@@ -12,7 +12,7 @@ export interface QualityTarget {
 
 export type QualityResult =
   | { scale: number; success: true; configuredBitrate: number }
-  | { error: string; code: string };
+  | { success: false; error: string; code: string };
 
 export function readSenderParameters(sender: RTCRtpSender): RTCRtpSendParameters {
   return sender.getParameters();
@@ -26,11 +26,11 @@ export async function applyQualityToSender(
   try {
     params = sender.getParameters();
   } catch {
-    return { error: "GET_PARAMETERS_FAILED", code: "GET_PARAMETERS_FAILED" };
+    return { success: false, error: "GET_PARAMETERS_FAILED", code: "GET_PARAMETERS_FAILED" };
   }
 
   if (!Array.isArray(params.encodings) || params.encodings.length === 0) {
-    return { error: "ENCODING_PARAMETERS_UNAVAILABLE", code: "ENCODING_PARAMETERS_UNAVAILABLE" };
+    return { success: false, error: "ENCODING_PARAMETERS_UNAVAILABLE", code: "ENCODING_PARAMETERS_UNAVAILABLE" };
   }
 
   const settings = sender.track?.getSettings();
@@ -51,7 +51,7 @@ export async function applyQualityToSender(
     await sender.setParameters(params);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { error: `setParameters failed: ${message}`, code: "SET_PARAMETERS_FAILED" };
+    return { success: false, error: `setParameters failed: ${message}`, code: "SET_PARAMETERS_FAILED" };
   }
 
   // Read back to verify

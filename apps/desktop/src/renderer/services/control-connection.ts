@@ -577,8 +577,7 @@ class ControlConnection {
     }
 
     // Get the video sender from the active publisher
-    const { getVideoSender } = await import("@screenlink/vdo-adapter");
-    const { getPublisherConnection } = await import("@screenlink/vdo-adapter");
+    const { getVideoSender, getPublisherConnection, applyQualityToSender } = await import("@screenlink/vdo-adapter");
 
     // Try to find a publisher SDK connection from window global
     const sdkGlobal = (window as unknown as { __screenlinkPublisherSdk?: { connections: Map<string, unknown> } }).__screenlinkPublisherSdk;
@@ -611,7 +610,6 @@ class ControlConnection {
       return;
     }
 
-    const { applyQualityToSender } = await import("@screenlink/vdo-adapter");
     const result = await applyQualityToSender(videoSender, {
       videoCeilingKbps: (payload.videoCeilingKbps as number) || 1000,
       maxFps: (payload.maxFps as number) || 30,
