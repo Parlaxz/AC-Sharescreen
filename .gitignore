@@ -31,6 +31,9 @@ Thumbs.db
 *.sublime-project
 *.sublime-workspace
 
+# Native helper build directories
+native/**/build/
+
 # Test coverage
 coverage/
 
