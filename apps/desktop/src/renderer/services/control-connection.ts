@@ -664,10 +664,13 @@ class ControlConnection {
     }
 
     try {
+      // Gate 5: control messages must only flow through the data channel.
+      // If the data channel is unavailable the message is dropped rather
+      // than silently falling back to the signaling WebSocket path.
       this.sdk.sendData(envelope, {
         uuid: this.peerUuid,
         preference: "all",
-        allowFallback: true,
+        allowFallback: false,
       });
     } catch (err) {
       console.error("[Control] Failed to send message:", err);
