@@ -1,4 +1,6 @@
 #include "Protocol.h"
+#include "WindowsVersion.h"
+#include "AudioCapabilities.h"
 #include <iostream>
 
 int main(int argc, char* argv[]) {
@@ -26,7 +28,11 @@ int main(int argc, char* argv[]) {
     }
 
     case screenlink::audio::Command::kCapabilities: {
-      // Phase 2A: capabilities are partial stubs — full detection in Task 2A.2
+      auto osInfo = screenlink::audio::DetectWindowsVersion();
+      auto compileTime = screenlink::audio::DetectCompileTimeSupport();
+      auto runtime = screenlink::audio::DetectRuntimeSupport(osInfo);
+      auto cap = screenlink::audio::ComputeCapability(compileTime, runtime);
+
       std::cout << "{\n";
       std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
       std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
@@ -34,42 +40,46 @@ int main(int argc, char* argv[]) {
       std::cout << "  \"status\": \"ok\",\n";
       std::cout << "  \"operatingSystem\": \"Windows\",\n";
       std::cout << "  \"osVersion\": {\n";
-      std::cout << "    \"major\": 0,\n";
-      std::cout << "    \"minor\": 0,\n";
-      std::cout << "    \"build\": 0,\n";
-      std::cout << "    \"revision\": 0\n";
+      std::cout << "    \"major\": " << osInfo.major << ",\n";
+      std::cout << "    \"minor\": " << osInfo.minor << ",\n";
+      std::cout << "    \"build\": " << osInfo.build << ",\n";
+      std::cout << "    \"revision\": " << osInfo.revision << "\n";
       std::cout << "  },\n";
-      std::cout << "  \"detectionMethod\": \"not-implemented\",\n";
-      std::cout << "  \"detectionSucceeded\": false,\n";
-      std::cout << "  \"compiledWindowsSdkVersion\": \"0.0.0.0\",\n";
-      std::cout << "  \"processLoopbackHeadersAvailable\": false,\n";
-      std::cout << "  \"processLoopbackRuntimeSupported\": false,\n";
-      std::cout << "  \"applicationLoopbackSupported\": false,\n";
-      std::cout << "  \"usable\": false,\n";
-      std::cout << "  \"reasonCode\": \"detection-not-implemented\",\n";
-      std::cout << "  \"reasonMessage\": \"Windows version detection not yet implemented\"\n";
+      std::cout << "  \"detectionMethod\": \"" << osInfo.detectionMethod << "\",\n";
+      std::cout << "  \"detectionSucceeded\": " << (osInfo.succeeded ? "true" : "false") << ",\n";
+      std::cout << "  \"compiledWindowsSdkVersion\": \""
+                << compileTime.windowsSdkVersion << "\",\n";
+      std::cout << "  \"processLoopbackHeadersAvailable\": "
+                << (compileTime.headersAvailable ? "true" : "false") << ",\n";
+      std::cout << "  \"processLoopbackRuntimeSupported\": "
+                << (runtime.osBuildEligible ? "true" : "false") << ",\n";
+      std::cout << "  \"applicationLoopbackSupported\": "
+                << (cap.usable ? "true" : "false") << ",\n";
+      std::cout << "  \"usable\": " << (cap.usable ? "true" : "false") << ",\n";
+      std::cout << "  \"is64BitProcess\": "
+                << (runtime.is64BitProcess ? "true" : "false") << ",\n";
+      std::cout << "  \"is64BitOperatingSystem\": "
+                << (runtime.is64BitOperatingSystem ? "true" : "false") << ",\n";
+      std::cout << "  \"reasonCode\": \"" << cap.reasonCode << "\",\n";
+      std::cout << "  \"reasonMessage\": \"" << cap.reasonMessage << "\"\n";
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }
 
     case screenlink::audio::Command::kSelfTest: {
-      // Phase 2A self-test: only tests what exists (protocol, serialization)
-      // Full detection testing added in Task 2A.2
       bool allPassed = true;
 
-      // Test 1: Protocol version is non-empty
+      // ── Protocol tests ──
       if (screenlink::audio::kProtocolVersion.empty()) {
         std::cerr << "FAIL: kProtocolVersion is empty\n";
         allPassed = false;
       }
 
-      // Test 2: Helper version is non-empty
       if (screenlink::audio::kHelperVersion.empty()) {
         std::cerr << "FAIL: kHelperVersion is empty\n";
         allPassed = false;
       }
 
-      // Test 3: ParseCommand works
       if (screenlink::audio::ParseCommand("--version") != screenlink::audio::Command::kVersion) {
         std::cerr << "FAIL: ParseCommand('--version') mismatch\n";
         allPassed = false;
@@ -84,6 +94,55 @@ int main(int argc, char* argv[]) {
       }
       if (screenlink::audio::ParseCommand("--unknown") != screenlink::audio::Command::kUnknown) {
         std::cerr << "FAIL: ParseCommand('--unknown') mismatch\n";
+        allPassed = false;
+      }
+
+      // ── Windows version detection tests ──
+      auto osInfo = screenlink::audio::DetectWindowsVersion();
+      if (!osInfo.succeeded) {
+        std::cerr << "FAIL: DetectWindowsVersion() returned: "
+                  << osInfo.failureReason << "\n";
+        allPassed = false;
+      }
+      if (osInfo.major == 0 && osInfo.minor == 0 && osInfo.build == 0) {
+        std::cerr << "FAIL: DetectWindowsVersion() returned all zeros\n";
+        allPassed = false;
+      }
+      if (osInfo.detectionMethod.empty()) {
+        std::cerr << "FAIL: DetectWindowsVersion() detectionMethod is empty\n";
+        allPassed = false;
+      }
+
+      // ── Compile-time support detection tests ──
+      auto compileTime = screenlink::audio::DetectCompileTimeSupport();
+      if (compileTime.windowsSdkVersion.empty()) {
+        std::cerr << "FAIL: windowsSdkVersion is empty\n";
+        allPassed = false;
+      }
+
+      // ── Runtime support detection tests ──
+      auto runtime = screenlink::audio::DetectRuntimeSupport(osInfo);
+      if (!runtime.is64BitProcess) {
+        std::cerr << "FAIL: is64BitProcess should be true\n";
+        allPassed = false;
+      }
+      if (!runtime.is64BitOperatingSystem) {
+        std::cerr << "FAIL: is64BitOperatingSystem should be true on x64 Windows\n";
+        allPassed = false;
+      }
+      if (runtime.osBuildNumber == 0) {
+        std::cerr << "FAIL: osBuildNumber should be non-zero\n";
+        allPassed = false;
+      }
+
+      // ── Capability computation tests ──
+      auto cap = screenlink::audio::ComputeCapability(compileTime, runtime);
+      if (cap.reasonCode.empty()) {
+        std::cerr << "FAIL: reasonCode should not be empty\n";
+        allPassed = false;
+      }
+      if (cap.reasonMessage.empty()) {
+        std::cerr << "FAIL: reasonMessage should not be empty\n";
         allPassed = false;
       }
 

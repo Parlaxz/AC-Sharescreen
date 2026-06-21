@@ -23,10 +23,19 @@ endif()
 # Source files
 set(SOURCES
   src/main.cpp
+  src/WindowsVersion.cpp
+  src/AudioCapabilities.cpp
 )
 
 # Executable
 add_executable(${PROJECT_NAME} ${SOURCES})
+
+# Pass Windows SDK version to C++ code for compile-time checks
+if(MSVC AND CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE
+    SCREENLINK_WIN_SDK_VERSION="${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+  )
+endif()
 
 # Set output directory
 set_target_properties(${PROJECT_NAME} PROPERTIES
