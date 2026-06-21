@@ -125,7 +125,39 @@ export async function getAudioCapabilities(): Promise<HelperResult<AudioCapabili
         return;
       }
 
-      resolve({ success: true, data: parsed as AudioCapabilityResult });
+      if (!validateCapability(parsed)) {
+        resolve(errorResult("invalid-capability", "Audio helper returned incomplete capability data"));
+        return;
+      }
+
+      resolve({ success: true, data: parsed });
     });
+
+    function validateCapability(obj: unknown): obj is AudioCapabilityResult {
+      if (typeof obj !== "object" || obj === null) return false;
+      const cap = obj as Record<string, unknown>;
+      return (
+        typeof cap.protocolVersion === "string" &&
+        typeof cap.helperVersion === "string" &&
+        typeof cap.architecture === "string" &&
+        typeof cap.operatingSystem === "string" &&
+        typeof cap.detectionMethod === "string" &&
+        typeof cap.detectionSucceeded === "boolean" &&
+        typeof cap.compiledWindowsSdkVersion === "string" &&
+        typeof cap.processLoopbackHeadersAvailable === "boolean" &&
+        typeof cap.processLoopbackRuntimeSupported === "boolean" &&
+        typeof cap.applicationLoopbackSupported === "boolean" &&
+        typeof cap.usable === "boolean" &&
+        typeof cap.is64BitProcess === "boolean" &&
+        typeof cap.is64BitOperatingSystem === "boolean" &&
+        typeof cap.reasonCode === "string" &&
+        typeof cap.reasonMessage === "string" &&
+        typeof cap.status === "string" &&
+        typeof cap.osVersion === "object" &&
+        cap.osVersion !== null &&
+        typeof (cap.osVersion as Record<string, unknown>).major === "number"
+      );
+    }
+
   });
 }

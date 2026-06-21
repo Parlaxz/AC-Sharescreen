@@ -13,7 +13,7 @@
     "audio-helper:configure": "cmake -S native/audio-helper -B native/audio-helper/build -G \"Visual Studio 17 2022\" -A x64",
     "audio-helper:build": "cmake --build native/audio-helper/build --config Release",
     "audio-helper:self-test": "native\\audio-helper\\build\\Release\\screenlink-audio-helper.exe --self-test",
-    "audio-helper:clean": "if exist native\\audio-helper\\build rmdir /s /q native\\audio-helper\\build",
+    "audio-helper:clean": "powershell -NoProfile -Command \"if (Test-Path 'native/audio-helper/build') { Remove-Item -Recurse -Force 'native/audio-helper/build' }\"",
     "audio-helper:check": "pnpm audio-helper:build && pnpm audio-helper:self-test",
     "test": "pnpm --filter @screenlink/shared test",
     "test:run": "pnpm test",

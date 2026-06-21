@@ -16,6 +16,7 @@ export interface AudioCapabilityResult {
   is64BitOperatingSystem: boolean;
   reasonCode: string;
   reasonMessage: string;
+  status: string;
 }
 
 export interface OsVersion {
