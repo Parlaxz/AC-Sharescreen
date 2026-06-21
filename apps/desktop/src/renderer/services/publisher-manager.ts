@@ -87,8 +87,6 @@ export class PublisherManager {
 
   async startPublishing(stream: MediaStream, config: PublisherConfig): Promise<void> {
     const publisher = new HostPublisher();
-    this.publisher = publisher;
-    this.config = config;
 
     await publisher.createAndConnect({ password: config.password });
     await publisher.publish(stream, {
@@ -103,6 +101,8 @@ export class PublisherManager {
       },
     });
 
+    this.publisher = publisher;
+    this.config = config;
     this.setState("sharing");
   }
 
@@ -141,7 +141,12 @@ export class PublisherManager {
         encoding.maxFramerate = fps;
       }
 
-      await sender.setParameters(params);
+      try {
+        await sender.setParameters(params);
+      } catch (err) {
+        console.warn("[PublisherManager] setParameters failed:", err);
+        return;
+      }
       const readback = sender.getParameters();
       const appliedBitrate = readback.encodings?.[0]?.maxBitrate ?? 0;
       if (appliedBitrate !== bitrate * 1000) {
