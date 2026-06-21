@@ -113,6 +113,10 @@ export class MediaStatsPoller {
       const inboundStats: Map<string, number> = new Map();
       const outboundStats: Map<string, number> = new Map();
 
+      let selectedPairLocalId: string | undefined;
+      let selectedPairRemoteId: string | undefined;
+      const candidates = new Map<string, { candidateType: string; protocol: string }>();
+
       report.forEach(stat => {
         const s = stat as unknown as Record<string, unknown>;
 
@@ -155,6 +159,8 @@ export class MediaStatsPoller {
           const pair = s as RTCIceCandidatePairStats;
           snapshot.currentRtt = pair.currentRoundTripTime || 0;
           snapshot.availableOutgoingBitrate = (pair.availableOutgoingBitrate || 0) / 1000;
+          selectedPairLocalId = pair.localCandidateId;
+          selectedPairRemoteId = pair.remoteCandidateId;
         }
 
         if (s.type === "codec") {
@@ -165,13 +171,21 @@ export class MediaStatsPoller {
         }
 
         if (s.type === "local-candidate" || s.type === "remote-candidate") {
-          const cand = s as { candidateType?: string; protocol?: string };
-          if (cand.candidateType === "relay") {
-            snapshot.isRelay = true;
-            snapshot.relayProtocol = cand.protocol || "";
-          }
+          const cand = s as unknown as Record<string, unknown>;
+          candidates.set(cand.id as string, {
+            candidateType: (cand.candidateType as string) || "",
+            protocol: (cand.protocol as string) || "",
+          });
         }
       });
+
+      // Resolve relay status from SELECTED pair only
+      const selectedLocal = selectedPairLocalId ? candidates.get(selectedPairLocalId) : undefined;
+      const selectedRemote = selectedPairRemoteId ? candidates.get(selectedPairRemoteId) : undefined;
+      if (selectedLocal?.candidateType === "relay" || selectedRemote?.candidateType === "relay") {
+        snapshot.isRelay = true;
+        snapshot.relayProtocol = selectedLocal?.protocol || selectedRemote?.protocol || "";
+      }
 
       // Compute bitrates from byte deltas
       const currentOutboundBytes = outboundStats.get("bytesSent") || 0;
