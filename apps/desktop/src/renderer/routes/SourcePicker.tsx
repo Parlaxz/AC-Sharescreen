@@ -33,11 +33,9 @@ export function SourcePicker() {
             } else if (rawFingerprint) {
               // Fallback to fingerprint-based matching
               const fp = JSON.parse(rawFingerprint) as { kind?: string; name?: string; displayId?: string };
-              const fallback = list.find((s) => {
-                if (fp.kind === "screen") return s.displayId === fp.displayId;
-                if (fp.kind === "window") return s.name === fp.name;
-                return false;
-              });
+              const fallback = fp.kind === "screen"
+                ? list.find((s) => s.displayId === fp.displayId && s.kind === "screen")
+                : undefined;
               if (fallback) setSelectedId(fallback.id);
             }
           }

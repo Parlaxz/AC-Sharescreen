@@ -66,21 +66,19 @@ export function matchSourceByFingerprint(
   const exact = currentSources.find(s => s.id === fingerprint.sourceId);
   if (exact) return { id: exact.id, exactMatch: true };
 
-  // For monitors, try displayId match
+  // For screens, require exactly one unique displayId match
   if (fingerprint.kind === "screen") {
-    const displayMatch = currentSources.find(
+    const displayMatches = currentSources.filter(
       s => s.displayId === fingerprint.displayId && s.id.startsWith("screen:")
     );
-    if (displayMatch) return { id: displayMatch.id, exactMatch: false };
+    if (displayMatches.length === 1) {
+      return { id: displayMatches[0]!.id, exactMatch: false };
+    }
+    // Zero or multiple matches — ambiguous, require manual selection
+    return null;
   }
 
-  // For windows, try name match
-  if (fingerprint.kind === "window") {
-    const nameMatch = currentSources.find(
-      s => s.name === fingerprint.name && s.id.startsWith("window:")
-    );
-    if (nameMatch) return { id: nameMatch.id, exactMatch: false };
-  }
-
+  // For windows, do NOT match by name alone — too error-prone.
+  // Window matching requires native HWND/PID resolution (Phase 2A).
   return null;
 }
