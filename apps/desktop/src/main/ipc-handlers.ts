@@ -1,6 +1,7 @@
 import { ipcMain, app, BrowserWindow } from "electron";
 import { enumerateSources, getSourceFingerprint } from "./capture-source-manager.js";
 import { setApprovedSource } from "./display-media-handler.js";
+import { getAudioCapabilities } from "./audio-capability-service.js";
 import { generateVdoStreamId, generateVdoPassword } from "@screenlink/shared";
 import type { SettingsStore } from "./settings-store.js";
 import type { SecureStore } from "./secure-store.js";
@@ -319,6 +320,12 @@ export function registerIpcHandlers(
       chromeVersion: process.versions.chrome,
       nodeVersion: process.versions.node,
     };
+  });
+
+  // ── Audio capabilities ────────────────────────────────────────────────────
+
+  ipcMain.handle("get-audio-capabilities", async () => {
+    return getAudioCapabilities();
   });
 
   // ── Tray state updates ──────────────────────────────────────────────────

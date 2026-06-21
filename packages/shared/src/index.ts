@@ -58,4 +58,5 @@ export * from "./bitrate.js";
 export * from "./stats.js";
 export * from "./settings.js";
 export * from "./pairing.js";
+export * from "./audio-capabilities.js";
 export * from "./control-messages.js";

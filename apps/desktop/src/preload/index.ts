@@ -48,6 +48,8 @@ const api: ScreenLinkAPI = {
   traySetFriendSharing: (sharing) => ipcRenderer.send("tray-set-friend-sharing", sharing),
 
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
+
+  getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
 };
 
 contextBridge.exposeInMainWorld("screenlink", api);

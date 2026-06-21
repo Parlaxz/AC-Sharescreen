@@ -77,6 +77,13 @@ export interface ScreenLinkAPI {
     chromeVersion: string;
     nodeVersion: string;
   }>;
+
+  // Audio capabilities
+  getAudioCapabilities: () => Promise<{
+    success: boolean;
+    data?: import("@screenlink/shared").AudioCapabilityResult;
+    error?: { code: string; message: string };
+  }>;
 }
 
 export interface CaptureSourceDTO {
