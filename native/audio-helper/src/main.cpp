@@ -36,7 +36,7 @@ int main(int argc, char* argv[]) {
       std::cout << "{\n";
       std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
       std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
-      std::cout << "  \"architecture\": \"x64\",\n";
+      std::cout << "  \"architecture\": \"" << (runtime.is64BitProcess ? "x64" : "x86") << "\",\n";
       std::cout << "  \"status\": \"ok\",\n";
       std::cout << "  \"operatingSystem\": \"Windows\",\n";
       std::cout << "  \"osVersion\": {\n";
