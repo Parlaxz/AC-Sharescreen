@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import { generateVdoStreamId, generateVdoPassword } from "@screenlink/shared";
-import { ViewerClient, HostPublisher } from "@screenlink/vdo-adapter";
+import { ViewerClient } from "@screenlink/vdo-adapter";
+import { PublisherManager } from "../services/publisher-manager.js";
 import { MediaStatsPoller, type MediaStatsSnapshot } from "../services/media-stats-service.js";
 
 export function Dashboard() {
@@ -26,15 +27,14 @@ export function Dashboard() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewerRef = useRef<ViewerClient | null>(null);
-  const publisherRef = useRef<HostPublisher | null>(null);
-  const captureStreamRef = useRef<MediaStream | null>(null);
+  const publisherManagerRef = useRef<PublisherManager | null>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mediaStats, setMediaStats] = useState<MediaStatsSnapshot | null>(null);
   const [localMediaStats, setLocalMediaStats] = useState<MediaStatsSnapshot | null>(null);
   const [showIncomingSharePrompt, setShowIncomingSharePrompt] = useState(false);
   const statsPollerRef = useRef<MediaStatsPoller | null>(null);
-  const localStatsPollerRef = useRef<MediaStatsPoller | null>(null);
+  // local stats now flow through PublisherManager events
 
   function formatBitsTransferred(bytes: number): string {
     const bits = Math.max(0, bytes) * 8;
@@ -156,28 +156,7 @@ export function Dashboard() {
     };
   }, [remoteShareState]);
 
-  // Start/poll local publisher stats when sharing
-  useEffect(() => {
-    if (localShareState === "sharing") {
-      const sdk = publisherRef.current?.getSDK();
-      if (sdk) {
-        const poller = new MediaStatsPoller();
-        localStatsPollerRef.current = poller;
-        poller.start(sdk, null, (stats) => {
-          setLocalMediaStats(stats);
-        });
-      }
-    } else {
-      localStatsPollerRef.current?.stop();
-      localStatsPollerRef.current = null;
-      setLocalMediaStats(null);
-    }
-
-    return () => {
-      localStatsPollerRef.current?.stop();
-      localStatsPollerRef.current = null;
-    };
-  }, [localShareState]);
+  // Local publisher stats now flow through PublisherManager onStats callback
 
   // ── Remote viewing functions ──────────────────────────────
 
@@ -239,31 +218,34 @@ export function Dashboard() {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
       await api?.setSource(sourceId);
 
-      const ms = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-      captureStreamRef.current = ms;
-
       // Generate ephemeral credentials
       const sessionId = crypto.randomUUID();
       const streamId = generateVdoStreamId();
       const password = generateVdoPassword();
       setLocalMediaCredentials(sessionId, streamId, password);
 
-      // Handle track ending (user stops sharing via browser UI)
-      ms.getVideoTracks()[0]?.addEventListener("ended", () => handleStopSharing());
-
-      // Create publisher and publish
-      const publisher = new HostPublisher();
-      publisherRef.current = publisher;
-      await publisher.createAndConnect({ password });
-      await publisher.publish(ms, {
-        streamID: streamId,
-        label: "ScreenLink Host",
-        password,
-        videoBitrate: captureBitrate,
-        videoResolution: { width: captureWidth, height: captureHeight, frameRate: captureFps },
+      const mgr = new PublisherManager({
+        onStateChange: (state) => setLocalShareState(state),
+        onStats: (stats) => setLocalMediaStats(stats),
+        onError: (err) => console.error("Publisher error:", err),
+        onTrackEnded: () => handleStopSharing(),
       });
+      publisherManagerRef.current = mgr;
 
-      setLocalShareState("sharing");
+      const stream = await mgr.startCapture({
+        sourceId, password, streamId,
+        videoBitrate: captureBitrate,
+        videoWidth: captureWidth,
+        videoHeight: captureHeight,
+        videoFps: captureFps,
+      });
+      await mgr.startPublishing(stream, {
+        sourceId, password, streamId,
+        videoBitrate: captureBitrate,
+        videoWidth: captureWidth,
+        videoHeight: captureHeight,
+        videoFps: captureFps,
+      });
 
       // Notify remote peer
       const { getControlConnection } = await import("../services/control-connection.js");
@@ -271,8 +253,8 @@ export function Dashboard() {
     } catch (err) {
       console.error("Share failed:", err);
       setLocalShareState("error");
-      captureStreamRef.current?.getTracks().forEach(t => t.stop());
-      captureStreamRef.current = null;
+      publisherManagerRef.current?.stopCapture().catch(() => {});
+      publisherManagerRef.current = null;
     }
   }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials]);
 
@@ -284,11 +266,8 @@ export function Dashboard() {
     setLocalShareState("stopping");
     const { getControlConnection } = await import("../services/control-connection.js");
     getControlConnection().sendShareStopped();
-    await publisherRef.current?.stopPublishing();
-    await publisherRef.current?.disconnect();
-    publisherRef.current = null;
-    captureStreamRef.current?.getTracks().forEach(t => t.stop());
-    captureStreamRef.current = null;
+    await publisherManagerRef.current?.stopCapture();
+    publisherManagerRef.current = null;
     clearLocalMediaCredentials();
     setLocalShareState("idle");
   }, [clearLocalMediaCredentials]);
