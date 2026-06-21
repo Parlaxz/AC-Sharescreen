@@ -14,6 +14,7 @@ export type { HostPublisherOptions } from "./host-publisher.js";
 export type {
   DegradationPreference,
   QualityTarget,
+  QualityResult,
 } from "./sender-parameters.js";
 
 export type { StatsSnapshot } from "./media-stats.js";

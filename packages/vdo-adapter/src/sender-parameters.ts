@@ -10,18 +10,27 @@ export interface QualityTarget {
   degradationPreference: DegradationPreference;
 }
 
+export type QualityResult =
+  | { scale: number; success: true; configuredBitrate: number }
+  | { error: string; code: string };
+
 export function readSenderParameters(sender: RTCRtpSender): RTCRtpSendParameters {
   return sender.getParameters();
 }
 
-export function applyQualityToSender(
+export async function applyQualityToSender(
   sender: RTCRtpSender,
   target: QualityTarget,
-): { scale: number; success: boolean } | { error: string } {
-  const params = sender.getParameters();
+): Promise<QualityResult> {
+  let params: RTCRtpSendParameters;
+  try {
+    params = sender.getParameters();
+  } catch {
+    return { error: "GET_PARAMETERS_FAILED", code: "GET_PARAMETERS_FAILED" };
+  }
 
   if (!Array.isArray(params.encodings) || params.encodings.length === 0) {
-    return { error: "ENCODING_PARAMETERS_UNAVAILABLE" };
+    return { error: "ENCODING_PARAMETERS_UNAVAILABLE", code: "ENCODING_PARAMETERS_UNAVAILABLE" };
   }
 
   const settings = sender.track?.getSettings();
@@ -33,19 +42,26 @@ export function applyQualityToSender(
   );
 
   const encoding = params.encodings[0]!;
-  if (encoding) {
-    encoding.maxBitrate = target.videoCeilingKbps * 1000;
-    encoding.maxFramerate = target.maxFps;
-    encoding.scaleResolutionDownBy = scale;
-  }
-
+  encoding.maxBitrate = target.videoCeilingKbps * 1000;
+  encoding.maxFramerate = target.maxFps;
+  encoding.scaleResolutionDownBy = scale;
   params.degradationPreference = target.degradationPreference;
 
   try {
-    sender.setParameters(params).catch(() => {});
-  } catch {
-    return { error: "SET_PARAMETERS_FAILED" };
+    await sender.setParameters(params);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { error: `setParameters failed: ${message}`, code: "SET_PARAMETERS_FAILED" };
   }
 
-  return { scale, success: true };
+  // Read back to verify
+  let readback: RTCRtpSendParameters;
+  try {
+    readback = sender.getParameters();
+  } catch {
+    return { scale, success: true, configuredBitrate: target.videoCeilingKbps * 1000 };
+  }
+
+  const appliedBitrate = readback.encodings?.[0]?.maxBitrate;
+  return { scale, success: true, configuredBitrate: appliedBitrate ?? target.videoCeilingKbps * 1000 };
 }

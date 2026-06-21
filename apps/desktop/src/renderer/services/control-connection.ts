@@ -9,6 +9,7 @@ import {
   MAX_CONTROL_PAYLOAD_BYTES,
   DEDUP_WINDOW_MS,
 } from "@screenlink/shared";
+import type { DegradationPreference } from "@screenlink/vdo-adapter";
 
 /** Connection role for a given peer UUID. */
 type ConnectionRole = "viewer" | "publisher" | "unknown";
@@ -562,7 +563,7 @@ class ControlConnection {
     useStore.getState().setRemoteShareState("remote-online-idle");
   }
 
-  private handleQualityRequest(payload: Record<string, unknown>): void {
+  private async handleQualityRequest(payload: Record<string, unknown>): Promise<void> {
     const st = useStore.getState();
 
     if (!st.allowRemoteQualityRequests) {
@@ -575,27 +576,68 @@ class ControlConnection {
       return;
     }
 
-    const success = this.applyQualityToSender(payload);
+    // Get the video sender from the active publisher
+    const { getVideoSender } = await import("@screenlink/vdo-adapter");
+    const { getPublisherConnection } = await import("@screenlink/vdo-adapter");
 
-    if (success) {
-      const applied = buildEnvelope("quality.applied", this.localDeviceId, {
+    // Try to find a publisher SDK connection from window global
+    const sdkGlobal = (window as unknown as { __screenlinkPublisherSdk?: { connections: Map<string, unknown> } }).__screenlinkPublisherSdk;
+    if (!sdkGlobal) {
+      const rejected = buildEnvelope("quality.rejected", this.localDeviceId, {
         requestId: payload.requestId || "",
-        requested: payload,
-        applied: { note: "Quality settings applied" },
+        code: "NO_SDK",
+        message: "No active publisher SDK found",
       });
-      this.sendMessage(applied);
-    } else {
+      this.sendMessage(rejected);
+      return;
+    }
+
+    let videoSender: RTCRtpSender | undefined;
+    for (const [uuid] of sdkGlobal.connections) {
+      try {
+        const pc = getPublisherConnection(sdkGlobal, uuid);
+        videoSender = getVideoSender(pc);
+        if (videoSender) break;
+      } catch {}
+    }
+
+    if (!videoSender) {
       const rejected = buildEnvelope("quality.rejected", this.localDeviceId, {
         requestId: payload.requestId || "",
         code: "NO_SENDER_AVAILABLE",
         message: "No active video sender to configure",
       });
       this.sendMessage(rejected);
+      return;
     }
-  }
 
-  private applyQualityToSender(payload: Record<string, unknown>): boolean {
-    return true;
+    const { applyQualityToSender } = await import("@screenlink/vdo-adapter");
+    const result = await applyQualityToSender(videoSender, {
+      videoCeilingKbps: (payload.videoCeilingKbps as number) || 1000,
+      maxFps: (payload.maxFps as number) || 30,
+      targetWidth: (payload.targetWidth as number) || 1280,
+      targetHeight: (payload.targetHeight as number) || 720,
+      degradationPreference: (payload.degradationPreference as DegradationPreference) || "balanced",
+    });
+
+    if ("success" in result && result.success) {
+      const applied = buildEnvelope("quality.applied", this.localDeviceId, {
+        requestId: payload.requestId || "",
+        requested: payload,
+        applied: {
+          configuredBitrate: result.configuredBitrate,
+          scale: result.scale,
+        },
+      });
+      this.sendMessage(applied);
+    } else {
+      const rejected = buildEnvelope("quality.rejected", this.localDeviceId, {
+        requestId: payload.requestId || "",
+        code: "APPLY_FAILED",
+        message: (result as { error: string }).error,
+      });
+      this.sendMessage(rejected);
+    }
   }
 
   // ── Send ─────────────────────────────────────────────────
