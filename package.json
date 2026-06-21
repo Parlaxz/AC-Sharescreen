@@ -1,0 +1,30 @@
+{
+  "name": "screenlink",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ScreenLink - Private screen sharing with permanent links",
+  "scripts": {
+    "build": "pnpm build:shared && pnpm build:vdo-adapter && pnpm build:desktop",
+    "build:shared": "pnpm --filter @screenlink/shared build",
+    "build:vdo-adapter": "pnpm --filter @screenlink/vdo-adapter build",
+    "build:desktop": "pnpm --filter @screenlink/desktop build",
+    "build:desktop:renderer": "pnpm --filter @screenlink/desktop exec vite build",
+    "build:installer": "pnpm build && cd apps/desktop && npx electron-builder --win --x64",
+    "test": "pnpm --filter @screenlink/shared test",
+    "test:run": "pnpm test",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean",
+    "clean:dev": "powershell -NoProfile -Command \"Get-Process -Name 'electron' -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*screenlink*' } | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0\"",
+    "desktop:dev": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev",
+    "desktop:dev:alice": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev -- --dev-profile=alice --multi-instance",
+    "desktop:dev:bob": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev -- --dev-profile=bob --multi-instance",
+    "lint": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@10.0.0",
+  "dependencies": {
+    "@vdoninja/sdk": "1.3.18"
+  }
+}

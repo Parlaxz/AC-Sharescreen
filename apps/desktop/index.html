@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' screenlink://app; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' screenlink://app blob:; connect-src 'self' wss://wss.vdo.ninja;"
+    />
+    <title>ScreenLink</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="/vendor/vdoninja-sdk-1.3.18.min.js"></script>
+    <script type="module" src="/src/renderer/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "@screenlink/scripts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "copy-sdk": "node copy-vdo-sdk.mjs",
+    "verify-sdk": "node verify-vdo-sdk.mjs",
+    "provision": "node provision-share.mjs",
+    "package": "node package-release.mjs"
+  }
+}
