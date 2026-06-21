@@ -8,6 +8,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# Require x64 architecture
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  message(FATAL_ERROR "x64 build required. Re-run cmake with -A x64")
+endif()
+
 # Strict warnings
 if(MSVC)
   add_compile_options(/W4 /WX /utf-8)

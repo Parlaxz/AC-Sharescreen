@@ -1,10 +1,15 @@
 #include "Protocol.h"
 #include <iostream>
-#include <cstdlib>
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
+  if (argc < 2 || argc > 2) {
     std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test\n";
+    std::cout << "{\n"
+              << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n"
+              << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n"
+              << "  \"status\": \"error\",\n"
+              << "  \"error\": \"invalid-arguments\"\n"
+              << "}\n";
     return static_cast<int>(screenlink::audio::ExitCode::kUnknownCommand);
   }
 

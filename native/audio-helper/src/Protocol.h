@@ -2,7 +2,6 @@
 #define SCREENLINK_AUDIO_PROTOCOL_H
 
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 namespace screenlink::audio {
