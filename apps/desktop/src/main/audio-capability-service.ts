@@ -1,8 +1,12 @@
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from "url";
 import { app } from "electron";
 import type { AudioCapabilityResult } from "@screenlink/shared";
+
+// ESM-compatible __dirname — set once at module load
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const HELPER_TIMEOUT_MS = 5000;
 const HELPER_EXE = "screenlink-audio-helper.exe";
