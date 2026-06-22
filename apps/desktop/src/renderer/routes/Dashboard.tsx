@@ -333,9 +333,12 @@ export function Dashboard() {
         try {
           setAudioEnabled(true);
 
-          // 1. Create fresh port listener (not reused from previous share)
+          // 1. Create fresh port listener + request port from main process
           const portPromise = waitForNextAudioPort();
-          await api?.requestAudioPort();
+          const portResult = await api?.requestAudioPort();
+          if (!portResult || !portResult.success) {
+            throw new Error(portResult?.error || 'Audio helper unavailable');
+          }
 
           // 2. Await the MessagePort transferred from main process
           const port = await portPromise;
