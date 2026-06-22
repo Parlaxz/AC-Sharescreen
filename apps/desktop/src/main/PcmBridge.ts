@@ -49,8 +49,8 @@ export class PcmBridge {
       framesPerPacket: 480,
     });
 
-    // Transfer port2 to the renderer
-    webContents.postMessage('pcm:port', null, [port2]);
+    // Transfer port2 to the renderer with the expected message type
+    webContents.postMessage('pcm:port', { type: 'pcm:port' }, [port2]);
   }
 
   /**

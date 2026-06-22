@@ -30,34 +30,26 @@ const api: ScreenLinkAPI = {
   clearPairing: () => ipcRenderer.invoke("clear-pairing"),
   exportCurrentPairing: () => ipcRenderer.invoke("export-current-pairing"),
 
-  // Fullscreen
   toggleFullscreen: () => ipcRenderer.invoke("toggle-fullscreen"),
   onFullscreenChanged: (callback) => {
-    const handler = (_event: Electron.IpcRendererEvent, isFullscreen: boolean) =>
-      callback(isFullscreen);
+    const handler = (_event: Electron.IpcRendererEvent, isFullscreen: boolean) => callback(isFullscreen);
     ipcRenderer.on("fullscreen-state-changed", handler);
-    return () => {
-      ipcRenderer.removeListener("fullscreen-state-changed", handler);
-    };
+    return () => { ipcRenderer.removeListener("fullscreen-state-changed", handler); };
   },
 
-  // Tray
   traySetSharing: (sharing) => ipcRenderer.send("tray-set-sharing", sharing),
   traySetViewing: (viewing) => ipcRenderer.send("tray-set-viewing", viewing),
   traySetFriendName: (name) => ipcRenderer.send("tray-set-friend-name", name),
   traySetFriendSharing: (sharing) => ipcRenderer.send("tray-set-friend-sharing", sharing),
 
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
-
   getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
 
-  // Audio pipeline
   requestAudioPort: () => ipcRenderer.invoke("request-audio-port"),
   getAudioState: () => ipcRenderer.invoke("get-audio-state"),
   startSyntheticAudio: (mode) => ipcRenderer.invoke("start-synthetic-audio", mode),
   stopAudio: () => ipcRenderer.invoke("stop-audio"),
 
-  // Phase 2E: Audio sessions
   enumerateAudioSessions: () => ipcRenderer.invoke("enumerate-audio-sessions"),
   startApplicationAudio: (options) => ipcRenderer.invoke("start-application-audio", options),
   startFilteredMonitorAudio: (options) => ipcRenderer.invoke("start-filtered-monitor-audio", options),
@@ -66,3 +58,15 @@ const api: ScreenLinkAPI = {
 };
 
 contextBridge.exposeInMainWorld("screenlink", api);
+
+// Forward the PCM MessagePort from main process to renderer.
+// Main sends via webContents.postMessage('pcm:port', data, [port]).
+// The port arrives here as ipcRenderer event with event.ports[0].
+// Re-dispatch to renderer via window.postMessage.
+ipcRenderer.on('pcm:port', (_event: Electron.IpcRendererEvent) => {
+  const evt = _event as unknown as { ports?: MessagePort[] };
+  const port = evt.ports?.[0];
+  if (port) {
+    window.postMessage({ type: 'pcm:port' }, '*', [port]);
+  }
+});
