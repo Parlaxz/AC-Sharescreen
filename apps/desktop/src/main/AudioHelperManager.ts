@@ -1,6 +1,7 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as crypto from 'crypto';
 import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser';
+import { PcmBridge } from './PcmBridge';
 import {
   ControlClient,
   HelperCapabilities,
@@ -84,6 +85,7 @@ export class AudioHelperManager {
   private onErrorCallback: ((error: string) => void) | null = null;
 
   private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
+  readonly pcmBridge: PcmBridge = new PcmBridge();
 
   constructor(config: AudioHelperConfig) {
     this.config = config;
@@ -127,6 +129,12 @@ export class AudioHelperManager {
 
   onError(cb: (error: string) => void): void {
     this.onErrorCallback = cb;
+  }
+
+  // ── PCM Bridge ──
+
+  attachPcmToWebContents(webContents: Electron.WebContents): void {
+    this.pcmBridge.attachToWebContents(webContents);
   }
 
   // ── Lifecycle ──
@@ -181,6 +189,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'synthetic';
     this.state = 'capturing';
     this.parser?.reset();
+    this.pcmBridge.forwardReset(result.streamGeneration);
     return result.streamGeneration;
   }
 
@@ -195,6 +204,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'process';
     this.state = 'capturing';
     this.parser?.reset();
+    this.pcmBridge.forwardReset(result.streamGeneration);
     return result.streamGeneration;
   }
 
@@ -325,6 +335,7 @@ export class AudioHelperManager {
           return;
         }
 
+        this.pcmBridge.forwardPacket(packet);
         this.onPacketCallback?.(packet);
         this.emitStats();
       },
@@ -445,6 +456,8 @@ export class AudioHelperManager {
   }
 
   private async cleanup(): Promise<void> {
+    this.pcmBridge.detach();
+
     if (this.diagnosticsInterval !== null) {
       clearInterval(this.diagnosticsInterval);
       this.diagnosticsInterval = null;

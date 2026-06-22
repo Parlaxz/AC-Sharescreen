@@ -205,6 +205,12 @@ uint64_t SyntheticSource::Run(SyntheticConfig config, PacketCallback onPacket) {
             qpc100ns += 1000000;  // 100ms in 100ns units
         }
 
+        // Apply pending deadline-miss discontinuity (from the pacing section above)
+        if (pendingDiscontinuity_) {
+            isDiscontinuous = true;
+            pendingDiscontinuity_ = false;
+        }
+
         // ── Build AudioPacket ──
         AudioPacket packet;
         packet.frames = buffer.data();
@@ -280,6 +286,9 @@ uint64_t SyntheticSource::Run(SyntheticConfig config, PacketCallback onPacket) {
                     currentSequence += static_cast<uint64_t>(missedIntervals);
                     // Advance deadline further by the missed intervals
                     nextDeadline.QuadPart += static_cast<LONGLONG>(missedIntervals * packetIntervalQpc);
+                    // Track missed frames for discontinuity reporting on the next packet
+                    pendingDiscontinuity_ = true;
+                    pendingMissedFrames_ += static_cast<uint64_t>(missedIntervals) * config.framesPerPacket;
                 }
             }
         }

@@ -54,6 +54,10 @@ private:
                       uint64_t frameIndex, float amplitude);
     void GenerateSilence(float* buffer, uint32_t frames, uint32_t channels);
 
+    // Deadline-miss tracking: set when pacing falls behind, consumed on next packet
+    bool pendingDiscontinuity_ = false;
+    uint64_t pendingMissedFrames_ = 0;
+
     static constexpr float kToneFrequency = 440.0f;  // A4
     static constexpr float kAmplitude = 0.25f;        // Safe level
 };
