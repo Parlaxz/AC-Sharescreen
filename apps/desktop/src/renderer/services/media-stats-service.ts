@@ -32,6 +32,27 @@ export interface MediaStatsSnapshot {
 
   // Codec
   codecMimeType: string;
+
+  // Audio outbound
+  audioOutboundBytes: number;
+  audioOutboundPackets: number;
+  audioOutboundBitrateKbps: number;
+  audioCodec: string;
+  audioSsrc: number;
+  audioLevel: number;
+  totalAudioEnergy: number;
+  totalSamplesSent: number;
+
+  // Audio inbound
+  audioInboundBytes: number;
+  audioInboundPackets: number;
+  audioInboundBitrateKbps: number;
+  audioPacketsLost: number;
+  audioJitter: number;
+  audioJitterBufferDelay: number;
+  audioConcealedSamples: number;
+  audioConcealmentEvents: number;
+  audioTotalSamplesReceived: number;
 }
 
 export class MediaStatsPoller {
@@ -41,6 +62,8 @@ export class MediaStatsPoller {
   private previousOutboundBytes = 0;
   private previousInboundBytes = 0;
   private previousTimestamp = 0;
+  private previousAudioOutboundBytes = 0;
+  private previousAudioInboundBytes = 0;
   private onStats: ((stats: MediaStatsSnapshot) => void) | null = null;
 
   start(
@@ -53,6 +76,8 @@ export class MediaStatsPoller {
     this.onStats = callback;
     this.previousOutboundBytes = 0;
     this.previousInboundBytes = 0;
+    this.previousAudioOutboundBytes = 0;
+    this.previousAudioInboundBytes = 0;
     this.previousTimestamp = Date.now();
 
     // Poll every 2 seconds
@@ -108,10 +133,29 @@ export class MediaStatsPoller {
         currentRtt: 0,
         availableOutgoingBitrate: 0,
         codecMimeType: "",
+        audioOutboundBytes: 0,
+        audioOutboundPackets: 0,
+        audioOutboundBitrateKbps: 0,
+        audioCodec: "",
+        audioSsrc: 0,
+        audioLevel: 0,
+        totalAudioEnergy: 0,
+        totalSamplesSent: 0,
+        audioInboundBytes: 0,
+        audioInboundPackets: 0,
+        audioInboundBitrateKbps: 0,
+        audioPacketsLost: 0,
+        audioJitter: 0,
+        audioJitterBufferDelay: 0,
+        audioConcealedSamples: 0,
+        audioConcealmentEvents: 0,
+        audioTotalSamplesReceived: 0,
       };
 
       const inboundStats: Map<string, number> = new Map();
       const outboundStats: Map<string, number> = new Map();
+      const audioOutboundStats: Map<string, number> = new Map();
+      const audioInboundStats: Map<string, number> = new Map();
 
       let selectedPairLocalId: string | undefined;
       let selectedPairRemoteId: string | undefined;
@@ -149,6 +193,27 @@ export class MediaStatsPoller {
           inboundStats.set("pliCount", s.pliCount as number);
         }
 
+        if (s.type === "outbound-rtp" && s.kind === "audio") {
+          audioOutboundStats.set("bytesSent", s.bytesSent as number);
+          audioOutboundStats.set("packetsSent", s.packetsSent as number);
+          audioOutboundStats.set("ssrc", s.ssrc as number);
+          audioOutboundStats.set("audioLevel", s.audioLevel as number);
+          audioOutboundStats.set("totalAudioEnergy", s.totalAudioEnergy as number);
+          audioOutboundStats.set("totalSamplesSent", s.totalSamplesSent as number);
+        }
+
+        if (s.type === "inbound-rtp" && s.kind === "audio") {
+          audioInboundStats.set("bytesReceived", s.bytesReceived as number);
+          audioInboundStats.set("packetsReceived", s.packetsReceived as number);
+          audioInboundStats.set("packetsLost", s.packetsLost as number);
+          audioInboundStats.set("jitter", s.jitter as number);
+          audioInboundStats.set("jitterBufferDelay", s.jitterBufferDelay as number);
+          audioInboundStats.set("jitterBufferEmittedCount", s.jitterBufferEmittedCount as number);
+          audioInboundStats.set("concealedSamples", s.concealedSamples as number);
+          audioInboundStats.set("concealmentEvents", s.concealmentEvents as number);
+          audioInboundStats.set("totalSamplesReceived", s.totalSamplesReceived as number);
+        }
+
         if (s.type === "remote-inbound-rtp") {
           inboundStats.set("roundTripTime", s.roundTripTime as number);
           inboundStats.set("jitter", s.jitter as number);
@@ -165,7 +230,9 @@ export class MediaStatsPoller {
 
         if (s.type === "codec") {
           const codec = s as { mimeType?: string };
-          if (codec.mimeType?.startsWith("video/")) {
+          if (codec.mimeType?.startsWith("audio/")) {
+            snapshot.audioCodec = codec.mimeType;
+          } else if (codec.mimeType?.startsWith("video/") && !snapshot.codecMimeType) {
             snapshot.codecMimeType = codec.mimeType;
           }
         }
@@ -190,6 +257,8 @@ export class MediaStatsPoller {
       // Compute bitrates from byte deltas
       const currentOutboundBytes = outboundStats.get("bytesSent") || 0;
       const currentInboundBytes = inboundStats.get("bytesReceived") || 0;
+      const currentAudioOutBytes = audioOutboundStats.get("bytesSent") || 0;
+      const currentAudioInBytes = audioInboundStats.get("bytesReceived") || 0;
 
       if (elapsed > 0 && this.previousOutboundBytes > 0) {
         const outboundDelta = currentOutboundBytes - this.previousOutboundBytes;
@@ -201,6 +270,19 @@ export class MediaStatsPoller {
         const inboundDelta = currentInboundBytes - this.previousInboundBytes;
         if (inboundDelta >= 0) {
           snapshot.inboundBitrateKbps = (inboundDelta * 8) / elapsed / 1000;
+        }
+      }
+      // Audio bitrate from deltas
+      if (elapsed > 0 && this.previousAudioOutboundBytes > 0) {
+        const delta = currentAudioOutBytes - this.previousAudioOutboundBytes;
+        if (delta >= 0) {
+          snapshot.audioOutboundBitrateKbps = (delta * 8) / elapsed / 1000;
+        }
+      }
+      if (elapsed > 0 && this.previousAudioInboundBytes > 0) {
+        const delta = currentAudioInBytes - this.previousAudioInboundBytes;
+        if (delta >= 0) {
+          snapshot.audioInboundBitrateKbps = (delta * 8) / elapsed / 1000;
         }
       }
 
@@ -229,9 +311,28 @@ export class MediaStatsPoller {
       snapshot.framesDropped = inboundStats.get("framesDropped") || 0;
       snapshot.freezeCount = inboundStats.get("freezeCount") || 0;
 
+      // Audio stats
+      snapshot.audioOutboundBytes = currentAudioOutBytes;
+      snapshot.audioOutboundPackets = audioOutboundStats.get("packetsSent") || 0;
+      snapshot.audioSsrc = audioOutboundStats.get("ssrc") || 0;
+      snapshot.audioLevel = audioOutboundStats.get("audioLevel") || 0;
+      snapshot.totalAudioEnergy = audioOutboundStats.get("totalAudioEnergy") || 0;
+      snapshot.totalSamplesSent = audioOutboundStats.get("totalSamplesSent") || 0;
+
+      snapshot.audioInboundBytes = currentAudioInBytes;
+      snapshot.audioInboundPackets = audioInboundStats.get("packetsReceived") || 0;
+      snapshot.audioPacketsLost = audioInboundStats.get("packetsLost") || 0;
+      snapshot.audioJitter = audioInboundStats.get("jitter") || 0;
+      snapshot.audioJitterBufferDelay = audioInboundStats.get("jitterBufferDelay") || 0;
+      snapshot.audioConcealedSamples = audioInboundStats.get("concealedSamples") || 0;
+      snapshot.audioConcealmentEvents = audioInboundStats.get("concealmentEvents") || 0;
+      snapshot.audioTotalSamplesReceived = audioInboundStats.get("totalSamplesReceived") || 0;
+
       // Update previous values
       this.previousOutboundBytes = currentOutboundBytes;
       this.previousInboundBytes = currentInboundBytes;
+      this.previousAudioOutboundBytes = currentAudioOutBytes;
+      this.previousAudioInboundBytes = currentAudioInBytes;
       this.previousTimestamp = now;
 
       this.onStats(snapshot);

@@ -8,6 +8,8 @@ import { TrayManager } from "./tray-manager.js";
 import type { TrayMenuActions } from "./tray-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
 import { registerIpcHandlers } from "./ipc-handlers.js";
+// Audio helper lifecycle is managed by IPC handlers via ensureAudioHelper()
+// in ipc-handlers.ts — no direct imports needed here
 import { registerPermissionHandler } from "./permissions.js";
 import { SettingsStore } from "./settings-store.js";
 import { SecureStore } from "./secure-store.js";

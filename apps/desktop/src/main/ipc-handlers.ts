@@ -1,7 +1,8 @@
 import { ipcMain, app, BrowserWindow } from "electron";
 import { enumerateSources, getSourceFingerprint } from "./capture-source-manager.js";
 import { setApprovedSource } from "./display-media-handler.js";
-import { getAudioCapabilities } from "./audio-capability-service.js";
+import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.js";
+import { AudioHelperManager } from "./AudioHelperManager.js";
 import { generateVdoStreamId, generateVdoPassword } from "@screenlink/shared";
 import type { SettingsStore } from "./settings-store.js";
 import type { SecureStore } from "./secure-store.js";
@@ -19,6 +20,36 @@ export function setCurrentVdoCredentials(streamId: string, password: string): vo
 export function clearCurrentVdoCredentials(): void {
   currentVdoStreamId = "";
   currentVdoPassword = "";
+}
+
+// ── Audio helper state (set by main process lifecycle) ──────────────────────
+
+let currentAudioHelper: AudioHelperManager | null = null;
+let currentAudioState: string = "disabled";
+
+export function setCurrentAudioHelper(helper: AudioHelperManager | null): void {
+  currentAudioHelper = helper;
+}
+
+export function setCurrentAudioState(state: string): void {
+  currentAudioState = state;
+}
+
+async function ensureAudioHelper(): Promise<AudioHelperManager> {
+  if (currentAudioHelper) return currentAudioHelper;
+
+  const helperPath = getHelperPath();
+  setCurrentAudioState("starting-helper");
+
+  const helper = new AudioHelperManager({ helperPath });
+  helper.onPacket(() => {});
+  helper.onError((err) => console.error("[Audio] Helper error:", err));
+  await helper.start();
+
+  setCurrentAudioHelper(helper);
+  setCurrentAudioState("connecting-transport");
+
+  return helper;
 }
 
 /**
@@ -326,6 +357,52 @@ export function registerIpcHandlers(
 
   ipcMain.handle("get-audio-capabilities", async () => {
     return getAudioCapabilities();
+  });
+
+  // ── Audio pipeline ─────────────────────────────────────────────────────
+
+  ipcMain.handle("request-audio-port", async (event) => {
+    try {
+      const helper = await ensureAudioHelper();
+      helper.attachPcmToWebContents(event.sender);
+      return { success: true };
+    } catch (err) {
+      console.error("[IPC] request-audio-port failed:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+
+  ipcMain.handle("get-audio-state", () => {
+    return currentAudioState ?? "disabled";
+  });
+
+  ipcMain.handle("start-synthetic-audio", async (_event, mode?: number) => {
+    try {
+      const helper = await ensureAudioHelper();
+      await helper.startSyntheticCapture({ mode: mode ?? 0 });
+      setCurrentAudioState("active");
+      return { success: true };
+    } catch (err) {
+      console.error("[IPC] start-synthetic-audio failed:", err);
+      setCurrentAudioState("error");
+      return { success: false, error: String(err) };
+    }
+  });
+
+  ipcMain.handle("stop-audio", async () => {
+    try {
+      setCurrentAudioState("stopping");
+      if (currentAudioHelper) {
+        await currentAudioHelper.shutdown();
+        setCurrentAudioHelper(null);
+      }
+      setCurrentAudioState("disabled");
+      return { success: true };
+    } catch (err) {
+      console.error("[IPC] stop-audio failed:", err);
+      setCurrentAudioState("error");
+      return { success: false, error: String(err) };
+    }
   });
 
   // ── Tray state updates ──────────────────────────────────────────────────

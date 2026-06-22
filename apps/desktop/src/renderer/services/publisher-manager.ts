@@ -1,5 +1,8 @@
 import { HostPublisher } from "@screenlink/vdo-adapter";
 import type { MediaStatsSnapshot } from "./media-stats-service.js";
+import type { ProcessAudioController } from "../audio/ProcessAudioController.js";
+
+export type AudioState = "disabled" | "active" | "error";
 
 export type PublisherState =
   | "idle"
@@ -29,8 +32,11 @@ export interface PublisherEvents {
 export class PublisherManager {
   private publisher: HostPublisher | null = null;
   private captureStream: MediaStream | null = null;
+  private audioController: ProcessAudioController | null = null;
+  private combinedStream: MediaStream | null = null;
   private audioTrack: MediaStreamTrack | null = null;
   private state: PublisherState = "idle";
+  private _audioState: AudioState = "disabled";
   private events: PublisherEvents;
   private config: PublisherConfig | null = null;
 
@@ -51,7 +57,33 @@ export class PublisherManager {
   }
 
   getAudioTrack(): MediaStreamTrack | null {
-    return this.audioTrack;
+    return this.audioController?.getTrack() ?? this.audioTrack;
+  }
+
+  getAudioState(): AudioState {
+    return this._audioState;
+  }
+
+  setAudioController(controller: ProcessAudioController): void {
+    this.audioController = controller;
+    this._audioState = "active";
+  }
+
+  private buildCombinedStream(): MediaStream {
+    const videoTracks = this.captureStream?.getVideoTracks() ?? [];
+    const audioTrack = this.audioController?.getTrack() ?? null;
+
+    const stream = new MediaStream();
+
+    if (videoTracks.length > 0) {
+      stream.addTrack(videoTracks[0]);
+    }
+
+    if (audioTrack && audioTrack.readyState === "live") {
+      stream.addTrack(audioTrack);
+    }
+
+    return stream;
   }
 
   private setState(newState: PublisherState): void {
@@ -86,6 +118,12 @@ export class PublisherManager {
   }
 
   async startPublishing(stream: MediaStream, config: PublisherConfig): Promise<void> {
+    // If we have an audio controller, build a combined stream with video + audio
+    if (this.audioController) {
+      this.combinedStream = this.buildCombinedStream();
+      stream = this.combinedStream;
+    }
+
     const publisher = new HostPublisher();
 
     await publisher.createAndConnect({ password: config.password });
@@ -107,6 +145,18 @@ export class PublisherManager {
   }
 
   async stopCapture(): Promise<void> {
+    // Stop audio controller
+    if (this.audioController) {
+      await this.audioController.close();
+      this.audioController = null;
+    }
+
+    // Stop combined stream
+    if (this.combinedStream) {
+      this.combinedStream.getTracks().forEach(t => t.stop());
+      this.combinedStream = null;
+    }
+
     if (this.publisher) {
       await this.publisher.stopPublishing();
       await this.publisher.disconnect();
@@ -116,6 +166,7 @@ export class PublisherManager {
     this.captureStream?.getTracks().forEach(t => t.stop());
     this.captureStream = null;
     this.audioTrack = null;
+    this._audioState = "disabled";
     this.config = null;
 
     this.setState("idle");

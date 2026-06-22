@@ -34,6 +34,11 @@ export function Dashboard() {
   const [localMediaStats, setLocalMediaStats] = useState<MediaStatsSnapshot | null>(null);
   const [showIncomingSharePrompt, setShowIncomingSharePrompt] = useState(false);
   const statsPollerRef = useRef<MediaStatsPoller | null>(null);
+  // Audio state
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [remoteMuted, setRemoteMuted] = useState(false);
+  const [remoteVolume, setRemoteVolume] = useState(1);
+  const [showEnableAudioButton, setShowEnableAudioButton] = useState(false);
   // local stats now flow through PublisherManager events
 
   function formatBitsTransferred(bytes: number): string {
@@ -99,6 +104,21 @@ export function Dashboard() {
     return () => document.removeEventListener("keydown", handler);
   }, [isFullscreen]);
 
+  // Sync video volume state to element
+  useEffect(() => {
+    const el = videoRef.current;
+    if (el) el.volume = remoteVolume;
+  }, [remoteVolume]);
+
+  // Video event handlers for autoplay detection
+  const handleVideoPlay = useCallback(() => {
+    setShowEnableAudioButton(false);
+  }, []);
+
+  const handleVideoError = useCallback(() => {
+    setShowEnableAudioButton(true);
+  }, []);
+
   // Start/poll WebRTC stats when viewing
   useEffect(() => {
     if (remoteShareState === "viewing") {
@@ -143,6 +163,23 @@ export function Dashboard() {
           currentRtt: 0,
           availableOutgoingBitrate: 0,
           codecMimeType: "",
+          audioOutboundBytes: 0,
+          audioOutboundPackets: 0,
+          audioOutboundBitrateKbps: 0,
+          audioCodec: "",
+          audioSsrc: 0,
+          audioLevel: 0,
+          totalAudioEnergy: 0,
+          totalSamplesSent: 0,
+          audioInboundBytes: 0,
+          audioInboundPackets: 0,
+          audioInboundBitrateKbps: 0,
+          audioPacketsLost: 0,
+          audioJitter: 0,
+          audioJitterBufferDelay: 0,
+          audioConcealedSamples: 0,
+          audioConcealmentEvents: 0,
+          audioTotalSamplesReceived: 0,
         });
       }
     } else {
@@ -206,7 +243,7 @@ export function Dashboard() {
 
   // ── Sharing handlers ──────────────────────────────────────
 
-  const handleShareScreen = useCallback(async () => {
+  const handleShareScreen = useCallback(async (withAudio?: boolean) => {
     setLocalShareState("selecting-source");
     try {
       if (!sourceId) {
@@ -231,6 +268,34 @@ export function Dashboard() {
         onTrackEnded: () => handleStopSharing(),
       });
       publisherManagerRef.current = mgr;
+
+      // If sharing with audio, set up audio pipeline before publishing
+      if (withAudio) {
+        setAudioEnabled(true);
+        await api?.startSyntheticAudio(0);
+        // Register window message listener BEFORE requesting the port
+        const portPromise = new Promise<MessagePort>((resolve, reject) => {
+          const handler = (event: MessageEvent) => {
+            if (event.data?.type === "pcm:port" && event.ports?.length > 0) {
+              window.removeEventListener("message", handler);
+              resolve(event.ports[0]);
+            }
+          };
+          window.addEventListener("message", handler);
+          setTimeout(() => {
+            window.removeEventListener("message", handler);
+            reject(new Error("Audio port timeout"));
+          }, 5000);
+        });
+        // Request audio port triggers MessagePort transfer from main process
+        await api?.requestAudioPort();
+        const port = await portPromise;
+
+        const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
+        const controller = new ProcessAudioController();
+        await controller.initialize(port);
+        mgr.setAudioController(controller);
+      }
 
       const stream = await mgr.startCapture({
         sourceId, password, streamId,
@@ -257,6 +322,11 @@ export function Dashboard() {
       publisherManagerRef.current = null;
     }
   }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials]);
+
+  const handleShareScreenWithAudio = useCallback(
+    () => handleShareScreen(true),
+    [handleShareScreen],
+  );
 
   const handleShareWindow = useCallback(async () => {
     navigate("source-picker" as Page);
@@ -310,6 +380,9 @@ export function Dashboard() {
             <>
               <button onClick={handleShareScreen}>Share Screen</button>
               <button onClick={handleShareWindow}>Share Window</button>
+              <button onClick={handleShareScreenWithAudio} className="ghost">
+                🎵 Share with Audio (Dev)
+              </button>
             </>
           ) : (
             <button className="danger" onClick={handleStopSharing}>Stop Sharing</button>
@@ -375,6 +448,9 @@ export function Dashboard() {
           border: isFullscreen ? "none" : undefined,
         }}>
           <video ref={videoRef} autoPlay playsInline
+            muted={remoteMuted}
+            onPlay={handleVideoPlay}
+            onError={handleVideoError}
             onDoubleClick={toggleFullscreen}
             style={{ width: "100%", height: "100%", display: remoteShareState === "viewing" ? "block" : "none", background: "#000", objectFit: "contain", cursor: "pointer" }} />
           {remoteShareState === "viewing" && (
@@ -387,6 +463,34 @@ export function Dashboard() {
                 zIndex: 10,
               }}>
               {isFullscreen ? "✕ Exit Fullscreen" : "⛶ Fullscreen"}
+            </button>
+          )}
+          {/* Audio controls (mute/volume) */}
+          {remoteShareState === "viewing" && (
+            <div className="audio-controls" style={{ position: "absolute", bottom: "0.5rem", left: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center", background: "rgba(0,0,0,0.6)", padding: "0.25rem 0.5rem", borderRadius: "4px", zIndex: 10 }}>
+              <button onClick={() => setRemoteMuted(!remoteMuted)} className="ghost" style={{ color: "#fff", fontSize: "0.75rem", padding: "0.25rem 0.5rem", border: "none", cursor: "pointer" }}>
+                {remoteMuted ? "🔇 Unmute" : "🔊 Mute"}
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={remoteVolume}
+                onChange={(e) => setRemoteVolume(parseFloat(e.target.value))}
+                style={{ width: "80px" }}
+                aria-label="Volume"
+              />
+              <span style={{ color: "#fff", fontSize: "0.7rem" }}>
+                {Math.round(remoteVolume * 100)}%
+              </span>
+            </div>
+          )}
+          {/* Enable Audio button shown when autoplay is blocked */}
+          {showEnableAudioButton && remoteShareState === "viewing" && (
+            <button onClick={() => videoRef.current?.play()} className="ghost"
+              style={{ position: "absolute", bottom: "0.5rem", right: "0.5rem", background: "rgba(0,0,0,0.6)", color: "#fff", fontSize: "0.75rem", padding: "0.25rem 0.5rem", borderRadius: "4px", border: "none", cursor: "pointer", zIndex: 10 }}>
+              🔈 Enable Audio
             </button>
           )}
           {remoteShareState !== "viewing" && (
@@ -411,6 +515,15 @@ export function Dashboard() {
               <span>Total transferred: {formatBitsTransferred(mediaStats.inboundBytes || 0)}</span>
               <span>Path: {mediaStats.isRelay ? `TURN Relay (${mediaStats.relayProtocol})` : "Direct P2P/STUN"}</span>
               <span>Codec: {mediaStats.codecMimeType.replace("video/", "")}</span>
+              {/* Audio stats */}
+              {(mediaStats.audioInboundBitrateKbps || 0) > 0 && (
+                <>
+                  <span>Audio Bitrate: {(mediaStats.audioInboundBitrateKbps || 0).toFixed(0)} kbps</span>
+                  <span>Audio Codec: {(mediaStats.audioCodec || "N/A").replace("audio/", "")}</span>
+                  <span>Audio Jitter: {((mediaStats.audioJitter || 0) * 1000).toFixed(0)} ms</span>
+                  <span>Audio Loss: {mediaStats.audioPacketsLost || 0}</span>
+                </>
+              )}
             </div>
           </div>
         )}

@@ -50,6 +50,12 @@ const api: ScreenLinkAPI = {
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
 
   getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
+
+  // Audio pipeline
+  requestAudioPort: () => ipcRenderer.invoke("request-audio-port"),
+  getAudioState: () => ipcRenderer.invoke("get-audio-state"),
+  startSyntheticAudio: (mode) => ipcRenderer.invoke("start-synthetic-audio", mode),
+  stopAudio: () => ipcRenderer.invoke("stop-audio"),
 };
 
 contextBridge.exposeInMainWorld("screenlink", api);

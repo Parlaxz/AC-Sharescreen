@@ -7,7 +7,7 @@ import type { AudioCapabilityResult } from "@screenlink/shared";
 const HELPER_TIMEOUT_MS = 5000;
 const HELPER_EXE = "screenlink-audio-helper.exe";
 
-function getHelperPath(): string {
+export function getHelperPath(): string {
   if (app.isPackaged) {
     // In production, helper sits next to the app executable in resources
     return path.join(process.resourcesPath, HELPER_EXE);

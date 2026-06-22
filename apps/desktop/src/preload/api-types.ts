@@ -84,7 +84,26 @@ export interface ScreenLinkAPI {
     data?: import("@screenlink/shared").AudioCapabilityResult;
     error?: { code: string; message: string };
   }>;
+
+  // Audio pipeline
+  requestAudioPort: () => Promise<void>;
+  getAudioState: () => Promise<AudioStateDTO>;
+  startSyntheticAudio: (mode?: number) => Promise<void>;
+  stopAudio: () => Promise<void>;
 }
+
+export type AudioStateDTO =
+  | "disabled"
+  | "starting-helper"
+  | "connecting-transport"
+  | "loading-worklet"
+  | "buffering"
+  | "primed"
+  | "track-ready"
+  | "publishing"
+  | "active"
+  | "stopping"
+  | "error";
 
 export interface CaptureSourceDTO {
   id: string;
