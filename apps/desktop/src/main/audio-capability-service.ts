@@ -18,9 +18,9 @@ export function getHelperPath(): string {
     helperPath = path.join(process.resourcesPath, HELPER_EXE);
   } else {
     // Development: built in native/audio-helper/build/Release/
+    // From dist/main/, 4 levels up reaches the repo root
     helperPath = path.join(
       __dirname,
-      "..",
       "..",
       "..",
       "..",
@@ -41,7 +41,6 @@ export function getHelperPath(): string {
     if (!app.isPackaged) {
       const altPath = path.join(
         __dirname,
-        "..",
         "..",
         "..",
         "..",
