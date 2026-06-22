@@ -106,6 +106,8 @@ public:
     // Count of active (non-removed) sources.
     uint32_t SourceCount() const;
 
+    static constexpr uint32_t kMaxSources = 32; ///< Hard limit on concurrent sources
+
 private:
     void MixerThread();
 
@@ -124,8 +126,8 @@ private:
         uint64_t creationTimeUtc100ns;
 
         std::deque<QueuedPacket> queue_;
-        size_t maxQueuePackets_ = 5;         // ~50ms max (5 x 10ms packets)
-        uint64_t maxQueueAge100ns_ = 100000; // 10ms in 100ns units
+        size_t maxQueuePackets_ = 4;         // ~40ms target (was 5 with contradictory 10ms age)
+        uint64_t maxQueueAge100ns_ = 500000; // 50ms hard max (was 100000 = 10ms)
         mutable std::mutex queueMutex_;
 
         // Statistics
@@ -139,7 +141,8 @@ private:
         bool hasLastSequence_ = false;
     };
 
-    std::vector<std::unique_ptr<CaptureSource>> sources_;
+    // Use shared_ptr so FeedPacket can keep a source alive outside the lock
+    std::vector<std::shared_ptr<CaptureSource>> sources_;
     mutable std::mutex sourcesMutex_;
     uint32_t nextSourceId_ = 1;
 

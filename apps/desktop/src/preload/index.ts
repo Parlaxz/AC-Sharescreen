@@ -5,7 +5,6 @@ const api: ScreenLinkAPI = {
   getSources: () => ipcRenderer.invoke("get-sources"),
   setSource: (sourceId) => ipcRenderer.invoke("set-source", sourceId),
   getSourceFingerprint: (sourceId) => ipcRenderer.invoke("get-source-fingerprint", sourceId),
-  resolveSourcePid: (sourceId) => ipcRenderer.invoke("resolve-source-pid", sourceId),
 
   getSettings: () => ipcRenderer.invoke("get-settings"),
   updateSettings: (partial) => ipcRenderer.invoke("update-settings", partial),

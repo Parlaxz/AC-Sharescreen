@@ -334,15 +334,8 @@ export function Dashboard() {
 
         // 5. Start native capture PRODUCER based on audio mode
         if (audioMode === 'application') {
-          // Resolve window source PID for application-level capture
-          const pidResult = await api?.resolveSourcePid(sourceId);
-          if (!pidResult?.success) {
-            throw new Error(`Cannot resolve source PID: ${pidResult?.error ?? 'unknown'}`);
-          }
-          await api?.startApplicationAudio({
-            targetPid: pidResult.pid!,
-            expectedCreationTimeUtc100ns: 0,
-          });
+          // Application audio resolves the source via native helper (includes PID + creation-time validation)
+          await api?.startApplicationAudio({ sourceId });
         } else {
           // monitor mode: filtered monitor capture
           await api?.startFilteredMonitorAudio({

@@ -127,10 +127,10 @@ AudioSessionMonitor::~AudioSessionMonitor() {
 bool AudioSessionMonitor::Initialize() {
     // 1. Initialize COM
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    comInitialized_ = (hr == S_OK || hr == S_FALSE);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         return false;
     }
-    comInitialized_ = true;
 
     // 2. Create device enumerator
     IMMDeviceEnumerator* enumerator = nullptr;

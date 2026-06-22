@@ -295,6 +295,9 @@ ServiceSession::~ServiceSession() {
         state_.store(static_cast<SessionState>(3)); // kStopping
     }
 
+    // Stop Phase 2E multi-source resources before joining threads
+    StopPhase2EResources();
+
     // Join threads
     if (captureThread_.joinable()) captureThread_.join();
     if (controlThread_.joinable()) controlThread_.join();
@@ -953,6 +956,9 @@ void ServiceSession::HandleStopCapture(const std::string& /*payload*/,
         captureThread_.join();
     }
 
+    // Stop Phase 2E multi-source resources
+    StopPhase2EResources();
+
     uint64_t finalPacketCount = totalPackets_.load();
     state_.store(static_cast<SessionState>(0)); // kIdle
 
@@ -1059,6 +1065,9 @@ void ServiceSession::HandleShutdown(const std::string& /*payload*/,
         }
         state_.store(static_cast<SessionState>(0)); // kIdle
     }
+
+    // Stop Phase 2E multi-source resources
+    StopPhase2EResources();
 
     std::string result = "{";
     result += "\"exitCode\":0";
@@ -1595,6 +1604,28 @@ void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         activeSourceType_ = "";
+    }
+}
+
+// ========================================================================
+// StopPhase2EResources
+// ========================================================================
+
+void ServiceSession::StopPhase2EResources() {
+    // Stop mixer first (stops producing output)
+    if (mixer_) {
+        mixer_->Stop();
+    }
+
+    // Stop all application capture sources
+    for (auto& src : captureSources_) {
+        if (src) src->Stop();
+    }
+    captureSources_.clear();
+
+    // Stop session monitor
+    if (sessionMonitor_) {
+        sessionMonitor_->Stop();
     }
 }
 

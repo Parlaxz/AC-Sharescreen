@@ -208,6 +208,14 @@ export class ControlClient {
     return { streamGeneration: resp.result.streamGeneration as number };
   }
 
+  async resolveSource(payload: { sourceId: string }): Promise<Record<string, unknown>> {
+    const resp = await this.sendRequest('resolveSource', payload as Record<string, unknown>);
+    if (!resp.success) {
+      throw new Error(`resolveSource failed: ${resp.error ?? 'unknown'}`);
+    }
+    return (resp.result ?? { found: false, error: 'empty result' }) as Record<string, unknown>;
+  }
+
   async startApplicationAudio(payload: {
     targetPid: number;
     expectedCreationTimeUtc100ns?: number;

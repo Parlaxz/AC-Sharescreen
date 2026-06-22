@@ -211,6 +211,11 @@ export class AudioHelperManager {
 
   // ── Phase 2E: Audio sessions ──
 
+  async resolveSource(sourceId: string): Promise<any> {
+    this.ensureReady();
+    return this.control!.resolveSource({ sourceId });
+  }
+
   async enumerateAudioSessions(): Promise<any> {
     this.ensureReady();
     return this.control!.sendRequest('enumerateAudioSessions');

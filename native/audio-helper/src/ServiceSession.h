@@ -77,6 +77,9 @@ private:
     /// Validate auth token and sessionId from a request.
     bool ValidateRequest(const std::string& authToken, const std::string& sessionId);
 
+    /// Stop all Phase 2E multi-source mixer resources.
+    void StopPhase2EResources();
+
     /// Capture callback — converts AudioPacket to PcmPacket and enqueues.
     bool OnCapturePacket(const AudioPacket& packet);
 

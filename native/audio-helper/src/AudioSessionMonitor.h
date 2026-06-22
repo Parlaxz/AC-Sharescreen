@@ -16,6 +16,16 @@ struct AudioSessionInfo {
     bool systemSound = false;         // PID 0 or system
     bool identityValidated = false;   // creation time successfully queried
     std::string errorReason;
+
+    // Phase 2E expanded fields
+    std::string sessionId;            // IAudioSessionControl2::GetSessionIdentifier
+    std::string sessionInstanceId;    // GetSessionInstanceIdentifier
+    uint32_t sessionState = 0;        // AudioSessionState
+    uint32_t rootPid = 0;             // resolved application root PID
+    uint64_t rootCreationTimeUtc100ns = 0;
+    bool excluded = false;            // matched an exclusion rule
+    std::string exclusionReason;      // "discord", "screenlink", etc.
+    bool processAlive = false;        // process still alive at enumeration time
 };
 
 /// Enumerates Windows render audio sessions using Core Audio APIs.

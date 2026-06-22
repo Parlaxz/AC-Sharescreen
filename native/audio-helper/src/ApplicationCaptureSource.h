@@ -27,6 +27,12 @@ public:
     /// @param creationTimeUtc100ns Validated creation time (0 = skip validation)
     /// @param onPacket Callback for captured AudioPackets
     /// @return true if capture thread started successfully
+    ///
+    /// Note: Start() can fail (e.g., thread creation failure). The caller MUST
+    /// check the return value. Full activation acknowledgment (e.g., waiting for
+    /// the capture loop to begin processing) is not yet implemented; callers
+    /// should treat a return of true as "thread started" but not necessarily
+    /// "capture is actively producing packets."
     bool Start(uint32_t pid, uint64_t creationTimeUtc100ns,
                std::function<bool(const AudioPacket&)> onPacket);
 

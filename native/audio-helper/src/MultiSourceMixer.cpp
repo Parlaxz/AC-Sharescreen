@@ -30,7 +30,12 @@ MultiSourceMixer::~MultiSourceMixer() {
 uint32_t MultiSourceMixer::AddSource(uint32_t pid, uint64_t creationTimeUtc100ns) {
     std::lock_guard<std::mutex> lock(sourcesMutex_);
 
-    auto source = std::make_unique<CaptureSource>();
+    // Enforce source limit
+    if (sources_.size() >= kMaxSources) {
+        return 0; // 0 means "no source added"
+    }
+
+    auto source = std::make_shared<CaptureSource>();
     source->sourceId = nextSourceId_++;
     source->pid = pid;
     source->creationTimeUtc100ns = creationTimeUtc100ns;
@@ -75,19 +80,20 @@ void MultiSourceMixer::RemoveSource(uint32_t sourceId) {
 }
 
 void MultiSourceMixer::FeedPacket(uint32_t sourceId, const AudioPacket& packet) {
-    // Find the source
-    CaptureSource* source = nullptr;
+    // Find and hold the source via shared_ptr to prevent use-after-free
+    // if RemoveSource() runs concurrently.
+    std::shared_ptr<CaptureSource> source;
     {
         std::lock_guard<std::mutex> lock(sourcesMutex_);
         for (auto& s : sources_) {
             if (s->sourceId == sourceId) {
-                source = s.get();
+                source = s; // copy shared_ptr, keeps object alive
                 break;
             }
         }
     }
 
-    if (!source) return; // Source was removed
+    if (!source) return; // Source was removed (and no shared owners remain)
 
     // Build a queued packet with owned frame data
     QueuedPacket qp;
@@ -293,6 +299,14 @@ void MultiSourceMixer::MixerThread() {
             bool hasData = false;
         };
 
+        // ── Timestamp-aligned source collection ──
+        // Convert the current deadline (QPC ticks) to 100ns units for
+        // comparison against qpcPosition100ns in each queued packet.
+        uint64_t deadline100ns = static_cast<uint64_t>(
+            (static_cast<double>(deadline.QuadPart) * 10000000.0) / hostFreq);
+        uint64_t windowStart100ns = deadline100ns - static_cast<uint64_t>(
+            (static_cast<double>(packetIntervalQpc) * 10000000.0) / hostFreq);
+
         std::vector<SourceContribution> contributions;
 
         {
@@ -310,38 +324,80 @@ void MultiSourceMixer::MixerThread() {
                     contrib.isSilent = true;
                     contrib.hasData = false;
                 } else {
-                    // Move packet data out of queue (pop_front invalidates)
-                    auto qp = std::move(source->queue_.front());
-                    source->queue_.pop_front();
+                    // Find a packet matching the current deadline window
+                    bool found = false;
+                    while (!source->queue_.empty()) {
+                        auto& front = source->queue_.front();
 
-                    contrib.frameData = std::move(qp.frameData);
-                    contrib.frameCount = qp.header.frameCount;
-                    contrib.channels = qp.header.channels;
-                    contrib.isSilent = qp.header.isSilent;
-                    contrib.isDiscontinuous = qp.header.isDiscontinuous;
+                        // If timestamp is 0 (not set), use the packet immediately.
+                        // This handles legacy tests and callers that don't set
+                        // qpcPosition100ns.
+                        if (front.header.qpcPosition100ns == 0) {
+                            // Fall through to the "use it" path below
+                            // by setting qpcPosition100ns to the window start
+                            // (just need it to pass the >= check below).
+                            // We don't modify the packet; we just let it through.
+                        }
+                        // If front packet is for a future window, keep it
+                        else if (front.header.qpcPosition100ns > deadline100ns) {
+                            // Packet is ahead of this block — leave in queue,
+                            // output silence for this block
+                            break;
+                        }
 
-                    if (qp.header.isSilent) {
-                        source->silentPackets_++;
-                    }
+                        // If front packet is within the current window (or timestamp
+                        // was 0 / not set), use it
+                        if (front.header.qpcPosition100ns == 0 ||
+                            front.header.qpcPosition100ns >= windowStart100ns) {
+                            auto qp = std::move(source->queue_.front());
+                            source->queue_.pop_front();
 
-                    if (qp.header.isDiscontinuous) {
-                        source->discontinuities_++;
-                    }
+                            contrib.frameData = std::move(qp.frameData);
+                            contrib.frameCount = qp.header.frameCount;
+                            contrib.channels = qp.header.channels;
+                            contrib.isSilent = qp.header.isSilent;
+                            contrib.isDiscontinuous = qp.header.isDiscontinuous;
 
-                    contrib.hasData = true;
-
-                    if (!qp.header.isSilent) {
-                        // Check if frames are actually non-zero
-                        bool nonZero = false;
-                        for (size_t i = 0; i < contrib.frameData.size(); ++i) {
-                            if (contrib.frameData[i] != 0.0f) {
-                                nonZero = true;
-                                break;
+                            if (qp.header.isSilent) {
+                                source->silentPackets_++;
                             }
+
+                            if (qp.header.isDiscontinuous) {
+                                source->discontinuities_++;
+                            }
+
+                            contrib.hasData = true;
+
+                            if (!qp.header.isSilent) {
+                                // Check if frames are actually non-zero
+                                bool nonZero = false;
+                                for (size_t i = 0; i < contrib.frameData.size(); ++i) {
+                                    if (contrib.frameData[i] != 0.0f) {
+                                        nonZero = true;
+                                        break;
+                                    }
+                                }
+                                if (nonZero) {
+                                    activeNonSilentSources++;
+                                }
+                            }
+
+                            found = true;
+                            break;
                         }
-                        if (nonZero) {
-                            activeNonSilentSources++;
-                        }
+
+                        // Front packet is for a past window — discard it (too late)
+                        source->latePackets_++;
+                        source->droppedPackets_++;
+                        source->droppedFrames_ += front.header.frameCount;
+                        source->queue_.pop_front();
+                    }
+
+                    if (!found) {
+                        // No matching packet in the current window
+                        source->missingPackets_++;
+                        contrib.isSilent = true;
+                        contrib.hasData = false;
                     }
                 }
 

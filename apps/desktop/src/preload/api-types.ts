@@ -5,9 +5,6 @@ export interface ScreenLinkAPI {
   getSources: () => Promise<CaptureSourceDTO[]>;
   setSource: (sourceId: string) => Promise<void>;
   getSourceFingerprint: (sourceId: string) => Promise<Record<string, unknown> | null>;
-  /** Resolve a window source ID to its process PID. */
-  resolveSourcePid: (sourceId: string) => Promise<{ success: boolean; pid?: number; hwnd?: number; error?: string }>;
-
   // Settings
   getSettings: () => Promise<PersistedSettings>;
   updateSettings: (partial: Record<string, unknown>) => Promise<void>;
@@ -95,7 +92,7 @@ export interface ScreenLinkAPI {
 
   // Phase 2E: Audio sessions
   enumerateAudioSessions: () => Promise<any>;
-  startApplicationAudio: (options: { targetPid: number; expectedCreationTimeUtc100ns: number }) => Promise<any>;
+  startApplicationAudio: (options: { sourceId: string }) => Promise<any>;
   startFilteredMonitorAudio: (options?: { excludeDiscord?: boolean; excludeScreenLink?: boolean }) => Promise<any>;
   getMixerState: () => Promise<any>;
   getMixerDiagnostics: () => Promise<any>;
