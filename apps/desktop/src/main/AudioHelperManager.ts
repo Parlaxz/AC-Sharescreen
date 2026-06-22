@@ -151,18 +151,24 @@ export class AudioHelperManager {
 
     try {
       // 1. Spawn the helper process
+      console.log('[AudioHelper] Spawning helper:', this.config.helperPath);
       await this.spawnHelper();
+      console.log('[AudioHelper] Helper spawned, PID:', this.helper?.pid);
 
       // 2. Connect to control named pipe
+      console.log('[AudioHelper] Connecting to control pipe:', this.ctrlPipeName);
       this.control = new ControlClient(this.ctrlPipeName, this.sessionId, this.authToken);
       await this.control.connect(5000);
+      console.log('[AudioHelper] Control pipe connected');
 
       // 3. Perform handshake
       this.state = 'handshaking';
+      console.log('[AudioHelper] Sending hello...');
       const helloResp = await this.control.hello();
       if (!helloResp.success) {
         throw new Error(`Handshake failed: ${helloResp.error ?? 'unknown'}`);
       }
+      console.log('[AudioHelper] Hello handshake complete, helper version:', helloResp.result?.helperVersion);
 
       // 4. Connect PCM named pipe
       await this.connectPcmPipe();

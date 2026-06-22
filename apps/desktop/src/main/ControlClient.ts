@@ -88,7 +88,9 @@ export class ControlClient {
       const start = Date.now();
 
       const tryConnect = () => {
-        if (Date.now() - start > timeoutMs) {
+        const elapsed = Date.now() - start;
+        if (elapsed > timeoutMs) {
+          console.log(`[ControlClient] Connect timeout after ${elapsed}ms`);
           reject(new Error(`Timeout connecting to control pipe: ${this.pipePath}`));
           return;
         }
@@ -97,11 +99,13 @@ export class ControlClient {
 
         const onError = () => {
           socket.destroy();
+          console.log(`[ControlClient] Connect retry at ${Date.now() - start}ms`);
           setTimeout(tryConnect, 200);
         };
 
         socket.once('connect', () => {
           socket.removeListener('error', onError);
+          console.log(`[ControlClient] Connected at ${Date.now() - start}ms`);
           this.socket = socket;
           this.connected = true;
           this.setupSocket();
@@ -185,8 +189,11 @@ export class ControlClient {
 
     const requestStr = JSON.stringify(request) + '\n';
 
+    console.log(`[ControlClient] Sending "${command}" (reqId=${requestId})`);
+
     return new Promise<ControlResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
+        console.log(`[ControlClient] TIMEOUT for "${command}" (reqId=${requestId})`);
         this.pendingRequests.delete(requestId);
         reject(new Error(`Response timeout for command "${command}"`));
       }, this.REQUEST_TIMEOUT_MS);
