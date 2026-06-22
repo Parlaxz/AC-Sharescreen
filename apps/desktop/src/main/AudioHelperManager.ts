@@ -1,14 +1,14 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as crypto from 'crypto';
 import * as net from 'net';
-import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser';
-import { PcmBridge } from './PcmBridge';
+import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser.js';
+import { PcmBridge } from './PcmBridge.js';
 import {
   ControlClient,
   HelperCapabilities,
   HelperDiagnostics,
   HelperState,
-} from './ControlClient';
+} from './ControlClient.js';
 
 // ── Types ──
 

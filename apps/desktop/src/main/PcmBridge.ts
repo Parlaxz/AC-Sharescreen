@@ -1,5 +1,5 @@
 import { MessageChannelMain } from 'electron';
-import type { ParsedPcmPacket } from './BinaryPcmParser';
+import type { ParsedPcmPacket } from './BinaryPcmParser.js';
 
 /**
  * Sanitized PCM packet for renderer consumption.
