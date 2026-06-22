@@ -141,6 +141,11 @@ int main(int argc, char* argv[]) {
         allPassed = false;
       }
 
+      if (screenlink::audio::kServiceProtocolVersion.empty()) {
+        std::cerr << "FAIL: kServiceProtocolVersion is empty\n";
+        allPassed = false;
+      }
+
       if (screenlink::audio::ParseCommand("--version") != screenlink::audio::Command::kVersion) {
         std::cerr << "FAIL: ParseCommand('--version') mismatch\n";
         allPassed = false;
@@ -167,6 +172,10 @@ int main(int argc, char* argv[]) {
       }
       if (screenlink::audio::ParseCommand("--resolve-source") != screenlink::audio::Command::kResolveSource) {
         std::cerr << "FAIL: ParseCommand('--resolve-source') mismatch\n";
+        allPassed = false;
+      }
+      if (screenlink::audio::ParseCommand("--serve") != screenlink::audio::Command::kServe) {
+        std::cerr << "FAIL: ParseCommand('--serve') mismatch\n";
         allPassed = false;
       }
       if (screenlink::audio::ParseCommand("--unknown") != screenlink::audio::Command::kUnknown) {
