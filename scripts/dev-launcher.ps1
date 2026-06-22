@@ -117,8 +117,27 @@ function Start-ViteDevServer {
     $existingPid = Get-LivePid $VitePidFile
     if ($existingPid) {
         Write-Log "Vite dev server already running (PID: $existingPid)"
+        Write-Log "Rebuilding TypeScript (main + preload)..."
+        Push-Location $DesktopDir
+        try {
+            $proc = Start-Process -FilePath "pnpm.cmd" -ArgumentList @("exec", "tsc", "-p", "tsconfig.main.json", "--outDir", "dist/main") -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { return $false }
+            $proc = Start-Process -FilePath "pnpm.cmd" -ArgumentList @("exec", "tsc", "-p", "tsconfig.preload.json", "--outDir", "dist/preload") -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { return $false }
+        } finally { Pop-Location }
         return $true
     }
+
+    Write-Log "Building native helper (C++)..."
+    Push-Location $ProjectRoot
+    try {
+        $proc = Start-Process -FilePath "cmake.cmd" -ArgumentList @("--build", (Join-Path (Join-Path $ProjectRoot "native") (Join-Path "audio-helper" "build")), "--config", "Release") -NoNewWindow -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            Write-Log "WARNING: C++ build failed (exit: $($proc.ExitCode)) — audio helper may be stale"
+        } else {
+            Write-Log "C++ helper built successfully"
+        }
+    } finally { Pop-Location }
 
     Write-Log "Building workspace packages..."
 
