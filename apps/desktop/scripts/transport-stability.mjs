@@ -193,7 +193,15 @@ async function main() {
   });
   log(`Initial diagnostics: totalControlRequests=${initDiag.result?.totalControlRequests ?? '?'}`);
 
-  // 5. Start synthetic capture (mode 0 = continuous tone, unlimited packets)
+  // 5. Connect PCM pipe FIRST (before startSynthetic)
+  // The C++ helper waits up to 1s for PCM client before starting capture.
+  // Connect PCM first so startSynthetic proceeds immediately.
+  log('Connecting PCM pipe...');
+  pcmSocket = await openPcmPipe(pcmPipe, 10000);
+  pcmSocket.setNoDelay(true);
+  log('PCM pipe connected');
+
+  // 6. Start synthetic capture (mode 0 = continuous tone, unlimited packets)
   log('Starting synthetic capture (continuous tone)...');
   const startResp = sendRequest(ctrlFd, {
     protocolVersion: '0.2.0', requestId: requestId++, sessionId, authToken,
@@ -202,12 +210,6 @@ async function main() {
   if (!startResp.success) throw new Error(`startSynthetic failed: ${startResp.error}`);
   streamGen = startResp.result.streamGeneration;
   log(`Synthetic capture started, stream generation: ${streamGen}`);
-
-  // 6. Connect PCM pipe (async via net.Socket for non-blocking reads)
-  log('Connecting PCM pipe...');
-  pcmSocket = await openPcmPipe(pcmPipe, 10000);
-  pcmSocket.setNoDelay(true);
-  log('PCM pipe connected');
 
   // 7. Read packets for the duration
   let parserBuffer = Buffer.alloc(0);

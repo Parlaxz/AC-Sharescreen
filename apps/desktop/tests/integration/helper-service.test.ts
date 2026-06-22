@@ -309,7 +309,24 @@ describe('native helper service integration', () => {
     expect(result.uptimeMs).toBeGreaterThanOrEqual(0);
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 8: startSynthetic ────────────────────────────────────────────
+  // ── Test 8: Connect PCM pipe (BEFORE startSynthetic) ──────────────────
+  // The C++ startSynthetic waits up to 1s for the PCM client to connect.
+  // We must connect PCM first so the helper can proceed immediately.
+  it('connects PCM pipe before startSynthetic', () => {
+    expect(ctrlFd).not.toBeNull();
+
+    // Connect PCM pipe (read-only — server pipe is PIPE_ACCESS_OUTBOUND)
+    pcmFd = connectPipe(pcmPipe, 5000, 'r');
+    expect(pcmFd).not.toBeNull();
+  }, INTEGRATION_TIMEOUT);
+
+  // ── Test 9: PCM client PID was accepted ───────────────────────────────
+  it('helper accepted PCM connection from our PID', () => {
+    expect(helperExitCode).toBeNull();
+    expect(pcmFd).not.toBeNull();
+  });
+
+  // ── Test 10: startSynthetic ──────────────────────────────────────────
   it('startSynthetic returns streamGeneration', () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -337,15 +354,8 @@ describe('native helper service integration', () => {
     expect(result.sourceType).toBe('synthetic');
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 9: Connect PCM pipe and receive packets ──────────────────────
-  it('connects PCM pipe and receives valid packets', async () => {
-    expect(ctrlFd).not.toBeNull();
-
-    // Give the helper a moment to create the PCM pipe server
-    await delay(500);
-
-    // Connect PCM pipe (read-only — server pipe is PIPE_ACCESS_OUTBOUND)
-    pcmFd = connectPipe(pcmPipe, 5000, 'r');
+  // ── Test 11: Read PCM packets from already-connected pipe ─────────────
+  it('receives valid PCM packets after startSynthetic', async () => {
     expect(pcmFd).not.toBeNull();
 
     // Read a few PCM packets
@@ -401,7 +411,7 @@ describe('native helper service integration', () => {
     pcmFd = null;
   }, INTEGRATION_TIMEOUT + PCM_READ_TIMEOUT + 2000);
 
-  // ── Test 10: getState during capture ──────────────────────────────────
+  // ── Test 12: getState during capture ──────────────────────────────────
   it('getState returns capturing during active capture', () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -422,7 +432,7 @@ describe('native helper service integration', () => {
     expect(result.uptimeMs).toBeDefined();
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 11: stopCapture ──────────────────────────────────────────────
+  // ── Test 13: stopCapture ──────────────────────────────────────────────
   it('stopCapture stops the capture', () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -446,7 +456,7 @@ describe('native helper service integration', () => {
     }
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 12: getDiagnostics ───────────────────────────────────────────
+  // ── Test 14: getDiagnostics ───────────────────────────────────────────
   it('getDiagnostics returns expected stats', () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -477,7 +487,7 @@ describe('native helper service integration', () => {
     expect(result.totalControlRequests).toBeGreaterThanOrEqual(4);
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 13: Unauthenticated request ──────────────────────────────────
+  // ── Test 15: Reject wrong auth token ──────────────────────────────────
   it('rejects request with wrong auth token', () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -498,7 +508,26 @@ describe('native helper service integration', () => {
     expect(response.error!.toLowerCase()).toContain('auth');
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 14: Unknown command ──────────────────────────────────────────
+  // ── Test 16: Reject wrong session ID ──────────────────────────────────
+  it('rejects request with wrong session ID', () => {
+    expect(ctrlFd).not.toBeNull();
+
+    const response = sendRequest(ctrlFd!, {
+      protocolVersion: '0.2.0',
+      requestId: 100,
+      sessionId: 'wrong-session-id',
+      authToken,
+      command: 'ping',
+      payload: {},
+    });
+
+    expect(response.success).toBe(false);
+    expect(response.error).toBeDefined();
+    expect(typeof response.error).toBe('string');
+    expect(response.error!.toLowerCase()).toContain('auth');
+  }, INTEGRATION_TIMEOUT);
+
+  // ── Test 17: Unknown command ──────────────────────────────────────────
   it('rejects unknown command', () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -516,7 +545,7 @@ describe('native helper service integration', () => {
     expect(typeof response.error).toBe('string');
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 15: shutdown ─────────────────────────────────────────────────
+  // ── Test 18: shutdown ─────────────────────────────────────────────────
   it('shutdown causes helper to exit', async () => {
     expect(ctrlFd).not.toBeNull();
 
@@ -540,7 +569,7 @@ describe('native helper service integration', () => {
     }
   }, INTEGRATION_TIMEOUT);
 
-  // ── Test 16: No orphan process ────────────────────────────────────────
+  // ── Test 19: No orphan process ────────────────────────────────────────
   it('helper process is not orphaned', () => {
     // The helper should have exited after the shutdown command
     if (helperExitCode !== null) {
@@ -551,7 +580,7 @@ describe('native helper service integration', () => {
     }
   }, 5000);
 
-  // ── Test 17: Clean stderr ─────────────────────────────────────────────
+  // ── Test 20: Clean stderr ─────────────────────────────────────────────
   it('helper stderr has no crash output', () => {
     const stderr = helperStderr.toLowerCase();
     expect(stderr).not.toContain('fatal');

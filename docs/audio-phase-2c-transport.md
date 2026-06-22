@@ -4,6 +4,7 @@
 **Date:** 2026-06-21
 **Starting commit:** `9ed1865` (Phase 2B clean)
 **Ending commits:** `4dd5a23` (Phase 2C final)
+**TypeScript/C++ alignment:** Commit `8fb1c41` (C++ security/ordering), TS alignment above
 
 ## Architecture
 
@@ -125,7 +126,15 @@ Electron main process
 - Default frame rate: 48000 Hz
 - Default channels: 2
 - Default frame count: 480 (10ms)
-- Default queue size: 128 packets (~1.28s)
+- Default queue size: 15 packets (~150ms)
+- Kernel pipe buffer: 64 KB
+
+### QPC Frequency
+
+- The `qpcFrequency` field in each PCM header contains the real `QueryPerformanceFrequency` value obtained at helper startup
+- Previously hardcoded at 10 MHz — now dynamically queried via `QueryPerformanceFrequency(&li)`
+- This ensures accurate timestamp conversion regardless of hardware
+- Both the C++ helper and TypeScript `BinaryPcmParser` use the per-packet frequency for any QPC-to-microsecond conversion
 
 ## Byte Order
 
@@ -136,7 +145,9 @@ All integers are little-endian (native x64). Named pipes are local-only — no n
 - Pipe names are randomly generated per session (32 hex chars)
 - Format: `\\.\pipe\screenlink-{sessionId}-ctrl` and `\\.\pipe\screenlink-{sessionId}-pcm`
 - Session authentication: random auth token validated on every control request
-- Pipe ACLs: default Windows named pipe ACLs (current user only)
+- **Pipe DACL:** Explicit current-user security descriptor created via `CreateWellKnownSid(WinCurrentUserSid)` + `SetSecurityDescriptorDacl(TRUE)`. This replaces the default DACL to ensure no inherited permissions leak to other users.
+- **Remote client rejection:** `PIPE_REJECT_REMOTE_CLIENTS` flag is set on both pipes, ensuring only local connections are accepted even if the pipe name is somehow exposed.
+- **Client PID validation:** The control pipe validates the client's PID via `GetNamedPipeClientProcessId`. Only the expected parent PID is allowed to connect to the PCM pipe. PCM pipe connections from unexpected PIDs are rejected at the pipe server level.
 - No network access: `\\.\pipe\` prefix restricts to local machine
 - No global static pipe names
 
@@ -162,8 +173,11 @@ The auth token is never logged.
 5. Electron connects control pipe (retry with 5s timeout)
 6. Handshake: Electron sends `hello`, helper responds with version
 7. Helper creates PCM pipe server
-8. Electron connects PCM pipe (retry with 5s timeout)
+8. Electron connects PCM pipe (retry with 5s timeout) — **PCM pipe must be connected before startSynthetic/startProcessCapture**
 9. Ready for commands
+10. Electron sends `startSynthetic` or `startProcessCapture`
+
+> **PCM-first ordering:** The C++ `startSynthetic` command waits up to 1 second for the PCM client to connect before beginning capture. If no PCM client connects within that window, `startSynthetic` returns error `"pcm-not-connected"`. The TypeScript integration test and stability script both connect the PCM pipe **before** sending `startSynthetic` to avoid this delay.
 
 ### Capture
 
@@ -200,7 +214,8 @@ The auth token is never logged.
 
 ### Helper Side (PcmWriter)
 
-- **Maximum queued packets:** 128 (~1.28s at 10ms packets)
+- **Maximum queued packets:** 15 (~150ms at 10ms packets)
+- **Kernel pipe receive buffer:** 64 KB (reduced from default for tighter latency control)
 - **Overflow policy:** Drop oldest queued packets
 - **Dropped-packet counter:** `droppedPackets` field in PCM header
 - **Next packet after drop:** Marked with discontinuity flag
@@ -301,13 +316,16 @@ Electron rejects packets from old generations.
 1. Spawn real helper in --serve mode
 2. Connect control named pipe
 3. Hello handshake
-4. Connect PCM named pipe
-5. Start synthetic capture
-6. Read and parse PCM packets
-7. Verify sequence integrity
-8. Stop capture
-9. Shutdown
-10. Verify no orphan process
+4. Query initial state (getVersion, getCapabilities, getState, ping)
+5. **Connect PCM named pipe** (before startSynthetic — PCM-first ordering)
+6. Start synthetic capture
+7. Read and parse PCM packets
+8. Verify sequence integrity
+9. Stop capture
+10. Shutdown
+11. Verify no orphan process
+
+> **PCM-first ordering:** Step 5 (PCM pipe connect) occurs before step 6 (startSynthetic). The C++ helper waits up to 1s for the PCM client; connecting PCM first eliminates this startup delay.
 
 ## Files Added
 
@@ -323,9 +341,10 @@ Electron rejects packets from old generations.
 | `apps/desktop/src/main/ControlClient.ts` | Typed control pipe client |
 | `apps/desktop/src/main/AudioHelperManager.ts` | Process lifecycle manager |
 | `apps/desktop/tests/binary-pcm-parser.test.ts` | 34 parser tests |
+| `apps/desktop/tests/binary-pcm-golden.test.ts` | 20+ golden fixture / cross-language header agreement tests |
 | `apps/desktop/tests/control-client.test.ts` | 15 protocol tests |
-| `apps/desktop/tests/integration/helper-service.test.ts` | Real pipe integration tests |
-| `apps/desktop/scripts/transport-stability.mjs` | 30-minute stability runner |
+| `apps/desktop/tests/integration/helper-service.test.ts` | Real pipe integration tests (PCM-first ordering) |
+| `apps/desktop/scripts/transport-stability.mjs` | 30-minute stability runner (PCM-first ordering) |
 
 ## Limitations
 
