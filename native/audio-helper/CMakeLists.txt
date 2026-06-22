@@ -25,10 +25,19 @@ set(SOURCES
   src/main.cpp
   src/WindowsVersion.cpp
   src/AudioCapabilities.cpp
+  src/WindowEnumerator.cpp
+  src/ProcessResolver.cpp
+  src/SourceMapper.cpp
+  src/WavWriter.cpp
+  src/LoopbackCapture.cpp
 )
 
 # Executable
 add_executable(${PROJECT_NAME} ${SOURCES})
+
+# Link dwmapi.lib for DwmGetWindowAttribute,
+# ole32.lib for COM, avrt.lib for Pro Audio thread priority
+target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi ole32 avrt mmdevapi uuid)
 
 # Pass Windows SDK version to C++ code for compile-time checks
 if(MSVC AND CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)

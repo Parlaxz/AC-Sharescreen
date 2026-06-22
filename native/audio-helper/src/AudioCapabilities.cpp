@@ -9,8 +9,10 @@ namespace screenlink::audio {
 namespace {
 
 // Minimum SDK build version that defines process-loopback APIs.
-// This matches kMinProcessLoopbackBuild from Protocol.h and must be
-// kept in sync. Currently both are 22000 (Windows SDK 10.0.22000.0).
+// This is the COMPILE-TIME SDK version check, separate from the
+// runtime minimum (kMinProcessLoopbackBuild in Protocol.h, currently
+// 20348). The SDK that introduced PROCESS_LOOPBACK is 10.0.22000.0,
+// so this stays at 22000 regardless of runtime OS build.
 inline constexpr uint32_t kMinSdkBuildForProcessLoopback = 22000;
 
 std::vector<uint32_t> ParseVersionString(const std::string& version) {
