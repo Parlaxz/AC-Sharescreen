@@ -6,6 +6,7 @@
 #include "SourceMapper.h"
 #include "WavWriter.h"
 #include "LoopbackCapture.h"
+#include "PipeTransport.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -459,6 +460,188 @@ int main(int argc, char* argv[]) {
           // Clean up temp file
           DeleteFileA(testWavPath.c_str());
         }
+      }
+
+      // ── PipeTransport: sizeof(PcmPacketHeader) ──
+      {
+          // Compile-time check via static_assert in PipeTransport.h.
+          // Runtime check as belt-and-suspenders (use a variable to
+          // avoid MSVC C4127 "conditional expression is constant").
+          const bool headerSizeOk =
+              (sizeof(screenlink::audio::PcmPacketHeader) == 68);
+          if (!headerSizeOk) {
+              std::cerr << "FAIL: sizeof(PcmPacketHeader) is "
+                        << sizeof(screenlink::audio::PcmPacketHeader)
+                        << " (expected 68)\n";
+              allPassed = false;
+          }
+      }
+
+      // ── PipeTransport: queue push/pop/full/drop/empty ──
+      {
+          screenlink::audio::PcmPacketQueue queue(5); // usable capacity = 4
+          if (queue.MaxSize() != 4) {
+              std::cerr << "FAIL: queue.MaxSize() = " << queue.MaxSize()
+                        << " (expected 4)\n";
+              allPassed = false;
+          }
+
+          // Push 4 packets
+          for (int i = 0; i < 4; ++i) {
+              screenlink::audio::PcmPacket p;
+              p.header.sequenceNumber = static_cast<uint64_t>(i);
+              if (!queue.TryPush(std::move(p))) {
+                  std::cerr << "FAIL: queue.TryPush failed on iteration " << i << "\n";
+                  allPassed = false;
+              }
+          }
+
+          // Queue should now be full (5th push fails)
+          screenlink::audio::PcmPacket overflowPacket;
+          overflowPacket.header.sequenceNumber = 99;
+          if (queue.TryPush(std::move(overflowPacket))) {
+              std::cerr << "FAIL: queue.TryPush should have returned false (full)\n";
+              allPassed = false;
+          }
+
+          // Drop count should be 1
+          if (queue.DroppedCount() != 1) {
+              std::cerr << "FAIL: queue.DroppedCount() = " << queue.DroppedCount()
+                        << " (expected 1)\n";
+              allPassed = false;
+          }
+
+          // Pop 4 packets
+          for (int i = 0; i < 4; ++i) {
+              screenlink::audio::PcmPacket p;
+              if (!queue.TryPop(p)) {
+                  std::cerr << "FAIL: queue.TryPop failed on iteration " << i << "\n";
+                  allPassed = false;
+              }
+          }
+
+          // Queue should now be empty
+          screenlink::audio::PcmPacket emptyPacket;
+          if (queue.TryPop(emptyPacket)) {
+              std::cerr << "FAIL: queue.TryPop should have returned false (empty)\n";
+              allPassed = false;
+          }
+
+          // Size should be 0
+          if (queue.Size() != 0) {
+              std::cerr << "FAIL: queue.Size() = " << queue.Size()
+                        << " (expected 0 after draining)\n";
+              allPassed = false;
+          }
+      }
+
+      // ── PipeTransport: queue sequence number round-trip ──
+      {
+          screenlink::audio::PcmPacketQueue queue(4);
+          screenlink::audio::PcmPacket in;
+          in.header.sequenceNumber = 42;
+          in.header.frameCount = 480;
+          in.header.channels = 2;
+          in.payload.resize(480 * 2, 0.5f);
+
+          if (!queue.TryPush(std::move(in))) {
+              std::cerr << "FAIL: queue.TryPush (round-trip) failed\n";
+              allPassed = false;
+          }
+
+          screenlink::audio::PcmPacket out;
+          if (!queue.TryPop(out)) {
+              std::cerr << "FAIL: queue.TryPop (round-trip) failed\n";
+              allPassed = false;
+          }
+
+          if (out.header.sequenceNumber != 42) {
+              std::cerr << "FAIL: sequenceNumber round-trip: got "
+                        << out.header.sequenceNumber
+                        << " (expected 42)\n";
+              allPassed = false;
+          }
+
+          if (out.header.frameCount != 480) {
+              std::cerr << "FAIL: frameCount round-trip: got "
+                        << out.header.frameCount
+                        << " (expected 480)\n";
+              allPassed = false;
+          }
+
+          if (out.payload.size() != 960) {
+              std::cerr << "FAIL: payload size round-trip: got "
+                        << out.payload.size()
+                        << " (expected 960)\n";
+              allPassed = false;
+          }
+      }
+
+      // ── PipeTransport: ValidatePcmHeader valid ──
+      {
+          screenlink::audio::PcmPacketHeader h;
+          h.frameCount = 480;
+          h.channels = 2;
+          h.payloadBytes = 480 * 2 * static_cast<uint32_t>(sizeof(float));
+          auto result = screenlink::audio::ValidatePcmHeader(h);
+          if (!result.valid) {
+              std::cerr << "FAIL: ValidatePcmHeader(valid) failed: "
+                        << result.error << "\n";
+              allPassed = false;
+          }
+      }
+
+      // ── PipeTransport: ValidatePcmHeader invalid magic ──
+      {
+          screenlink::audio::PcmPacketHeader h;
+          h.magic = 0xDEADBEEF;
+          h.frameCount = 480;
+          h.channels = 2;
+          h.payloadBytes = 480 * 2 * static_cast<uint32_t>(sizeof(float));
+          auto result = screenlink::audio::ValidatePcmHeader(h);
+          if (result.valid) {
+              std::cerr << "FAIL: ValidatePcmHeader(invalid magic) "
+                           "should have failed\n";
+              allPassed = false;
+          }
+      }
+
+      // ── PipeTransport: ValidatePcmHeader overflow payload ──
+      {
+          screenlink::audio::PcmPacketHeader h;
+          h.frameCount = screenlink::audio::kMaxPcmFramesPerPacket;
+          h.channels = 2;
+          // payloadBytes is valid (matches frameCount * channels * sizeof(float))
+          h.payloadBytes = h.frameCount * h.channels * static_cast<uint32_t>(sizeof(float));
+          // Now mess up frameCount to trigger overflow detection
+          // Actually, the overflow check is for expectedPayload > kMaxPcmFrameBytes
+          // which won't trigger with valid values.
+          // Instead, set frameCount to something that makes payloadBytes exceed kMaxPcmFrameBytes.
+          // But payloadBytes is computed from frameCount, so they'll match.
+          // Let's set a valid payloadBytes but make frameCount*channels*sizeof(float) overflow uint32_t
+          // No — make frameCount huge so expectedPayload (uint64_t) exceeds kMaxPcmFrameBytes
+          h.frameCount = screenlink::audio::kMaxPcmFramesPerPacket + 1;
+          h.payloadBytes = (h.frameCount) * h.channels * static_cast<uint32_t>(sizeof(float));
+          auto result = screenlink::audio::ValidatePcmHeader(h);
+          if (result.valid) {
+              std::cerr << "FAIL: ValidatePcmHeader(overflow frames) "
+                           "should have failed\n";
+              allPassed = false;
+          }
+      }
+
+      // ── PipeTransport: ValidatePcmHeader mismatched payloadBytes ──
+      {
+          screenlink::audio::PcmPacketHeader h;
+          h.frameCount = 480;
+          h.channels = 2;
+          h.payloadBytes = 480 * 2 * static_cast<uint32_t>(sizeof(float)) + 1; // off by one
+          auto result = screenlink::audio::ValidatePcmHeader(h);
+          if (result.valid) {
+              std::cerr << "FAIL: ValidatePcmHeader(mismatched payloadBytes) "
+                           "should have failed\n";
+              allPassed = false;
+          }
       }
 
       if (allPassed) {

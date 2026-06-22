@@ -30,6 +30,7 @@ set(SOURCES
   src/SourceMapper.cpp
   src/WavWriter.cpp
   src/LoopbackCapture.cpp
+  src/PipeTransport.cpp
 )
 
 # Executable
