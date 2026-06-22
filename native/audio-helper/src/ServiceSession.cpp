@@ -2,6 +2,8 @@
 #include "AudioCapabilities.h"
 #include "WindowsVersion.h"
 #include "Protocol.h"
+#include "ExclusionPolicy.h"
+#include "ProcessResolver.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -299,6 +301,24 @@ ServiceSession::~ServiceSession() {
     if (pcmConnectThread_.joinable()) pcmConnectThread_.join();
     if (monitorThread_.joinable()) monitorThread_.join();
 
+    // Stop and clean up multi-source capture sources
+    for (auto& source : captureSources_) {
+        if (source) source->Stop();
+    }
+    captureSources_.clear();
+
+    // Stop mixer
+    if (mixer_) {
+        mixer_->Stop();
+        mixer_.reset();
+    }
+
+    // Stop session monitor
+    if (sessionMonitor_) {
+        sessionMonitor_->Stop();
+        sessionMonitor_.reset();
+    }
+
     // Close parent process handle
     if (parentProcessHandle_ != nullptr) {
         CloseHandle(static_cast<HANDLE>(parentProcessHandle_));
@@ -546,6 +566,26 @@ bool ServiceSession::DispatchCommand(const std::string& command,
         return true;
     } else if (command == "shutdown") {
         HandleShutdown(payload, response);
+        return true;
+    } else if (command == "enumerateAudioSessions" ||
+               command == "enumerateaudiosessions") {
+        HandleEnumerateAudioSessions(payload, response);
+        return true;
+    } else if (command == "startApplicationAudio" ||
+               command == "startapplicationaudio") {
+        HandleStartApplicationAudio(payload, response);
+        return true;
+    } else if (command == "startFilteredMonitorAudio" ||
+               command == "startfilteredmonitoraudio") {
+        HandleStartFilteredMonitorAudio(payload, response);
+        return true;
+    } else if (command == "getMixerState" ||
+               command == "getmixerstate") {
+        HandleGetMixerState(payload, response);
+        return true;
+    } else if (command == "getMixerDiagnostics" ||
+               command == "getmixerdiagnostics") {
+        HandleGetMixerDiagnostics(payload, response);
         return true;
     }
     return false;
@@ -1030,6 +1070,490 @@ void ServiceSession::HandleShutdown(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "idle");
+    resp.Set("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+// ========================================================================
+// Phase 2E — Multi-source audio mixer handlers
+// ========================================================================
+
+void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/,
+                                                    std::string& response) {
+    // Create session monitor
+    auto monitor = std::make_unique<AudioSessionMonitor>();
+    if (!monitor->Initialize()) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "session-enumeration-failed");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    auto sessions = monitor->EnumerateSessions();
+    monitor->Stop();
+
+    // Build result JSON: {"sessionCount":N,"sessions":[{...},{...}]}
+    std::string result = "{";
+    result += "\"sessionCount\":" + std::to_string(sessions.size()) + ",";
+    result += "\"sessions\":[";
+    for (size_t i = 0; i < sessions.size(); ++i) {
+        if (i > 0) result += ",";
+        result += "{";
+        result += "\"pid\":" + std::to_string(sessions[i].pid) + ",";
+        // Use a simple escaping: replace " with \" in the name
+        std::string safeName = sessions[i].executableName;
+        {
+            size_t pos = 0;
+            while ((pos = safeName.find('"', pos)) != std::string::npos) {
+                safeName.replace(pos, 1, "\\\"");
+                pos += 2;
+            }
+        }
+        result += "\"executableName\":\"" + safeName + "\",";
+        result += "\"systemSound\":";
+        result += (sessions[i].systemSound ? "true" : "false");
+        result += ",";
+        result += "\"identityValidated\":";
+        result += (sessions[i].identityValidated ? "true" : "false");
+        if (!sessions[i].errorReason.empty()) {
+            std::string safeError = sessions[i].errorReason;
+            size_t pos = 0;
+            while ((pos = safeError.find('"', pos)) != std::string::npos) {
+                safeError.replace(pos, 1, "\\\"");
+                pos += 2;
+            }
+            result += ",\"errorReason\":\"" + safeError + "\"";
+        }
+        result += "}";
+    }
+    result += "]}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.Set("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
+                                                   std::string& response) {
+    // Parse payload
+    int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
+    uint64_t expectedCreationTime = SimpleJson::GetUint(payload, "expectedCreationTimeUtc100ns", 0);
+
+    if (targetPid <= 0) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "invalid-target-pid");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    // Validate process exists and creation time matches
+    uint64_t actualCreationTime = GetProcessCreationTime(static_cast<uint32_t>(targetPid));
+    if (actualCreationTime == 0) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "process-not-found");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    if (expectedCreationTime != 0 && actualCreationTime != expectedCreationTime) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "creation-time-mismatch");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    // Resolve application root
+    auto treeResult = ResolveProcessTree(static_cast<uint32_t>(targetPid));
+    if (!treeResult.succeeded) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "process-resolution-failed");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    uint32_t rootPid = treeResult.applicationRootPid;
+
+    // Create mixer if not already running
+    if (!mixer_) {
+        mixer_ = std::make_unique<MultiSourceMixer>(48000, static_cast<uint16_t>(2));
+
+        // Start mixer with callback to PCM writer
+        mixer_->Start([this](const AudioPacket& p) -> bool {
+            return OnCapturePacket(p);
+        });
+
+        if (!mixer_->IsRunning()) {
+            SimpleJson resp;
+            resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+            resp.Set("requestId", static_cast<uint64_t>(0));
+            resp.Set("sessionId", config_.sessionId);
+            resp.Set("success", false);
+            resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+            resp.Set("error", "mixer-start-failed");
+            resp.Set("result", "{}");
+            response = resp.Str();
+            return;
+        }
+    }
+
+    // Add source to mixer
+    uint32_t sourceId = mixer_->AddSource(rootPid, actualCreationTime);
+
+    // Start capture source
+    auto source = std::make_unique<ApplicationCaptureSource>();
+    bool started = source->Start(rootPid, actualCreationTime,
+        [this, sourceId](const AudioPacket& p) -> bool {
+            mixer_->FeedPacket(sourceId, p);
+            return true;
+        });
+
+    if (!started) {
+        mixer_->RemoveSource(sourceId);
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "capture-start-failed");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    captureSources_.push_back(std::move(source));
+
+    std::string result = "{";
+    result += "\"sourceId\":" + std::to_string(sourceId) + ",";
+    result += "\"rootPid\":" + std::to_string(rootPid) + ",";
+    // Escape rootName for JSON safety
+    {
+        std::string safeName = treeResult.applicationRootName;
+        size_t pos = 0;
+        while ((pos = safeName.find('"', pos)) != std::string::npos) {
+            safeName.replace(pos, 1, "\\\"");
+            pos += 2;
+        }
+        result += "\"rootName\":\"" + safeName + "\"";
+    }
+    result += "}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.Set("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
+                                                       std::string& response) {
+    bool excludeDiscord = SimpleJson::GetBool(payload, "excludeDiscord", true);
+    bool excludeScreenLink = SimpleJson::GetBool(payload, "excludeScreenLink", true);
+    uint32_t screenLinkPid = static_cast<uint32_t>(
+        SimpleJson::GetUint(payload, "screenLinkPid", 0));
+
+    // Enumerate audio sessions
+    auto monitor = std::make_unique<AudioSessionMonitor>();
+    if (!monitor->Initialize()) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "session-enumeration-failed");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    auto sessions = monitor->EnumerateSessions();
+    monitor->Stop();
+
+    // Track session count stats
+    uint32_t eligibleCount = 0;
+    uint32_t excludedDiscordCount = 0;
+    uint32_t excludedScreenLinkCount = 0;
+    uint32_t duplicateRootCount = 0;
+    uint32_t invalidSessionCount = 0;
+
+    // Deduplication: track which application roots we've already added
+    struct RootIdentity {
+        uint32_t pid;
+        uint64_t creationTimeUtc100ns;
+        bool operator==(const RootIdentity& o) const {
+            return pid == o.pid && creationTimeUtc100ns == o.creationTimeUtc100ns;
+        }
+    };
+    std::vector<RootIdentity> addedRoots;
+
+    // Create mixer if needed
+    if (!mixer_) {
+        mixer_ = std::make_unique<MultiSourceMixer>(48000, static_cast<uint16_t>(2));
+        mixer_->Start([this](const AudioPacket& p) -> bool {
+            return OnCapturePacket(p);
+        });
+
+        if (!mixer_->IsRunning()) {
+            SimpleJson resp;
+            resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+            resp.Set("requestId", static_cast<uint64_t>(0));
+            resp.Set("sessionId", config_.sessionId);
+            resp.Set("success", false);
+            resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+            resp.Set("error", "mixer-start-failed");
+            resp.Set("result", "{}");
+            response = resp.Str();
+            return;
+        }
+    }
+
+    // Process each session
+    for (const auto& session : sessions) {
+        if (session.systemSound || session.pid == 0) {
+            invalidSessionCount++;
+            continue;
+        }
+
+        if (!session.identityValidated) {
+            invalidSessionCount++;
+            continue;
+        }
+
+        // Resolve process tree to find application root
+        auto treeResult = ResolveProcessTree(session.pid);
+        if (!treeResult.succeeded) {
+            invalidSessionCount++;
+            continue;
+        }
+
+        uint32_t rootPid = treeResult.applicationRootPid;
+        uint64_t rootCreationTime = treeResult.targetCreationTimeUtc100ns;
+
+        // Get the root process name for exclusion checks
+        std::string rootName = treeResult.applicationRootName;
+        std::string rootPath;
+        for (const auto& p : treeResult.processes) {
+            if (p.processId == rootPid) {
+                rootPath = p.processPath;
+                break;
+            }
+        }
+
+        // Apply exclusion policy
+        if (excludeDiscord || excludeScreenLink) {
+            auto exclusion = CheckExclusion(rootName, rootPath);
+            if (exclusion.isDiscord && excludeDiscord) {
+                excludedDiscordCount++;
+                continue;
+            }
+            if (exclusion.isScreenLink && excludeScreenLink) {
+                // Check if this is the ScreenLink PID we should exclude
+                bool shouldExclude = true;
+                if (screenLinkPid != 0 && rootPid != screenLinkPid) {
+                    // Only exclude the specific ScreenLink process if screenLinkPid is given
+                    shouldExclude = false;
+                }
+                if (shouldExclude) {
+                    excludedScreenLinkCount++;
+                    continue;
+                }
+            }
+        }
+
+        // Deduplicate by root PID + creation time
+        RootIdentity identity{rootPid, rootCreationTime};
+        bool isDuplicate = false;
+        for (const auto& added : addedRoots) {
+            if (added == identity) {
+                isDuplicate = true;
+                break;
+            }
+        }
+
+        if (isDuplicate) {
+            duplicateRootCount++;
+            continue;
+        }
+
+        eligibleCount++;
+
+        // Add source to mixer
+        uint32_t sourceId = mixer_->AddSource(rootPid, rootCreationTime);
+
+        // Start capture source
+        auto source = std::make_unique<ApplicationCaptureSource>();
+        bool started = source->Start(rootPid, rootCreationTime,
+            [this, sourceId](const AudioPacket& p) -> bool {
+                mixer_->FeedPacket(sourceId, p);
+                return true;
+            });
+
+        if (started) {
+            addedRoots.push_back(identity);
+            captureSources_.push_back(std::move(source));
+        }
+    }
+
+    // Update mixer diagnostics with session counts
+    {
+        auto diag = mixer_->GetDiagnostics();
+        // The diag fields are populated snapshot-based; we update our counters
+        // in the response directly rather than modifying mixer state.
+    }
+
+    uint32_t activeSourceCount = mixer_->SourceCount();
+
+    std::string result = "{";
+    result += "\"totalSessions\":" + std::to_string(sessions.size()) + ",";
+    result += "\"eligibleCount\":" + std::to_string(eligibleCount) + ",";
+    result += "\"excludedDiscordCount\":" + std::to_string(excludedDiscordCount) + ",";
+    result += "\"excludedScreenLinkCount\":" + std::to_string(excludedScreenLinkCount) + ",";
+    result += "\"duplicateRootCount\":" + std::to_string(duplicateRootCount) + ",";
+    result += "\"invalidSessionCount\":" + std::to_string(invalidSessionCount) + ",";
+    result += "\"activeSourceCount\":" + std::to_string(activeSourceCount);
+    result += "}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.Set("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+void ServiceSession::HandleGetMixerState(const std::string& /*payload*/,
+                                          std::string& response) {
+    bool mixerRunning = mixer_ && mixer_->IsRunning();
+    uint32_t sourceCount = mixer_ ? mixer_->SourceCount() : 0;
+
+    std::string result = "{";
+    result += "\"mixerRunning\":" + std::string(mixerRunning ? "true" : "false") + ",";
+    result += "\"sourceCount\":" + std::to_string(sourceCount);
+    result += "}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.Set("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+void ServiceSession::HandleGetMixerDiagnostics(const std::string& /*payload*/,
+                                                 std::string& response) {
+    if (!mixer_) {
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "mixer-not-running");
+        resp.Set("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    auto diag = mixer_->GetDiagnostics();
+
+    // Build result JSON
+    std::string result = "{";
+    result += "\"outputPackets\":" + std::to_string(diag.outputPackets) + ",";
+    result += "\"outputFrames\":" + std::to_string(diag.outputFrames) + ",";
+    result += "\"silentOutputPackets\":" + std::to_string(diag.silentOutputPackets) + ",";
+    result += "\"discontinuities\":" + std::to_string(diag.discontinuities) + ",";
+    result += "\"activeSourceCount\":" + std::to_string(diag.activeSourceCount) + ",";
+    result += "\"peakSourceCount\":" + std::to_string(diag.peakSourceCount) + ",";
+    result += "\"eligibleSessionCount\":" + std::to_string(diag.eligibleSessionCount) + ",";
+    result += "\"excludedDiscordCount\":" + std::to_string(diag.excludedDiscordCount) + ",";
+    result += "\"excludedScreenLinkCount\":" + std::to_string(diag.excludedScreenLinkCount) + ",";
+    result += "\"duplicateRootCount\":" + std::to_string(diag.duplicateRootCount) + ",";
+    result += "\"invalidSessionCount\":" + std::to_string(diag.invalidSessionCount) + ",";
+    result += "\"sourcesAdded\":" + std::to_string(diag.sourcesAdded) + ",";
+    result += "\"sourcesRemoved\":" + std::to_string(diag.sourcesRemoved) + ",";
+    result += "\"peakMixLevel\":" + std::to_string(static_cast<double>(diag.peakMixLevel)) + ",";
+    result += "\"appliedHeadroomDb\":" + std::to_string(static_cast<double>(diag.appliedHeadroomDb)) + ",";
+    result += "\"clippedSamples\":" + std::to_string(diag.clippedSamples) + ",";
+    result += "\"limitedBlocks\":" + std::to_string(diag.limitedBlocks) + ",";
+    result += "\"maxQueueDepth\":" + std::to_string(diag.maxQueueDepth) + ",";
+    result += "\"maxQueueAge100ns\":" + std::to_string(diag.maxQueueAge100ns) + ",";
+    result += "\"sourceQueuesAtMax\":" + std::to_string(diag.sourceQueuesAtMax) + ",";
+
+    // Source states
+    result += "\"sourceStates\":[";
+    for (size_t i = 0; i < diag.sourceStates.size(); ++i) {
+        if (i > 0) result += ",";
+        const auto& s = diag.sourceStates[i];
+        result += "{";
+        result += "\"sourceId\":" + std::to_string(s.sourceId) + ",";
+        result += "\"pid\":" + std::to_string(s.pid) + ",";
+        result += "\"creationTimeUtc100ns\":" + std::to_string(s.creationTimeUtc100ns) + ",";
+        result += "\"active\":" + std::string(s.active ? "true" : "false") + ",";
+        result += "\"queueDepth\":" + std::to_string(s.queueDepth) + ",";
+        result += "\"latePackets\":" + std::to_string(s.latePackets) + ",";
+        result += "\"missingPackets\":" + std::to_string(s.missingPackets) + ",";
+        result += "\"silentPackets\":" + std::to_string(s.silentPackets) + ",";
+        result += "\"discontinuities\":" + std::to_string(s.discontinuities) + ",";
+        result += "\"droppedPackets\":" + std::to_string(s.droppedPackets) + ",";
+        result += "\"droppedFrames\":" + std::to_string(s.droppedFrames);
+        result += "}";
+    }
+    result += "]}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
     resp.Set("result", result);
     resp.Set("error", "null");
     response = resp.Str();

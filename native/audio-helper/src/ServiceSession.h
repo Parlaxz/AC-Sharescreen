@@ -8,9 +8,14 @@
 #include <string>
 #include <thread>
 
-#include "LoopbackCapture.h"   // AudioPacket, CaptureConfig
-#include "PipeTransport.h"     // PcmPipeWriter
-#include "SyntheticSource.h"   // SyntheticConfig
+#include <vector>
+
+#include "LoopbackCapture.h"       // AudioPacket, CaptureConfig
+#include "PipeTransport.h"         // PcmPipeWriter
+#include "SyntheticSource.h"       // SyntheticConfig
+#include "AudioSessionMonitor.h"   // AudioSessionMonitor, AudioSessionInfo
+#include "MultiSourceMixer.h"      // MultiSourceMixer, MixerDiagnostics
+#include "ApplicationCaptureSource.h" // ApplicationCaptureSource
 
 namespace screenlink::audio {
 
@@ -55,6 +60,13 @@ private:
     void HandleGetDiagnostics(const std::string& payload, std::string& response);
     void HandlePing(const std::string& payload, std::string& response);
     void HandleShutdown(const std::string& payload, std::string& response);
+
+    // Phase 2E: Multi-source audio mixer handlers
+    void HandleEnumerateAudioSessions(const std::string& payload, std::string& response);
+    void HandleStartApplicationAudio(const std::string& payload, std::string& response);
+    void HandleStartFilteredMonitorAudio(const std::string& payload, std::string& response);
+    void HandleGetMixerState(const std::string& payload, std::string& response);
+    void HandleGetMixerDiagnostics(const std::string& payload, std::string& response);
 
     /// Dispatch a parsed control request to the appropriate handler.
     /// Returns true if the command was recognised, false otherwise.
@@ -113,6 +125,11 @@ private:
 
     // Parent process handle
     void* parentProcessHandle_ = nullptr;
+
+    // Phase 2E: Multi-source audio mixer
+    std::unique_ptr<AudioSessionMonitor> sessionMonitor_;
+    std::unique_ptr<MultiSourceMixer> mixer_;
+    std::vector<std::unique_ptr<ApplicationCaptureSource>> captureSources_;
 };
 
 } // namespace screenlink::audio

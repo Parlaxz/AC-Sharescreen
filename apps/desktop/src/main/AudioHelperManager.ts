@@ -74,7 +74,7 @@ export class AudioHelperManager {
 
   private state: HelperStateEnum = 'disconnected';
   private streamGeneration: number = -1;
-  private currentSourceType: 'synthetic' | 'process' | null = null;
+  private currentSourceType: 'synthetic' | 'process' | 'application' | 'monitor' | null = null;
   private stats: AudioHelperStats;
   private lastError_: string | null = null;
   private restartCount: number = 0;
@@ -207,6 +207,49 @@ export class AudioHelperManager {
     this.parser?.reset();
     this.pcmBridge.forwardReset(result.streamGeneration);
     return result.streamGeneration;
+  }
+
+  // ── Phase 2E: Audio sessions ──
+
+  async enumerateAudioSessions(): Promise<any> {
+    this.ensureReady();
+    return this.control!.sendRequest('enumerateAudioSessions');
+  }
+
+  async startApplicationCapture(options: {
+    targetPid: number;
+    expectedCreationTimeUtc100ns: number;
+  }): Promise<any> {
+    this.ensureReady();
+    const result = await this.control!.startApplicationAudio(options);
+    this.streamGeneration = (result.streamGeneration as number) || this.streamGeneration;
+    this.currentSourceType = 'application';
+    return result;
+  }
+
+  async startFilteredMonitorCapture(options: {
+    excludeDiscord?: boolean;
+    excludeScreenLink?: boolean;
+  }): Promise<any> {
+    this.ensureReady();
+    const resp = await this.control!.sendRequest('startFilteredMonitorAudio', {
+      excludeDiscord: options.excludeDiscord ?? true,
+      excludeScreenLink: options.excludeScreenLink ?? true,
+      screenLinkPid: process.pid,
+    });
+    this.streamGeneration = (resp.result?.streamGeneration as number) || this.streamGeneration;
+    this.currentSourceType = 'monitor';
+    return resp;
+  }
+
+  async getMixerState(): Promise<any> {
+    this.ensureReady();
+    return this.control!.sendRequest('getMixerState');
+  }
+
+  async getMixerDiagnostics(): Promise<any> {
+    this.ensureReady();
+    return this.control!.sendRequest('getMixerDiagnostics');
   }
 
   async stopCapture(): Promise<void> {

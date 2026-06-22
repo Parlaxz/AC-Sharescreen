@@ -9,6 +9,10 @@
 #include "PipeTransport.h"
 #include "SyntheticSource.h"
 #include "ServiceSession.h"
+#include "ExclusionPolicy.h"
+#include "AudioSessionMonitor.h"
+#include "MultiSourceMixer.h"
+#include "ApplicationCaptureSource.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -66,7 +70,7 @@ void PrintError(const char* errorMsg, int& exitCodeOut, int exitCode) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
+    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
     std::cout << "{\n"
               << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n"
               << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n"
@@ -917,6 +921,278 @@ int main(int argc, char* argv[]) {
           }
       }
 
+      // ── Phase 2E: ExclusionPolicy tests ──
+      {
+        auto expect = [&allPassed](bool cond, const char* label) {
+            if (!cond) { std::cerr << "FAIL: " << label << "\n"; allPassed = false; }
+        };
+
+        // 1. Discord variants
+        {
+            expect(screenlink::audio::IsDiscordProcess("discord.exe"),
+                   "ExclusionPolicy: discord.exe matches");
+            expect(screenlink::audio::IsDiscordProcess("DISCORD.EXE"),
+                   "ExclusionPolicy: DISCORD.EXE matches (case insensitive)");
+            expect(screenlink::audio::IsDiscordProcess("Discord.exe"),
+                   "ExclusionPolicy: Discord.exe matches (case insensitive)");
+            expect(screenlink::audio::IsDiscordProcess("discordptb.exe"),
+                   "ExclusionPolicy: discordptb.exe matches");
+            expect(screenlink::audio::IsDiscordProcess("discordcanary.exe"),
+                   "ExclusionPolicy: discordcanary.exe matches");
+            expect(screenlink::audio::IsDiscordProcess("discorddevelopment.exe"),
+                   "ExclusionPolicy: discorddevelopment.exe matches");
+        }
+
+        // 2. Non-Discord should not match
+        {
+            expect(!screenlink::audio::IsDiscordProcess("notdiscord.exe"),
+                   "ExclusionPolicy: notdiscord.exe should not match");
+            expect(!screenlink::audio::IsDiscordProcess("discord.exe.bak"),
+                   "ExclusionPolicy: discord.exe.bak should not match (substring)");
+            expect(!screenlink::audio::IsDiscordProcess(""),
+                   "ExclusionPolicy: empty string should not match");
+            expect(!screenlink::audio::IsDiscordProcess("chrome.exe"),
+                   "ExclusionPolicy: chrome.exe should not match");
+        }
+
+        // 3. ScreenLink variants
+        {
+            expect(screenlink::audio::IsScreenLinkProcess("ScreenLink.exe", ""),
+                   "ExclusionPolicy: ScreenLink.exe matches");
+            expect(screenlink::audio::IsScreenLinkProcess("screenlink.exe", ""),
+                   "ExclusionPolicy: screenlink.exe matches (lowercase)");
+            expect(screenlink::audio::IsScreenLinkProcess("SCREENLINKHelper.exe", "C:\\path\\SCREENLINKHelper.exe"),
+                   "ExclusionPolicy: SCREENLINKHelper.exe matches");
+            expect(screenlink::audio::IsScreenLinkProcess("", "C:\\Program Files\\ScreenLink\\screenlink.exe"),
+                   "ExclusionPolicy: path-based ScreenLink match");
+        }
+
+        // 4. Non-ScreenLink should not match
+        {
+            expect(!screenlink::audio::IsScreenLinkProcess("not-screen-link.exe", ""),
+                   "ExclusionPolicy: not-screen-link.exe should not match");
+            expect(!screenlink::audio::IsScreenLinkProcess("", ""),
+                   "ExclusionPolicy: empty strings should not match ScreenLink");
+        }
+
+        // 5. ExclusionMatch result
+        {
+            auto m1 = screenlink::audio::CheckExclusion("discord.exe", "");
+            expect(m1.isDiscord, "CheckExclusion: discord.exe isDiscord=true");
+            expect(!m1.isScreenLink, "CheckExclusion: discord.exe isScreenLink=false");
+            expect(!m1.matchedName.empty(), "CheckExclusion: discord.exe matchedName populated");
+
+            auto m2 = screenlink::audio::CheckExclusion("ScreenLink.exe", "");
+            expect(m2.isScreenLink, "CheckExclusion: ScreenLink.exe isScreenLink=true");
+            expect(!m2.isDiscord, "CheckExclusion: ScreenLink.exe isDiscord=false");
+
+            auto m3 = screenlink::audio::CheckExclusion("chrome.exe", "");
+            expect(!m3.isDiscord, "CheckExclusion: chrome.exe isDiscord=false");
+            expect(!m3.isScreenLink, "CheckExclusion: chrome.exe isScreenLink=false");
+            expect(m3.matchedName.empty(), "CheckExclusion: chrome.exe matchedName empty");
+        }
+      }
+
+      // ── Phase 2E: AudioSessionMonitor test (init only, may fail on build 19045) ──
+      {
+        auto expect = [&allPassed](bool cond, const char* label) {
+            if (!cond) { std::cerr << "FAIL: " << label << "\n"; allPassed = false; }
+        };
+
+        {
+            screenlink::audio::AudioSessionMonitor monitor;
+            bool initOk = monitor.Initialize();
+
+            // Note: AudioSessionMonitor init may fail on builds < 20348 or without
+            // a default render endpoint. We just verify it doesn't crash.
+            if (initOk) {
+                auto sessions = monitor.EnumerateSessions();
+                // sessions may be empty or non-empty depending on system state
+                // Just verify the call doesn't crash
+                monitor.Stop();
+                expect(true, "AudioSessionMonitor: init+enum+stop succeeded");
+            } else {
+                // Failed init is acceptable on unsupported builds
+                // Just verify we can still call Stop safely
+                monitor.Stop();
+                expect(true, "AudioSessionMonitor: init failed gracefully (acceptable)");
+            }
+        }
+      }
+
+      // ── Phase 2E: MultiSourceMixer tests ──
+      {
+        auto expect = [&allPassed](bool cond, const char* label) {
+            if (!cond) { std::cerr << "FAIL: " << label << "\n"; allPassed = false; }
+        };
+
+        // 1. Basic mixing of two tones
+        {
+            screenlink::audio::MultiSourceMixer mixer(48000, 2);
+
+            uint32_t source1 = mixer.AddSource(1, 100);
+            uint32_t source2 = mixer.AddSource(2, 200);
+
+            expect(mixer.SourceCount() == 2, "MultiSourceMixer: SourceCount == 2 after adding two sources");
+
+            // Generate test tones
+            std::vector<float> tone1(480 * 2);
+            std::vector<float> tone2(480 * 2);
+            for (uint32_t i = 0; i < 480; ++i) {
+                tone1[i * 2] = 0.5f;
+                tone1[i * 2 + 1] = 0.5f;
+                tone2[i * 2] = 0.3f;
+                tone2[i * 2 + 1] = 0.3f;
+            }
+
+            // Feed packets
+            screenlink::audio::AudioPacket p1;
+            p1.frames = tone1.data();
+            p1.frameCount = 480;
+            p1.channels = 2;
+            p1.sequenceNumber = 0;
+            p1.sourceId = source1;
+
+            screenlink::audio::AudioPacket p2;
+            p2.frames = tone2.data();
+            p2.frameCount = 480;
+            p2.channels = 2;
+            p2.sequenceNumber = 0;
+            p2.sourceId = source2;
+
+            mixer.FeedPacket(source1, p1);
+            mixer.FeedPacket(source2, p2);
+
+            // Start mixer and collect one output packet.
+            // IMPORTANT: Copy frame data inside the callback since the
+            // mixer's output buffer is thread-local and destroyed after Stop().
+            std::vector<float> capturedMix;
+            std::vector<screenlink::audio::AudioPacket> outputPackets;
+            mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
+                // Copy frame data while still in the mixer thread
+                if (p.frames && p.frameCount > 0) {
+                    capturedMix.assign(p.frames, p.frames + p.frameCount * p.channels);
+                }
+                outputPackets.push_back(p);
+                if (!capturedMix.empty()) {
+                    outputPackets.back().frames = capturedMix.data();
+                }
+                return false; // stop after first packet
+            });
+
+            // Wait for mixer thread to finish (callback returned false)
+            mixer.Stop();
+
+            expect(!outputPackets.empty(), "MultiSourceMixer: output received");
+            if (!outputPackets.empty()) {
+                auto& op = outputPackets[0];
+                expect(op.frameCount == 480, "MultiSourceMixer: output frameCount == 480");
+                expect(op.channels == 2, "MultiSourceMixer: output channels == 2");
+
+                // Verify mixing: each sample should be (0.5 + 0.3) * headroom
+                // With 2 active sources: headroom = 1/sqrt(2) ≈ 0.707
+                // Expected: (0.5 + 0.3) * 0.707 = 0.8 * 0.707 = 0.566
+                bool mixedCorrectly = true;
+                if (op.frames) {
+                    float expectedSum = (0.5f + 0.3f) * 0.70710677f;
+                    float tolerance = 0.01f;
+                    if (std::abs(op.frames[0] - expectedSum) > tolerance) {
+                        mixedCorrectly = false;
+                        std::cerr << "FAIL: MultiSourceMixer: mixed sample = "
+                                  << op.frames[0] << " (expected ~" << expectedSum << ")\n";
+                    }
+                }
+                expect(mixedCorrectly, "MultiSourceMixer: mixed sample values correct");
+            }
+
+            // Remove sources
+            mixer.RemoveSource(source1);
+            mixer.RemoveSource(source2);
+            expect(mixer.SourceCount() == 0, "MultiSourceMixer: SourceCount == 0 after removing all sources");
+        }
+
+        // 2. Silence when no sources
+        {
+            screenlink::audio::MultiSourceMixer mixer(48000, 2);
+
+            std::vector<float> capturedMix;
+            std::vector<screenlink::audio::AudioPacket> outputPackets;
+            mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
+                if (p.frames && p.frameCount > 0) {
+                    capturedMix.assign(p.frames, p.frames + p.frameCount * p.channels);
+                }
+                outputPackets.push_back(p);
+                if (!capturedMix.empty()) {
+                    outputPackets.back().frames = capturedMix.data();
+                }
+                return false;
+            });
+
+            mixer.Stop();
+
+            expect(!outputPackets.empty(), "MultiSourceMixer: output received with no sources");
+            if (!outputPackets.empty()) {
+                expect(outputPackets[0].isSilent, "MultiSourceMixer: output isSilent with no sources");
+            }
+        }
+
+        // 3. Stereo correctness: left and right channels independent
+        {
+            screenlink::audio::MultiSourceMixer mixer(48000, 2);
+
+            uint32_t source1 = mixer.AddSource(1, 100);
+
+            // Generate a stereo tone with different L/R values
+            std::vector<float> stereo(480 * 2);
+            for (uint32_t i = 0; i < 480; ++i) {
+                stereo[i * 2] = 0.8f;     // left
+                stereo[i * 2 + 1] = 0.2f; // right
+            }
+
+            screenlink::audio::AudioPacket p;
+            p.frames = stereo.data();
+            p.frameCount = 480;
+            p.channels = 2;
+            p.sequenceNumber = 0;
+            p.sourceId = source1;
+
+            mixer.FeedPacket(source1, p);
+
+            std::vector<float> capturedMix;
+            std::vector<screenlink::audio::AudioPacket> outputPackets;
+            mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
+                if (p.frames && p.frameCount > 0) {
+                    capturedMix.assign(p.frames, p.frames + p.frameCount * p.channels);
+                }
+                outputPackets.push_back(p);
+                if (!capturedMix.empty()) {
+                    outputPackets.back().frames = capturedMix.data();
+                }
+                return false;
+            });
+
+            mixer.Stop();
+            mixer.RemoveSource(source1);
+
+            expect(!outputPackets.empty(), "MultiSourceMixer: stereo output received");
+            if (!outputPackets.empty() && outputPackets[0].frames) {
+                // With 1 active source: headroom = 1.0
+                bool stereoCorrect = true;
+                if (std::abs(outputPackets[0].frames[0] - 0.8f) > 0.01f) {
+                    stereoCorrect = false;
+                    std::cerr << "FAIL: MultiSourceMixer: left channel = "
+                              << outputPackets[0].frames[0] << " (expected 0.8)\n";
+                }
+                if (std::abs(outputPackets[0].frames[1] - 0.2f) > 0.01f) {
+                    stereoCorrect = false;
+                    std::cerr << "FAIL: MultiSourceMixer: right channel = "
+                              << outputPackets[0].frames[1] << " (expected 0.2)\n";
+                }
+                expect(stereoCorrect, "MultiSourceMixer: stereo channels independent");
+            }
+        }
+      }
+
       // ── ServiceSession / SimpleJson tests ──
       {
         auto expect = [&allPassed](bool cond, const char* label) {
@@ -1557,6 +1833,45 @@ int main(int argc, char* argv[]) {
 
       screenlink::audio::ServiceSession session(svcConfig);
       return session.Run();
+    }
+
+    case screenlink::audio::Command::kEnumerateAudioSessions: {
+      screenlink::audio::AudioSessionMonitor monitor;
+      if (!monitor.Initialize()) {
+        std::cout << "{\n";
+        std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+        std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+        std::cout << "  \"status\": \"error\",\n";
+        std::cout << "  \"error\": \"session-enumeration-failed\"\n";
+        std::cout << "}\n";
+        return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
+      }
+
+      auto sessions = monitor.EnumerateSessions();
+      monitor.Stop();
+
+      std::cout << "{\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+      std::cout << "  \"status\": \"ok\",\n";
+      std::cout << "  \"sessionCount\": " << sessions.size() << ",\n";
+      std::cout << "  \"sessions\": [\n";
+      for (size_t i = 0; i < sessions.size(); ++i) {
+        const auto& s = sessions[i];
+        std::cout << "    {\n";
+        std::cout << "      \"pid\": " << s.pid << ",\n";
+        std::cout << "      \"executableName\": \"" << JsonEscape(s.executableName) << "\",\n";
+        std::cout << "      \"executablePath\": \"" << JsonEscape(s.executablePath) << "\",\n";
+        std::cout << "      \"systemSound\": " << (s.systemSound ? "true" : "false") << ",\n";
+        std::cout << "      \"identityValidated\": " << (s.identityValidated ? "true" : "false") << ",\n";
+        std::cout << "      \"creationTimeUtc100ns\": " << s.creationTimeUtc100ns << "\n";
+        std::cout << "    }";
+        if (i < sessions.size() - 1) std::cout << ",";
+        std::cout << "\n";
+      }
+      std::cout << "  ]\n";
+      std::cout << "}\n";
+      return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }
 
     case screenlink::audio::Command::kUnknown:

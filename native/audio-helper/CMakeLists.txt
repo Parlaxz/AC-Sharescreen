@@ -33,6 +33,10 @@ set(SOURCES
   src/PipeTransport.cpp
   src/SyntheticSource.cpp
   src/ServiceSession.cpp
+  src/ExclusionPolicy.cpp
+  src/AudioSessionMonitor.cpp
+  src/ApplicationCaptureSource.cpp
+  src/MultiSourceMixer.cpp
 )
 
 # Executable

@@ -7,6 +7,7 @@ import { generateVdoStreamId, generateVdoPassword } from "@screenlink/shared";
 import type { SettingsStore } from "./settings-store.js";
 import type { SecureStore } from "./secure-store.js";
 import type { TrayManager } from "./tray-manager.js";
+import { execSync } from "child_process";
 
 // In-memory VDO session credentials (set by host when sharing starts)
 let currentVdoStreamId = "";
@@ -104,6 +105,29 @@ export function registerIpcHandlers(
     const source = sources.find(s => s.id === sourceId);
     if (!source) return null;
     return getSourceFingerprint(source);
+  });
+
+  /** Resolve a window source ID to its process PID (Windows HWND → PID). */
+  ipcMain.handle("resolve-source-pid", async (_event, sourceId: string) => {
+    const match = sourceId.match(/^window:([0-9a-fA-F]+)$/);
+    if (!match) {
+      return { success: false, error: "source-id-not-a-window" };
+    }
+    const hwndHex = match[1]!;
+    const hwnd = parseInt(hwndHex, 16);
+    try {
+      const stdout = execSync(
+        `powershell -NoProfile -NonInteractive -Command "& {Get-Process | Where-Object { $_.MainWindowHandle -eq ${hwnd} } | Select-Object -ExpandProperty Id}"`,
+        { timeout: 3000, encoding: "utf-8" },
+      );
+      const pid = parseInt(stdout.trim(), 10);
+      if (isNaN(pid)) {
+        return { success: false, error: "pid-not-found", hwnd };
+      }
+      return { success: true, pid, hwnd };
+    } catch (err) {
+      return { success: false, error: String(err), hwnd };
+    }
   });
 
   // ── Settings persistence ─────────────────────────────────────────────────
@@ -401,6 +425,69 @@ export function registerIpcHandlers(
     } catch (err) {
       console.error("[IPC] stop-audio failed:", err);
       setCurrentAudioState("error");
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // ── Phase 2E: Audio sessions ───────────────────────────────────────────
+
+  ipcMain.handle('enumerate-audio-sessions', async () => {
+    if (!currentAudioHelper) {
+      return { success: false, error: 'no-audio-helper' };
+    }
+    try {
+      return await currentAudioHelper.enumerateAudioSessions();
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  ipcMain.handle('start-application-audio', async (_event, options: {
+    targetPid: number;
+    expectedCreationTimeUtc100ns: number;
+  }) => {
+    if (!currentAudioHelper) {
+      return { success: false, error: 'no-audio-helper' };
+    }
+    try {
+      return await currentAudioHelper.startApplicationCapture(options);
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  ipcMain.handle('start-filtered-monitor-audio', async (_event, options: {
+    excludeDiscord?: boolean;
+    excludeScreenLink?: boolean;
+  }) => {
+    if (!currentAudioHelper) {
+      return { success: false, error: 'no-audio-helper' };
+    }
+    try {
+      return await currentAudioHelper.startFilteredMonitorCapture(options);
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  ipcMain.handle('get-mixer-state', async () => {
+    if (!currentAudioHelper) {
+      return { state: 'stopped', activeSources: 0 };
+    }
+    try {
+      return await currentAudioHelper.getMixerState();
+    } catch {
+      return { state: 'error', activeSources: 0 };
+    }
+  });
+
+  ipcMain.handle('get-mixer-diagnostics', async () => {
+    if (!currentAudioHelper) {
+      return { success: false, error: 'no-audio-helper' };
+    }
+    try {
+      return await currentAudioHelper.getMixerDiagnostics();
+    } catch (err) {
       return { success: false, error: String(err) };
     }
   });

@@ -208,6 +208,17 @@ export class ControlClient {
     return { streamGeneration: resp.result.streamGeneration as number };
   }
 
+  async startApplicationAudio(payload: {
+    targetPid: number;
+    expectedCreationTimeUtc100ns?: number;
+  }): Promise<Record<string, unknown>> {
+    const resp = await this.sendRequest('startApplicationAudio', payload as Record<string, unknown>);
+    if (!resp.success || !resp.result) {
+      throw new Error(`startApplicationAudio failed: ${resp.error ?? 'unknown'}`);
+    }
+    return resp.result as Record<string, unknown>;
+  }
+
   async stopCapture(): Promise<ControlResponse> {
     return this.sendRequest('stopCapture');
   }

@@ -93,6 +93,23 @@ uint64_t GetProcessCreationTime(uint32_t pid) {
   return uli.QuadPart;
 }
 
+std::string GetProcessName(uint32_t pid) {
+    AutoHandle hProcess(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!hProcess.IsValid()) return {};
+
+    // Query image path and extract filename
+    WCHAR buffer[MAX_PATH + 1] = {};
+    DWORD pathSize = MAX_PATH;
+    if (QueryFullProcessImageNameW(hProcess.Get(), 0, buffer, &pathSize)) {
+        std::string path = WideToUtf8(buffer, static_cast<int>(pathSize));
+        auto pos = path.rfind('\\');
+        if (pos == std::string::npos) return path;
+        return path.substr(pos + 1);
+    }
+
+    return {};
+}
+
 bool IsSystemProcess(const std::string& processName) {
   // Convert to lowercase for comparison.
   std::string lower = processName;

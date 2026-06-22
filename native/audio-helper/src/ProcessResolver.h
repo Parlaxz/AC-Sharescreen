@@ -32,6 +32,10 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid);
 // Get creation time of a process in 100ns UTC ticks. Returns 0 on failure.
 uint64_t GetProcessCreationTime(uint32_t pid);
 
+// Get the executable filename for a PID. Returns empty string on failure.
+// Uses OpenProcess + GetModuleBaseNameA or falls back to path extraction.
+std::string GetProcessName(uint32_t pid);
+
 // Check if a process name is a known system/shell process that should not be
 // considered an application root (e.g., explorer.exe, dwm.exe, csrss.exe, etc.)
 bool IsSystemProcess(const std::string& processName);

@@ -12,7 +12,7 @@ namespace screenlink::audio {
 inline constexpr std::string_view kProtocolVersion = "0.1.0";
 
 /// Protocol version for the service control protocol (--serve mode).
-inline constexpr std::string_view kServiceProtocolVersion = "0.2.0";
+inline constexpr std::string_view kServiceProtocolVersion = "0.3.0";
 
 /// Helper application version (matches CMake project version).
 inline constexpr std::string_view kHelperVersion = "0.1.0";
@@ -49,6 +49,8 @@ enum class ExitCode : int {
   kSourceResolutionFailed = 23,
   kCaptureTestFailed = 30,
   kServeFailed = 40,
+  kSessionEnumerationFailed = 24,
+  kMixerStartFailed = 41,
 };
 
 /// Supported CLI commands
@@ -62,6 +64,7 @@ enum class Command {
   kCaptureTest,
   kResolveSource,
   kServe,
+  kEnumerateAudioSessions,
   kUnknown,
 };
 
@@ -76,6 +79,7 @@ inline Command ParseCommand(std::string_view arg) {
   if (arg == "--capture-test") return Command::kCaptureTest;
   if (arg == "--resolve-source") return Command::kResolveSource;
   if (arg == "--serve") return Command::kServe;
+  if (arg == "--enumerate-audio-sessions") return Command::kEnumerateAudioSessions;
   return Command::kUnknown;
 }
 

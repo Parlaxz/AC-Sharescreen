@@ -5,6 +5,7 @@ const api: ScreenLinkAPI = {
   getSources: () => ipcRenderer.invoke("get-sources"),
   setSource: (sourceId) => ipcRenderer.invoke("set-source", sourceId),
   getSourceFingerprint: (sourceId) => ipcRenderer.invoke("get-source-fingerprint", sourceId),
+  resolveSourcePid: (sourceId) => ipcRenderer.invoke("resolve-source-pid", sourceId),
 
   getSettings: () => ipcRenderer.invoke("get-settings"),
   updateSettings: (partial) => ipcRenderer.invoke("update-settings", partial),
@@ -56,6 +57,13 @@ const api: ScreenLinkAPI = {
   getAudioState: () => ipcRenderer.invoke("get-audio-state"),
   startSyntheticAudio: (mode) => ipcRenderer.invoke("start-synthetic-audio", mode),
   stopAudio: () => ipcRenderer.invoke("stop-audio"),
+
+  // Phase 2E: Audio sessions
+  enumerateAudioSessions: () => ipcRenderer.invoke("enumerate-audio-sessions"),
+  startApplicationAudio: (options) => ipcRenderer.invoke("start-application-audio", options),
+  startFilteredMonitorAudio: (options) => ipcRenderer.invoke("start-filtered-monitor-audio", options),
+  getMixerState: () => ipcRenderer.invoke("get-mixer-state"),
+  getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
 };
 
 contextBridge.exposeInMainWorld("screenlink", api);

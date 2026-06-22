@@ -41,6 +41,7 @@ export function Dashboard() {
   const [remoteMuted, setRemoteMuted] = useState(false);
   const [remoteVolume, setRemoteVolume] = useState(1);
   const [showEnableAudioButton, setShowEnableAudioButton] = useState(false);
+  const [audioMode, setAudioMode] = useState<'none' | 'application' | 'monitor'>('none');
   // local stats now flow through PublisherManager events
 
   function formatBitsTransferred(bytes: number): string {
@@ -286,7 +287,7 @@ export function Dashboard() {
 
   // ── Sharing handlers ──────────────────────────────────────
 
-  const handleShareScreen = useCallback(async (withAudio?: boolean) => {
+  const handleShareScreen = useCallback(async () => {
     setLocalShareState("selecting-source");
     try {
       if (!sourceId) {
@@ -313,7 +314,7 @@ export function Dashboard() {
       publisherManagerRef.current = mgr;
 
       // If sharing with audio, set up audio pipeline before publishing
-      if (withAudio) {
+      if (audioMode !== 'none') {
         setAudioEnabled(true);
 
         // 1. Create fresh port listener (not reused from previous share)
@@ -331,8 +332,24 @@ export function Dashboard() {
         // 4. Register controller before starting capture (publisher needs the track)
         mgr.setAudioController(controller);
 
-        // 5. Start native capture PRODUCER (PCM now flows to the ready consumer)
-        await api?.startSyntheticAudio(0);
+        // 5. Start native capture PRODUCER based on audio mode
+        if (audioMode === 'application') {
+          // Resolve window source PID for application-level capture
+          const pidResult = await api?.resolveSourcePid(sourceId);
+          if (!pidResult?.success) {
+            throw new Error(`Cannot resolve source PID: ${pidResult?.error ?? 'unknown'}`);
+          }
+          await api?.startApplicationAudio({
+            targetPid: pidResult.pid!,
+            expectedCreationTimeUtc100ns: 0,
+          });
+        } else {
+          // monitor mode: filtered monitor capture
+          await api?.startFilteredMonitorAudio({
+            excludeDiscord: true,
+            excludeScreenLink: true,
+          });
+        }
 
         // 6. Wait for the worklet ring buffer to reach priming depth
         await controller.waitUntilPrimed();
@@ -365,10 +382,10 @@ export function Dashboard() {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
       api?.stopAudio().catch(() => {});
     }
-  }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials]);
+  }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials, audioMode]);
 
   const handleShareScreenWithAudio = useCallback(
-    () => handleShareScreen(true),
+    () => handleShareScreen(),
     [handleShareScreen],
   );
 
@@ -443,9 +460,31 @@ export function Dashboard() {
             <>
               <button onClick={handleShareScreen}>Share Screen</button>
               <button onClick={handleShareWindow}>Share Window</button>
-              <button onClick={handleShareScreenWithAudio} className="ghost">
-                🎵 Share with Audio (Dev)
-              </button>
+              <div className="card" style={{ marginTop: "0.5rem", padding: "0.5rem" }}>
+                <h4>Audio</h4>
+                <label>
+                  <input type="radio" name="audioMode" value="none" checked={audioMode === 'none'}
+                    onChange={() => setAudioMode('none')} /> No Audio
+                </label>
+                <label style={{ marginLeft: "1rem" }}>
+                  <input type="radio" name="audioMode" value="application" checked={audioMode === 'application'}
+                    onChange={() => setAudioMode('application')} /> App Audio (window only)
+                </label>
+                <label style={{ marginLeft: "1rem" }}>
+                  <input type="radio" name="audioMode" value="monitor" checked={audioMode === 'monitor'}
+                    onChange={() => setAudioMode('monitor')} /> Filtered Monitor Audio
+                </label>
+                {audioMode === 'application' && (
+                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                    Captures audio from the selected application process tree only.
+                  </p>
+                )}
+                {audioMode === 'monitor' && (
+                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                    Captures audio from active applications. Discord and ScreenLink playback are excluded.
+                  </p>
+                )}
+              </div>
             </>
           ) : (
             <button className="danger" onClick={handleStopSharing}>Stop Sharing</button>

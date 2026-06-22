@@ -38,6 +38,7 @@ struct AudioPacket {
     bool isDiscontinuous = false;
     bool hasTimestampError = false;
     bool isEndOfStream = false;
+    uint32_t sourceId = 0;  // identifies the originating capture source
 };
 
 /// Packet callback: return true to continue, false to stop.
