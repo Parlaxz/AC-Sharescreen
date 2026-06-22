@@ -346,6 +346,13 @@ export class AudioHelperManager {
 
     // Wait briefly for the helper to start and create pipes
     await new Promise((r) => setTimeout(r, 500));
+
+    // Verify helper is still alive — if it crashed during startup, fail fast
+    if (this.helper && this.helper.exitCode !== null) {
+      throw new Error(
+        `Helper exited during startup with code ${this.helper.exitCode}`,
+      );
+    }
   }
 
   private async connectPcmPipe(): Promise<void> {
