@@ -189,10 +189,28 @@ export class ControlClient {
   private tryDispatchResponse(text: string): boolean {
     try {
       const response: ControlResponse = JSON.parse(text);
-      const pending = this.pendingRequests.get(response.requestId);
+      
+      // The helper always responds with requestId: 0 (SimpleJson limitation).
+      // Match by exact requestId first, then fall back to the sole pending
+      // request when requestId is 0 (safe because the protocol is serial).
+      let pending = this.pendingRequests.get(response.requestId);
+      if (!pending && response.requestId === 0 && this.pendingRequests.size === 1) {
+        const soleEntry = this.pendingRequests.entries().next();
+        if (!soleEntry.done) {
+          pending = soleEntry.value[1];
+          ccTrace(`[${this.id}] FALLBACK routing requestId 0 → pending ${soleEntry.value[0]}`);
+        }
+      }
+      
       if (pending) {
         clearTimeout(pending.timer);
-        this.pendingRequests.delete(response.requestId);
+        // Delete by actual pending key (not response.requestId which may be 0)
+        for (const [key, val] of this.pendingRequests) {
+          if (val === pending) {
+            this.pendingRequests.delete(key);
+            break;
+          }
+        }
         ccTrace(`[${this.id}] DISPATCH reqId=${response.requestId} success=${response.success} state=${response.state}`);
         // Clear buffer only if we consumed the exact text
         if (this.buffer === text || this.buffer.startsWith(text)) {
