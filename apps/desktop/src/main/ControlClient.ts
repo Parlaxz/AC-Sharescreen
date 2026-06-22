@@ -144,7 +144,14 @@ export class ControlClient {
   }
 
   private processBuffer(): void {
-    // Parse complete newline-delimited JSON responses from buffer
+    // Guard against unbounded buffer growth (malformed data)
+    if (this.buffer.length > 1048576) {
+      console.warn('[ControlClient] Buffer exceeded 1MB, clearing');
+      this.buffer = '';
+      return;
+    }
+
+    // Try parsing complete newline-delimited JSON responses first
     while (this.buffer.includes('\n')) {
       const newlineIdx = this.buffer.indexOf('\n');
       const line = this.buffer.slice(0, newlineIdx).trim();
@@ -152,20 +159,36 @@ export class ControlClient {
 
       if (!line) continue;
 
-      try {
-        const response: ControlResponse = JSON.parse(line);
-        const pending = this.pendingRequests.get(response.requestId);
-        if (pending) {
-          clearTimeout(pending.timer);
-          this.pendingRequests.delete(response.requestId);
-          pending.resolve(response);
-        }
-        // Responses with unknown requestId are silently dropped
-        // (e.g. leftover from a previous session generation)
-      } catch {
-        // Malformed JSON — skip this fragment
-      }
+      if (this.tryDispatchResponse(line)) continue;
     }
+
+    // Also try parsing the entire accumulated buffer as a single JSON object
+    // (handles the case where the helper sends response without \n delimiter)
+    if (this.buffer.length > 0 && this.pendingRequests.size > 0) {
+      this.tryDispatchResponse(this.buffer.trim());
+    }
+  }
+
+  /** Attempt to parse and dispatch a JSON response. Returns true on success. */
+  private tryDispatchResponse(text: string): boolean {
+    try {
+      const response: ControlResponse = JSON.parse(text);
+      const pending = this.pendingRequests.get(response.requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingRequests.delete(response.requestId);
+        // Remove consumed data from buffer only if it matches exactly
+        // (avoid partial consumption for line-based parsing)
+        if (this.buffer === text || this.buffer.startsWith(text)) {
+          this.buffer = '';
+        }
+        pending.resolve(response);
+        return true;
+      }
+    } catch {
+      // Not valid JSON yet — keep accumulating
+    }
+    return false;
   }
 
   isConnected(): boolean {
