@@ -463,6 +463,7 @@ void ServiceSession::ControlThread() {
     }
 
     controlPipe_ = static_cast<void*>(hPipe);
+    std::cerr << "[helper] CTL: waiting for client..." << std::endl;
 
     while (running_.load()) {
         // Wait for client to connect
@@ -470,18 +471,18 @@ void ServiceSession::ControlThread() {
         if (!connected) {
             DWORD err = GetLastError();
             if (err == ERROR_PIPE_CONNECTED) {
-                // Client connected before we called ConnectNamedPipe — fine
+                std::cerr << "[helper] CTL: client already connected" << std::endl;
             } else if (err == ERROR_NO_DATA) {
-                // Client connected and disconnected — retry
+                std::cerr << "[helper] CTL: client disconnected" << std::endl;
                 DisconnectNamedPipe(hPipe);
                 continue;
             } else {
-                // Connection failed — retry if still running
-                if (running_.load()) {
-                    Sleep(10);
-                }
+                std::cerr << "[helper] CTL: ConnectNamedPipe error " << err << std::endl;
+                if (running_.load()) { Sleep(10); }
                 continue;
             }
+        } else {
+            std::cerr << "[helper] CTL: client connected" << std::endl;
         }
 
         // Verify client PID matches expected parent
@@ -489,10 +490,11 @@ void ServiceSession::ControlThread() {
             ULONG clientPid = 0;
             if (GetNamedPipeClientProcessId(hPipe, &clientPid) && clientPid != 0 &&
                 config_.parentPid != 0 && clientPid != config_.parentPid) {
-                // Client PID doesn't match expected parent — disconnect
+                std::cerr << "[helper] CTL: PID rejection " << clientPid << " != " << config_.parentPid << std::endl;
                 DisconnectNamedPipe(hPipe);
                 continue;
             }
+            std::cerr << "[helper] CTL: client PID " << clientPid << " accepted" << std::endl;
         }
 
         // Process requests from this client until disconnect or shutdown
