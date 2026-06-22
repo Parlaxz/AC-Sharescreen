@@ -3,9 +3,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
-// ── Diagnostic trace file ──
+// ── Diagnostic trace file (2 levels up from dist/main/ → apps/desktop/) ──
 const _ccDir = path.dirname(fileURLToPath(import.meta.url));
-const CC_TRACE = path.join(_ccDir, '..', '..', '..', 'control-trace.log');
+const CC_TRACE = path.join(_ccDir, '..', '..', 'control-trace.log');
 let ccSeq = 0;
 function ccTrace(msg: string): void {
   const seq = ++ccSeq;

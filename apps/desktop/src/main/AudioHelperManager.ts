@@ -15,7 +15,7 @@ import {
 // Diagnostic log file for audio startup debugging (ESM-compatible path)
 import { fileURLToPath } from 'url';
 const _dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIAG_LOG = path.join(_dirname, '..', '..', '..', 'audio-diag.log');
+const DIAG_LOG = path.join(_dirname, '..', '..', 'audio-diag.log');
 function diag(msg: string): void {
   try {
     fs.appendFileSync(DIAG_LOG, `${new Date().toISOString().slice(11, 23)} ${msg}\n`);
