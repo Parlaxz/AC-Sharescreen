@@ -1,4 +1,19 @@
 import * as net from 'net';
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+// ── Diagnostic trace file ──
+const _ccDir = path.dirname(fileURLToPath(import.meta.url));
+const CC_TRACE = path.join(_ccDir, '..', '..', '..', 'control-trace.log');
+let ccSeq = 0;
+function ccTrace(msg: string): void {
+  const seq = ++ccSeq;
+  const ts = Date.now();
+  try {
+    fs.appendFileSync(CC_TRACE, `${ts} [CC#${seq}] ${msg}\n`);
+  } catch { /* best effort */ }
+}
 
 // ── Types ──
 
@@ -57,12 +72,8 @@ export interface HelperDiagnostics {
 
 // ── ControlClient ──
 
-/**
- * Async typed client for the native audio-helper control named pipe.
- * Uses net.Socket for non-blocking I/O with request/response matching by requestId.
- * Protocol: newline-delimited JSON over byte-mode named pipe.
- */
 export class ControlClient {
+  readonly id: string;
   private pipePath: string;
   private sessionId: string;
   private authToken: string;
@@ -81,95 +92,100 @@ export class ControlClient {
     this.pipePath = pipeName;
     this.sessionId = sessionId;
     this.authToken = authToken;
+    this.id = `cc_${Math.random().toString(36).slice(2, 8)}`;
+    ccTrace(`[${this.id}] CREATED pipe=${pipeName}`);
   }
 
   async connect(timeoutMs: number = 5000): Promise<void> {
+    ccTrace(`[${this.id}] connect() entered`);
+
     return new Promise<void>((resolve, reject) => {
       const start = Date.now();
+      let retryCount = 0;
 
       const tryConnect = () => {
         const elapsed = Date.now() - start;
+        ccTrace(`[${this.id}] tryConnect #${++retryCount} elapsed=${elapsed}ms`);
         if (elapsed > timeoutMs) {
-          console.log(`[ControlClient] Connect timeout after ${elapsed}ms`);
+          ccTrace(`[${this.id}] CONNECT TIMEOUT after ${elapsed}ms`);
           reject(new Error(`Timeout connecting to control pipe: ${this.pipePath}`));
           return;
         }
 
-        const socket = net.connect(this.pipePath);
+        // 1. Create socket BEFORE calling connect (listen before connect per spec)
+        const socket = new net.Socket();
 
-        const onError = () => {
-          socket.destroy();
-          console.log(`[ControlClient] Connect retry at ${Date.now() - start}ms`);
-          setTimeout(tryConnect, 200);
-        };
+        // 2. Attach listeners BEFORE connect
+        socket.on('data', (data: Buffer) => {
+          ccTrace(`[${this.id}] DATA len=${data.length} raw=${data.toString('utf8').replace(/\r/g,'\\r').replace(/\n/g,'\\n').slice(0,200)}`);
+          this.buffer += data.toString('utf-8');
+          this.processBuffer();
+        });
 
-        socket.once('connect', () => {
-          socket.removeListener('error', onError);
-          console.log(`[ControlClient] Connected at ${Date.now() - start}ms`);
+        socket.on('close', () => {
+          ccTrace(`[${this.id}] CLOSE`);
+          if (this.socket === socket) {
+            this.socket = null;
+            this.connected = false;
+          }
+          for (const [, pending] of this.pendingRequests) {
+            clearTimeout(pending.timer);
+            pending.reject(new Error('Control pipe closed'));
+          }
+          this.pendingRequests.clear();
+        });
+
+        socket.on('error', (err: Error) => {
+          ccTrace(`[${this.id}] ERROR ${err.message}`);
+          // Don't reject here — close will fire after error
+        });
+
+        // 3. Connect
+        ccTrace(`[${this.id}] net.connect...`);
+        socket.connect(this.pipePath, () => {
+          const connectedAt = Date.now() - start;
+          ccTrace(`[${this.id}] CONNECTED at ${connectedAt}ms local=${socket.localAddress||''} remote=${socket.remoteAddress||''}`);
           this.socket = socket;
           this.connected = true;
-          this.setupSocket();
           resolve();
         });
 
-        socket.once('error', onError);
+        // 4. Error during connection attempt (before connect fires)
+        socket.once('error', (err: Error) => {
+          if (!this.connected) {
+            ccTrace(`[${this.id}] connect ERROR ${err.message} — will retry`);
+            socket.destroy();
+            setTimeout(tryConnect, 200);
+          }
+        });
       };
 
       tryConnect();
     });
   }
 
-  private setupSocket(): void {
-    const socket = this.socket!;
-
-    socket.on('data', (data: Buffer) => {
-      this.buffer += data.toString('utf-8');
-      this.processBuffer();
-    });
-
-    socket.on('close', () => {
-      this.socket = null;
-      this.connected = false;
-      // Reject all pending requests
-      for (const [, pending] of this.pendingRequests) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('Control pipe closed'));
-      }
-      this.pendingRequests.clear();
-    });
-
-    socket.on('error', () => {
-      // Socket errors surface as 'close' after 'error'
-    });
-  }
-
   private processBuffer(): void {
-    // Guard against unbounded buffer growth (malformed data)
     if (this.buffer.length > 1048576) {
-      console.warn('[ControlClient] Buffer exceeded 1MB, clearing');
+      ccTrace(`[${this.id}] BUFFER OVERFLOW 1MB, clearing`);
       this.buffer = '';
       return;
     }
 
-    // Try parsing complete newline-delimited JSON responses first
+    // Line-delimited JSON
     while (this.buffer.includes('\n')) {
-      const newlineIdx = this.buffer.indexOf('\n');
-      const line = this.buffer.slice(0, newlineIdx).trim();
-      this.buffer = this.buffer.slice(newlineIdx + 1);
-
+      const nl = this.buffer.indexOf('\n');
+      const line = this.buffer.slice(0, nl).trim();
+      this.buffer = this.buffer.slice(nl + 1);
       if (!line) continue;
-
       if (this.tryDispatchResponse(line)) continue;
     }
 
-    // Also try parsing the entire accumulated buffer as a single JSON object
-    // (handles the case where the helper sends response without \n delimiter)
+    // Also try raw accumulated buffer (no \n case)
     if (this.buffer.length > 0 && this.pendingRequests.size > 0) {
       this.tryDispatchResponse(this.buffer.trim());
     }
   }
 
-  /** Attempt to parse and dispatch a JSON response. Returns true on success. */
   private tryDispatchResponse(text: string): boolean {
     try {
       const response: ControlResponse = JSON.parse(text);
@@ -177,16 +193,18 @@ export class ControlClient {
       if (pending) {
         clearTimeout(pending.timer);
         this.pendingRequests.delete(response.requestId);
-        // Remove consumed data from buffer only if it matches exactly
-        // (avoid partial consumption for line-based parsing)
+        ccTrace(`[${this.id}] DISPATCH reqId=${response.requestId} success=${response.success} state=${response.state}`);
+        // Clear buffer only if we consumed the exact text
         if (this.buffer === text || this.buffer.startsWith(text)) {
           this.buffer = '';
         }
         pending.resolve(response);
         return true;
+      } else {
+        ccTrace(`[${this.id}] UNMATCHED response reqId=${response.requestId} (pending keys=[${[...this.pendingRequests.keys()].join(',')}])`);
       }
     } catch {
-      // Not valid JSON yet — keep accumulating
+      // Not JSON yet
     }
     return false;
   }
@@ -196,7 +214,9 @@ export class ControlClient {
   }
 
   async sendRequest(command: string, payload: Record<string, unknown> = {}): Promise<ControlResponse> {
+    const mark = Date.now();
     if (!this.socket || !this.connected) {
+      ccTrace(`[${this.id}] sendRequest("${command}") FAILED — not connected`);
       throw new Error('Not connected to control pipe');
     }
 
@@ -209,23 +229,36 @@ export class ControlClient {
       command,
       payload,
     };
-
     const requestStr = JSON.stringify(request) + '\n';
 
-    console.log(`[ControlClient] Sending "${command}" (reqId=${requestId})`);
+    ccTrace(`[${this.id}] SEND "${command}" reqId=${requestId} len=${requestStr.length}`);
 
+    // CRITICAL: register pending handler BEFORE write to avoid race
     return new Promise<ControlResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
-        console.log(`[ControlClient] TIMEOUT for "${command}" (reqId=${requestId})`);
+        ccTrace(`[${this.id}] TIMEOUT "${command}" reqId=${requestId} after ${Date.now() - mark}ms`);
         this.pendingRequests.delete(requestId);
         reject(new Error(`Response timeout for command "${command}"`));
       }, this.REQUEST_TIMEOUT_MS);
 
+      // Register first
       this.pendingRequests.set(requestId, { resolve, reject, timer });
 
+      // Then write
       try {
-        this.socket!.write(requestStr);
+        const sock = this.socket!;
+        sock.write(requestStr, (err?: Error | null) => {
+          if (err) {
+            ccTrace(`[${this.id}] WRITE CALLBACK ERROR "${command}" reqId=${requestId}: ${err.message}`);
+            clearTimeout(timer);
+            this.pendingRequests.delete(requestId);
+            reject(err);
+          } else {
+            ccTrace(`[${this.id}] WRITE OK "${command}" reqId=${requestId} (write callback)`);
+          }
+        });
       } catch (err) {
+        ccTrace(`[${this.id}] WRITE EXCEPTION "${command}" reqId=${requestId}: ${err}`);
         clearTimeout(timer);
         this.pendingRequests.delete(requestId);
         reject(err instanceof Error ? err : new Error(String(err)));
@@ -235,105 +268,64 @@ export class ControlClient {
 
   // ── Convenience Methods ──
 
-  async hello(): Promise<ControlResponse> {
-    return this.sendRequest('hello');
-  }
-
-  async getVersion(): Promise<ControlResponse> {
-    return this.sendRequest('getVersion');
-  }
+  async hello(): Promise<ControlResponse> { return this.sendRequest('hello'); }
+  async getVersion(): Promise<ControlResponse> { return this.sendRequest('getVersion'); }
 
   async getCapabilities(): Promise<HelperCapabilities> {
     const resp = await this.sendRequest('getCapabilities');
-    if (!resp.success || !resp.result) {
-      throw new Error(`getCapabilities failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success || !resp.result) throw new Error(`getCapabilities failed: ${resp.error ?? 'unknown'}`);
     return resp.result as unknown as HelperCapabilities;
   }
 
   async getState(): Promise<HelperState> {
     const resp = await this.sendRequest('getState');
-    if (!resp.success || !resp.result) {
-      throw new Error(`getState failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success || !resp.result) throw new Error(`getState failed: ${resp.error ?? 'unknown'}`);
     return resp.result as unknown as HelperState;
   }
 
-  async startSynthetic(payload: {
-    mode?: number;
-    durationMs?: number;
-    totalPackets?: number;
-    framesPerPacket?: number;
-  } = {}): Promise<{ streamGeneration: number }> {
+  async startSynthetic(payload: { mode?: number; durationMs?: number; totalPackets?: number; framesPerPacket?: number } = {}): Promise<{ streamGeneration: number }> {
     const resp = await this.sendRequest('startSynthetic', payload as Record<string, unknown>);
-    if (!resp.success || !resp.result) {
-      throw new Error(`startSynthetic failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success || !resp.result) throw new Error(`startSynthetic failed: ${resp.error ?? 'unknown'}`);
     return { streamGeneration: resp.result.streamGeneration as number };
   }
 
-  async startProcessCapture(payload: {
-    targetPid: number;
-    expectedCreationTimeUtc100ns?: number;
-    mode?: 'include' | 'exclude';
-  }): Promise<{ streamGeneration: number }> {
+  async startProcessCapture(payload: { targetPid: number; expectedCreationTimeUtc100ns?: number; mode?: 'include' | 'exclude' }): Promise<{ streamGeneration: number }> {
     const resp = await this.sendRequest('startProcessCapture', payload as Record<string, unknown>);
-    if (!resp.success || !resp.result) {
-      throw new Error(`startProcessCapture failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success || !resp.result) throw new Error(`startProcessCapture failed: ${resp.error ?? 'unknown'}`);
     return { streamGeneration: resp.result.streamGeneration as number };
   }
 
   async resolveSource(payload: { sourceId: string }): Promise<Record<string, unknown>> {
     const resp = await this.sendRequest('resolveSource', payload as Record<string, unknown>);
-    if (!resp.success) {
-      throw new Error(`resolveSource failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success) throw new Error(`resolveSource failed: ${resp.error ?? 'unknown'}`);
     return (resp.result ?? { found: false, error: 'empty result' }) as Record<string, unknown>;
   }
 
-  async startApplicationAudio(payload: {
-    targetPid: number;
-    expectedCreationTimeUtc100ns?: number;
-  }): Promise<Record<string, unknown>> {
+  async startApplicationAudio(payload: { targetPid: number; expectedCreationTimeUtc100ns?: number }): Promise<Record<string, unknown>> {
     const resp = await this.sendRequest('startApplicationAudio', payload as Record<string, unknown>);
-    if (!resp.success || !resp.result) {
-      throw new Error(`startApplicationAudio failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success || !resp.result) throw new Error(`startApplicationAudio failed: ${resp.error ?? 'unknown'}`);
     return resp.result as Record<string, unknown>;
   }
 
-  async stopCapture(): Promise<ControlResponse> {
-    return this.sendRequest('stopCapture');
-  }
+  async stopCapture(): Promise<ControlResponse> { return this.sendRequest('stopCapture'); }
 
   async getDiagnostics(): Promise<HelperDiagnostics> {
     const resp = await this.sendRequest('getDiagnostics');
-    if (!resp.success || !resp.result) {
-      throw new Error(`getDiagnostics failed: ${resp.error ?? 'unknown'}`);
-    }
+    if (!resp.success || !resp.result) throw new Error(`getDiagnostics failed: ${resp.error ?? 'unknown'}`);
     return resp.result as unknown as HelperDiagnostics;
   }
 
-  async ping(): Promise<ControlResponse> {
-    return this.sendRequest('ping');
-  }
-
-  async shutdown(): Promise<ControlResponse> {
-    return this.sendRequest('shutdown');
-  }
+  async ping(): Promise<ControlResponse> { return this.sendRequest('ping'); }
+  async shutdown(): Promise<ControlResponse> { return this.sendRequest('shutdown'); }
 
   disconnect(): void {
+    ccTrace(`[${this.id}] disconnect()`);
     if (this.socket) {
-      try {
-        this.socket.destroy();
-      } catch { /* ignore */ }
+      try { this.socket.destroy(); } catch { /* ignore */ }
       this.socket = null;
     }
     this.connected = false;
     this.buffer = '';
-
-    // Reject pending requests
     for (const [, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
       pending.reject(new Error('Control client disconnected'));
