@@ -87,12 +87,14 @@ export class PcmBridge {
       ) as ArrayBuffer,
     };
 
-    // Transfer the ArrayBuffer — zero-copy ownership transfer
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
+    // Note: Electron's MessagePortMain.postMessage does not support
+    // ArrayBuffer transfers.  The pcmData ArrayBuffer arrives as a
+    // structured-clone copy on the renderer side.  Zero-copy is not
+    // available at this boundary.
     this.port.postMessage({
       type: 'pcm:packet',
       packet: rendererPacket,
-    }, [rendererPacket.pcmData] as unknown as Electron.MessagePortMain[]);
+    });
 
     this.packetsForwarded++;
   }

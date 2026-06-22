@@ -80,8 +80,10 @@ class PcmRingBuffer {
 
   read(output: Float32Array[], frameCount: number): number {
     const actual = Math.min(frameCount, this.framesAvailable_);
+    if (actual < frameCount) {
+      this.underrunFrames += (frameCount - actual);
+    }
     if (actual === 0) {
-      this.underrunFrames += frameCount;
       for (let ch = 0; ch < this.channels; ch++) {
         output[ch].fill(0, 0, frameCount);
       }
@@ -129,6 +131,12 @@ class PcmRingBuffer {
 
   get totalReceivedFrames(): number {
     return this.totalWritten;
+  }
+
+  flushAudio(): void {
+    this.framesAvailable_ = 0;
+    this.writeIndex = 0;
+    this.readIndex = 0;
   }
 
   reset(): void {
@@ -202,15 +210,15 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
         this.ringBuffer.reset();
         this.primed = false;
         this.discontinuityPending = false;
-        this.currentStreamGeneration = 0;
         break;
       }
 
       case 'pcm:discontinuity': {
         this.discontinuityPending = true;
         this.stats.discontinuities++;
-        // Flush pre-discontinuity audio from buffer
-        this.ringBuffer.reset();
+        // Flush pre-discontinuity audio, preserve session counters
+        this.ringBuffer.flushAudio();
+        this.primed = false; // Must re-prime after discontinuity
         break;
       }
 

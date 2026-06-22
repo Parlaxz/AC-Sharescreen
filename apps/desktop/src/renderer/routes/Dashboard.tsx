@@ -30,6 +30,8 @@ export function Dashboard() {
   const publisherManagerRef = useRef<PublisherManager | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
+  const portPromiseRef = useRef<Promise<MessagePort>>();
+  const autoplayTriedRef = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mediaStats, setMediaStats] = useState<MediaStatsSnapshot | null>(null);
   const [localMediaStats, setLocalMediaStats] = useState<MediaStatsSnapshot | null>(null);
@@ -68,6 +70,19 @@ export function Dashboard() {
         setSource(s.lastSourceId, s.lastSourceName);
       }
     })();
+  }, []);
+
+  // Initialize port promise for audio pipeline
+  useEffect(() => {
+    portPromiseRef.current = new Promise<MessagePort>((resolve) => {
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type === 'pcm:port' && event.ports?.length > 0) {
+          resolve(event.ports[0]);
+          window.removeEventListener('message', handler);
+        }
+      };
+      window.addEventListener('message', handler);
+    });
   }, []);
 
   // Cleanup viewer on unmount
@@ -199,7 +214,7 @@ export function Dashboard() {
       const sessionStream = new MediaStream();
       remoteStreamRef.current = sessionStream;
 
-      viewer.on("track", (event: unknown) => {
+      viewer.on("track", async (event: unknown) => {
         const payload = (event as CustomEvent).detail as { track?: MediaStreamTrack; streams?: MediaStream[] };
         if (!payload?.track) return;
 
@@ -214,23 +229,20 @@ export function Dashboard() {
         }
 
         setRemoteShareState("viewing");
+
+        // Attempt play() on every track addition
+        if (videoRef.current && !autoplayTriedRef.current) {
+          autoplayTriedRef.current = true;
+          try {
+            await videoRef.current.play();
+          } catch {
+            setShowEnableAudioButton(true);
+          }
+        }
       });
 
       await viewer.createAndConnect(remoteMediaPassword);
       await viewer.view(remoteStreamId, "Desktop User");
-
-      // Attempt autoplay after stream is set up
-      // (the 'track' event above may fire before or after view completes)
-      setTimeout(async () => {
-        if (videoRef.current && videoRef.current.srcObject) {
-          try {
-            await videoRef.current.play();
-          } catch {
-            // Autoplay blocked — show Enable Audio button
-            setShowEnableAudioButton(true);
-          }
-        }
-      }, 500);
     } catch (err) {
       console.error("Remote view failed:", err);
       setRemoteShareState("error");
@@ -241,9 +253,15 @@ export function Dashboard() {
     await viewerRef.current?.stopViewing();
     await viewerRef.current?.disconnect();
     viewerRef.current = null;
+    remoteStreamRef.current = null;
+    autoplayTriedRef.current = false;
     if (videoRef.current) videoRef.current.srcObject = null;
     clearRemoteMediaCredentials();
     setRemoteShareState("remote-online-idle");
+    setShowEnableAudioButton(false);
+    setRemoteMuted(false);
+    setRemoteVolume(1);
+    setAudioEnabled(false);
   }
 
   // Show a prompt when remote share becomes available by default.
@@ -291,28 +309,22 @@ export function Dashboard() {
       // If sharing with audio, set up audio pipeline before publishing
       if (withAudio) {
         setAudioEnabled(true);
-        await api?.startSyntheticAudio(0);
-        // Register window message listener BEFORE requesting the port
-        const portPromise = new Promise<MessagePort>((resolve, reject) => {
-          const handler = (event: MessageEvent) => {
-            if (event.data?.type === "pcm:port" && event.ports?.length > 0) {
-              window.removeEventListener("message", handler);
-              resolve(event.ports[0]);
-            }
-          };
-          window.addEventListener("message", handler);
-          setTimeout(() => {
-            window.removeEventListener("message", handler);
-            reject(new Error("Audio port timeout"));
-          }, 5000);
-        });
-        // Request audio port triggers MessagePort transfer from main process
-        await api?.requestAudioPort();
-        const port = await portPromise;
 
+        // Step 1: Request PCM port from main process
+        await api?.requestAudioPort();
+
+        // Step 2: Wait for the MessagePort from main process
+        const port = await portPromiseRef.current!;
+
+        // Step 3: Create AudioContext + worklet, wait for priming
         const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
         const controller = new ProcessAudioController();
         await controller.initialize(port);
+
+        // Step 4: Now that renderer is ready, start native capture
+        await api?.startSyntheticAudio(0);
+
+        // Step 5: Set audio controller on publisher manager
         mgr.setAudioController(controller);
       }
 

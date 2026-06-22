@@ -308,19 +308,21 @@ export class AudioHelperManager {
           return;
         }
 
-        try {
-          const socket = net.connect(this.pcmPipeName, () => {
-            this.pcmSocket = socket;
-            this.setupPcmSocket(socket);
-            resolve();
-          });
-          socket.once('error', () => {
-            socket.destroy();
-            setTimeout(tryConnect, 200);
-          });
-        } catch {
+        const socket = net.connect(this.pcmPipeName);
+
+        const onError = () => {
+          socket.destroy();
           setTimeout(tryConnect, 200);
-        }
+        };
+
+        socket.once('connect', () => {
+          socket.removeListener('error', onError);
+          this.pcmSocket = socket;
+          this.setupPcmSocket(socket);
+          resolve();
+        });
+
+        socket.once('error', onError);
       };
       tryConnect();
     });

@@ -67,8 +67,13 @@ export class PcmRingBuffer {
     if (output.length < this.channels) return 0;
 
     const actual = Math.min(frameCount, this.framesAvailable_);
+
+    // Count underrun frames (requested but not available)
+    if (actual < frameCount) {
+      this.underrunFrames += (frameCount - actual);
+    }
+
     if (actual === 0) {
-      this.underrunFrames += frameCount;
       // Write zeros to output
       for (let ch = 0; ch < this.channels; ch++) {
         output[ch].fill(0, 0, frameCount);
@@ -117,6 +122,26 @@ export class PcmRingBuffer {
 
   get totalRead(): number {
     return this.totalFramesRead;
+  }
+
+  /** Flush audio data without resetting session counters. Preserves totalWritten/totalRead/underrun/overrun. */
+  flushAudio(): void {
+    this.framesAvailable_ = 0;
+    // Reset indices to avoid wraparound confusion
+    this.writeIndex = 0;
+    this.readIndex = 0;
+  }
+
+  /** Reset all session counters (for new stream generation). */
+  resetSessionStats(): void {
+    this.totalFramesWritten = 0;
+    this.totalFramesRead = 0;
+    this.overrunFrames = 0;
+    this.underrunFrames = 0;
+  }
+
+  get silentFrames(): number {
+    return this.underrunFrames; // All underrun frames are output as silence
   }
 
   reset(): void {

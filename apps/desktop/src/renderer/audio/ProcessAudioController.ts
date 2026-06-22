@@ -133,16 +133,32 @@ export class ProcessAudioController {
       }
       this.audioTrack = tracks[0];
 
-      // 8. Start priming timeout
-      this.primingTimeout = setTimeout(() => {
-        if (this.state === 'buffering' || this.state === 'loaded') {
-          console.warn(
-            '[ProcessAudioController] Priming timeout — starting with partial buffer',
-          );
-          this.state = 'primed';
-          this.onStateChange?.('primed');
-        }
-      }, this.PRIMING_TIMEOUT_MS);
+      // 8. Wait for worklet to be primed (or timeout)
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          this.workletNode!.port.onmessage = null;
+          reject(new Error('Priming timeout: no PCM received within 5000ms'));
+        }, this.PRIMING_TIMEOUT_MS);
+
+        // Override the worklet onmessage to catch the primed event
+        const originalHandler = this.workletNode.port.onmessage;
+        this.workletNode.port.onmessage = (event: MessageEvent) => {
+          const msg = event.data;
+          if (!msg || typeof msg !== 'object') return;
+
+          if (msg.type === 'pcm:primed') {
+            clearTimeout(timeout);
+            this.state = 'primed';
+            this.onStateChange?.('primed');
+            // Restore the original handler for subsequent messages
+            this.workletNode!.port.onmessage = originalHandler;
+            resolve();
+          } else if (originalHandler) {
+            // Forward non-priming messages to the original handler
+            originalHandler(event);
+          }
+        };
+      });
     } catch (err) {
       this.state = 'error';
       this.onStateChange?.('error');

@@ -40,6 +40,7 @@ export class PublisherManager {
   private events: PublisherEvents;
   private config: PublisherConfig | null = null;
   private stopping_: boolean = false;
+  private stopPromise_: Promise<void> | null = null;
 
   constructor(events: PublisherEvents) {
     this.events = events;
@@ -147,41 +148,49 @@ export class PublisherManager {
   }
 
   async stopCapture(): Promise<void> {
-    if (this.stopping_) return;
+    // Return existing promise if already stopping (awaitable idempotency)
+    if (this.stopping_) {
+      return this.stopPromise_;
+    }
     this.stopping_ = true;
     this.setState("stopping");
 
-    try {
-      // 1. Stop publisher first (before stopping its media tracks)
-      if (this.publisher) {
-        await this.publisher.stopPublishing();
-        await this.publisher.disconnect();
-        this.publisher = null;
+    this.stopPromise_ = (async () => {
+      try {
+        // 1. Stop publisher first (before its media tracks die)
+        if (this.publisher) {
+          await this.publisher.stopPublishing();
+          await this.publisher.disconnect();
+          this.publisher = null;
+        }
+
+        // 2. Stop audio controller
+        if (this.audioController) {
+          await this.audioController.close();
+          this.audioController = null;
+        }
+
+        // 3. Stop combined stream tracks
+        if (this.combinedStream) {
+          this.combinedStream.getTracks().forEach(t => t.stop());
+          this.combinedStream = null;
+        }
+
+        // 4. Stop capture stream tracks
+        this.captureStream?.getTracks().forEach(t => t.stop());
+        this.captureStream = null;
+        this.audioTrack = null;
+        this._audioState = "disabled";
+        this.config = null;
+
+        this.setState("idle");
+      } finally {
+        this.stopping_ = false;
+        this.stopPromise_ = null;
       }
+    })();
 
-      // 2. Stop audio controller
-      if (this.audioController) {
-        await this.audioController.close();
-        this.audioController = null;
-      }
-
-      // 3. Stop combined stream tracks
-      if (this.combinedStream) {
-        this.combinedStream.getTracks().forEach(t => t.stop());
-        this.combinedStream = null;
-      }
-
-      // 4. Stop capture stream tracks
-      this.captureStream?.getTracks().forEach(t => t.stop());
-      this.captureStream = null;
-      this.audioTrack = null;
-      this._audioState = "disabled";
-      this.config = null;
-
-      this.setState("idle");
-    } finally {
-      this.stopping_ = false;
-    }
+    return this.stopPromise_;
   }
 
   async setQuality(bitrate: number, width: number, height: number, fps: number): Promise<void> {
