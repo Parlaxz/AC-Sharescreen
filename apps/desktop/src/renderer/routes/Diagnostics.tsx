@@ -13,6 +13,8 @@ export function Diagnostics() {
   const { navigate } = useStore();
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [audioDiag, setAudioDiag] = useState<any>(null);
+  const [mixerDiag, setMixerDiag] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -26,6 +28,18 @@ export function Diagnostics() {
         console.error("Failed to get app info:", err);
       } finally {
         setLoading(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const api = (
+        window as unknown as { screenlink?: ScreenLinkAPI }
+      ).screenlink;
+      if (api) {
+        api.getAudioState().then(state => setAudioDiag(state)).catch(() => {});
+        api.getMixerDiagnostics().then(diag => setMixerDiag(diag)).catch(() => {});
       }
     })();
   }, []);
@@ -117,6 +131,26 @@ export function Diagnostics() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* Audio Diagnostics */}
+      <div className="card">
+        <h3>Audio Diagnostics</h3>
+        {audioDiag !== null ? (
+          <table className="info-table">
+            <tbody>
+              <tr><td>Audio State</td><td className="mono">{String(audioDiag)}</td></tr>
+            </tbody>
+          </table>
+        ) : (
+          <p className="dim">Audio helper not active</p>
+        )}
+        {mixerDiag !== null && (
+          <>
+            <h4 style={{ marginTop: "0.5rem" }}>Mixer State</h4>
+            <pre className="log-box" style={{ fontSize: "0.7rem" }}>{JSON.stringify(mixerDiag, null, 2)}</pre>
+          </>
+        )}
       </div>
 
       {/* Log section */}

@@ -199,6 +199,17 @@ MixerDiagnostics MultiSourceMixer::GetDiagnostics() const {
 
     MixerDiagnostics d = diag_;
 
+    // Set diagnostics capture timestamp
+    {
+        LARGE_INTEGER qpc;
+        QueryPerformanceCounter(&qpc);
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        d.diagnosticsTimestamp = static_cast<uint64_t>(
+            (static_cast<double>(qpc.QuadPart) * 10000000.0) /
+            static_cast<double>(freq.QuadPart));
+    }
+
     // Collect per-source states
     d.sourceStates.clear();
     d.activeSourceCount = 0;

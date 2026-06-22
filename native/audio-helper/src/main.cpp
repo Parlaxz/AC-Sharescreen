@@ -85,9 +85,15 @@ int main(int argc, char* argv[]) {
   switch (cmd) {
     case screenlink::audio::Command::kVersion: {
       std::cout << "{\n";
-      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
       std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
-      std::cout << "  \"status\": \"ok\"\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"serviceProtocolVersion\": \"" << screenlink::audio::kServiceProtocolVersion << "\",\n";
+      std::cout << "  \"build\": \"x64 Windows\",\n";
+#ifdef NDEBUG
+      std::cout << "  \"configuration\": \"release\"\n";
+#else
+      std::cout << "  \"configuration\": \"debug\"\n";
+#endif
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }

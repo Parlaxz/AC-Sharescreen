@@ -95,7 +95,7 @@ private:
         kStarting,
         kCapturing,
         kStopping,
-        kError
+        kError   // Permanent unrecoverable error state
     };
 
     ServiceConfig config_;
@@ -124,6 +124,9 @@ private:
     std::atomic<uint64_t> totalPayloadBytes_{0};
     std::atomic<uint64_t> totalControlRequests_{0};
     std::atomic<uint64_t> failedControlRequests_{0};
+    // Phase 2F: Production diagnostics
+    uint32_t helperStartCount_ = 0;
+    uint64_t lastErrorTimestamp_ = 0; // 100ns QPC timestamp of last error
     std::chrono::steady_clock::time_point startTime_;
 
     // Parent process handle

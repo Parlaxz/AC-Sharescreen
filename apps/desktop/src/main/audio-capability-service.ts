@@ -8,24 +8,55 @@ const HELPER_TIMEOUT_MS = 5000;
 const HELPER_EXE = "screenlink-audio-helper.exe";
 
 export function getHelperPath(): string {
+  let helperPath: string;
   if (app.isPackaged) {
     // In production, helper sits next to the app executable in resources
-    return path.join(process.resourcesPath, HELPER_EXE);
+    helperPath = path.join(process.resourcesPath, HELPER_EXE);
+  } else {
+    // Development: built in native/audio-helper/build/Release/
+    helperPath = path.join(
+      __dirname,
+      "..",
+      "..",
+      "..",
+      "..",
+      "..",
+      "native",
+      "audio-helper",
+      "build",
+      "Release",
+      HELPER_EXE,
+    );
   }
-  // Development: built in native/audio-helper/build/Release/
-  return path.join(
-    __dirname,
-    "..",
-    "..",
-    "..",
-    "..",
-    "..",
-    "native",
-    "audio-helper",
-    "build",
-    "Release",
-    HELPER_EXE,
-  );
+
+  // Verify the helper exists at the resolved path
+  try {
+    fs.accessSync(helperPath, fs.constants.X_OK);
+  } catch {
+    // In development, try an alternative path (build root instead of Release/)
+    if (!app.isPackaged) {
+      const altPath = path.join(
+        __dirname,
+        "..",
+        "..",
+        "..",
+        "..",
+        "..",
+        "native",
+        "audio-helper",
+        "build",
+        HELPER_EXE,
+      );
+      try {
+        fs.accessSync(altPath, fs.constants.X_OK);
+        return altPath;
+      } catch {
+        // Return original path — caller will handle missing file
+      }
+    }
+  }
+
+  return helperPath;
 }
 
 export interface HelperResult<T> {

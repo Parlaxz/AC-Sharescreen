@@ -137,4 +137,5 @@ export interface PersistedSettings {
   autoWatchFriend: boolean;
   friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
+  lastAudioMode?: 'none' | 'application' | 'monitor';
 }

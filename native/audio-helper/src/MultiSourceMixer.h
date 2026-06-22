@@ -55,6 +55,7 @@ struct MixerDiagnostics {
     uint32_t sourceQueuesAtMax = 0;
     std::vector<MixerSourceState> sourceStates;
     std::string lastError;
+    uint64_t diagnosticsTimestamp = 0; // QPC 100ns timestamp when diagnostics were captured
 };
 
 /// A queued audio packet with owned frame data (copy of AudioPacket.frames).

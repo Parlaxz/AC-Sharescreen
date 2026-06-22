@@ -86,6 +86,7 @@ export class AudioHelperManager {
   private onErrorCallback: ((error: string) => void) | null = null;
 
   private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
+  private shuttingDown_: boolean = false;
   readonly pcmBridge: PcmBridge = new PcmBridge();
 
   constructor(config: AudioHelperConfig) {
@@ -270,6 +271,7 @@ export class AudioHelperManager {
   }
 
   async shutdown(): Promise<void> {
+    this.shuttingDown_ = true; // Prevent restart during shutdown
     try {
       if (this.state === 'capturing') {
         await this.stopCapture();
@@ -282,6 +284,7 @@ export class AudioHelperManager {
     }
     await this.cleanup();
     this.state = 'disconnected';
+    this.shuttingDown_ = false;
   }
 
   // ── Queries ──
@@ -459,6 +462,9 @@ export class AudioHelperManager {
     const wasRunning = this.state !== 'disconnected';
     this.state = 'error';
     this.lastError_ = `Helper exited with code=${code} signal=${signal}`;
+
+    // Don't restart if we're shutting down
+    if (this.shuttingDown_) return;
 
     if (wasRunning && this.restartCount < this.maxRestarts) {
       this.restartCount++;

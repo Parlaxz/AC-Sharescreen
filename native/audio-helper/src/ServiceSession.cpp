@@ -265,6 +265,56 @@ const char* StateToStr(int state) {
     }
 }
 
+// ── Phase 2F: Rate-limited stderr logger ──
+
+/// Simple rate-limited logger: at most one message per N milliseconds.
+class RateLimitedLogger {
+public:
+    explicit RateLimitedLogger(uint64_t intervalMs) : intervalMs_(intervalMs) {}
+
+    void Log(const std::string& msg) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - lastLog_).count();
+        if (elapsed >= static_cast<int64_t>(intervalMs_)) {
+            std::cerr << msg << std::endl;
+            lastLog_ = now;
+        }
+    }
+
+private:
+    uint64_t intervalMs_;
+    std::chrono::steady_clock::time_point lastLog_;
+};
+
+/// Global rate-limited logger instance (5-second interval).
+RateLimitedLogger g_errorLog(5000);
+
+/// Get QPC timestamp in 100ns units.
+uint64_t GetQpcTimestamp100ns() {
+    LARGE_INTEGER qpc;
+    QueryPerformanceCounter(&qpc);
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    return static_cast<uint64_t>(
+        (static_cast<double>(qpc.QuadPart) * 10000000.0) /
+        static_cast<double>(freq.QuadPart));
+}
+
+// ── Phase 2F: Wide-to-UTF8 helper for path logging ──
+
+std::string WideToUtf8(PCWSTR wideStr, int length = -1) {
+    if (wideStr == nullptr) return {};
+    int realLength = (length >= 0) ? length : static_cast<int>(wcslen(wideStr));
+    if (realLength == 0) return {};
+    int needed = WideCharToMultiByte(CP_UTF8, 0, wideStr, realLength, nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return {};
+    std::string result(static_cast<size_t>(needed), '\0');
+    int written = WideCharToMultiByte(CP_UTF8, 0, wideStr, realLength, &result[0], needed, nullptr, nullptr);
+    if (written <= 0) return {};
+    return result;
+}
+
 } // anonymous namespace
 
 // ========================================================================
@@ -331,6 +381,16 @@ ServiceSession::~ServiceSession() {
 
 int ServiceSession::Run() {
     startTime_ = std::chrono::steady_clock::now();
+    helperStartCount_++;
+
+    // Log helper identity on startup
+    {
+        WCHAR exePath[MAX_PATH + 1] = {};
+        DWORD pathLen = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        std::string exeStr = WideToUtf8(exePath, static_cast<int>(pathLen));
+        std::cerr << "[helper] Started: " << exeStr
+                  << " (PID: " << GetCurrentProcessId() << ")" << std::endl;
+    }
 
     // Start PCM writer (creates pipe and waits for connection in its own thread)
     if (!pcmWriter_.Start(config_.pcmPipeName, config_.parentPid)) {
@@ -396,7 +456,7 @@ void ServiceSession::ControlThread() {
         lpSa);    // security attributes
 
     if (hPipe == INVALID_HANDLE_VALUE) {
-        std::cerr << "Failed to create control pipe: " << GetLastError() << "\n";
+        g_errorLog.Log("[helper] Failed to create control pipe: " + std::to_string(GetLastError()));
         running_.store(false);
         return;
     }
@@ -466,6 +526,8 @@ void ServiceSession::ControlThread() {
             // Validate auth
             if (!ValidateRequest(authToken, sessionId)) {
                 failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
+                lastErrorTimestamp_ = GetQpcTimestamp100ns();
+                g_errorLog.Log("[helper] Auth failure for request from pipe client");
 
                 // Build response
                 SimpleJson resp;
@@ -491,6 +553,8 @@ void ServiceSession::ControlThread() {
 
             if (!recognised) {
                 failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
+                lastErrorTimestamp_ = GetQpcTimestamp100ns();
+                g_errorLog.Log("[helper] Unknown command: " + command);
                 SimpleJson resp;
                 resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
                 resp.Set("requestId", requestId);
@@ -1021,7 +1085,9 @@ void ServiceSession::HandleGetDiagnostics(const std::string& /*payload*/,
     result += activeSrc + "\",";
     result += "\"state\":\"";
     result += StateToStr(currentState) + std::string("\",");
-    result += "\"streamGeneration\":" + std::to_string(streamGen);
+    result += "\"streamGeneration\":" + std::to_string(streamGen) + ",";
+    result += "\"helperStartCount\":" + std::to_string(helperStartCount_) + ",";
+    result += "\"lastErrorTimestamp\":" + std::to_string(lastErrorTimestamp_);
     result += "}";
 
     SimpleJson resp;

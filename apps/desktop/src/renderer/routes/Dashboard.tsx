@@ -61,13 +61,16 @@ export function Dashboard() {
     }
   }
 
-  // Restore saved source from settings on mount
+  // Restore saved source and audio mode from settings on mount
   useEffect(() => {
     (async () => {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
       const s = await api?.getSettings();
       if (s && s.lastSourceId && s.lastSourceName) {
         setSource(s.lastSourceId, s.lastSourceName);
+      }
+      if (s && s.lastAudioMode) {
+        setAudioMode(s.lastAudioMode);
       }
     })();
   }, []);
@@ -313,39 +316,60 @@ export function Dashboard() {
       });
       publisherManagerRef.current = mgr;
 
-      // If sharing with audio, set up audio pipeline before publishing
-      if (audioMode !== 'none') {
-        setAudioEnabled(true);
+      // Source validation for application audio mode
+      let effectiveAudioMode = audioMode;
+      if (audioMode === 'application' && sourceId && !sourceId.startsWith('window:')) {
+        console.warn("[Audio] Application audio requires a window source, not a screen");
+        effectiveAudioMode = 'none';
+        setAudioMode('none');
+      } else if (audioMode === 'application' && !sourceId) {
+        effectiveAudioMode = 'none';
+        setAudioMode('none');
+      }
 
-        // 1. Create fresh port listener (not reused from previous share)
-        const portPromise = waitForNextAudioPort();
-        await api?.requestAudioPort();
+      // Audio setup (best-effort, failure does not block video-only sharing)
+      let audioConfigured = false;
+      if (effectiveAudioMode !== 'none') {
+        try {
+          setAudioEnabled(true);
 
-        // 2. Await the MessagePort transferred from main process
-        const port = await portPromise;
+          // 1. Create fresh port listener (not reused from previous share)
+          const portPromise = waitForNextAudioPort();
+          await api?.requestAudioPort();
 
-        // 3. Create AudioContext + worklet (consumer ready, no priming wait)
-        const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
-        const controller = new ProcessAudioController();
-        await controller.initialize(port);
+          // 2. Await the MessagePort transferred from main process
+          const port = await portPromise;
 
-        // 4. Register controller before starting capture (publisher needs the track)
-        mgr.setAudioController(controller);
+          // 3. Create AudioContext + worklet (consumer ready, no priming wait)
+          const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
+          const controller = new ProcessAudioController();
+          await controller.initialize(port);
 
-        // 5. Start native capture PRODUCER based on audio mode
-        if (audioMode === 'application') {
-          // Application audio resolves the source via native helper (includes PID + creation-time validation)
-          await api?.startApplicationAudio({ sourceId });
-        } else {
-          // monitor mode: filtered monitor capture
-          await api?.startFilteredMonitorAudio({
-            excludeDiscord: true,
-            excludeScreenLink: true,
-          });
+          // 4. Register controller before starting capture (publisher needs the track)
+          mgr.setAudioController(controller);
+
+          // 5. Start native capture PRODUCER based on audio mode
+          if (effectiveAudioMode === 'application') {
+            // Application audio resolves the source via native helper (includes PID + creation-time validation)
+            await api?.startApplicationAudio({ sourceId });
+          } else {
+            // monitor mode: filtered monitor capture
+            await api?.startFilteredMonitorAudio({
+              excludeDiscord: true,
+              excludeScreenLink: true,
+            });
+          }
+
+          // 6. Wait for the worklet ring buffer to reach priming depth
+          await controller.waitUntilPrimed();
+          audioConfigured = true;
+        } catch (err) {
+          console.warn("[Audio] Setup failed, continuing video-only:", err);
+          setAudioEnabled(false);
+          // Clean up partial audio state
+          try { api?.stopAudio(); } catch {}
+          // Audio is optional — continue with video only
         }
-
-        // 6. Wait for the worklet ring buffer to reach priming depth
-        await controller.waitUntilPrimed();
       }
 
       const stream = await mgr.startCapture({
@@ -366,6 +390,14 @@ export function Dashboard() {
       // Notify remote peer
       const { getControlConnection } = await import("../services/control-connection.js");
       getControlConnection().sendShareStarted();
+
+      // Persist audio mode preference
+      try {
+        const settings = await api?.getSettings();
+        if (settings && settings.lastAudioMode !== effectiveAudioMode) {
+          await api?.updateSettings({ lastAudioMode: effectiveAudioMode });
+        }
+      } catch { /* ignore */ }
     } catch (err) {
       console.error("Share failed:", err);
       setLocalShareState("error");
