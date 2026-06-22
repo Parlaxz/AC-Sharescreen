@@ -448,7 +448,8 @@ void ServiceSession::ControlThread() {
     HANDLE hPipe = CreateNamedPipeA(
         config_.controlPipeName.c_str(),
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+        PIPE_REJECT_REMOTE_CLIENTS,
         1,        // max instances
         65536,    // out buffer
         65536,    // in buffer
@@ -462,9 +463,6 @@ void ServiceSession::ControlThread() {
     }
 
     controlPipe_ = static_cast<void*>(hPipe);
-
-    // Buffer for reading requests
-    char readBuf[65536];
 
     while (running_.load()) {
         // Wait for client to connect
@@ -498,9 +496,13 @@ void ServiceSession::ControlThread() {
         }
 
         // Process requests from this client until disconnect or shutdown
+        // Byte mode with newline-delimited JSON framing.
+        std::string lineBuffer;
+        char chunk[65536];
+
         while (running_.load()) {
             DWORD bytesRead = 0;
-            BOOL readOk = ReadFile(hPipe, readBuf, sizeof(readBuf) - 1,
+            BOOL readOk = ReadFile(hPipe, chunk, sizeof(chunk) - 1,
                                    &bytesRead, nullptr);
             if (!readOk) {
                 DWORD err = GetLastError();
@@ -510,80 +512,92 @@ void ServiceSession::ControlThread() {
                 break; // Exit inner loop to reconnect
             }
 
-            // Null-terminate the request
-            readBuf[bytesRead] = '\0';
-            std::string requestStr(readBuf, bytesRead);
+            if (bytesRead == 0) break;
 
-            totalControlRequests_.fetch_add(1, std::memory_order_relaxed);
+            chunk[bytesRead] = '\0';
+            lineBuffer.append(chunk, bytesRead);
 
-            // Parse the request
-            std::string sessionId = SimpleJson::GetString(requestStr, "sessionId");
-            std::string authToken = SimpleJson::GetString(requestStr, "authToken");
-            std::string command = SimpleJson::GetString(requestStr, "command");
-            std::string payload = SimpleJson::GetObject(requestStr, "payload");
-            uint64_t requestId = SimpleJson::GetUint(requestStr, "requestId", 0);
+            // Process complete lines
+            size_t pos;
+            while ((pos = lineBuffer.find('\n')) != std::string::npos) {
+                std::string requestLine = lineBuffer.substr(0, pos);
+                lineBuffer.erase(0, pos + 1);
 
-            // Validate auth
-            if (!ValidateRequest(authToken, sessionId)) {
-                failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
-                lastErrorTimestamp_ = GetQpcTimestamp100ns();
-                g_errorLog.Log("[helper] Auth failure for request from pipe client");
+                // Skip empty lines
+                if (requestLine.empty()) continue;
 
-                // Build response
-                SimpleJson resp;
-                resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-                resp.Set("requestId", requestId);
-                resp.Set("sessionId", config_.sessionId);
-                resp.Set("success", false);
-                resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-                resp.Set("error", "authentication-failed");
-                resp.Set("result", "{}");
-                std::string respStr = resp.Str();
+                totalControlRequests_.fetch_add(1, std::memory_order_relaxed);
 
+                // Parse the request
+                std::string sessionId = SimpleJson::GetString(requestLine, "sessionId");
+                std::string authToken = SimpleJson::GetString(requestLine, "authToken");
+                std::string command = SimpleJson::GetString(requestLine, "command");
+                std::string payload = SimpleJson::GetObject(requestLine, "payload");
+                uint64_t requestId = SimpleJson::GetUint(requestLine, "requestId", 0);
+
+                // Validate auth
+                if (!ValidateRequest(authToken, sessionId)) {
+                    failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
+                    lastErrorTimestamp_ = GetQpcTimestamp100ns();
+                    g_errorLog.Log("[helper] Auth failure for request from pipe client");
+
+                    SimpleJson resp;
+                    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+                    resp.Set("requestId", requestId);
+                    resp.Set("sessionId", config_.sessionId);
+                    resp.Set("success", false);
+                    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+                    resp.Set("error", "authentication-failed");
+                    resp.Set("result", "{}");
+                    std::string respStr = resp.Str();
+
+                    DWORD bytesWritten = 0;
+                    WriteFile(hPipe, respStr.data(),
+                              static_cast<DWORD>(respStr.size()),
+                              &bytesWritten, nullptr);
+                    continue;
+                }
+
+                // Dispatch command
+                std::string response;
+                bool recognised = DispatchCommand(command, payload, response);
+
+                if (!recognised) {
+                    failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
+                    SimpleJson resp;
+                    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+                    resp.Set("requestId", requestId);
+                    resp.Set("sessionId", config_.sessionId);
+                    resp.Set("success", false);
+                    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+                    resp.Set("error", "unknown-command");
+                    resp.Set("result", "{}");
+                    std::string respStr = resp.Str();
+
+                    DWORD bytesWritten = 0;
+                    WriteFile(hPipe, respStr.data(),
+                              static_cast<DWORD>(respStr.size()),
+                              &bytesWritten, nullptr);
+                    continue;
+                }
+
+                // Send response
                 DWORD bytesWritten = 0;
-                WriteFile(hPipe, respStr.data(),
-                          static_cast<DWORD>(respStr.size()),
+                WriteFile(hPipe, response.data(),
+                          static_cast<DWORD>(response.size()),
                           &bytesWritten, nullptr);
-                continue;
+
+                // Check if this was a shutdown command
+                if (command == "shutdown") {
+                    Sleep(50);
+                    running_.store(false);
+                    break;
+                }
             }
 
-            // Dispatch command
-            std::string response;
-            bool recognised = DispatchCommand(command, payload, response);
-
-            if (!recognised) {
-                failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
-                lastErrorTimestamp_ = GetQpcTimestamp100ns();
-                g_errorLog.Log("[helper] Unknown command: " + command);
-                SimpleJson resp;
-                resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-                resp.Set("requestId", requestId);
-                resp.Set("sessionId", config_.sessionId);
-                resp.Set("success", false);
-                resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-                resp.Set("error", "unknown-command");
-                resp.Set("result", "{}");
-                std::string respStr = resp.Str();
-
-                DWORD bytesWritten = 0;
-                WriteFile(hPipe, respStr.data(),
-                          static_cast<DWORD>(respStr.size()),
-                          &bytesWritten, nullptr);
-                continue;
-            }
-
-            // Send response
-            DWORD bytesWritten = 0;
-            WriteFile(hPipe, response.data(),
-                      static_cast<DWORD>(response.size()),
-                      &bytesWritten, nullptr);
-
-            // Check if this was a shutdown command
-            if (command == "shutdown") {
-                // Give the response time to be sent before closing
-                Sleep(50);
-                running_.store(false);
-                break;
+            // Guard against unbounded line buffer growth
+            if (lineBuffer.size() > 65536) {
+                lineBuffer.clear();
             }
         }
 

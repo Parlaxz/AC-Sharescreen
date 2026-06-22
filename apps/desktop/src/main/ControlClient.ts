@@ -1,3 +1,5 @@
+import * as net from 'net';
+
 // ── Types ──
 
 export interface ControlRequest {
@@ -56,21 +58,24 @@ export interface HelperDiagnostics {
 // ── ControlClient ──
 
 /**
- * Typed client for the native audio-helper control named pipe.
- *
- * Windows named pipes in message mode are accessed via `\\\\.\\pipe\\{name}` paths.
- * Node.js `fs` synchronous operations (`openSync`, `writeSync`, `readSync`,
- * `closeSync`) are used because message-mode named pipes are fundamentally
- * synchronous on Windows.
+ * Async typed client for the native audio-helper control named pipe.
+ * Uses net.Socket for non-blocking I/O with request/response matching by requestId.
+ * Protocol: newline-delimited JSON over byte-mode named pipe.
  */
 export class ControlClient {
   private pipePath: string;
   private sessionId: string;
   private authToken: string;
   private requestId: number = 0;
-  private fd: number | null = null;
+  private socket: net.Socket | null = null;
   private connected: boolean = false;
   private buffer: string = '';
+  private pendingRequests = new Map<
+    number,
+    { resolve: (resp: ControlResponse) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+  >();
+
+  readonly REQUEST_TIMEOUT_MS = 5000;
 
   constructor(pipeName: string, sessionId: string, authToken: string) {
     this.pipePath = pipeName;
@@ -79,20 +84,84 @@ export class ControlClient {
   }
 
   async connect(timeoutMs: number = 5000): Promise<void> {
-    const fs = await import('fs');
-    const start = Date.now();
+    return new Promise<void>((resolve, reject) => {
+      const start = Date.now();
 
-    while (Date.now() - start < timeoutMs) {
+      const tryConnect = () => {
+        if (Date.now() - start > timeoutMs) {
+          reject(new Error(`Timeout connecting to control pipe: ${this.pipePath}`));
+          return;
+        }
+
+        const socket = net.connect(this.pipePath);
+
+        const onError = () => {
+          socket.destroy();
+          setTimeout(tryConnect, 200);
+        };
+
+        socket.once('connect', () => {
+          socket.removeListener('error', onError);
+          this.socket = socket;
+          this.connected = true;
+          this.setupSocket();
+          resolve();
+        });
+
+        socket.once('error', onError);
+      };
+
+      tryConnect();
+    });
+  }
+
+  private setupSocket(): void {
+    const socket = this.socket!;
+
+    socket.on('data', (data: Buffer) => {
+      this.buffer += data.toString('utf-8');
+      this.processBuffer();
+    });
+
+    socket.on('close', () => {
+      this.socket = null;
+      this.connected = false;
+      // Reject all pending requests
+      for (const [, pending] of this.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Control pipe closed'));
+      }
+      this.pendingRequests.clear();
+    });
+
+    socket.on('error', () => {
+      // Socket errors surface as 'close' after 'error'
+    });
+  }
+
+  private processBuffer(): void {
+    // Parse complete newline-delimited JSON responses from buffer
+    while (this.buffer.includes('\n')) {
+      const newlineIdx = this.buffer.indexOf('\n');
+      const line = this.buffer.slice(0, newlineIdx).trim();
+      this.buffer = this.buffer.slice(newlineIdx + 1);
+
+      if (!line) continue;
+
       try {
-        this.fd = fs.openSync(this.pipePath, 'r+');
-        this.connected = true;
-        return;
+        const response: ControlResponse = JSON.parse(line);
+        const pending = this.pendingRequests.get(response.requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingRequests.delete(response.requestId);
+          pending.resolve(response);
+        }
+        // Responses with unknown requestId are silently dropped
+        // (e.g. leftover from a previous session generation)
       } catch {
-        // Pipe not ready yet, retry
-        await new Promise(r => setTimeout(r, 100));
+        // Malformed JSON — skip this fragment
       }
     }
-    throw new Error(`Timeout connecting to control pipe: ${this.pipePath}`);
   }
 
   isConnected(): boolean {
@@ -100,7 +169,7 @@ export class ControlClient {
   }
 
   async sendRequest(command: string, payload: Record<string, unknown> = {}): Promise<ControlResponse> {
-    if (!this.connected || this.fd === null) {
+    if (!this.socket || !this.connected) {
       throw new Error('Not connected to control pipe');
     }
 
@@ -114,47 +183,24 @@ export class ControlClient {
       payload,
     };
 
-    const fs = await import('fs');
     const requestStr = JSON.stringify(request) + '\n';
 
-    // Write request as a single message
-    fs.writeSync(this.fd, requestStr);
+    return new Promise<ControlResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error(`Response timeout for command "${command}"`));
+      }, this.REQUEST_TIMEOUT_MS);
 
-    // Read response — accumulate until we have a complete JSON object
-    const maxReadAttempts = 100;
-    for (let i = 0; i < maxReadAttempts; i++) {
-      const buf = Buffer.alloc(65536);
+      this.pendingRequests.set(requestId, { resolve, reject, timer });
+
       try {
-        const bytesRead = fs.readSync(this.fd, buf, 0, buf.length, null);
-        if (bytesRead > 0) {
-          this.buffer += buf.toString('utf-8', 0, bytesRead);
-
-          // Try to parse a complete JSON response
-          try {
-            const response: ControlResponse = JSON.parse(this.buffer);
-            this.buffer = '';
-            if (response.requestId !== requestId) {
-              throw new Error(
-                `Request ID mismatch: expected ${requestId}, got ${response.requestId}`,
-              );
-            }
-            return response;
-          } catch (parseErr) {
-            if (parseErr instanceof SyntaxError) {
-              // Incomplete JSON — wait for more data
-              continue;
-            }
-            throw parseErr;
-          }
-        }
-      } catch {
-        // No data yet or pipe error — retry
+        this.socket!.write(requestStr);
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingRequests.delete(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
       }
-
-      await new Promise(r => setTimeout(r, 10));
-    }
-
-    throw new Error('Timeout waiting for control response');
+    });
   }
 
   // ── Convenience Methods ──
@@ -248,17 +294,20 @@ export class ControlClient {
   }
 
   disconnect(): void {
-    if (this.fd !== null) {
+    if (this.socket) {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const fs = require('fs') as typeof import('fs');
-        fs.closeSync(this.fd);
-      } catch {
-        /* ignore during cleanup */
-      }
-      this.fd = null;
+        this.socket.destroy();
+      } catch { /* ignore */ }
+      this.socket = null;
     }
     this.connected = false;
     this.buffer = '';
+
+    // Reject pending requests
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Control client disconnected'));
+    }
+    this.pendingRequests.clear();
   }
 }
