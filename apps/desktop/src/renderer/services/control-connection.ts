@@ -14,6 +14,9 @@ import type { DegradationPreference } from "@screenlink/vdo-adapter";
 /** Connection role for a given peer UUID. */
 type ConnectionRole = "viewer" | "publisher" | "unknown";
 
+/** Connection lifecycle state machine. */
+type ConnectionState = 'idle' | 'starting' | 'started' | 'stopping' | 'destroyed';
+
 /** Shorthand for the screenlink API from the window object. */
 function getApi() {
   return (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -50,17 +53,45 @@ class ControlConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isConnected = false;
   private isDestroyed = false;
+  private connectionState: ConnectionState = 'idle';
+  private startPromise: Promise<void> | null = null;
+  private abortController: AbortController | null = null;
+  private pendingViews = new Set<string>();
+  private generation: number = 0;
 
   /** Start the control connection using stored pairing config */
   async start(): Promise<void> {
+    if (this.connectionState === 'destroyed') {
+      console.warn('[Control] Cannot start — connection was destroyed');
+      return;
+    }
+    if (this.connectionState === 'starting' || this.connectionState === 'started') {
+      // Idempotent: return existing in-flight promise
+      return this.startPromise;
+    }
+
+    this.connectionState = 'starting';
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+    const gen = ++this.generation;
+
+    this.startPromise = this.doStart(signal, gen);
+    return this.startPromise;
+  }
+
+  private async doStart(signal: AbortSignal, gen: number): Promise<void> {
     const api = getApi();
-    if (!api) return;
+    if (!api || signal.aborted || gen !== this.generation) return;
 
     const config = await api.getPairingConfig();
     const pairSecret = await api.getPairSecret();
 
+    // Check if we were destroyed while awaiting config
+    if (signal.aborted || gen !== this.generation) return;
+
     if (!config || !pairSecret) {
       useStore.getState().setPairingState("unpaired");
+      this.connectionState = 'idle';
       return;
     }
 
@@ -96,196 +127,194 @@ class ControlConnection {
       useStore.getState().setPairingState("PAIR_IMPORTED_CONNECTING");
     }
 
-    await this.connectToVDO(pairSecret);
+    try {
+      await this.connectToVDO(pairSecret, signal, gen);
+      if (!signal.aborted && gen === this.generation) {
+        this.connectionState = 'started';
+      }
+    } catch (err) {
+      if (!signal.aborted && gen === this.generation) {
+        console.error('[Control] Failed to connect:', err);
+        useStore.getState().setPairingState("error");
+        this.connectionState = 'idle';
+        this.scheduleReconnect();
+      }
+    }
   }
 
-  private async connectToVDO(pairSecret: string): Promise<void> {
-    try {
-      const Ctor = window.VDONinjaSDK ?? window.VDONinja;
-      if (!Ctor) throw new Error("VDO.Ninja SDK not loaded");
+  private async connectToVDO(pairSecret: string, signal: AbortSignal, gen: number): Promise<void> {
+    if (signal.aborted || gen !== this.generation) return;
 
-      patchVdoNinjaSdk(Ctor);
+    const Ctor = window.VDONinjaSDK ?? window.VDONinja;
+    if (!Ctor) throw new Error("VDO.Ninja SDK not loaded");
 
-      this.sdk = new Ctor({
-        host: "wss://wss.vdo.ninja",
-        password: pairSecret,
-        salt: "vdo.ninja",
-        debug: true,
-        turnServers: null,
-        forceTURN: false,
-        maxReconnectAttempts: 10,
-        reconnectDelay: 1000,
-      });
+    patchVdoNinjaSdk(Ctor);
 
-      // Set up event listeners
-      this.sdk.on("connected", () => {
-        console.log("[Control] Connected to VDO.Ninja signaling");
-        this.isConnected = true;
-        // NOTE: Do NOT transition to PAIR_CONNECTED_UNCONFIRMED here.
-        // Signaling connection is not the same as peer connection.
-        // Stay in current lifecycle (PAIR_CREATED_WAITING_FOR_IMPORT,
-        // PAIR_IMPORTED_CONNECTING, or PAIRED_OFFLINE) until a real
-        // data channel opens.
-      });
+    this.sdk = new Ctor({
+      host: "wss://wss.vdo.ninja",
+      password: pairSecret,
+      salt: "vdo.ninja",
+      debug: false,
+      turnServers: null,
+      forceTURN: false,
+      maxReconnectAttempts: 10,
+      reconnectDelay: 1000,
+    });
 
-      this.sdk.on("disconnected", () => {
-        console.log("[Control] Disconnected from signaling");
-        this.isConnected = false;
-        this.peerUuid = null;
-        this.peerRoles.clear();
-        this.stopHandshakeRetry();
+    // Set up event listeners
+    this.sdk.on("connected", () => {
+      console.log("[Control] Connected to VDO.Ninja signaling");
+      this.isConnected = true;
+    });
 
-        // Transition to PAIRED_OFFLINE if trusted identity exists,
-        // or stay in pre-handshake states otherwise.
-        const currentState = useStore.getState().pairingState;
-        if (
-          currentState === "PAIRED_ONLINE" ||
-          currentState === "PAIR_CONNECTED_UNCONFIRMED"
-        ) {
-          useStore.getState().setPairingState("PAIRED_OFFLINE");
-          // Persist offline lifecycle so restart shows correct state
-          this.persistLifecycle("PAIRED_OFFLINE");
-        }
+    this.sdk.on("disconnected", () => {
+      console.log("[Control] Disconnected from signaling");
+      this.isConnected = false;
+      this.peerUuid = null;
+      this.peerRoles.clear();
+      this.stopHandshakeRetry();
 
-        // Do NOT blank friend info — trusted remote identity remains visible.
-        useStore.getState().setRemoteShareState("remote-offline");
-      });
-
-      // When a data channel opens, track its role
-      this.sdk.on("dataChannelOpen", (data: unknown) => {
-        const evt = (data as CustomEvent).detail || data;
-        const uuid = typeof evt === "object"
-          ? (evt as Record<string, unknown>).uuid as string
-          : "";
-        const role = (typeof evt === "object"
-          ? (evt as Record<string, unknown>).type as string
-          : "") as ConnectionRole;
-
-        console.log("[Control] Data channel opened, peer UUID:", uuid?.slice(0, 8), "role:", role);
-        this.peerUuid = uuid;
-
-        if (role === "viewer" || role === "publisher") {
-          this.peerRoles.set(uuid, role);
-        }
-
-        // NOW we have a real peer — transition to PAIR_CONNECTED_UNCONFIRMED
-        useStore.getState().setPairingState("PAIR_CONNECTED_UNCONFIRMED");
-
-        // Send hello/request immediately, then retry until paired.
-        this.sendHello();
-        const req = buildEnvelope("state.request", this.localDeviceId, {});
-        this.sendMessage(req);
-        this.startHandshakeRetry();
-      });
-
-      this.sdk.on("dataChannelClose", () => {
-        console.log("[Control] Data channel closed");
-        this.peerUuid = null;
-        this.stopHandshakeRetry();
-        useStore.getState().setRemoteShareState("remote-offline");
-        // Do NOT blank friend info — trusted remote identity stays visible.
-        const currentState = useStore.getState().pairingState;
-        if (currentState === "PAIRED_ONLINE" || currentState === "PAIR_CONNECTED_UNCONFIRMED") {
-          useStore.getState().setPairingState("PAIRED_OFFLINE");
-          this.persistLifecycle("PAIRED_OFFLINE");
-        }
-      });
-
-      this.sdk.on("dataReceived", (data: unknown) => {
-        this.handleMessage(data);
-      });
-
-      this.sdk.on("peerConnected", (...args: unknown[]) => {
-        console.log("[Control] Peer connected:", args);
-      });
-
-      this.sdk.on("peerDisconnected", (uuid: string) => {
-        console.log("[Control] Peer disconnected:", uuid);
-        if (this.peerUuid === uuid) {
-          this.peerUuid = null;
-          this.peerRoles.delete(uuid);
-          this.stopHandshakeRetry();
-          useStore.getState().setRemoteShareState("remote-offline");
-          // Do NOT blank friend info — trusted remote identity stays visible.
-          const currentState = useStore.getState().pairingState;
-          if (currentState === "PAIRED_ONLINE") {
-            useStore.getState().setPairingState("PAIRED_OFFLINE");
-            this.persistLifecycle("PAIRED_OFFLINE");
-          }
-        }
-      });
-
-      this.sdk.on("error", (err: unknown) => {
-        console.error("[Control] SDK error:", err);
-        useStore.getState().setPairingState("error");
-      });
-
-      this.sdk.on("connectionFailed", () => {
-        console.error("[Control] Connection failed");
-        useStore.getState().setPairingState("error");
-      });
-
-      // Connect to signaling
-      await this.sdk.connect();
-      console.log("[Control] SDK connect() completed");
-
-      // Step 1: Join the pair room
-      await this.sdk.joinRoom({ room: this.pairId });
-      console.log("[Control] Joined room:", this.pairId);
-
-      // Step 2: Announce our presence (data-only, no media)
-      const myStreamID = await this.sdk.announce({
-        streamID: this.localDeviceId,
-        room: this.pairId,
-        label: this.localDisplayName,
-      });
-      console.log("[Control] Announced as:", myStreamID);
-
-      // Step 3: Listen for remote peer streams and view them.
-      // Friend identity is NOT set here — only from validated peer.hello.
-
-      this.sdk.on("listing", (data: unknown) => {
-        const evt = (data as CustomEvent).detail || data;
-        const list = (evt as Record<string, unknown>).list as Array<unknown> || [];
-        console.log("[Control] Room listing:", list.length, "streams");
-        for (const item of list) {
-          const streamInfo = typeof item === "string" ? { streamID: item } : item as Record<string, unknown>;
-          const sid = streamInfo.streamID as string;
-          if (sid && sid !== myStreamID) {
-            console.log("[Control] Found remote stream, viewing:", sid.slice(0, 16));
-            this.viewRemoteStream(sid);
-          }
-        }
-      });
-
-      this.sdk.on("videoaddedtoroom", (data: unknown) => {
-        const evt = (data as CustomEvent).detail || data;
-        const sid = (evt as Record<string, unknown>).streamID as string;
-        if (sid && sid !== myStreamID) {
-          console.log("[Control] New stream in room, viewing:", sid.slice(0, 16));
-          this.viewRemoteStream(sid);
-        }
-      });
-
-      if (this.sdk.streams) {
-        for (const [sid] of this.sdk.streams) {
-          if (sid && sid !== myStreamID) {
-            console.log("[Control] Existing stream, viewing:", sid.slice(0, 16));
-            this.viewRemoteStream(sid);
-          }
-        }
+      const currentState = useStore.getState().pairingState;
+      if (
+        currentState === "PAIRED_ONLINE" ||
+        currentState === "PAIR_CONNECTED_UNCONFIRMED"
+      ) {
+        useStore.getState().setPairingState("PAIRED_OFFLINE");
+        this.persistLifecycle("PAIRED_OFFLINE");
       }
 
-      // Dedup cleanup every 5 minutes
-      this.dedupCleanupTimer = setInterval(() => {
-        this.seenMessageIds.clear();
-      }, 5 * 60 * 1000);
+      useStore.getState().setRemoteShareState("remote-offline");
+    });
 
-    } catch (err) {
-      console.error("[Control] Failed to connect:", err);
+    // When a data channel opens, track its role
+    this.sdk.on("dataChannelOpen", (data: unknown) => {
+      const evt = (data as CustomEvent).detail || data;
+      const uuid = typeof evt === "object"
+        ? (evt as Record<string, unknown>).uuid as string
+        : "";
+      const role = (typeof evt === "object"
+        ? (evt as Record<string, unknown>).type as string
+        : "") as ConnectionRole;
+
+      console.log("[Control] Data channel opened, peer UUID:", uuid?.slice(0, 8), "role:", role);
+      this.peerUuid = uuid;
+
+      if (role === "viewer" || role === "publisher") {
+        this.peerRoles.set(uuid, role);
+      }
+
+      useStore.getState().setPairingState("PAIR_CONNECTED_UNCONFIRMED");
+
+      this.sendHello();
+      const req = buildEnvelope("state.request", this.localDeviceId, {});
+      this.sendMessage(req);
+      this.startHandshakeRetry();
+    });
+
+    this.sdk.on("dataChannelClose", () => {
+      console.log("[Control] Data channel closed");
+      this.peerUuid = null;
+      this.stopHandshakeRetry();
+      useStore.getState().setRemoteShareState("remote-offline");
+      const currentState = useStore.getState().pairingState;
+      if (currentState === "PAIRED_ONLINE" || currentState === "PAIR_CONNECTED_UNCONFIRMED") {
+        useStore.getState().setPairingState("PAIRED_OFFLINE");
+        this.persistLifecycle("PAIRED_OFFLINE");
+      }
+    });
+
+    this.sdk.on("dataReceived", (data: unknown) => {
+      this.handleMessage(data);
+    });
+
+    this.sdk.on("peerConnected", (...args: unknown[]) => {
+      console.log("[Control] Peer connected:", args);
+    });
+
+    this.sdk.on("peerDisconnected", (uuid: string) => {
+      console.log("[Control] Peer disconnected:", uuid);
+      if (this.peerUuid === uuid) {
+        this.peerUuid = null;
+        this.peerRoles.delete(uuid);
+        this.stopHandshakeRetry();
+        useStore.getState().setRemoteShareState("remote-offline");
+        const currentState = useStore.getState().pairingState;
+        if (currentState === "PAIRED_ONLINE") {
+          useStore.getState().setPairingState("PAIRED_OFFLINE");
+          this.persistLifecycle("PAIRED_OFFLINE");
+        }
+      }
+    });
+
+    this.sdk.on("error", (err: unknown) => {
+      console.error("[Control] SDK error:", err);
       useStore.getState().setPairingState("error");
-      this.scheduleReconnect();
+    });
+
+    this.sdk.on("connectionFailed", () => {
+      console.error("[Control] Connection failed");
+      useStore.getState().setPairingState("error");
+    });
+
+    if (signal.aborted || gen !== this.generation) return;
+
+    // Connect to signaling
+    await this.sdk.connect();
+    if (signal.aborted || gen !== this.generation) return;
+    console.log("[Control] SDK connect() completed");
+
+    // Step 1: Join the pair room
+    await this.sdk.joinRoom({ room: this.pairId });
+    if (signal.aborted || gen !== this.generation) return;
+    console.log("[Control] Joined room:", this.pairId);
+
+    // Step 2: Announce our presence (data-only, no media)
+    const myStreamID = await this.sdk.announce({
+      streamID: this.localDeviceId,
+      room: this.pairId,
+      label: this.localDisplayName,
+    });
+    if (signal.aborted || gen !== this.generation) return;
+    console.log("[Control] Announced as:", myStreamID);
+
+    // Step 3: Listen for remote peer streams and view them.
+
+    this.sdk.on("listing", (data: unknown) => {
+      const evt = (data as CustomEvent).detail || data;
+      const list = (evt as Record<string, unknown>).list as Array<unknown> || [];
+      console.log("[Control] Room listing:", list.length, "streams");
+      for (const item of list) {
+        const streamInfo = typeof item === "string" ? { streamID: item } : item as Record<string, unknown>;
+        const sid = streamInfo.streamID as string;
+        if (sid && sid !== myStreamID) {
+          console.log("[Control] Found remote stream, viewing:", sid.slice(0, 16));
+          this.viewRemoteStream(sid);
+        }
+      }
+    });
+
+    this.sdk.on("videoaddedtoroom", (data: unknown) => {
+      const evt = (data as CustomEvent).detail || data;
+      const sid = (evt as Record<string, unknown>).streamID as string;
+      if (sid && sid !== myStreamID) {
+        console.log("[Control] New stream in room, viewing:", sid.slice(0, 16));
+        this.viewRemoteStream(sid);
+      }
+    });
+
+    if (this.sdk.streams) {
+      for (const [sid] of this.sdk.streams) {
+        if (sid && sid !== myStreamID) {
+          console.log("[Control] Existing stream, viewing:", sid.slice(0, 16));
+          this.viewRemoteStream(sid);
+        }
+      }
     }
+
+    // Dedup cleanup every 5 minutes
+    this.dedupCleanupTimer = setInterval(() => {
+      this.seenMessageIds.clear();
+    }, 5 * 60 * 1000);
   }
 
   /** Persist a lifecycle transition to the main process. */
@@ -320,6 +349,11 @@ class ControlConnection {
 
   private async viewRemoteStream(hashedStreamId: string): Promise<void> {
     if (!this.sdk) return;
+    // Deduplicate: skip if already viewing or pending
+    if (this.pendingViews.has(hashedStreamId)) {
+      return;
+    }
+    this.pendingViews.add(hashedStreamId);
     try {
       await this.sdk.view(hashedStreamId, {
         audio: false,
@@ -328,6 +362,7 @@ class ControlConnection {
       });
       console.log("[Control] View request sent for stream:", hashedStreamId.slice(0, 16));
     } catch (err) {
+      this.pendingViews.delete(hashedStreamId);
       console.warn("[Control] Failed to view remote stream:", err);
     }
   }
@@ -680,11 +715,10 @@ class ControlConnection {
   // ── Reconnect ─────────────────────────────────────────────
 
   private scheduleReconnect(): void {
-    if (this.isDestroyed) return;
+    if (this.connectionState === 'destroyed') return;
     this.reconnectTimer = setTimeout(() => {
-      if (!this.isDestroyed) {
-        this.start();
-      }
+      if (this.connectionState === 'destroyed') return;
+      this.start();
     }, 5000);
   }
 
@@ -699,39 +733,43 @@ class ControlConnection {
    * active it is destroyed first, then start() is called fresh.
    */
   async restart(): Promise<void> {
-    // Tear down existing connection fully
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.dedupCleanupTimer) clearInterval(this.dedupCleanupTimer);
-    this.stopHandshakeRetry();
-    if (this.sdk) {
-      try { this.sdk.disconnect(); } catch {}
-      this.sdk = null;
-    }
-    this.peerUuid = null;
-    this.peerRoles.clear();
-    this.seenMessageIds.clear();
-    this.isConnected = false;
-    // Reset destroyed flag so start() can proceed
-    this.isDestroyed = false;
-    // Start fresh
+    this.destroy(); // sets state to 'destroyed', aborts everything
+    this.connectionState = 'idle'; // reset so start() can proceed
+    this.isDestroyed = false; // backward compat
     await this.start();
   }
 
   // ── Cleanup ───────────────────────────────────────────────
 
   destroy(): void {
-    this.isDestroyed = true;
+    if (this.connectionState === 'destroyed') return; // Idempotent
+    this.connectionState = 'destroyed';
+
+    // Abort any in-flight async work
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+    this.generation++;
+
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.dedupCleanupTimer) clearInterval(this.dedupCleanupTimer);
     this.stopHandshakeRetry();
+
     if (this.sdk) {
+      // Remove all event listeners before disconnecting
+      try { this.sdk.removeAllListeners?.(); } catch {}
       try { this.sdk.disconnect(); } catch {}
       this.sdk = null;
     }
+
     this.peerUuid = null;
     this.peerRoles.clear();
     this.seenMessageIds.clear();
+    this.pendingViews.clear();
     this.isConnected = false;
+    this.startPromise = null;
+    this.isDestroyed = true;
   }
 
   isActive(): boolean {
