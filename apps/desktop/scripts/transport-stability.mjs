@@ -15,6 +15,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as net from 'net';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,11 +28,13 @@ const HELPER_PATH = path.resolve(
   'screenlink-audio-helper.exe',
 );
 
-const RUN_DURATION_MS = 30 * 60 * 1000; // 30 minutes
-const REPORT_INTERVAL_MS = 60 * 1000;   // Report every 60 seconds
-const PCM_READ_TIMEOUT_MS = 3000;       // Read timeout before declaring end of stream
+const RUN_MINUTES = Math.max(0.1, parseFloat(process.argv[2] || '30'));
+const RUN_DURATION_MS = Math.round(RUN_MINUTES * 60 * 1000);
+const REPORT_INTERVAL_MS = Math.min(Math.max(Math.round(RUN_DURATION_MS / 4), 5000), 60000);
+const PCM_STALL_TIMEOUT = 5000;
 const PCM_MAGIC = 0x50434D21;
 const HEADER_SIZE = 68;
+const PCM_READ_TIMEOUT_MS = 3000;
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
@@ -52,7 +55,7 @@ let lastReportPackets = 0;
 
 let helper;
 let ctrlFd;
-let pcmFd;
+let pcmSocket;
 let streamGen = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -71,7 +74,7 @@ function helperExists() {
   }
 }
 
-async function waitForPipe(pipePath, timeoutMs) {
+async function openControlPipe(pipePath, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
@@ -80,14 +83,43 @@ async function waitForPipe(pipePath, timeoutMs) {
       await new Promise(r => setTimeout(r, 200));
     }
   }
-  throw new Error(`Timeout waiting for pipe: ${pipePath}`);
+  throw new Error(`Timeout waiting for control pipe: ${pipePath}`);
+}
+
+async function openPcmPipe(pipePath, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const tryConnect = () => {
+      if (Date.now() - start > timeoutMs) {
+        return reject(new Error(`Timeout connecting to PCM pipe: ${pipePath}`));
+      }
+      try {
+        const socket = net.connect(pipePath, () => {
+          resolve(socket);
+        });
+        socket.once('error', () => {
+          socket.destroy();
+          setTimeout(tryConnect, 200);
+        });
+      } catch {
+        setTimeout(tryConnect, 200);
+      }
+    };
+    tryConnect();
+  });
 }
 
 function sendRequest(fd, request) {
   fs.writeSync(fd, JSON.stringify(request) + '\n');
   const buf = Buffer.alloc(65536);
   const bytes = fs.readSync(fd, buf, 0, buf.length, null);
-  return JSON.parse(buf.toString('utf-8', 0, bytes));
+  const resp = JSON.parse(buf.toString('utf-8', 0, bytes));
+  // The SimpleJson helper encodes 'result' as a JSON string, not a nested object.
+  // If result is a string, parse it as JSON.
+  if (typeof resp.result === 'string') {
+    try { resp.result = JSON.parse(resp.result); } catch {}
+  }
+  return resp;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -142,7 +174,7 @@ async function main() {
 
   // 2. Connect control pipe
   log('Connecting control pipe...');
-  ctrlFd = await waitForPipe(ctrlPipe, 5000);
+  ctrlFd = await openControlPipe(ctrlPipe, 5000);
   log('Control pipe connected');
 
   // 3. Send hello
@@ -171,144 +203,117 @@ async function main() {
   streamGen = startResp.result.streamGeneration;
   log(`Synthetic capture started, stream generation: ${streamGen}`);
 
-  // 6. Connect PCM pipe
+  // 6. Connect PCM pipe (async via net.Socket for non-blocking reads)
   log('Connecting PCM pipe...');
-  pcmFd = await waitForPipe(pcmPipe, 5000);
+  pcmSocket = await openPcmPipe(pcmPipe, 10000);
+  pcmSocket.setNoDelay(true);
   log('PCM pipe connected');
 
   // 7. Read packets for the duration
-  const readBuf = Buffer.alloc(65536);
   let parserBuffer = Buffer.alloc(0);
+  let pcmDataResolve = null;
   const testStart = Date.now();
+  const testDuration = RUN_DURATION_MS;
   let lastReadTime = Date.now();
-  let readStalls = 0;
+  const PCM_STALL_TIMEOUT = 5000; // Consider connection stalled if no data for 5s
 
-  log(`Reading PCM for ${RUN_DURATION_MS / 60000} minutes...`);
+  log(`Reading PCM for ${RUN_MINUTES} minutes...`);
   log('='.repeat(60));
 
-  const pcmReadLoop = async () => {
-    while (Date.now() - testStart < RUN_DURATION_MS && !helperExited) {
-      try {
-        // Check if pipe is still readable (non-blocking check)
-        const bytesRead = fs.readSync(pcmFd, readBuf, 0, readBuf.length, null);
-        if (bytesRead === 0) {
-          // Empty read (EOF)
-          if (Date.now() - lastReadTime > PCM_READ_TIMEOUT_MS) {
-            log('PCM pipe EOF — no data for timeout period');
+  // Set up async data handler
+  pcmSocket.on('data', (chunk) => {
+    lastReadTime = Date.now();
+    parserBuffer = Buffer.concat([parserBuffer, chunk]);
+
+    if (parserBuffer.length > 1_048_576) {
+      log('WARN: Parser buffer exceeded 1MB — resetting');
+      parserBuffer = Buffer.alloc(0);
+      totalMalformed++;
+      return;
+    }
+
+    // Parse packets
+    while (parserBuffer.length >= HEADER_SIZE) {
+      const magic = parserBuffer.readUInt32LE(0);
+      if (magic !== PCM_MAGIC) {
+        let found = false;
+        for (let i = 1; i < parserBuffer.length - 3; i++) {
+          if (parserBuffer.readUInt32LE(i) === PCM_MAGIC) {
+            parserBuffer = parserBuffer.subarray(i);
+            found = true;
+            totalMalformed++;
             break;
           }
-          continue;
         }
-
-        lastReadTime = Date.now();
-
-        // Feed into parser buffer
-        parserBuffer = Buffer.concat([parserBuffer, readBuf.subarray(0, bytesRead)]);
-
-        // Guard against unbounded buffer growth
-        if (parserBuffer.length > 1_048_576) {
-          log('WARN: Parser buffer exceeded 1MB — resetting');
-          parserBuffer = Buffer.alloc(0);
-          totalMalformed++;
-          continue;
-        }
-
-        // Parse packets from buffer
-        while (parserBuffer.length >= HEADER_SIZE) {
-          const magic = parserBuffer.readUInt32LE(0);
-          if (magic !== PCM_MAGIC) {
-            // Scan forward for magic
-            let found = false;
-            for (let i = 1; i < parserBuffer.length - 3; i++) {
-              if (parserBuffer.readUInt32LE(i) === PCM_MAGIC) {
-                parserBuffer = parserBuffer.subarray(i);
-                found = true;
-                totalMalformed++;
-                break;
-              }
-            }
-            if (!found) {
-              parserBuffer = Buffer.alloc(0);
-              break;
-            }
-            continue;
-          }
-
-          // Read header size
-          const headerSize = parserBuffer.readUInt16LE(4);
-          if (headerSize < HEADER_SIZE) {
-            parserBuffer = parserBuffer.subarray(1);
-            totalMalformed++;
-            continue;
-          }
-
-          if (parserBuffer.length < headerSize) break; // Need more data
-
-          const frameCount = parserBuffer.readUInt32LE(52);
-          const channels = parserBuffer.readUInt16LE(48);
-          const payloadBytes = parserBuffer.readUInt32LE(56);
-          const expectedPayload = frameCount * channels * 4;
-
-          if (payloadBytes !== expectedPayload || payloadBytes > 7680) {
-            parserBuffer = parserBuffer.subarray(1);
-            totalMalformed++;
-            continue;
-          }
-
-          if (parserBuffer.length < headerSize + payloadBytes) break; // Need more data
-
-          // Valid packet — extract header fields
-          const flags = parserBuffer.readUInt32LE(8);
-          const seq = Number(parserBuffer.readBigUInt64LE(12));
-          const streamGeneration = parserBuffer.readUInt32LE(60);
-
-          totalPackets++;
-          totalBytes += headerSize + payloadBytes;
-
-          if (flags & 1) totalSilent++;
-          if (flags & 2) totalDiscontinuity++;
-          if (flags & 4) totalTimestampError++;
-
-          if (lastSeq >= 0 && seq !== lastSeq + 1) {
-            totalGaps++;
-            if (totalGaps <= 5) {
-              log(`WARN: Sequence gap at packet ${totalPackets}: expected ${lastSeq + 1}, got ${seq}`);
-            }
-          }
-          lastSeq = seq;
-
-          // Check stream generation
-          if (streamGeneration !== streamGen) {
-            log(`ERROR: Stream generation mismatch: expected ${streamGen}, got ${streamGeneration}`);
-          }
-
-          // Remove consumed bytes
-          parserBuffer = parserBuffer.subarray(headerSize + payloadBytes);
-        }
-      } catch (err) {
-        if (err.code === 'EOF' || err.code === 'EPIPE') {
-          log('PCM pipe disconnected');
-          break;
-        }
-        // Transient error — retry
-        await new Promise(r => setTimeout(r, 100));
+        if (!found) { parserBuffer = Buffer.alloc(0); break; }
+        continue;
       }
 
-      // Periodic reporting
-      const elapsed = Date.now() - testStart;
-      const reportElapsed = Date.now() - (testStart + Math.floor(elapsed / REPORT_INTERVAL_MS) * REPORT_INTERVAL_MS);
-      if (reportElapsed >= REPORT_INTERVAL_MS || totalPackets === 0 || totalPackets % 10000 === 0) {
-        // Only do full reports on the minute
+      const headerSize = parserBuffer.readUInt16LE(4);
+      if (headerSize < HEADER_SIZE) { parserBuffer = parserBuffer.subarray(1); totalMalformed++; continue; }
+      if (parserBuffer.length < headerSize) break;
+
+      const frameCount = parserBuffer.readUInt32LE(52);
+      const channels = parserBuffer.readUInt16LE(48);
+      const payloadBytes = parserBuffer.readUInt32LE(56);
+      const expectedPayload = frameCount * channels * 4;
+
+      if (payloadBytes !== expectedPayload || payloadBytes > 7680) {
+        parserBuffer = parserBuffer.subarray(1);
+        totalMalformed++;
+        continue;
       }
+
+      if (parserBuffer.length < headerSize + payloadBytes) break;
+
+      const flags = parserBuffer.readUInt32LE(8);
+      const seq = Number(parserBuffer.readBigUInt64LE(12));
+      const streamGeneration = parserBuffer.readUInt32LE(60);
+
+      totalPackets++;
+      totalBytes += headerSize + payloadBytes;
+
+      if (flags & 1) totalSilent++;
+      if (flags & 2) totalDiscontinuity++;
+      if (flags & 4) totalTimestampError++;
+
+      if (lastSeq >= 0 && seq !== lastSeq + 1) {
+        totalGaps++;
+        if (totalGaps <= 5) {
+          log(`WARN: Sequence gap at packet ${totalPackets}: expected ${lastSeq + 1}, got ${seq}`);
+        }
+      }
+      lastSeq = seq;
+
+      if (streamGeneration !== streamGen) {
+        log(`ERROR: Stream generation mismatch: expected ${streamGen}, got ${streamGeneration}`);
+      }
+
+      parserBuffer = parserBuffer.subarray(headerSize + payloadBytes);
     }
-  };
 
-  // Periodic reporting loop (runs concurrently)
+    if (pcmDataResolve) {
+      pcmDataResolve();
+      pcmDataResolve = null;
+    }
+  });
+
+  pcmSocket.on('close', () => {
+    log('PCM pipe closed');
+  });
+
+  pcmSocket.on('error', (err) => {
+    if (err.code !== 'ECONNRESET' && err.code !== 'EPIPE') {
+      log(`PCM socket error: ${err.code} - ${err.message}`);
+    }
+  });
+
+  // Periodic reporting
   const reportInterval = setInterval(() => {
     const elapsed = Date.now() - testStart;
     if (elapsed < 1000) return;
     const rate = totalPackets / (elapsed / 1000);
-    const pct = Math.min(100, (elapsed / RUN_DURATION_MS) * 100).toFixed(1);
+    const pct = Math.min(100, (elapsed / testDuration) * 100).toFixed(1);
     const memMb = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
 
     log(`[${pct}%] Packets: ${totalPackets} (${rate.toFixed(0)}/s), ` +
@@ -316,7 +321,6 @@ async function main() {
         `Gaps: ${totalGaps}, Malformed: ${totalMalformed}, ` +
         `Queue: ${maxQueue}, Mem: ${memMb}MB`);
 
-    // Get diagnostics from helper
     if (ctrlFd) {
       try {
         const diagResp = sendRequest(ctrlFd, {
@@ -324,9 +328,9 @@ async function main() {
           command: 'getDiagnostics', payload: {},
         });
         if (diagResp.success && diagResp.result) {
-          maxQueue = Math.max(maxQueue, diagResp.result.queueSize || 0);
-          const qs = diagResp.result.queueSize;
-          const dp = diagResp.result.droppedPackets;
+          const qs = diagResp.result.queueSize || 0;
+          const dp = diagResp.result.droppedPackets || 0;
+          maxQueue = Math.max(maxQueue, qs);
           if (qs > 64) log(`WARN: Queue depth high: ${qs}`);
           if (dp > 0) log(`WARN: Dropped packets: ${dp}`);
         }
@@ -336,8 +340,23 @@ async function main() {
     }
   }, REPORT_INTERVAL_MS);
 
-  // Run the PCM read loop
-  await pcmReadLoop();
+  // Wait for test duration with periodic checks
+  while (Date.now() - testStart < testDuration) {
+    const remaining = testDuration - (Date.now() - testStart);
+    if (remaining <= 0) break;
+    
+    // Wait for data or timeout
+    await new Promise(resolve => {
+      pcmDataResolve = resolve;
+      setTimeout(resolve, 100);
+    });
+
+    // Check stall detection
+    if (Date.now() - lastReadTime > PCM_STALL_TIMEOUT && totalPackets > 0) {
+      log(`WARN: PCM data stalled for ${PCM_STALL_TIMEOUT}ms`);
+      lastReadTime = Date.now(); // Reset to avoid repeated warnings
+    }
+  }
 
   clearInterval(reportInterval);
 
@@ -378,7 +397,9 @@ async function main() {
   // 11. Cleanup
   log('Cleaning up...');
   try { fs.closeSync(ctrlFd); } catch {}
-  try { fs.closeSync(pcmFd); } catch {}
+  try { pcmSocket.destroy(); } catch {}
+  try { pcmSocket = null; } catch {}
+  // Note: pcmSocket is already closed via the 'close' handler
 
   // Wait for helper to exit
   await new Promise(r => setTimeout(r, 2000));
@@ -447,7 +468,7 @@ main().catch(err => {
   console.error('\nStability test FAILED:', err.message);
   // Cleanup
   try { if (ctrlFd) fs.closeSync(ctrlFd); } catch {}
-  try { if (pcmFd) fs.closeSync(pcmFd); } catch {}
+  try { if (pcmSocket) pcmSocket.destroy(); } catch {}
   if (helper && !helper.killed) {
     try { helper.kill(); } catch {}
   }
