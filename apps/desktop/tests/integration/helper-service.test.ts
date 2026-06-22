@@ -198,7 +198,7 @@ describe('native helper service integration', () => {
     expect(isSuccess(response)).toBe(true);
     // response.state is the top-level state string from the helper
     expect(response.state).toBe('idle');
-    expect(response.protocolVersion).toBe('0.2.0');
+    expect(response.protocolVersion).toBe('0.3.0');
     expect(response.sessionId).toBe(sessionId);
     // requestId is always 0 in responses (SimpleJson doesn't echo)
     expect(response.requestId).toBe(0);
@@ -207,7 +207,7 @@ describe('native helper service integration', () => {
     const result = parseResult(response);
     expect(result.helperVersion).toBeDefined();
     expect(typeof result.helperVersion).toBe('string');
-    expect(result.protocolVersion).toBe('0.2.0');
+    expect(result.protocolVersion).toBe('0.3.0');
     expect(result.sessionId).toBe(sessionId);
     expect(result.pid).toBeDefined();
     expect(typeof result.pid).toBe('number');
@@ -233,7 +233,7 @@ describe('native helper service integration', () => {
     expect(result.helperVersion).toBeDefined();
     expect(typeof result.helperVersion).toBe('string');
     expect(result.helperVersion!.length).toBeGreaterThan(0);
-    expect(result.protocolVersion).toBe('0.2.0');
+    expect(result.protocolVersion).toBe('0.3.0');
   }, INTEGRATION_TIMEOUT);
 
   // ── Test 5: getCapabilities ───────────────────────────────────────────
