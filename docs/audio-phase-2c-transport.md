@@ -126,7 +126,7 @@ Electron main process
 - Default frame rate: 48000 Hz
 - Default channels: 2
 - Default frame count: 480 (10ms)
-- Default queue size: 15 packets (~150ms)
+- Default queue size: 25 packets
 - Kernel pipe buffer: 64 KB
 
 ### QPC Frequency
@@ -145,7 +145,15 @@ All integers are little-endian (native x64). Named pipes are local-only — no n
 - Pipe names are randomly generated per session (32 hex chars)
 - Format: `\\.\pipe\screenlink-{sessionId}-ctrl` and `\\.\pipe\screenlink-{sessionId}-pcm`
 - Session authentication: random auth token validated on every control request
-- **Pipe DACL:** Explicit current-user security descriptor created via `CreateWellKnownSid(WinCurrentUserSid)` + `SetSecurityDescriptorDacl(TRUE)`. This replaces the default DACL to ensure no inherited permissions leak to other users.
+
+### Named-Pipe DACL
+
+Both control and PCM pipes use an explicit `SECURITY_ATTRIBUTES` with a DACL
+containing a single `ACCESS_ALLOWED_ACE` for the **current user SID**
+(retrieved via `GetTokenInformation(TokenUser)`). No Everyone, Anonymous, or
+other users are granted access. This is the SID of the interactive user
+running the ScreenLink Electron process, not the logon SID (SE_GROUP_LOGON_ID).
+
 - **Remote client rejection:** `PIPE_REJECT_REMOTE_CLIENTS` flag is set on both pipes, ensuring only local connections are accepted even if the pipe name is somehow exposed.
 - **Client PID validation:** The control pipe validates the client's PID via `GetNamedPipeClientProcessId`. Only the expected parent PID is allowed to connect to the PCM pipe. PCM pipe connections from unexpected PIDs are rejected at the pipe server level.
 - No network access: `\\.\pipe\` prefix restricts to local machine
@@ -212,15 +220,14 @@ The auth token is never logged.
 
 ## Backpressure Policy
 
-### Helper Side (PcmWriter)
+### Helper Side (PcmWriter/PcmPacketQueue)
 
-- **Maximum queued packets:** 15 (~150ms at 10ms packets)
-- **Kernel pipe receive buffer:** 64 KB (reduced from default for tighter latency control)
-- **Overflow policy:** Drop oldest queued packets
+- **Maximum queued packets:** 25
+- **Maximum queued age:** 250ms (hard limit), 100ms (normal target)
+- **Eviction policy:** Drop oldest. When queue exceeds count or age limits, the oldest packets are removed.
 - **Dropped-packet counter:** `droppedPackets` field in PCM header
-- **Next packet after drop:** Marked with discontinuity flag
-- **Capture thread:** Never blocks on a full queue (TryPush returns false)
-- **Pipe write thread:** Synchronous WriteFile (blocks on kernel pipe buffer)
+- **After eviction:** Next delivered packet is marked with discontinuity flag
+- **Capture thread:** Uses `Push()` which always succeeds (evicts oldest if full)
 
 ### Electron Side (BinaryPcmParser)
 

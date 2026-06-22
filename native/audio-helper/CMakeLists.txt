@@ -40,7 +40,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 # Link dwmapi.lib for DwmGetWindowAttribute,
 # ole32.lib for COM, avrt.lib for Pro Audio thread priority
-target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi ole32 avrt mmdevapi uuid)
+target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi ole32 avrt mmdevapi uuid winmm)
 
 # Pass Windows SDK version to C++ code for compile-time checks
 if(MSVC AND CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)

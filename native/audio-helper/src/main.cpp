@@ -488,45 +488,50 @@ int main(int argc, char* argv[]) {
           }
       }
 
-      // ── PipeTransport: queue push/pop/full/drop/empty ──
+      // ── PipeTransport: queue push/pop/drop-oldest/empty ──
       {
-          screenlink::audio::PcmPacketQueue queue(5); // usable capacity = 4
-          if (queue.MaxSize() != 4) {
+          screenlink::audio::PcmPacketQueue queue(5); // capacity = 5 (deque, no reserved slot)
+          if (queue.MaxSize() != 5) {
               std::cerr << "FAIL: queue.MaxSize() = " << queue.MaxSize()
-                        << " (expected 4)\n";
+                        << " (expected 5)\n";
               allPassed = false;
           }
 
-          // Push 4 packets
-          for (int i = 0; i < 4; ++i) {
+          // Push 5 packets (fills to capacity)
+          for (int i = 0; i < 5; ++i) {
               screenlink::audio::PcmPacket p;
               p.header.sequenceNumber = static_cast<uint64_t>(i);
-              if (!queue.TryPush(std::move(p))) {
-                  std::cerr << "FAIL: queue.TryPush failed on iteration " << i << "\n";
-                  allPassed = false;
-              }
+              queue.Push(std::move(p));
           }
 
-          // Queue should now be full (5th push fails)
+          // Push 6th packet — should drop oldest (seq 0)
           screenlink::audio::PcmPacket overflowPacket;
           overflowPacket.header.sequenceNumber = 99;
-          if (queue.TryPush(std::move(overflowPacket))) {
-              std::cerr << "FAIL: queue.TryPush should have returned false (full)\n";
-              allPassed = false;
-          }
+          queue.Push(std::move(overflowPacket));
 
-          // Drop count should be 1
+          // Drop count should be 1 (the oldest was evicted)
           if (queue.DroppedCount() != 1) {
               std::cerr << "FAIL: queue.DroppedCount() = " << queue.DroppedCount()
                         << " (expected 1)\n";
               allPassed = false;
           }
 
-          // Pop 4 packets
-          for (int i = 0; i < 4; ++i) {
+          // Size should still be 5
+          if (queue.Size() != 5) {
+              std::cerr << "FAIL: queue.Size() = " << queue.Size()
+                        << " (expected 5 after push with drop)\n";
+              allPassed = false;
+          }
+
+          // Pop 5 packets: should get seqs 1,2,3,4,99 (oldest 0 was dropped)
+          for (int i = 0; i < 5; ++i) {
               screenlink::audio::PcmPacket p;
               if (!queue.TryPop(p)) {
                   std::cerr << "FAIL: queue.TryPop failed on iteration " << i << "\n";
+                  allPassed = false;
+              } else if (i == 0 && p.header.sequenceNumber != 1) {
+                  std::cerr << "FAIL: first popped packet has seq " << p.header.sequenceNumber
+                            << " (expected 1, oldest 0 should have been dropped)\n";
                   allPassed = false;
               }
           }
@@ -555,10 +560,7 @@ int main(int argc, char* argv[]) {
           in.header.channels = 2;
           in.payload.resize(480 * 2, 0.5f);
 
-          if (!queue.TryPush(std::move(in))) {
-              std::cerr << "FAIL: queue.TryPush (round-trip) failed\n";
-              allPassed = false;
-          }
+          queue.Push(std::move(in));
 
           screenlink::audio::PcmPacket out;
           if (!queue.TryPop(out)) {

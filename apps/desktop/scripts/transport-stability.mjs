@@ -31,10 +31,8 @@ const HELPER_PATH = path.resolve(
 const RUN_MINUTES = Math.max(0.1, parseFloat(process.argv[2] || '30'));
 const RUN_DURATION_MS = Math.round(RUN_MINUTES * 60 * 1000);
 const REPORT_INTERVAL_MS = Math.min(Math.max(Math.round(RUN_DURATION_MS / 4), 5000), 60000);
-const PCM_STALL_TIMEOUT = 5000;
 const PCM_MAGIC = 0x50434D21;
 const HEADER_SIZE = 68;
-const PCM_READ_TIMEOUT_MS = 3000;
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
@@ -216,15 +214,12 @@ async function main() {
   let pcmDataResolve = null;
   const testStart = Date.now();
   const testDuration = RUN_DURATION_MS;
-  let lastReadTime = Date.now();
-  const PCM_STALL_TIMEOUT = 5000; // Consider connection stalled if no data for 5s
 
   log(`Reading PCM for ${RUN_MINUTES} minutes...`);
   log('='.repeat(60));
 
   // Set up async data handler
   pcmSocket.on('data', (chunk) => {
-    lastReadTime = Date.now();
     parserBuffer = Buffer.concat([parserBuffer, chunk]);
 
     if (parserBuffer.length > 1_048_576) {
@@ -353,11 +348,6 @@ async function main() {
       setTimeout(resolve, 100);
     });
 
-    // Check stall detection
-    if (Date.now() - lastReadTime > PCM_STALL_TIMEOUT && totalPackets > 0) {
-      log(`WARN: PCM data stalled for ${PCM_STALL_TIMEOUT}ms`);
-      lastReadTime = Date.now(); // Reset to avoid repeated warnings
-    }
   }
 
   clearInterval(reportInterval);

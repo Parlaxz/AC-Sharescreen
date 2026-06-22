@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <cstring>
+#include <deque>
 #include <system_error>
 #include <vector>
 
@@ -69,73 +70,74 @@ bool CreateCurrentUserSecurityAttributes(SECURITY_ATTRIBUTES& sa,
 namespace screenlink::audio {
 
 // ========================================================================
-// PcmPacketQueue
+// PcmPacketQueue (mutex-based deque with drop-oldest)
 // ========================================================================
 
 PcmPacketQueue::PcmPacketQueue(size_t maxPackets)
-    : maxPackets_(maxPackets)
+    : maxPackets_(maxPackets > 0 ? maxPackets : 1)
 {
-    // Reserve one extra slot so that we can distinguish full from empty
-    // using the head_ == tail_ rule.  The usable capacity is maxPackets_ - 1.
-    if (maxPackets_ < 2) maxPackets_ = 2;
-    buffer_.resize(maxPackets_);
 }
 
-bool PcmPacketQueue::TryPush(PcmPacket packet) {
-    const size_t tail = tail_.load(std::memory_order_relaxed);
-    const size_t next = Next(tail);
-    const size_t head = head_.load(std::memory_order_acquire);
+void PcmPacketQueue::Push(PcmPacket packet) {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-    if (next == head) {
-        // Queue full
-        droppedCount_.fetch_add(1, std::memory_order_relaxed);
-        return false;
+    // Age-based eviction: remove packets that exceed the hard age limit
+    if (!queue_.empty()) {
+        LARGE_INTEGER currentQpc;
+        QueryPerformanceCounter(&currentQpc);
+
+        while (!queue_.empty()) {
+            const auto& oldest = queue_.front();
+            if (oldest.header.qpcTimestamp == 0) break; // No timestamp, keep it
+            uint64_t ageQpc = currentQpc.QuadPart > static_cast<LONGLONG>(oldest.header.qpcTimestamp)
+                ? currentQpc.QuadPart - static_cast<LONGLONG>(oldest.header.qpcTimestamp)
+                : 0;
+            // Convert age to microseconds using qpcFrequency from the packet
+            uint64_t ageUs = (oldest.header.qpcFrequency > 0)
+                ? (ageQpc * 1000000) / oldest.header.qpcFrequency
+                : 0;
+            if (ageUs < kHardQueueAgeLimitUs) break; // Young enough, stop evicting
+            queue_.pop_front();
+            droppedCount_++;
+        }
     }
 
-    buffer_[tail] = std::move(packet);
-    tail_.store(next, std::memory_order_release);
-    return true;
+    // Count-based eviction: remove oldest if at capacity
+    while (queue_.size() >= maxPackets_) {
+        queue_.pop_front();
+        droppedCount_++;
+    }
+
+    // Push newest
+    queue_.push_back(std::move(packet));
 }
 
 bool PcmPacketQueue::TryPop(PcmPacket& packet) {
-    const size_t head = head_.load(std::memory_order_relaxed);
-    const size_t tail = tail_.load(std::memory_order_acquire);
-
-    if (head == tail) {
-        // Queue empty
-        return false;
-    }
-
-    packet = std::move(buffer_[head]);
-    head_.store(Next(head), std::memory_order_release);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) return false;
+    packet = std::move(queue_.front());
+    queue_.pop_front();
     return true;
 }
 
 size_t PcmPacketQueue::Size() const {
-    const size_t head = head_.load(std::memory_order_acquire);
-    const size_t tail = tail_.load(std::memory_order_acquire);
-    if (tail >= head) {
-        return tail - head;
-    }
-    return maxPackets_ - (head - tail);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.size();
 }
 
 size_t PcmPacketQueue::MaxSize() const {
-    return maxPackets_ - 1;
+    return maxPackets_;
 }
 
 uint32_t PcmPacketQueue::DroppedCount() const {
-    return droppedCount_.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return droppedCount_;
 }
 
 void PcmPacketQueue::Reset() {
-    head_.store(0, std::memory_order_relaxed);
-    tail_.store(0, std::memory_order_relaxed);
-    droppedCount_.store(0, std::memory_order_relaxed);
-    // Clear buffer entries (optional, but good hygiene)
-    for (auto& p : buffer_) {
-        p = PcmPacket{};
-    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.clear();
+    droppedCount_ = 0;
 }
 
 // ========================================================================

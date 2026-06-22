@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -14,7 +15,9 @@ namespace screenlink::audio {
 
 constexpr uint32_t kPcmMagic = 0x50434D21;      // "PCM!" in little-endian
 constexpr uint16_t kPcmWireVersion = 1;
-constexpr size_t kPcmDefaultQueueSize = 15;      // ~150ms at 10ms packets
+constexpr size_t kPcmDefaultQueueSize = 25;      // ~250ms at 10ms packets
+constexpr uint32_t kTargetQueueAgeUs = 100000;    // 100ms target max age
+constexpr uint32_t kHardQueueAgeLimitUs = 250000; // 250ms hard max age
 
 constexpr uint32_t kMaxPcmFramesPerPacket = 960; // 20ms at 48kHz
 constexpr uint32_t kMaxPcmFrameBytes = kMaxPcmFramesPerPacket * 2 * sizeof(float); // 7680
@@ -68,37 +71,29 @@ struct PcmPacket {
     std::vector<float> payload;  // interleaved float32 samples
 };
 
-// ── Bounded SPSC queue ──
+// ── Mutex-protected deque with drop-oldest backpressure ──
 
 class PcmPacketQueue {
 public:
     explicit PcmPacketQueue(size_t maxPackets);
     ~PcmPacketQueue() = default;
 
-    // Producer: returns false if queue is full (packet dropped).
-    bool TryPush(PcmPacket packet);
+    // Producer: always succeeds (drops oldest if full).
+    void Push(PcmPacket packet);
 
     // Consumer: returns false if queue is empty.
     bool TryPop(PcmPacket& packet);
 
-    size_t Size() const;          // approximate number of queued packets
-    size_t MaxSize() const;       // capacity
-    uint32_t DroppedCount() const; // total dropped since creation or last Reset
-    void Reset();                 // clear queue and reset counters
+    size_t Size() const;
+    size_t MaxSize() const;
+    uint32_t DroppedCount() const;
+    void Reset();
 
 private:
-    size_t Next(size_t index) const { return (index + 1) % maxPackets_; }
-
-    std::vector<PcmPacket> buffer_;
+    std::deque<PcmPacket> queue_;
     size_t maxPackets_ = 0;
-
-    // Producer writes at tail_, consumer reads from head_.
-    // Queue is full when Next(tail_) == head_.
-    // Queue is empty when head_ == tail_.
-    std::atomic<size_t> head_{0};
-    std::atomic<size_t> tail_{0};
-
-    std::atomic<uint32_t> droppedCount_{0};
+    uint32_t droppedCount_ = 0;
+    mutable std::mutex mutex_;
 };
 
 // ── Header validation ──

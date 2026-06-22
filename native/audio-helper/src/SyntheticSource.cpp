@@ -3,6 +3,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <cmath>
 #include <cstring>
@@ -56,7 +57,7 @@ uint64_t SyntheticSource::Run(SyntheticConfig config, PacketCallback onPacket) {
         static_cast<size_t>(config.framesPerPacket) * config.channels;
     std::vector<float> buffer(bufferFloats, 0.0f);
 
-    // QPC frequency for timestamp conversion
+    // QPC frequency for timestamp conversion and pacing
     LARGE_INTEGER qpcFreq;
     QueryPerformanceFrequency(&qpcFreq);
     const double hostFreq = static_cast<double>(qpcFreq.QuadPart);
@@ -89,6 +90,42 @@ uint64_t SyntheticSource::Run(SyntheticConfig config, PacketCallback onPacket) {
             default:
                 break;
         }
+    }
+
+    // ── High-resolution pacing setup (QPC-deadline-based waitable timer) ──
+    HANDLE timer = nullptr;
+    bool timerResolutionSet = false;
+    uint64_t packetIntervalQpc = 0;
+    LARGE_INTEGER nextDeadline = {};
+    bool deadlineInitialized = false;
+
+    if (config.pacingEnabled && config.sampleRate > 0) {
+        // Compute per-packet interval in QPC units
+        packetIntervalQpc = static_cast<uint64_t>(
+            static_cast<double>(qpcFreq.QuadPart) *
+            static_cast<double>(config.framesPerPacket) /
+            static_cast<double>(config.sampleRate));
+
+        // Try to create a high-resolution waitable timer (Windows 10+)
+        timer = CreateWaitableTimerExW(
+            nullptr, nullptr,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS);
+
+        if (!timer) {
+            // Fallback: standard waitable timer + 1ms timer resolution
+            timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+            if (timer) {
+                timeBeginPeriod(1);
+                timerResolutionSet = true;
+            }
+        }
+
+        // Initialize deadline to current QPC time
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        nextDeadline.QuadPart = now.QuadPart;
+        deadlineInitialized = true;
     }
 
     // ── Main generation loop ──
@@ -193,24 +230,67 @@ uint64_t SyntheticSource::Run(SyntheticConfig config, PacketCallback onPacket) {
         accumulatedFrames += config.framesPerPacket;
         currentSequence += 1;
 
-        // ── Pace packets to match real-time audio rate ──
-        // Sleep for slightly less than one packet's duration to compensate
-        // for the processing overhead of the callback + queue push + pipe write.
-        // At 480 frames/packet, 48kHz: 10ms per packet → ~100 packets/s.
-        // Windows Sleep() can overshoot by ~1-2ms, so we subtract a margin.
-        if (config.pacingEnabled && config.sampleRate > 0) {
-            const double packetDurationMs =
-                (static_cast<double>(config.framesPerPacket) /
-                 static_cast<double>(config.sampleRate)) * 1000.0;
-            // Subtract 0.5ms margin for processing time; Sleep granularity
-            // on Windows is ~1-2ms, so actual rate may be 60-100 packets/s.
-            const DWORD sleepMs = (packetDurationMs > 1.0)
-                ? static_cast<DWORD>(packetDurationMs - 0.5)
-                : 0;
-            if (sleepMs > 0) {
-                Sleep(sleepMs);
+        // ── Pace: wait until next absolute deadline using high-resolution timer ──
+        // Uses QPC-based relative time to avoid FILETIME conversion issues.
+        if (config.pacingEnabled && deadlineInitialized) {
+            nextDeadline.QuadPart += static_cast<LONGLONG>(packetIntervalQpc);
+
+            // Compute remaining time from NOW to deadline in QPC ticks
+            LARGE_INTEGER nowQpc;
+            QueryPerformanceCounter(&nowQpc);
+            int64_t remainingQpc = nextDeadline.QuadPart - nowQpc.QuadPart;
+
+            if (remainingQpc > 0) {
+                // Convert remaining QPC ticks to 100ns units for relative timer.
+                // SetWaitableTimer relative time: negative value in 100ns intervals.
+                int64_t relativeWait100ns = -static_cast<int64_t>(
+                    (static_cast<double>(remainingQpc) * 10000000.0) /
+                    static_cast<double>(qpcFreq.QuadPart));
+
+                if (timer && relativeWait100ns < 0) {
+                    LARGE_INTEGER dueTime;
+                    dueTime.QuadPart = relativeWait100ns;
+                    if (SetWaitableTimer(timer, &dueTime, 0, nullptr, nullptr, FALSE)) {
+                        WaitForSingleObject(timer, 50);
+                    } else {
+                        // SetWaitableTimer failed — fallback to Sleep
+                        if (!timerResolutionSet) {
+                            timeBeginPeriod(1);
+                            timerResolutionSet = true;
+                        }
+                        DWORD sleepMs = static_cast<DWORD>(
+                            remainingQpc * 1000 / qpcFreq.QuadPart);
+                        if (sleepMs > 0) Sleep(sleepMs);
+                    }
+                } else {
+                    // No timer available — fallback: Sleep with 1ms resolution
+                    if (!timerResolutionSet) {
+                        timeBeginPeriod(1);
+                        timerResolutionSet = true;
+                    }
+                    DWORD sleepMs = static_cast<DWORD>(
+                        remainingQpc * 1000 / qpcFreq.QuadPart);
+                    if (sleepMs > 0) Sleep(sleepMs);
+                }
+            } else {
+                // Deadline already passed — handle miss
+                int64_t missedIntervals = (-remainingQpc) / static_cast<int64_t>(packetIntervalQpc);
+                if (missedIntervals > 0) {
+                    accumulatedFrames += static_cast<uint64_t>(missedIntervals) * config.framesPerPacket;
+                    currentSequence += static_cast<uint64_t>(missedIntervals);
+                    // Advance deadline further by the missed intervals
+                    nextDeadline.QuadPart += static_cast<LONGLONG>(missedIntervals * packetIntervalQpc);
+                }
             }
         }
+    }
+
+    // ── Cleanup ──
+    if (timer) {
+        CloseHandle(timer);
+    }
+    if (timerResolutionSet) {
+        timeEndPeriod(1);
     }
 
     return packetsGenerated;
