@@ -1,6 +1,8 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as crypto from 'crypto';
 import * as net from 'net';
+import * as fs from 'fs';
+import * as path from 'path';
 import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser.js';
 import { PcmBridge } from './PcmBridge.js';
 import {
@@ -9,6 +11,16 @@ import {
   HelperDiagnostics,
   HelperState,
 } from './ControlClient.js';
+
+// Diagnostic log file for audio startup debugging (ESM-compatible path)
+import { fileURLToPath } from 'url';
+const _dirname = path.dirname(fileURLToPath(import.meta.url));
+const DIAG_LOG = path.join(_dirname, '..', '..', '..', 'audio-diag.log');
+function diag(msg: string): void {
+  try {
+    fs.appendFileSync(DIAG_LOG, `${new Date().toISOString().slice(11, 23)} ${msg}\n`);
+  } catch { /* best effort */ }
+}
 
 // ── Types ──
 
@@ -151,24 +163,39 @@ export class AudioHelperManager {
 
     try {
       // 1. Spawn the helper process
-      console.log('[AudioHelper] Spawning helper:', this.config.helperPath);
+      const helperPath = this.config.helperPath;
+      diag(`Spawning helper: ${helperPath}`);
+      console.log(`[AudioHelper] Spawning helper: ${helperPath}`);
       await this.spawnHelper();
-      console.log('[AudioHelper] Helper spawned, PID:', this.helper?.pid);
+
+      // Verify helper is alive
+      if (this.helper && this.helper.exitCode !== null) {
+        const msg = `Helper exited during startup with code ${this.helper.exitCode}`;
+        diag(`FAIL: ${msg}`);
+        console.error(`[AudioHelper] ${msg}`);
+        throw new Error(msg);
+      }
+      diag(`Helper spawned, PID=${this.helper?.pid}`);
+      console.log(`[AudioHelper] Helper spawned, PID: ${this.helper?.pid}`);
 
       // 2. Connect to control named pipe
-      console.log('[AudioHelper] Connecting to control pipe:', this.ctrlPipeName);
+      diag(`Connecting to control pipe...`);
+      console.log(`[AudioHelper] Connecting to control pipe: ${this.ctrlPipeName}`);
       this.control = new ControlClient(this.ctrlPipeName, this.sessionId, this.authToken);
       await this.control.connect(5000);
+      diag(`Control pipe connected`);
       console.log('[AudioHelper] Control pipe connected');
 
       // 3. Perform handshake
       this.state = 'handshaking';
+      diag(`Sending hello...`);
       console.log('[AudioHelper] Sending hello...');
       const helloResp = await this.control.hello();
       if (!helloResp.success) {
         throw new Error(`Handshake failed: ${helloResp.error ?? 'unknown'}`);
       }
-      console.log('[AudioHelper] Hello handshake complete, helper version:', helloResp.result?.helperVersion);
+      diag(`Hello handshake complete`);
+      console.log(`[AudioHelper] Hello handshake complete, helper version: ${helloResp.result?.helperVersion}`);
 
       // 4. Connect PCM named pipe
       await this.connectPcmPipe();
@@ -177,8 +204,10 @@ export class AudioHelperManager {
       this.state = 'ready';
       this.startDiagnostics();
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      diag(`FAIL: ${msg}`);
       this.state = 'error';
-      this.lastError_ = err instanceof Error ? err.message : String(err);
+      this.lastError_ = msg;
       await this.cleanup();
       throw err;
     }

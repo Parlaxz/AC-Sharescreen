@@ -131,12 +131,24 @@ function Start-ViteDevServer {
     Write-Log "Building native helper (C++)..."
     Push-Location $ProjectRoot
     try {
-        $proc = Start-Process -FilePath "cmake.cmd" -ArgumentList @("--build", (Join-Path (Join-Path $ProjectRoot "native") (Join-Path "audio-helper" "build")), "--config", "Release") -NoNewWindow -Wait -PassThru
-        if ($proc.ExitCode -ne 0) {
-            Write-Log "WARNING: C++ build failed (exit: $($proc.ExitCode)) — audio helper may be stale"
-        } else {
-            Write-Log "C++ helper built successfully"
+        $cmakeOpts = @("--build", (Join-Path (Join-Path $ProjectRoot "native") (Join-Path "audio-helper" "build")), "--config", "Release")
+        # Try cmake.exe from PATH; fall back to full Program Files path
+        $cmakePath = (Get-Command "cmake.exe" -ErrorAction SilentlyContinue).Source
+        if (-not $cmakePath) {
+            $cmakePath = "C:\Program Files\CMake\bin\cmake.exe"
         }
+        if (Test-Path $cmakePath) {
+            $proc = Start-Process -FilePath $cmakePath -ArgumentList $cmakeOpts -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) {
+                Write-Log "WARNING: C++ build failed (exit: $($proc.ExitCode)) — audio helper may be stale"
+            } else {
+                Write-Log "C++ helper built successfully"
+            }
+        } else {
+            Write-Log "WARNING: cmake.exe not found — skipping C++ build"
+        }
+    } catch {
+        Write-Log "WARNING: C++ build skipped: $_"
     } finally { Pop-Location }
 
     Write-Log "Building workspace packages..."
