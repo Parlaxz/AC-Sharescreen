@@ -1114,7 +1114,11 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
     totalPackets_.fetch_add(1, std::memory_order_relaxed);
     totalPayloadBytes_.fetch_add(hdr.payloadBytes, std::memory_order_relaxed);
 
-    return pcmWriter_.Queue().TryPush(std::move(pcmPacket));
+    // Best-effort push: if the queue is full, the packet is silently dropped
+    // (counted in pcmWriter_.Queue().DroppedCount()) but the capture source
+    // MUST keep running. Returning false would stop the entire capture.
+    pcmWriter_.Queue().TryPush(std::move(pcmPacket));
+    return true; // Always continue — dropped packets are counted but don't stop capture
 }
 
 // ========================================================================

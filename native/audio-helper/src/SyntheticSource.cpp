@@ -192,6 +192,25 @@ uint64_t SyntheticSource::Run(SyntheticConfig config, PacketCallback onPacket) {
         // ── Advance state for next packet ──
         accumulatedFrames += config.framesPerPacket;
         currentSequence += 1;
+
+        // ── Pace packets to match real-time audio rate ──
+        // Sleep for slightly less than one packet's duration to compensate
+        // for the processing overhead of the callback + queue push + pipe write.
+        // At 480 frames/packet, 48kHz: 10ms per packet → ~100 packets/s.
+        // Windows Sleep() can overshoot by ~1-2ms, so we subtract a margin.
+        if (config.pacingEnabled && config.sampleRate > 0) {
+            const double packetDurationMs =
+                (static_cast<double>(config.framesPerPacket) /
+                 static_cast<double>(config.sampleRate)) * 1000.0;
+            // Subtract 0.5ms margin for processing time; Sleep granularity
+            // on Windows is ~1-2ms, so actual rate may be 60-100 packets/s.
+            const DWORD sleepMs = (packetDurationMs > 1.0)
+                ? static_cast<DWORD>(packetDurationMs - 0.5)
+                : 0;
+            if (sleepMs > 0) {
+                Sleep(sleepMs);
+            }
+        }
     }
 
     return packetsGenerated;

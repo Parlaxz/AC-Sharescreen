@@ -25,6 +25,7 @@ struct SyntheticConfig {
     uint32_t framesPerPacket = 480;  // 10ms at 48kHz
     uint32_t totalPackets = 0;       // 0 = infinite (stop via callback returning false)
     uint32_t streamGeneration = 0;
+    bool pacingEnabled = true;       // Sleep between packets to match real-time rate
 };
 
 /// Deterministic PCM generator that produces AudioPackets.
