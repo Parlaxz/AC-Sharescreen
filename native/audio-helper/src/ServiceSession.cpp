@@ -551,6 +551,7 @@ void ServiceSession::ControlThread() {
                     resp.Set("result", "{}");
                     std::string respStr = resp.Str();
 
+                    respStr += '\n';
                     DWORD bytesWritten = 0;
                     WriteFile(hPipe, respStr.data(),
                               static_cast<DWORD>(respStr.size()),
@@ -573,6 +574,7 @@ void ServiceSession::ControlThread() {
                     resp.Set("error", "unknown-command");
                     resp.Set("result", "{}");
                     std::string respStr = resp.Str();
+                    respStr += '\n';
 
                     DWORD bytesWritten = 0;
                     WriteFile(hPipe, respStr.data(),
@@ -581,7 +583,8 @@ void ServiceSession::ControlThread() {
                     continue;
                 }
 
-                // Send response
+                // Send response (add newline delimiter for byte-mode protocol)
+                response += '\n';
                 DWORD bytesWritten = 0;
                 WriteFile(hPipe, response.data(),
                           static_cast<DWORD>(response.size()),
