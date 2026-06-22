@@ -133,32 +133,9 @@ export class ProcessAudioController {
       }
       this.audioTrack = tracks[0];
 
-      // 8. Wait for worklet to be primed (or timeout)
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          this.workletNode!.port.onmessage = null;
-          reject(new Error('Priming timeout: no PCM received within 5000ms'));
-        }, this.PRIMING_TIMEOUT_MS);
-
-        // Override the worklet onmessage to catch the primed event
-        const originalHandler = this.workletNode.port.onmessage;
-        this.workletNode.port.onmessage = (event: MessageEvent) => {
-          const msg = event.data;
-          if (!msg || typeof msg !== 'object') return;
-
-          if (msg.type === 'pcm:primed') {
-            clearTimeout(timeout);
-            this.state = 'primed';
-            this.onStateChange?.('primed');
-            // Restore the original handler for subsequent messages
-            this.workletNode!.port.onmessage = originalHandler;
-            resolve();
-          } else if (originalHandler) {
-            // Forward non-priming messages to the original handler
-            originalHandler(event);
-          }
-        };
-      });
+      // Note: priming is NOT awaited here. The consumer is ready, but
+      // no PCM can arrive until the producer starts. Call waitUntilPrimed()
+      // after starting the native capture producer.
     } catch (err) {
       this.state = 'error';
       this.onStateChange?.('error');
@@ -205,6 +182,43 @@ export class ProcessAudioController {
 
   getState(): AudioWorkletState {
     return this.state;
+  }
+
+  /**
+   * Wait until the worklet ring buffer reaches its priming target.
+   * The native capture producer MUST already be running — no PCM can
+   * arrive and trigger priming until the producer is active.
+   * Rejects with a timeout error if priming does not complete within
+   * PRIMING_TIMEOUT_MS (5s).
+   */
+  async waitUntilPrimed(): Promise<void> {
+    if (this.state === 'primed') return;
+    if (!this.workletNode) throw new Error('Worklet not initialized');
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.workletNode!.port.onmessage = null;
+        this.state = 'error';
+        this.onStateChange?.('error');
+        reject(new Error('Priming timeout: no PCM received within 5000ms'));
+      }, this.PRIMING_TIMEOUT_MS);
+
+      const originalHandler = this.workletNode!.port.onmessage;
+      this.workletNode!.port.onmessage = (event: MessageEvent) => {
+        const msg = event.data;
+        if (!msg || typeof msg !== 'object') return;
+
+        if (msg.type === 'pcm:primed') {
+          clearTimeout(timeout);
+          this.state = 'primed';
+          this.onStateChange?.('primed');
+          this.workletNode!.port.onmessage = originalHandler;
+          resolve();
+        } else if (originalHandler) {
+          originalHandler(event);
+        }
+      };
+    });
   }
 
   async resume(): Promise<void> {

@@ -30,7 +30,6 @@ export function Dashboard() {
   const publisherManagerRef = useRef<PublisherManager | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
-  const portPromiseRef = useRef<Promise<MessagePort>>();
   const autoplayTriedRef = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mediaStats, setMediaStats] = useState<MediaStatsSnapshot | null>(null);
@@ -72,23 +71,30 @@ export function Dashboard() {
     })();
   }, []);
 
-  // Initialize port promise for audio pipeline
-  useEffect(() => {
-    portPromiseRef.current = new Promise<MessagePort>((resolve) => {
-      const handler = (event: MessageEvent) => {
-        if (event.data?.type === 'pcm:port' && event.ports?.length > 0) {
-          resolve(event.ports[0]);
-          window.removeEventListener('message', handler);
-        }
-      };
-      window.addEventListener('message', handler);
-    });
-  }, []);
-
   // Cleanup viewer on unmount
   useEffect(() => {
     return () => { viewerRef.current?.disconnect(); };
   }, []);
+
+  // ── Audio port promise (fresh listener per share attempt) ──
+
+  function waitForNextAudioPort(): Promise<MessagePort> {
+    return new Promise<MessagePort>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        window.removeEventListener('message', handler);
+        reject(new Error('Audio port timeout'));
+      }, 5000);
+
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type !== 'pcm:port' || !event.ports?.[0]) return;
+        clearTimeout(timeout);
+        window.removeEventListener('message', handler);
+        resolve(event.ports[0]);
+      };
+
+      window.addEventListener('message', handler);
+    });
+  }
 
   // Sync state to tray
   useEffect(() => {
@@ -310,22 +316,26 @@ export function Dashboard() {
       if (withAudio) {
         setAudioEnabled(true);
 
-        // Step 1: Request PCM port from main process
+        // 1. Create fresh port listener (not reused from previous share)
+        const portPromise = waitForNextAudioPort();
         await api?.requestAudioPort();
 
-        // Step 2: Wait for the MessagePort from main process
-        const port = await portPromiseRef.current!;
+        // 2. Await the MessagePort transferred from main process
+        const port = await portPromise;
 
-        // Step 3: Create AudioContext + worklet, wait for priming
+        // 3. Create AudioContext + worklet (consumer ready, no priming wait)
         const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
         const controller = new ProcessAudioController();
         await controller.initialize(port);
 
-        // Step 4: Now that renderer is ready, start native capture
+        // 4. Register controller before starting capture (publisher needs the track)
+        mgr.setAudioController(controller);
+
+        // 5. Start native capture PRODUCER (PCM now flows to the ready consumer)
         await api?.startSyntheticAudio(0);
 
-        // Step 5: Set audio controller on publisher manager
-        mgr.setAudioController(controller);
+        // 6. Wait for the worklet ring buffer to reach priming depth
+        await controller.waitUntilPrimed();
       }
 
       const stream = await mgr.startCapture({
