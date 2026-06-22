@@ -45,6 +45,9 @@ public:
     /// @return Number of packets generated
     uint64_t Run(SyntheticConfig config, PacketCallback onPacket);
 
+    /// Returns the QPC frequency (ticks per second), cached after first call.
+    static uint64_t GetQpcFrequency();
+
 private:
     void GenerateTone(float* buffer, uint32_t frames, uint32_t channels,
                       uint64_t frameIndex, float amplitude);

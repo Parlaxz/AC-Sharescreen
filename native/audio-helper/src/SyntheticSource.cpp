@@ -10,6 +10,17 @@
 
 namespace screenlink::audio {
 
+// ── Static helper ──
+
+uint64_t SyntheticSource::GetQpcFrequency() {
+    static uint64_t freq = []() {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return static_cast<uint64_t>(f.QuadPart);
+    }();
+    return freq;
+}
+
 // ── Private helpers ──
 
 void SyntheticSource::GenerateTone(float* buffer, uint32_t frames,

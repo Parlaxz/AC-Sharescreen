@@ -6,6 +6,65 @@
 
 #include <cstring>
 #include <system_error>
+#include <vector>
+
+// ── Helper: Create SECURITY_ATTRIBUTES restricted to current user only ──
+namespace {
+
+bool CreateCurrentUserSecurityAttributes(SECURITY_ATTRIBUTES& sa,
+                                          std::vector<char>& secDescBuf,
+                                          std::vector<char>& aclBuf) {
+    // 1. Get the current process token
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+
+    // 2. Get the user SID from the token
+    DWORD tokenInfoLen = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &tokenInfoLen);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        CloseHandle(token);
+        return false;
+    }
+    std::vector<char> tokenInfoBuf(tokenInfoLen);
+    TOKEN_USER* tokenUser = reinterpret_cast<TOKEN_USER*>(tokenInfoBuf.data());
+    if (!GetTokenInformation(token, TokenUser, tokenUser, tokenInfoLen, &tokenInfoLen)) {
+        CloseHandle(token);
+        return false;
+    }
+    CloseHandle(token);
+
+    // 3. Build ACL with one ACE: ALLOW current user full access
+    aclBuf.resize(sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) +
+                  GetLengthSid(tokenUser->User.Sid) - sizeof(DWORD));
+    PACL acl = reinterpret_cast<PACL>(aclBuf.data());
+    if (!InitializeAcl(acl, static_cast<DWORD>(aclBuf.size()), ACL_REVISION)) {
+        return false;
+    }
+    if (!AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, tokenUser->User.Sid)) {
+        return false;
+    }
+
+    // 4. Initialize security descriptor
+    secDescBuf.resize(SECURITY_DESCRIPTOR_MIN_LENGTH);
+    PSECURITY_DESCRIPTOR sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(secDescBuf.data());
+    if (!InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION)) {
+        return false;
+    }
+    if (!SetSecurityDescriptorDacl(sd, TRUE, acl, FALSE)) {
+        return false;
+    }
+
+    // 5. Set up SECURITY_ATTRIBUTES
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+
+    return true;
+}
+
+} // anonymous namespace
 
 namespace screenlink::audio {
 
@@ -138,12 +197,14 @@ PcmPipeWriter::~PcmPipeWriter() {
     Stop();
 }
 
-bool PcmPipeWriter::Start(const std::string& pipeName) {
+bool PcmPipeWriter::Start(const std::string& pipeName, uint32_t expectedClientPid) {
     if (running_.load()) {
         return false; // already running
     }
 
     pipeName_ = pipeName;
+    expectedClientPid_ = expectedClientPid;
+    clientConnected_.store(false);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -183,15 +244,25 @@ void PcmPipeWriter::Stop() {
 
 void PcmPipeWriter::ThreadFunc() {
     // ── 1. Create named pipe (server, write-only) ──
+
+    // Security: restrict pipe access to current user only
+    SECURITY_ATTRIBUTES sa = {};
+    std::vector<char> secDescBuf;
+    std::vector<char> aclBuf;
+    LPSECURITY_ATTRIBUTES lpSa = nullptr;
+    if (CreateCurrentUserSecurityAttributes(sa, secDescBuf, aclBuf)) {
+        lpSa = &sa;
+    }
+
     HANDLE hPipe = CreateNamedPipeA(
         pipeName_.c_str(),
-        PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1,                     // max instances
-        kMaxPcmPacketBytes,    // outbound buffer size
+        65536,                 // outbound buffer size = 64KB
         0,                     // inbound buffer size (not used)
         0,                     // default client timeout
-        nullptr);              // default security attributes
+        lpSa);                 // security attributes
 
     if (hPipe == INVALID_HANDLE_VALUE) {
         running_.store(false);
@@ -265,6 +336,25 @@ void PcmPipeWriter::ThreadFunc() {
     // else: synchronous connection succeeded
 
     CloseHandle(connectEvent);
+
+    // ── Verify client PID ──
+    {
+        ULONG clientPid = 0;
+        if (GetNamedPipeClientProcessId(hPipe, &clientPid) && clientPid != 0 &&
+            expectedClientPid_ != 0 && clientPid != expectedClientPid_) {
+            // Wrong client — reject and exit
+            CloseHandle(hPipe);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pipe_ = nullptr;
+            }
+            running_.store(false);
+            return;
+        }
+    }
+
+    // Signal that PCM pipe client is connected
+    clientConnected_.store(true);
 
     // ── 3. Main loop: read from queue, write to pipe ──
     while (running_.load()) {

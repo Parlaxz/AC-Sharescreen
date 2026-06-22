@@ -200,6 +200,56 @@ private:
     std::vector<std::pair<std::string, std::string>> pairs_;
 };
 
+// ── Helper: Create SECURITY_ATTRIBUTES restricted to current user only ──
+
+bool CreateCurrentUserSecurityAttributes(SECURITY_ATTRIBUTES& sa,
+                                          std::vector<char>& secDescBuf,
+                                          std::vector<char>& aclBuf) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+
+    DWORD tokenInfoLen = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &tokenInfoLen);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        CloseHandle(token);
+        return false;
+    }
+    std::vector<char> tokenInfoBuf(tokenInfoLen);
+    TOKEN_USER* tokenUser = reinterpret_cast<TOKEN_USER*>(tokenInfoBuf.data());
+    if (!GetTokenInformation(token, TokenUser, tokenUser, tokenInfoLen, &tokenInfoLen)) {
+        CloseHandle(token);
+        return false;
+    }
+    CloseHandle(token);
+
+    aclBuf.resize(sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) +
+                  GetLengthSid(tokenUser->User.Sid) - sizeof(DWORD));
+    PACL acl = reinterpret_cast<PACL>(aclBuf.data());
+    if (!InitializeAcl(acl, static_cast<DWORD>(aclBuf.size()), ACL_REVISION)) {
+        return false;
+    }
+    if (!AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, tokenUser->User.Sid)) {
+        return false;
+    }
+
+    secDescBuf.resize(SECURITY_DESCRIPTOR_MIN_LENGTH);
+    PSECURITY_DESCRIPTOR sd = reinterpret_cast<PSECURITY_DESCRIPTOR>(secDescBuf.data());
+    if (!InitializeSecurityDescriptor(sd, SECURITY_DESCRIPTOR_REVISION)) {
+        return false;
+    }
+    if (!SetSecurityDescriptorDacl(sd, TRUE, acl, FALSE)) {
+        return false;
+    }
+
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+
+    return true;
+}
+
 // ── Helpers for state-to-string conversion ──
 
 const char* StateToStr(int state) {
@@ -260,7 +310,7 @@ int ServiceSession::Run() {
     startTime_ = std::chrono::steady_clock::now();
 
     // Start PCM writer (creates pipe and waits for connection in its own thread)
-    if (!pcmWriter_.Start(config_.pcmPipeName)) {
+    if (!pcmWriter_.Start(config_.pcmPipeName, config_.parentPid)) {
         std::cerr << "Failed to start PCM pipe writer\n";
         return static_cast<int>(ExitCode::kServeFailed);
     }
@@ -302,15 +352,25 @@ int ServiceSession::Run() {
 
 void ServiceSession::ControlThread() {
     // Create the control named pipe (message mode)
+
+    // Security: restrict pipe access to current user only
+    SECURITY_ATTRIBUTES sa = {};
+    std::vector<char> secDescBuf;
+    std::vector<char> aclBuf;
+    LPSECURITY_ATTRIBUTES lpSa = nullptr;
+    if (CreateCurrentUserSecurityAttributes(sa, secDescBuf, aclBuf)) {
+        lpSa = &sa;
+    }
+
     HANDLE hPipe = CreateNamedPipeA(
         config_.controlPipeName.c_str(),
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1,        // max instances
         65536,    // out buffer
         65536,    // in buffer
         0,        // default timeout
-        nullptr); // default security attributes
+        lpSa);    // security attributes
 
     if (hPipe == INVALID_HANDLE_VALUE) {
         std::cerr << "Failed to create control pipe: " << GetLastError() << "\n";
@@ -339,6 +399,17 @@ void ServiceSession::ControlThread() {
                 if (running_.load()) {
                     Sleep(10);
                 }
+                continue;
+            }
+        }
+
+        // Verify client PID matches expected parent
+        {
+            ULONG clientPid = 0;
+            if (GetNamedPipeClientProcessId(hPipe, &clientPid) && clientPid != 0 &&
+                config_.parentPid != 0 && clientPid != config_.parentPid) {
+                // Client PID doesn't match expected parent — disconnect
+                DisconnectNamedPipe(hPipe);
                 continue;
             }
         }
@@ -684,6 +755,34 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
 
     state_.store(static_cast<SessionState>(2)); // kCapturing
 
+    // Wait for PCM pipe client to be connected before starting capture
+    {
+        int waitCount = 0;
+        while (!pcmWriter_.IsClientConnected() && waitCount < 100) {
+            Sleep(10);
+            waitCount++;
+        }
+        if (!pcmWriter_.IsClientConnected()) {
+            // PCM pipe not connected — abort
+            state_.store(static_cast<SessionState>(0)); // kIdle
+            {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                activeSourceType_ = "";
+            }
+            streamGeneration_.fetch_sub(1);
+            SimpleJson resp;
+            resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+            resp.Set("requestId", static_cast<uint64_t>(0));
+            resp.Set("sessionId", config_.sessionId);
+            resp.Set("success", false);
+            resp.Set("state", "idle");
+            resp.Set("error", "pcm-not-connected");
+            resp.Set("result", "{}");
+            response = resp.Str();
+            return;
+        }
+    }
+
     // Launch synthetic capture thread
     captureThread_ = std::thread(&ServiceSession::RunSyntheticCapture,
                                   this, cfg);
@@ -994,7 +1093,8 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
 
     hdr.sequenceNumber = packet.sequenceNumber;
     hdr.qpcTimestamp = packet.qpcPosition100ns;
-    hdr.qpcFrequency = 10000000; // 10MHz typical QPC frequency representation
+    // Use actual QPC frequency instead of a hardcoded constant
+    hdr.qpcFrequency = SyntheticSource::GetQpcFrequency();
     hdr.devicePosition = packet.devicePosition;
     hdr.sampleRate = 48000;
     hdr.channels = static_cast<uint16_t>(packet.channels);

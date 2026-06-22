@@ -14,7 +14,7 @@ namespace screenlink::audio {
 
 constexpr uint32_t kPcmMagic = 0x50434D21;      // "PCM!" in little-endian
 constexpr uint16_t kPcmWireVersion = 1;
-constexpr size_t kPcmDefaultQueueSize = 128;     // ~1.28s at 10ms packets
+constexpr size_t kPcmDefaultQueueSize = 15;      // ~150ms at 10ms packets
 
 constexpr uint32_t kMaxPcmFramesPerPacket = 960; // 20ms at 48kHz
 constexpr uint32_t kMaxPcmFrameBytes = kMaxPcmFramesPerPacket * 2 * sizeof(float); // 7680
@@ -120,12 +120,14 @@ public:
 
     /// Create named-pipe server on `pipeName` and start the writer thread.
     /// pipeName should be like "\\\\.\\pipe\\screenlink-{session}-pcm"
-    bool Start(const std::string& pipeName);
+    /// expectedClientPid: if non-zero, verify connecting client's PID matches
+    bool Start(const std::string& pipeName, uint32_t expectedClientPid = 0);
 
     /// Signal the writer thread to stop and close the pipe.
     void Stop();
 
     bool IsRunning() const { return running_.load(); }
+    bool IsClientConnected() const { return clientConnected_.load(); }
 
     PcmPacketQueue& Queue() { return queue_; }
     size_t PacketsWritten() const { return packetsWritten_.load(); }
@@ -143,6 +145,8 @@ private:
     mutable std::mutex mutex_;  // protects pipe_ during Start/Stop/ThreadFunc
     std::atomic<size_t> packetsWritten_{0};
     std::atomic<size_t> writeErrors_{0};
+    uint32_t expectedClientPid_ = 0;
+    std::atomic<bool> clientConnected_{false};
     PcmPacketQueue queue_{kPcmDefaultQueueSize};
 };
 
