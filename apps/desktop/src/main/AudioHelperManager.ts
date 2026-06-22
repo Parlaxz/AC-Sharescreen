@@ -198,7 +198,11 @@ export class AudioHelperManager {
       console.log(`[AudioHelper] Hello handshake complete, helper version: ${helloResp.result?.helperVersion}`);
 
       // 4. Connect PCM named pipe
+      diag(`Connecting PCM pipe...`);
+      console.log(`[AudioHelper] Connecting PCM pipe...`);
       await this.connectPcmPipe();
+      diag(`PCM pipe connected`);
+      console.log(`[AudioHelper] PCM pipe connected`);
 
       // 5. Start diagnostics polling
       this.state = 'ready';
@@ -394,10 +398,14 @@ export class AudioHelperManager {
     return new Promise<void>((resolve, reject) => {
       const start = Date.now();
       const timeoutMs = 5000;
+      let attempts = 0;
 
       const tryConnect = () => {
-        if (Date.now() - start > timeoutMs) {
-          reject(new Error('Timeout connecting to PCM pipe'));
+        const elapsed = Date.now() - start;
+        attempts++;
+        if (elapsed > timeoutMs) {
+          diag(`PCM CONNECT TIMEOUT after ${elapsed}ms (${attempts} attempts)`);
+          reject(new Error(`Timeout connecting to PCM pipe after ${elapsed}ms`));
           return;
         }
 
@@ -405,11 +413,13 @@ export class AudioHelperManager {
 
         const onError = () => {
           socket.destroy();
+          diag(`PCM connect attempt ${attempts} failed at ${elapsed}ms`);
           setTimeout(tryConnect, 200);
         };
 
         socket.once('connect', () => {
           socket.removeListener('error', onError);
+          diag(`PCM pipe connected at ${elapsed}ms`);
           this.pcmSocket = socket;
           this.setupPcmSocket(socket);
           resolve();
