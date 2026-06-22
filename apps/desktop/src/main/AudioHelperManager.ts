@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as crypto from 'crypto';
+import * as net from 'net';
 import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser';
 import { PcmBridge } from './PcmBridge';
 import {
@@ -64,7 +65,7 @@ export class AudioHelperManager {
   private helper: ChildProcess | null = null;
   private control: ControlClient | null = null;
   private parser: BinaryPcmParser | null = null;
-  private pcmFd: number | null = null;
+  private pcmSocket: net.Socket | null = null;
 
   private sessionId: string;
   private authToken: string;
@@ -297,27 +298,41 @@ export class AudioHelperManager {
   }
 
   private async connectPcmPipe(): Promise<void> {
-    const fs = await import('fs');
-    const start = Date.now();
-    const timeoutMs = 5000;
+    return new Promise<void>((resolve, reject) => {
+      const start = Date.now();
+      const timeoutMs = 5000;
 
-    while (Date.now() - start < timeoutMs) {
-      try {
-        this.pcmFd = fs.openSync(this.pcmPipeName, 'r');
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
+      const tryConnect = () => {
+        if (Date.now() - start > timeoutMs) {
+          reject(new Error('Timeout connecting to PCM pipe'));
+          return;
+        }
 
-    if (!this.pcmFd) {
-      throw new Error('Timeout connecting to PCM pipe');
-    }
+        try {
+          const socket = net.connect(this.pcmPipeName, () => {
+            this.pcmSocket = socket;
+            this.setupPcmSocket(socket);
+            resolve();
+          });
+          socket.once('error', () => {
+            socket.destroy();
+            setTimeout(tryConnect, 200);
+          });
+        } catch {
+          setTimeout(tryConnect, 200);
+        }
+      };
+      tryConnect();
+    });
+  }
 
-    // Wire up the parser
+  private setupPcmSocket(socket: net.Socket): void {
+    socket.setNoDelay(true);
+
+    // Wire up the parser (same callback logic as before)
     this.parser = new BinaryPcmParser(
       (packet) => {
-        // Update stats
+        // Update stats (same as existing code)
         this.stats.packetCount++;
         this.stats.payloadBytes += packet.header.payloadBytes;
         if (packet.header.flags & 1) this.stats.silentPackets++;
@@ -325,13 +340,8 @@ export class AudioHelperManager {
         if (packet.header.flags & 4) this.stats.timestampErrorPackets++;
 
         // Check stream generation
-        if (
-          this.streamGeneration >= 0 &&
-          packet.header.streamGeneration !== this.streamGeneration
-        ) {
-          this.onErrorCallback?.(
-            `Stream generation mismatch: expected ${this.streamGeneration}, got ${packet.header.streamGeneration}`,
-          );
+        if (this.streamGeneration >= 0 && packet.header.streamGeneration !== this.streamGeneration) {
+          this.onErrorCallback?.(`Stream generation mismatch: expected ${this.streamGeneration}, got ${packet.header.streamGeneration}`);
           return;
         }
 
@@ -347,51 +357,31 @@ export class AudioHelperManager {
       },
     );
 
-    // Start reading PCM pipe asynchronously
-    this.startPcmReadLoop();
-  }
-
-  private async startPcmReadLoop(): Promise<void> {
-    if (!this.pcmFd) return;
-
-    const fs = await import('fs');
-    const buf = Buffer.alloc(65536);
-
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-    while ((this.state as string) !== 'disconnected' && this.pcmFd !== null) {
+    socket.on('data', (chunk: Buffer) => {
       try {
-        const bytesRead = fs.readSync(this.pcmFd, buf, 0, buf.length, null);
-        if (bytesRead > 0) {
-          this.parser!.feed(buf.subarray(0, bytesRead));
-          this.updateParserStats();
-        }
+        this.parser!.feed(chunk);
+        const s = this.parser!.getStats();
+        this.stats.sequenceGaps = s.sequenceGaps;
+        this.stats.malformedPackets = s.malformedPackets;
+        this.stats.silentPackets = s.silentPackets;
+        this.stats.discontinuityPackets = s.discontinuityPackets;
+        this.stats.timestampErrorPackets = s.timestampErrorPackets;
+        this.stats.parserBufferBytes = s.bufferBytes;
+        this.stats.maxParserBufferBytes = s.maxBufferSize;
       } catch (err) {
-        const nodeErr = err as NodeJS.ErrnoException;
-        if (
-          nodeErr.code === 'EOF' ||
-          nodeErr.code === 'PIPE_BROKEN' ||
-          nodeErr.code === 'EPIPE'
-        ) {
-          break;
-        }
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-        if ((this.state as string) !== 'disconnected') {
-          await new Promise((r) => setTimeout(r, 100));
-        }
+        this.onErrorCallback?.(`PCM parse error: ${err}`);
       }
-    }
-  }
+    });
 
-  private updateParserStats(): void {
-    if (!this.parser) return;
-    const s = this.parser.getStats();
-    this.stats.sequenceGaps = s.sequenceGaps;
-    this.stats.malformedPackets = s.malformedPackets;
-    this.stats.silentPackets = s.silentPackets;
-    this.stats.discontinuityPackets = s.discontinuityPackets;
-    this.stats.timestampErrorPackets = s.timestampErrorPackets;
-    this.stats.parserBufferBytes = s.bufferBytes;
-    this.stats.maxParserBufferBytes = s.maxBufferSize;
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      this.lastError_ = err.message;
+      this.stats.malformedPackets++;
+      this.onErrorCallback?.(err.message);
+    });
+
+    socket.on('close', () => {
+      this.pcmSocket = null;
+    });
   }
 
   private startDiagnostics(): void {
@@ -463,15 +453,12 @@ export class AudioHelperManager {
       this.diagnosticsInterval = null;
     }
 
-    // Close PCM pipe
-    if (this.pcmFd !== null) {
+    // Close PCM socket
+    if (this.pcmSocket) {
       try {
-        const fs = await import('fs');
-        fs.closeSync(this.pcmFd);
-      } catch {
-        /* ignore */
-      }
-      this.pcmFd = null;
+        this.pcmSocket.destroy();
+      } catch { /* ignore */ }
+      this.pcmSocket = null;
     }
 
     // Disconnect control client

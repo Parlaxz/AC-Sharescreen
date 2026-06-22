@@ -29,6 +29,7 @@ export class ProcessAudioController {
   private onStateChange: ((state: AudioWorkletState) => void) | null = null;
   private onStats: ((stats: WorkletStatsReport) => void) | null = null;
   private primingTimeout: ReturnType<typeof setTimeout> | null = null;
+  private currentStreamGeneration: number = -1;
 
   readonly TARGET_FRAMES = 3840; // ~80ms at 48kHz
   readonly PRIMING_TIMEOUT_MS = 5000;
@@ -95,6 +96,7 @@ export class ProcessAudioController {
             this.handlePcmPacket(msg.packet);
             break;
           case 'pcm:reset':
+            this.currentStreamGeneration = -1;
             this.workletNode?.port.postMessage({ type: 'pcm:reset' });
             break;
         }
@@ -149,19 +151,31 @@ export class ProcessAudioController {
     }
   }
 
-  private handlePcmPacket(packet: { pcmData: ArrayBufferLike; frameCount: number }): void {
+  private handlePcmPacket(packet: any): void {
     if (!this.workletNode) return;
 
-    // Convert ArrayBuffer to Float32Array
-    const pcmData = new Float32Array(packet.pcmData);
+    // Validate stream generation
+    if (this.currentStreamGeneration < 0) {
+      this.currentStreamGeneration = packet.streamGeneration;
+    } else if (packet.streamGeneration !== this.currentStreamGeneration) {
+      // Old generation — discard
+      return;
+    }
 
-    // Forward to worklet
+    // Forward continuity metadata
+    if (packet.flags & 2 || packet.droppedPackets > 0) {
+      this.workletNode.port.postMessage({ type: 'pcm:discontinuity' });
+    }
+
+    // Forward PCM data with transfer list for zero-copy
+    const pcmFloat32 = new Float32Array(packet.pcmData);
     this.workletNode.port.postMessage(
       {
         type: 'pcm:data',
-        data: pcmData,
+        data: pcmFloat32,
         frameCount: packet.frameCount,
       },
+      packet.pcmData.byteLength > 0 ? [packet.pcmData] : undefined,
     );
   }
 

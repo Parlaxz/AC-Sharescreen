@@ -87,10 +87,12 @@ export class PcmBridge {
       ) as ArrayBuffer,
     };
 
+    // Transfer the ArrayBuffer — zero-copy ownership transfer
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
     this.port.postMessage({
       type: 'pcm:packet',
       packet: rendererPacket,
-    });
+    }, [rendererPacket.pcmData] as unknown as Electron.MessagePortMain[]);
 
     this.packetsForwarded++;
   }

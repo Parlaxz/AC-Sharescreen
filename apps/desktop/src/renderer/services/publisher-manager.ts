@@ -39,6 +39,7 @@ export class PublisherManager {
   private _audioState: AudioState = "disabled";
   private events: PublisherEvents;
   private config: PublisherConfig | null = null;
+  private stopping_: boolean = false;
 
   constructor(events: PublisherEvents) {
     this.events = events;
@@ -66,6 +67,7 @@ export class PublisherManager {
 
   setAudioController(controller: ProcessAudioController): void {
     this.audioController = controller;
+    this.audioTrack = controller.getTrack();
     this._audioState = "active";
   }
 
@@ -145,31 +147,41 @@ export class PublisherManager {
   }
 
   async stopCapture(): Promise<void> {
-    // Stop audio controller
-    if (this.audioController) {
-      await this.audioController.close();
-      this.audioController = null;
+    if (this.stopping_) return;
+    this.stopping_ = true;
+    this.setState("stopping");
+
+    try {
+      // 1. Stop publisher first (before stopping its media tracks)
+      if (this.publisher) {
+        await this.publisher.stopPublishing();
+        await this.publisher.disconnect();
+        this.publisher = null;
+      }
+
+      // 2. Stop audio controller
+      if (this.audioController) {
+        await this.audioController.close();
+        this.audioController = null;
+      }
+
+      // 3. Stop combined stream tracks
+      if (this.combinedStream) {
+        this.combinedStream.getTracks().forEach(t => t.stop());
+        this.combinedStream = null;
+      }
+
+      // 4. Stop capture stream tracks
+      this.captureStream?.getTracks().forEach(t => t.stop());
+      this.captureStream = null;
+      this.audioTrack = null;
+      this._audioState = "disabled";
+      this.config = null;
+
+      this.setState("idle");
+    } finally {
+      this.stopping_ = false;
     }
-
-    // Stop combined stream
-    if (this.combinedStream) {
-      this.combinedStream.getTracks().forEach(t => t.stop());
-      this.combinedStream = null;
-    }
-
-    if (this.publisher) {
-      await this.publisher.stopPublishing();
-      await this.publisher.disconnect();
-      this.publisher = null;
-    }
-
-    this.captureStream?.getTracks().forEach(t => t.stop());
-    this.captureStream = null;
-    this.audioTrack = null;
-    this._audioState = "disabled";
-    this.config = null;
-
-    this.setState("idle");
   }
 
   async setQuality(bitrate: number, width: number, height: number, fps: number): Promise<void> {
@@ -207,7 +219,8 @@ export class PublisherManager {
   }
 
   hasAudio(): boolean {
-    return this.audioTrack !== null && this.audioTrack.readyState === "live";
+    const track = this.audioController?.getTrack() ?? this.audioTrack;
+    return track?.readyState === "live";
   }
 
   destroy(): void {

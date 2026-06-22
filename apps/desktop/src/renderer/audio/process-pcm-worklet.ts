@@ -150,8 +150,8 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
   private ringBuffer: PcmRingBuffer;
   private stats: WorkletStats;
   private primed = false;
-  private primedFrames = 0;
   private discontinuityPending = false;
+  private currentStreamGeneration: number = 0;
 
   constructor(options: AudioWorkletNodeOptions) {
     super();
@@ -187,13 +187,10 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
           this.stats.framesReceived += written;
           this.stats.overrunFrames = this.ringBuffer.overrun;
 
-          // Track primed state
-          if (!this.primed) {
-            this.primedFrames += written;
-            if (this.primedFrames >= kTargetBufferFrames) {
-              this.primed = true;
-              this.port.postMessage({ type: 'pcm:primed' });
-            }
+          // Check if primed — use actual buffer depth, not cumulative
+          if (!this.primed && this.ringBuffer.framesAvailable >= kTargetBufferFrames) {
+            this.primed = true;
+            this.port.postMessage({ type: 'pcm:primed' });
           }
         } else {
           this.stats.invalidMessages++;
@@ -204,14 +201,16 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       case 'pcm:reset': {
         this.ringBuffer.reset();
         this.primed = false;
-        this.primedFrames = 0;
         this.discontinuityPending = false;
+        this.currentStreamGeneration = 0;
         break;
       }
 
       case 'pcm:discontinuity': {
         this.discontinuityPending = true;
         this.stats.discontinuities++;
+        // Flush pre-discontinuity audio from buffer
+        this.ringBuffer.reset();
         break;
       }
 
@@ -234,20 +233,22 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
 
     const renderQuantum = output[0].length; // Typically 128
 
-    // Zero-fill output initially (underrun case handled by ring buffer read)
+    // If not primed yet, output silence without consuming buffer
+    if (!this.primed) {
+      for (let ch = 0; ch < output.length; ch++) {
+        output[ch].fill(0);
+      }
+      this.stats.silentFrames += renderQuantum;
+      return true;
+    }
+
+    // Normal processing
     const framesRead = this.ringBuffer.read(output, renderQuantum);
     this.stats.framesRendered += framesRead;
     this.stats.underrunFrames = this.ringBuffer.underrun;
 
     if (framesRead === 0) {
       this.stats.silentFrames += renderQuantum;
-    }
-
-    // Track discontinuity on this render quantum
-    if (this.discontinuityPending) {
-      this.discontinuityPending = false;
-      // Zero out this quantum to avoid audible glitch from stale data
-      // The ring buffer already dropped stale data
     }
 
     // Update buffer depth stats

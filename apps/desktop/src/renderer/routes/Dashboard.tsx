@@ -28,6 +28,7 @@ export function Dashboard() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewerRef = useRef<ViewerClient | null>(null);
   const publisherManagerRef = useRef<PublisherManager | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const fullscreenContainerRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mediaStats, setMediaStats] = useState<MediaStatsSnapshot | null>(null);
@@ -109,15 +110,6 @@ export function Dashboard() {
     const el = videoRef.current;
     if (el) el.volume = remoteVolume;
   }, [remoteVolume]);
-
-  // Video event handlers for autoplay detection
-  const handleVideoPlay = useCallback(() => {
-    setShowEnableAudioButton(false);
-  }, []);
-
-  const handleVideoError = useCallback(() => {
-    setShowEnableAudioButton(true);
-  }, []);
 
   // Start/poll WebRTC stats when viewing
   useEffect(() => {
@@ -202,16 +194,43 @@ export function Dashboard() {
     try {
       const viewer = new ViewerClient();
       viewerRef.current = viewer;
+
+      // Create a persistent stream for this session
+      const sessionStream = new MediaStream();
+      remoteStreamRef.current = sessionStream;
+
       viewer.on("track", (event: unknown) => {
         const payload = (event as CustomEvent).detail as { track?: MediaStreamTrack; streams?: MediaStream[] };
-        if (payload?.track && videoRef.current) {
-          const stream = payload.streams?.[0] ?? new MediaStream([payload.track]);
-          videoRef.current.srcObject = stream;
-          setRemoteShareState("viewing");
+        if (!payload?.track) return;
+
+        // Add track to persistent stream (don't replace)
+        if (!sessionStream.getTracks().some(t => t.id === payload.track!.id)) {
+          sessionStream.addTrack(payload.track);
         }
+
+        // Attach to video element
+        if (videoRef.current) {
+          videoRef.current.srcObject = sessionStream;
+        }
+
+        setRemoteShareState("viewing");
       });
+
       await viewer.createAndConnect(remoteMediaPassword);
       await viewer.view(remoteStreamId, "Desktop User");
+
+      // Attempt autoplay after stream is set up
+      // (the 'track' event above may fire before or after view completes)
+      setTimeout(async () => {
+        if (videoRef.current && videoRef.current.srcObject) {
+          try {
+            await videoRef.current.play();
+          } catch {
+            // Autoplay blocked — show Enable Audio button
+            setShowEnableAudioButton(true);
+          }
+        }
+      }, 500);
     } catch (err) {
       console.error("Remote view failed:", err);
       setRemoteShareState("error");
@@ -320,6 +339,9 @@ export function Dashboard() {
       setLocalShareState("error");
       publisherManagerRef.current?.stopCapture().catch(() => {});
       publisherManagerRef.current = null;
+      // Also stop audio if it was started
+      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+      api?.stopAudio().catch(() => {});
     }
   }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials]);
 
@@ -339,8 +361,27 @@ export function Dashboard() {
     await publisherManagerRef.current?.stopCapture();
     publisherManagerRef.current = null;
     clearLocalMediaCredentials();
+
+    // Stop audio helper
+    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    if (api) {
+      try {
+        await api.stopAudio();
+      } catch { /* ignore */ }
+    }
+
     setLocalShareState("idle");
   }, [clearLocalMediaCredentials]);
+
+  async function handleEnableAudio() {
+    if (!videoRef.current) return;
+    try {
+      await videoRef.current.play();
+      setShowEnableAudioButton(false);
+    } catch {
+      // Still blocked
+    }
+  }
 
   // ── Render ────────────────────────────────────────────────
 
@@ -449,8 +490,6 @@ export function Dashboard() {
         }}>
           <video ref={videoRef} autoPlay playsInline
             muted={remoteMuted}
-            onPlay={handleVideoPlay}
-            onError={handleVideoError}
             onDoubleClick={toggleFullscreen}
             style={{ width: "100%", height: "100%", display: remoteShareState === "viewing" ? "block" : "none", background: "#000", objectFit: "contain", cursor: "pointer" }} />
           {remoteShareState === "viewing" && (
@@ -488,7 +527,7 @@ export function Dashboard() {
           )}
           {/* Enable Audio button shown when autoplay is blocked */}
           {showEnableAudioButton && remoteShareState === "viewing" && (
-            <button onClick={() => videoRef.current?.play()} className="ghost"
+            <button onClick={handleEnableAudio} className="ghost"
               style={{ position: "absolute", bottom: "0.5rem", right: "0.5rem", background: "rgba(0,0,0,0.6)", color: "#fff", fontSize: "0.75rem", padding: "0.25rem 0.5rem", borderRadius: "4px", border: "none", cursor: "pointer", zIndex: 10 }}>
               🔈 Enable Audio
             </button>

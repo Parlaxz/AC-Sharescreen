@@ -160,6 +160,9 @@ export class MediaStatsPoller {
       let selectedPairLocalId: string | undefined;
       let selectedPairRemoteId: string | undefined;
       const candidates = new Map<string, { candidateType: string; protocol: string }>();
+      const codecs = new Map<string, { mimeType: string }>();
+      let audioCodecId: string | undefined;
+      let videoCodecId: string | undefined;
 
       report.forEach(stat => {
         const s = stat as unknown as Record<string, unknown>;
@@ -176,6 +179,7 @@ export class MediaStatsPoller {
           outboundStats.set("nackCount", s.nackCount as number);
           outboundStats.set("pliCount", s.pliCount as number);
           snapshot.qualityLimitation = (s.qualityLimitationReason as string) || "";
+          videoCodecId = (s.codecId as string) || videoCodecId;
         }
 
         if (s.type === "inbound-rtp" && s.kind === "video") {
@@ -191,6 +195,7 @@ export class MediaStatsPoller {
           inboundStats.set("freezeCount", s.freezeCount as number);
           inboundStats.set("nackCount", s.nackCount as number);
           inboundStats.set("pliCount", s.pliCount as number);
+          videoCodecId = (s.codecId as string) || videoCodecId;
         }
 
         if (s.type === "outbound-rtp" && s.kind === "audio") {
@@ -200,6 +205,7 @@ export class MediaStatsPoller {
           audioOutboundStats.set("audioLevel", s.audioLevel as number);
           audioOutboundStats.set("totalAudioEnergy", s.totalAudioEnergy as number);
           audioOutboundStats.set("totalSamplesSent", s.totalSamplesSent as number);
+          audioCodecId = (s.codecId as string) || audioCodecId;
         }
 
         if (s.type === "inbound-rtp" && s.kind === "audio") {
@@ -212,6 +218,7 @@ export class MediaStatsPoller {
           audioInboundStats.set("concealedSamples", s.concealedSamples as number);
           audioInboundStats.set("concealmentEvents", s.concealmentEvents as number);
           audioInboundStats.set("totalSamplesReceived", s.totalSamplesReceived as number);
+          audioCodecId = (s.codecId as string) || audioCodecId;
         }
 
         if (s.type === "remote-inbound-rtp") {
@@ -229,10 +236,15 @@ export class MediaStatsPoller {
         }
 
         if (s.type === "codec") {
-          const codec = s as { mimeType?: string };
-          if (codec.mimeType?.startsWith("audio/")) {
+          const codec = s as { mimeType?: string; id?: string };
+          if (codec.id) {
+            codecs.set(codec.id, { mimeType: codec.mimeType || '' });
+          }
+          // Fallback: direct match if no id
+          if (codec.mimeType?.startsWith("audio/") && !snapshot.audioCodec) {
             snapshot.audioCodec = codec.mimeType;
-          } else if (codec.mimeType?.startsWith("video/") && !snapshot.codecMimeType) {
+          }
+          if (codec.mimeType?.startsWith("video/") && !snapshot.codecMimeType) {
             snapshot.codecMimeType = codec.mimeType;
           }
         }
@@ -245,6 +257,14 @@ export class MediaStatsPoller {
           });
         }
       });
+
+      // Resolve codecs from active RTP report codecId
+      if (audioCodecId && codecs.has(audioCodecId)) {
+        snapshot.audioCodec = codecs.get(audioCodecId)!.mimeType;
+      }
+      if (videoCodecId && codecs.has(videoCodecId)) {
+        snapshot.codecMimeType = codecs.get(videoCodecId)!.mimeType;
+      }
 
       // Resolve relay status from SELECTED pair only
       const selectedLocal = selectedPairLocalId ? candidates.get(selectedPairLocalId) : undefined;
