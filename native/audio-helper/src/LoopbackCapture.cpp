@@ -17,6 +17,14 @@
 #include <vector>
 #include <system_error>
 
+// Define stream flags that may not be present in older SDK headers.
+#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+#endif
+#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
+#endif
+
 namespace screenlink::audio {
 
 namespace {
@@ -48,17 +56,35 @@ static const GUID IID_IActivateAudioInterfaceCompletionHandler_ = {
     0x41D949AB, 0xD986, 0x43B2, { 0x87, 0x48, 0x0B, 0xA6, 0xE6, 0xE2, 0xE7, 0x8E }
 };
 
-// ── Process-loopback types (declared locally to avoid WinRT/CX dependency) ──
+// ── Process-loopback activation types ──
+
+enum class AudioClientActivationType : int32_t {
+    kDefault = 0,
+    kProcessLoopback = 1,
+};
 
 enum class ProcessLoopbackMode : int32_t {
-    Include = 0,
-    Exclude = 1,
+    kIncludeTargetProcessTree = 0,
+    kExcludeTargetProcessTree = 1,
 };
 
-struct ProcessLoopbackParams {
-    ProcessLoopbackMode mode;
+struct AudioClientProcessLoopbackParams {
     DWORD targetProcessId;
+    ProcessLoopbackMode processLoopbackMode;
 };
+
+// Flat layout suitable for direct use as a PROPVARIANT blob.
+// ActivationType (int32) + targetProcessId (DWORD) + processLoopbackMode (int32) = 12 bytes.
+struct AudioClientActivationParams {
+    AudioClientActivationType activationType;
+    AudioClientProcessLoopbackParams processLoopbackParams;
+};
+
+static_assert(sizeof(AudioClientActivationParams) == 12,
+              "AudioClientActivationParams must be exactly 12 bytes");
+
+// Virtual audio device path for process-loopback capture.
+static const wchar_t kVirtualAudioDeviceProcessLoopback[] = L"VAD\\Process_Loopback";
 
 // ── COM completion handler for async activation ──
 
@@ -152,6 +178,177 @@ void SafeRelease(T*& ptr) {
     }
 }
 
+// ── RAII wrapper for Win32 HANDLE ──
+
+class AutoHandle {
+public:
+    explicit AutoHandle(HANDLE h) noexcept : handle_(h) {}
+    ~AutoHandle() noexcept {
+        if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+    AutoHandle(const AutoHandle&) = delete;
+    AutoHandle& operator=(const AutoHandle&) = delete;
+    AutoHandle(AutoHandle&& other) noexcept : handle_(other.handle_) {
+        other.handle_ = nullptr;
+    }
+    AutoHandle& operator=(AutoHandle&& other) noexcept {
+        if (this != &other) {
+            if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) {
+                CloseHandle(handle_);
+            }
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+    HANDLE Get() const noexcept { return handle_; }
+    bool IsValid() const noexcept {
+        return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+    }
+
+private:
+    HANDLE handle_ = nullptr;
+};
+
+// ── Fixed capture format: 48 kHz, stereo, IEEE float32 ──
+
+static constexpr uint32_t kCaptureSampleRate = 48000;
+static constexpr uint16_t kCaptureChannels = 2;
+static constexpr uint16_t kCaptureBitsPerSample = 32;
+static constexpr uint16_t kCaptureBlockAlign = kCaptureChannels * (kCaptureBitsPerSample / 8); // 8
+static constexpr uint32_t kCaptureAvgBytesPerSec = kCaptureSampleRate * kCaptureBlockAlign;   // 384000
+
+static WAVEFORMATEX MakeCaptureFormat() {
+    WAVEFORMATEX fmt = {};
+    fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    fmt.nChannels = kCaptureChannels;
+    fmt.nSamplesPerSec = kCaptureSampleRate;
+    fmt.wBitsPerSample = kCaptureBitsPerSample;
+    fmt.nBlockAlign = kCaptureBlockAlign;
+    fmt.nAvgBytesPerSec = kCaptureAvgBytesPerSec;
+    fmt.cbSize = 0;
+    return fmt;
+}
+
+// ── Shared activation logic for all capture functions ──
+//
+// Activates the process-loopback virtual device and returns an initialized
+// IAudioClient and IAudioCaptureClient. Caller must CoUninitialize, release
+// all COM pointers, and free |out_handler| via SafeRelease.
+
+struct ActivationResult {
+    bool succeeded = false;
+    std::string failureReason;
+    IAudioClient* audioClient = nullptr;
+    IAudioCaptureClient* captureClient = nullptr;
+    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
+    CaptureActivationHandler* handler = nullptr;
+};
+
+ActivationResult ActivateProcessLoopback(const CaptureConfig& config) {
+    ActivationResult ar;
+
+    // Build activation params for process-loopback
+    AudioClientActivationParams params{};
+    params.activationType = AudioClientActivationType::kProcessLoopback;
+    params.processLoopbackParams.targetProcessId =
+        static_cast<DWORD>(config.targetPid);
+    params.processLoopbackParams.processLoopbackMode =
+        config.includeMode
+            ? ProcessLoopbackMode::kIncludeTargetProcessTree
+            : ProcessLoopbackMode::kExcludeTargetProcessTree;
+
+    PROPVARIANT variant;
+    PropVariantInit(&variant);
+    variant.vt = VT_BLOB;
+    variant.blob.cbSize = sizeof(params);
+    variant.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
+
+    // Create activation handler and begin async activation
+    ar.handler = new CaptureActivationHandler();
+
+    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
+    HRESULT hr = ActivateAudioInterfaceAsync(
+        kVirtualAudioDeviceProcessLoopback,
+        IID_IAudioClient_,
+        &variant,
+        ar.handler,
+        &asyncOp);
+
+    PropVariantClear(&variant);
+
+    if (FAILED(hr)) {
+        ar.failureReason = "ActivateAudioInterfaceAsync failed: "
+            + HresultToString(hr);
+        SafeRelease(asyncOp);
+        SafeRelease(ar.handler);
+        return ar;
+    }
+
+    ar.asyncOp = asyncOp;
+
+    // Wait for activation (up to 10 seconds)
+    if (!ar.handler->Wait(10000)) {
+        ar.failureReason = "Audio interface activation timed out";
+        SafeRelease(asyncOp);
+        SafeRelease(ar.handler);
+        return ar;
+    }
+
+    // Retrieve the activated IAudioClient
+    ar.audioClient = ar.handler->GetAudioClient();
+    HRESULT activateResult = ar.handler->GetResult();
+    if (FAILED(activateResult) || !ar.audioClient) {
+        ar.failureReason = "Audio client activation failed (HRESULT: "
+            + HresultToString(activateResult) + ")";
+        SafeRelease(asyncOp);
+        SafeRelease(ar.handler);
+        return ar;
+    }
+
+    // Initialize audio client with fixed format and autoconvert flags.
+    // Note: No AUDCLNT_STREAMFLAGS_LOOPBACK — process-loopback is implicit
+    // in the virtual device path.
+    WAVEFORMATEX captureFormat = MakeCaptureFormat();
+    REFERENCE_TIME bufferDuration = 100000; // 10 ms in 100-ns units
+    hr = ar.audioClient->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        bufferDuration,
+        0,
+        &captureFormat,
+        nullptr);
+
+    if (FAILED(hr)) {
+        ar.failureReason = "IAudioClient::Initialize failed: "
+            + HresultToString(hr);
+        SafeRelease(ar.audioClient);
+        SafeRelease(asyncOp);
+        SafeRelease(ar.handler);
+        return ar;
+    }
+
+    // Get the capture client
+    hr = ar.audioClient->GetService(
+        IID_IAudioCaptureClient_,
+        reinterpret_cast<void**>(&ar.captureClient));
+
+    if (FAILED(hr) || !ar.captureClient) {
+        ar.failureReason = "GetService(IAudioCaptureClient) failed: "
+            + HresultToString(hr);
+        SafeRelease(ar.captureClient);
+        SafeRelease(ar.audioClient);
+        SafeRelease(asyncOp);
+        SafeRelease(ar.handler);
+        return ar;
+    }
+
+    ar.succeeded = true;
+    return ar;
+}
+
 } // anonymous namespace
 
 // ── IsProcessLoopbackSupported ──
@@ -162,9 +359,9 @@ bool IsProcessLoopbackSupported() {
            osInfo.build >= kMinProcessLoopbackBuild;
 }
 
-// ── RunCaptureWithCallback ──
+// ── RunCaptureWithPacketCallback ──
 
-CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback onFrames) {
+CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCallback onPacket) {
     CaptureResult result;
 
     // 1. Check OS support
@@ -177,166 +374,64 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
         return result;
     }
 
-    // 2. Initialize COM
+    // 2. Enforce duration cap
+    if (config.durationMs > kMaxCaptureTestDurationMs) {
+        result.failureReason = "Capture duration ("
+            + std::to_string(config.durationMs)
+            + " ms) exceeds maximum allowed ("
+            + std::to_string(kMaxCaptureTestDurationMs) + " ms)";
+        return result;
+    }
+
+    // 3. Validate PID creation time (if provided)
+    if (config.expectedCreationTimeUtc100ns != 0) {
+        AutoHandle processHandle(OpenProcess(PROCESS_QUERY_INFORMATION, FALSE,
+                                             config.targetPid));
+        if (!processHandle.IsValid()) {
+            result.failureReason = "Failed to open target process (PID "
+                + std::to_string(config.targetPid)
+                + "): " + std::to_string(GetLastError());
+            return result;
+        }
+        FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+        if (!GetProcessTimes(processHandle.Get(), &createTime, &exitTime,
+                             &kernelTime, &userTime)) {
+            result.failureReason = "GetProcessTimes failed: "
+                + std::to_string(GetLastError());
+            return result;
+        }
+        uint64_t createTime100ns =
+            (static_cast<uint64_t>(createTime.dwHighDateTime) << 32)
+            | static_cast<uint64_t>(createTime.dwLowDateTime);
+        if (createTime100ns != config.expectedCreationTimeUtc100ns) {
+            result.failureReason = "Target process PID "
+                + std::to_string(config.targetPid)
+                + " has been recycled (creation time mismatch)";
+            return result;
+        }
+    }
+
+    // 4. Initialize COM
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         result.failureReason = "CoInitializeEx failed: " + HresultToString(hr);
         return result;
     }
 
-    // 3. Get IMMDeviceEnumerator
-    IMMDeviceEnumerator* pEnumerator = nullptr;
-    hr = CoCreateInstance(CLSID_MMDeviceEnumerator_, nullptr, CLSCTX_ALL,
-                          IID_IMMDeviceEnumerator_,
-                          reinterpret_cast<void**>(&pEnumerator));
-    if (FAILED(hr)) {
-        result.failureReason = "CoCreateInstance(MMDeviceEnumerator) failed: "
-            + HresultToString(hr);
+    // 5. Activate process-loopback virtual device
+    ActivationResult ar = ActivateProcessLoopback(config);
+    if (!ar.succeeded) {
+        result.failureReason = std::move(ar.failureReason);
         CoUninitialize();
         return result;
     }
 
-    // 4. Get default render endpoint
-    IMMDevice* pDevice = nullptr;
-    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
-    if (FAILED(hr)) {
-        result.failureReason = "GetDefaultAudioEndpoint failed: "
-            + HresultToString(hr);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        return result;
-    }
+    IAudioClient* pAudioClient = ar.audioClient;
+    IAudioCaptureClient* pCaptureClient = ar.captureClient;
+    IActivateAudioInterfaceAsyncOperation* asyncOp = ar.asyncOp;
+    CaptureActivationHandler* handler = ar.handler;
 
-    // 5. Get device ID string
-    LPWSTR deviceId = nullptr;
-    hr = pDevice->GetId(&deviceId);
-    if (FAILED(hr)) {
-        result.failureReason = "IMMDevice::GetId failed: "
-            + HresultToString(hr);
-        SafeRelease(pDevice);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        return result;
-    }
-
-    // 6. Prepare process-loopback parameter blob
-    ProcessLoopbackParams loopbackParams;
-    loopbackParams.mode = config.includeMode
-        ? ProcessLoopbackMode::Include
-        : ProcessLoopbackMode::Exclude;
-    loopbackParams.targetProcessId = static_cast<DWORD>(config.targetPid);
-
-    PROPVARIANT variant;
-    PropVariantInit(&variant);
-    variant.vt = VT_BLOB;
-    variant.blob.cbSize = sizeof(loopbackParams);
-    variant.blob.pBlobData = reinterpret_cast<BYTE*>(&loopbackParams);
-
-    // 7. Create activation handler and begin async activation
-    CaptureActivationHandler* handler = new CaptureActivationHandler();
-
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    hr = ActivateAudioInterfaceAsync(deviceId, IID_IAudioClient_,
-                                      &variant, handler, &asyncOp);
-
-    // Clean up resources that are no longer needed
-    PropVariantClear(&variant);
-    CoTaskMemFree(deviceId);
-    SafeRelease(pDevice);
-    SafeRelease(pEnumerator);
-
-    if (FAILED(hr)) {
-        result.failureReason = "ActivateAudioInterfaceAsync failed: "
-            + HresultToString(hr);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 8. Wait for activation (up to 5 seconds)
-    if (!handler->Wait(5000)) {
-        result.failureReason = "Audio interface activation timed out";
-        // Note: Cancel() requires a newer SDK; async operation completes on its own.
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 9. Retrieve the activated IAudioClient
-    IAudioClient* pAudioClient = handler->GetAudioClient();
-    HRESULT activateResult = handler->GetResult();
-    if (FAILED(activateResult) || !pAudioClient) {
-        result.failureReason = "Audio client activation failed (HRESULT: "
-            + HresultToString(activateResult) + ")";
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // pAudioClient has been AddRef'd by the handler; we must Release it later.
-
-    // 10. Get mix format to determine sample rate and channel count
-    WAVEFORMATEXTENSIBLE* pMixFormat = nullptr;
-    hr = pAudioClient->GetMixFormat(reinterpret_cast<WAVEFORMATEX**>(&pMixFormat));
-    if (FAILED(hr) || !pMixFormat) {
-        result.failureReason = "GetMixFormat failed: " + HresultToString(hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    uint32_t sampleRate = pMixFormat->Format.nSamplesPerSec;
-    uint16_t channels = pMixFormat->Format.nChannels;
-
-    // Build the capture format — always IEEE float32, using the mix format's
-    // sample rate and channel count so the engine can support it.
-    WAVEFORMATEX captureFormat = {};
-    captureFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-    captureFormat.nChannels = channels;
-    captureFormat.nSamplesPerSec = sampleRate;
-    captureFormat.wBitsPerSample = 32;
-    captureFormat.nBlockAlign = static_cast<uint16_t>((channels * 32) / 8);
-    captureFormat.nAvgBytesPerSec = sampleRate * captureFormat.nBlockAlign;
-    captureFormat.cbSize = 0;
-
-    CoTaskMemFree(pMixFormat);
-    pMixFormat = nullptr;
-
-    // 11. Initialize audio client in loopback shared mode
-    REFERENCE_TIME bufferDuration = 100000; // 10 ms in 100-ns units
-    hr = pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                   AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                   bufferDuration, 0, &captureFormat, nullptr);
-    if (FAILED(hr)) {
-        result.failureReason = "IAudioClient::Initialize (loopback) failed: "
-            + HresultToString(hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 12. Get the capture client
-    IAudioCaptureClient* pCaptureClient = nullptr;
-    hr = pAudioClient->GetService(IID_IAudioCaptureClient_,
-                                   reinterpret_cast<void**>(&pCaptureClient));
-    if (FAILED(hr) || !pCaptureClient) {
-        result.failureReason = "GetService(IAudioCaptureClient) failed: "
-            + HresultToString(hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 13. Start the audio engine
+    // 6. Start the audio engine
     hr = pAudioClient->Start();
     if (FAILED(hr)) {
         result.failureReason = "IAudioClient::Start failed: "
@@ -349,12 +444,13 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
         return result;
     }
 
-    // 14. Set Pro Audio thread priority
+    // 7. Set Pro Audio thread priority
     DWORD taskIndex = 0;
     HANDLE avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
 
-    // 15. Capture loop
+    // 8. Capture loop
     uint64_t framesCaptured = 0;
+    uint64_t sequenceNumber = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::milliseconds(config.durationMs);
     bool running = true;
@@ -378,28 +474,51 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
             BYTE* pData = nullptr;
             UINT32 numFramesAvailable = 0;
             DWORD flags = 0;
+            UINT64 devicePosition = 0;
+            UINT64 qpcPosition = 0;
 
             hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
-                                            &flags, nullptr, nullptr);
+                                           &flags, &devicePosition, &qpcPosition);
             if (FAILED(hr)) {
                 running = false;
                 break;
             }
 
-            if (numFramesAvailable > 0 && (flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
-                // Data is always float32 because we initialized with IEEE_FLOAT
-                size_t totalSamples =
-                    static_cast<size_t>(numFramesAvailable) * channels;
-                floatBuffer.assign(
-                    reinterpret_cast<float*>(pData),
-                    reinterpret_cast<float*>(pData) + totalSamples);
+            AudioPacket packet{};
+            packet.frameCount = numFramesAvailable;
+            packet.channels = kCaptureChannels;
+            packet.sequenceNumber = sequenceNumber;
+            packet.qpcPosition100ns = qpcPosition;
+            packet.devicePosition = devicePosition;
+            packet.isDiscontinuous =
+                (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+            packet.hasTimestampError =
+                (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
 
-                if (!onFrames(floatBuffer.data(), numFramesAvailable, channels)) {
-                    running = false;
+            if (numFramesAvailable > 0) {
+                size_t totalSamples =
+                    static_cast<size_t>(numFramesAvailable) * kCaptureChannels;
+
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                    // Zero-fill silent frames to preserve timeline
+                    floatBuffer.assign(totalSamples, 0.0f);
+                    packet.isSilent = true;
+                } else {
+                    floatBuffer.assign(
+                        reinterpret_cast<float*>(pData),
+                        reinterpret_cast<float*>(pData) + totalSamples);
                 }
 
-                framesCaptured += numFramesAvailable;
+                packet.frames = floatBuffer.data();
             }
+
+            // Invoke callback — always called even for silent packets
+            if (!onPacket(packet)) {
+                running = false;
+            }
+
+            framesCaptured += numFramesAvailable;
+            sequenceNumber++;
 
             pCaptureClient->ReleaseBuffer(numFramesAvailable);
 
@@ -419,7 +538,7 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
         }
     }
 
-    // 16. Stop the engine
+    // 9. Stop the engine
     pAudioClient->Stop();
 
     // Revert Pro Audio priority
@@ -429,10 +548,10 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
 
     // Populate result
     result.framesCaptured = framesCaptured;
-    result.bytesWritten = framesCaptured * captureFormat.nBlockAlign;
+    result.bytesWritten = framesCaptured * kCaptureBlockAlign;
     result.succeeded = true;
 
-    // 17. Cleanup COM objects
+    // 10. Cleanup COM objects
     SafeRelease(pCaptureClient);
     SafeRelease(pAudioClient);
     SafeRelease(asyncOp);
@@ -440,6 +559,15 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
     CoUninitialize();
 
     return result;
+}
+
+// ── RunCaptureWithCallback (thin wrapper around RunCaptureWithPacketCallback) ──
+
+CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback onFrames) {
+    auto packetCallback = [&onFrames](const AudioPacket& packet) -> bool {
+        return onFrames(packet.frames, packet.frameCount, packet.channels);
+    };
+    return RunCaptureWithPacketCallback(config, packetCallback);
 }
 
 // ── RunCapture (WAV output) ──
@@ -461,162 +589,69 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         return result;
     }
 
-    // 2. Initialize COM
+    // 2. Enforce duration cap
+    if (config.durationMs > kMaxCaptureTestDurationMs) {
+        result.failureReason = "Capture duration ("
+            + std::to_string(config.durationMs)
+            + " ms) exceeds maximum allowed ("
+            + std::to_string(kMaxCaptureTestDurationMs) + " ms)";
+        return result;
+    }
+
+    // 3. Validate PID creation time (if provided)
+    if (config.expectedCreationTimeUtc100ns != 0) {
+        AutoHandle processHandle(OpenProcess(PROCESS_QUERY_INFORMATION, FALSE,
+                                             config.targetPid));
+        if (!processHandle.IsValid()) {
+            result.failureReason = "Failed to open target process (PID "
+                + std::to_string(config.targetPid)
+                + "): " + std::to_string(GetLastError());
+            return result;
+        }
+        FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+        if (!GetProcessTimes(processHandle.Get(), &createTime, &exitTime,
+                             &kernelTime, &userTime)) {
+            result.failureReason = "GetProcessTimes failed: "
+                + std::to_string(GetLastError());
+            return result;
+        }
+        uint64_t createTime100ns =
+            (static_cast<uint64_t>(createTime.dwHighDateTime) << 32)
+            | static_cast<uint64_t>(createTime.dwLowDateTime);
+        if (createTime100ns != config.expectedCreationTimeUtc100ns) {
+            result.failureReason = "Target process PID "
+                + std::to_string(config.targetPid)
+                + " has been recycled (creation time mismatch)";
+            return result;
+        }
+    }
+
+    // 4. Initialize COM
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         result.failureReason = "CoInitializeEx failed: " + HresultToString(hr);
         return result;
     }
 
-    // 3. Get device enumerator
-    IMMDeviceEnumerator* pEnumerator = nullptr;
-    hr = CoCreateInstance(CLSID_MMDeviceEnumerator_, nullptr, CLSCTX_ALL,
-                          IID_IMMDeviceEnumerator_,
-                          reinterpret_cast<void**>(&pEnumerator));
-    if (FAILED(hr)) {
-        result.failureReason = "CoCreateInstance(MMDeviceEnumerator) failed: "
-            + HresultToString(hr);
+    // 5. Activate process-loopback virtual device
+    ActivationResult ar = ActivateProcessLoopback(config);
+    if (!ar.succeeded) {
+        result.failureReason = std::move(ar.failureReason);
         CoUninitialize();
         return result;
     }
 
-    // 4. Get default render endpoint
-    IMMDevice* pDevice = nullptr;
-    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
-    if (FAILED(hr)) {
-        result.failureReason = "GetDefaultAudioEndpoint failed: "
-            + HresultToString(hr);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        return result;
-    }
+    IAudioClient* pAudioClient = ar.audioClient;
+    IAudioCaptureClient* pCaptureClient = ar.captureClient;
+    IActivateAudioInterfaceAsyncOperation* asyncOp = ar.asyncOp;
+    CaptureActivationHandler* handler = ar.handler;
 
-    // 5. Get device ID
-    LPWSTR deviceId = nullptr;
-    hr = pDevice->GetId(&deviceId);
-    if (FAILED(hr)) {
-        result.failureReason = "IMMDevice::GetId failed: "
-            + HresultToString(hr);
-        SafeRelease(pDevice);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        return result;
-    }
+    WAVEFORMATEX captureFormat = MakeCaptureFormat();
 
-    // 6. Prepare process-loopback params
-    ProcessLoopbackParams loopbackParams;
-    loopbackParams.mode = config.includeMode
-        ? ProcessLoopbackMode::Include
-        : ProcessLoopbackMode::Exclude;
-    loopbackParams.targetProcessId = static_cast<DWORD>(config.targetPid);
-
-    PROPVARIANT variant;
-    PropVariantInit(&variant);
-    variant.vt = VT_BLOB;
-    variant.blob.cbSize = sizeof(loopbackParams);
-    variant.blob.pBlobData = reinterpret_cast<BYTE*>(&loopbackParams);
-
-    // 7. Activate with process-loopback
-    CaptureActivationHandler* handler = new CaptureActivationHandler();
-
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    hr = ActivateAudioInterfaceAsync(deviceId, IID_IAudioClient_,
-                                      &variant, handler, &asyncOp);
-
-    PropVariantClear(&variant);
-    CoTaskMemFree(deviceId);
-    SafeRelease(pDevice);
-    SafeRelease(pEnumerator);
-
-    if (FAILED(hr)) {
-        result.failureReason = "ActivateAudioInterfaceAsync failed: "
-            + HresultToString(hr);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 8. Wait for activation
-    if (!handler->Wait(5000)) {
-        result.failureReason = "Audio interface activation timed out";
-        // Note: Cancel() requires a newer SDK; async operation completes on its own.
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    IAudioClient* pAudioClient = handler->GetAudioClient();
-    HRESULT activateResult = handler->GetResult();
-    if (FAILED(activateResult) || !pAudioClient) {
-        result.failureReason = "Audio client activation failed (HRESULT: "
-            + HresultToString(activateResult) + ")";
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 9. Get mix format for sample rate and channel count
-    WAVEFORMATEXTENSIBLE* pMixFormat = nullptr;
-    hr = pAudioClient->GetMixFormat(reinterpret_cast<WAVEFORMATEX**>(&pMixFormat));
-    if (FAILED(hr) || !pMixFormat) {
-        result.failureReason = "GetMixFormat failed: " + HresultToString(hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    uint32_t sampleRate = pMixFormat->Format.nSamplesPerSec;
-    uint16_t channels = pMixFormat->Format.nChannels;
-
-    WAVEFORMATEX captureFormat = {};
-    captureFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-    captureFormat.nChannels = channels;
-    captureFormat.nSamplesPerSec = sampleRate;
-    captureFormat.wBitsPerSample = 32;
-    captureFormat.nBlockAlign = static_cast<uint16_t>((channels * 32) / 8);
-    captureFormat.nAvgBytesPerSec = sampleRate * captureFormat.nBlockAlign;
-    captureFormat.cbSize = 0;
-
-    CoTaskMemFree(pMixFormat);
-    pMixFormat = nullptr;
-
-    // 10. Initialize as loopback
-    REFERENCE_TIME bufferDuration = 100000; // 10 ms
-    hr = pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                   AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                   bufferDuration, 0, &captureFormat, nullptr);
-    if (FAILED(hr)) {
-        result.failureReason = "IAudioClient::Initialize (loopback) failed: "
-            + HresultToString(hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 11. Get capture client
-    IAudioCaptureClient* pCaptureClient = nullptr;
-    hr = pAudioClient->GetService(IID_IAudioCaptureClient_,
-                                   reinterpret_cast<void**>(&pCaptureClient));
-    if (FAILED(hr) || !pCaptureClient) {
-        result.failureReason = "GetService(IAudioCaptureClient) failed: "
-            + HresultToString(hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
-        CoUninitialize();
-        return result;
-    }
-
-    // 12. Open WAV writer (now that we know the format)
+    // 6. Open WAV writer with overwrite flag
     WavWriter writer;
-    if (!writer.Open(result.outputPath, sampleRate, channels, 32)) {
+    if (!writer.Open(result.outputPath, kCaptureSampleRate, kCaptureChannels,
+                     kCaptureBitsPerSample, config.overwrite)) {
         result.failureReason = "Failed to open output WAV file: " + result.outputPath;
         SafeRelease(pCaptureClient);
         SafeRelease(pAudioClient);
@@ -626,7 +661,7 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         return result;
     }
 
-    // 13. Start audio engine
+    // 7. Start audio engine
     hr = pAudioClient->Start();
     if (FAILED(hr)) {
         result.failureReason = "IAudioClient::Start failed: "
@@ -640,11 +675,11 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         return result;
     }
 
-    // 14. Set Pro Audio priority
+    // 8. Set Pro Audio thread priority
     DWORD taskIndex = 0;
     HANDLE avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
 
-    // 15. Capture loop writing frames to WAV
+    // 9. Capture loop writing frames to WAV
     uint64_t framesCaptured = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::milliseconds(config.durationMs);
@@ -652,6 +687,7 @@ CaptureResult RunCapture(const CaptureConfig& config) {
     std::vector<float> floatBuffer;
 
     while (running) {
+        // Check timeout
         auto elapsed = std::chrono::steady_clock::now() - startTime;
         if (elapsed >= duration) {
             break;
@@ -665,20 +701,28 @@ CaptureResult RunCapture(const CaptureConfig& config) {
             BYTE* pData = nullptr;
             UINT32 numFramesAvailable = 0;
             DWORD flags = 0;
+            UINT64 devicePosition = 0;
+            UINT64 qpcPosition = 0;
 
             hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
-                                            &flags, nullptr, nullptr);
+                                           &flags, &devicePosition, &qpcPosition);
             if (FAILED(hr)) {
                 running = false;
                 break;
             }
 
-            if (numFramesAvailable > 0 && (flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0) {
+            if (numFramesAvailable > 0) {
                 size_t totalSamples =
-                    static_cast<size_t>(numFramesAvailable) * channels;
-                floatBuffer.assign(
-                    reinterpret_cast<float*>(pData),
-                    reinterpret_cast<float*>(pData) + totalSamples);
+                    static_cast<size_t>(numFramesAvailable) * kCaptureChannels;
+
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                    // Zero-fill silent frames to preserve timeline
+                    floatBuffer.assign(totalSamples, 0.0f);
+                } else {
+                    floatBuffer.assign(
+                        reinterpret_cast<float*>(pData),
+                        reinterpret_cast<float*>(pData) + totalSamples);
+                }
 
                 if (!writer.WriteFrames(floatBuffer.data(), numFramesAvailable)) {
                     running = false;
@@ -704,7 +748,7 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         }
     }
 
-    // 16. Stop and close WAV
+    // 10. Stop and close WAV
     pAudioClient->Stop();
 
     if (avrtHandle) {
@@ -715,10 +759,10 @@ CaptureResult RunCapture(const CaptureConfig& config) {
 
     // Populate result
     result.framesCaptured = framesCaptured;
-    result.bytesWritten = framesCaptured * captureFormat.nBlockAlign;
+    result.bytesWritten = framesCaptured * kCaptureBlockAlign;
     result.succeeded = true;
 
-    // 17. Cleanup COM
+    // 11. Cleanup COM
     SafeRelease(pCaptureClient);
     SafeRelease(pAudioClient);
     SafeRelease(asyncOp);

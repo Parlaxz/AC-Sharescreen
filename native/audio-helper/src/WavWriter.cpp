@@ -1,11 +1,17 @@
 #include "WavWriter.h"
+
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <algorithm>
 #include <cstring>
 
 namespace screenlink::audio {
 
 bool WavWriter::Open(const std::string& path, uint32_t sampleRate,
-                      uint16_t channels, uint16_t bitsPerSample) {
+                      uint16_t channels, uint16_t bitsPerSample,
+                      bool overwrite) {
     if (file_.is_open()) {
         return false;
     }
@@ -14,6 +20,14 @@ bool WavWriter::Open(const std::string& path, uint32_t sampleRate,
     if (sampleRate == 0 || channels == 0 ||
         (bitsPerSample != 16 && bitsPerSample != 32)) {
         return false;
+    }
+
+    // Refuse to overwrite an existing file unless explicitly allowed
+    if (!overwrite) {
+        DWORD attrs = GetFileAttributesA(path.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            return false; // file exists and overwrite is false
+        }
     }
 
     path_ = path;

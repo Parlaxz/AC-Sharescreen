@@ -28,6 +28,10 @@ inline constexpr std::string_view kHelperVersion = "0.1.0";
 /// https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording
 inline constexpr uint32_t kMinProcessLoopbackBuild = 20348;
 
+/// Maximum duration for a capture test in milliseconds.
+/// Prevents runaway captures that could fill the disk.
+inline constexpr uint32_t kMaxCaptureTestDurationMs = 30000;
+
 /// Command exit codes
 enum class ExitCode : int {
   kSuccess = 0,
@@ -39,6 +43,7 @@ enum class ExitCode : int {
   kEnumerationFailed = 20,
   kProcessResolutionFailed = 21,
   kSourceEnumerationFailed = 22,
+  kSourceResolutionFailed = 23,
   kCaptureTestFailed = 30,
 };
 
@@ -51,6 +56,7 @@ enum class Command {
   kEnumerateSources,
   kResolveProcessTree,
   kCaptureTest,
+  kResolveSource,
   kUnknown,
 };
 
@@ -63,6 +69,7 @@ inline Command ParseCommand(std::string_view arg) {
   if (arg == "--enumerate-sources") return Command::kEnumerateSources;
   if (arg == "--resolve-process-tree") return Command::kResolveProcessTree;
   if (arg == "--capture-test") return Command::kCaptureTest;
+  if (arg == "--resolve-source") return Command::kResolveSource;
   return Command::kUnknown;
 }
 

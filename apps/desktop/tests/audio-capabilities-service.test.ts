@@ -19,6 +19,7 @@ interface AudioSource {
   isVisible: boolean;
   isCloaked: boolean;
   hasAudio: boolean;
+  processCreationTimeUtc100ns: number;
 }
 
 type ElectronConfidence = AudioSource["electronConfidence"];
@@ -47,7 +48,8 @@ function isValidSource(obj: unknown): obj is AudioSource {
     typeof s.windowClass === "string" &&
     typeof s.isVisible === "boolean" &&
     typeof s.isCloaked === "boolean" &&
-    typeof s.hasAudio === "boolean"
+    typeof s.hasAudio === "boolean" &&
+    typeof s.processCreationTimeUtc100ns === "number"
   );
 }
 
@@ -66,6 +68,7 @@ function mockAudioSource(overrides?: Partial<AudioSource>): AudioSource {
     isVisible: true,
     isCloaked: false,
     hasAudio: true,
+    processCreationTimeUtc100ns: 1337000000000000000,
   };
 
   const merged = { ...defaults, ...overrides } as Record<string, unknown>;
@@ -80,13 +83,13 @@ function mockAudioSource(overrides?: Partial<AudioSource>): AudioSource {
     merged.displayName = overrides.windowTitle || merged.processName;
   }
 
-  // Auto-derive hasAudio: visible non-cloaked Electron = true
+  // Auto-derive hasAudio: visible, non-cloaked, non-zero processId = true
   if (
-    overrides?.isElectron !== undefined ||
     overrides?.isVisible !== undefined ||
-    overrides?.isCloaked !== undefined
+    overrides?.isCloaked !== undefined ||
+    overrides?.processId !== undefined
   ) {
-    merged.hasAudio = !!(merged.isElectron && merged.isVisible && !merged.isCloaked);
+    merged.hasAudio = !!(merged.isVisible && !merged.isCloaked && merged.processId !== 0);
   }
 
   return merged as unknown as AudioSource;
@@ -413,7 +416,8 @@ describe("Phase 2B source types", () => {
           "windowClass": "Chrome_WidgetWin_1",
           "isVisible": true,
           "isCloaked": false,
-          "hasAudio": true
+          "hasAudio": true,
+          "processCreationTimeUtc100ns": 1337000000000000000
         },
         {
           "sourceId": "source:5678:345678",
@@ -428,7 +432,8 @@ describe("Phase 2B source types", () => {
           "windowClass": "ConsoleWindowClass",
           "isVisible": false,
           "isCloaked": true,
-          "hasAudio": false
+          "hasAudio": false,
+          "processCreationTimeUtc100ns": 1337000000000000000
         }
       ]
     }`;
@@ -495,22 +500,23 @@ describe("Phase 2B source types", () => {
     expect(source.hasAudio).toBe(false);
   });
 
-  it("hasAudio is false for non-Electron source regardless of visibility", () => {
-    const visible = mockAudioSource({
+  it("hasAudio is true for visible, non-cloaked non-Electron source", () => {
+    const source = mockAudioSource({
       isElectron: false,
       isVisible: true,
       isCloaked: false,
-      hasAudio: false,
     });
-    expect(visible.hasAudio).toBe(false);
+    expect(source.hasAudio).toBe(true);
+  });
 
-    const invisible = mockAudioSource({
+  it("hasAudio is false for invisible non-Electron source", () => {
+    const source = mockAudioSource({
       isElectron: false,
       isVisible: false,
       isCloaked: false,
       hasAudio: false,
     });
-    expect(invisible.hasAudio).toBe(false);
+    expect(source.hasAudio).toBe(false);
   });
 
   // ---------------------------------------------------------------------------
@@ -573,5 +579,212 @@ describe("Phase 2B source types", () => {
 
   it("rejects empty object", () => {
     expect(isValidSource({})).toBe(false);
+  });
+});
+
+describe("AudioPacket type", () => {
+  interface AudioPacket {
+    frameCount: number;
+    channels: number;
+    sequenceNumber: number;
+    qpcPosition100ns: number;
+    devicePosition: number;
+    isSilent: boolean;
+    isDiscontinuous: boolean;
+    hasTimestampError: boolean;
+  }
+
+  function isValidPacket(obj: unknown): obj is AudioPacket {
+    if (typeof obj !== "object" || obj === null) return false;
+    const p = obj as Record<string, unknown>;
+    return (
+      typeof p.frameCount === "number" &&
+      typeof p.channels === "number" &&
+      typeof p.sequenceNumber === "number" &&
+      typeof p.qpcPosition100ns === "number" &&
+      typeof p.devicePosition === "number" &&
+      typeof p.isSilent === "boolean" &&
+      typeof p.isDiscontinuous === "boolean" &&
+      typeof p.hasTimestampError === "boolean"
+    );
+  }
+
+  function mockPacket(overrides?: Partial<AudioPacket>): AudioPacket {
+    return {
+      frameCount: 480,
+      channels: 2,
+      sequenceNumber: 0,
+      qpcPosition100ns: 0,
+      devicePosition: 0,
+      isSilent: false,
+      isDiscontinuous: false,
+      hasTimestampError: false,
+      ...overrides,
+    };
+  }
+
+  it("accepts a valid AudioPacket with all fields", () => {
+    const packet = mockPacket();
+    expect(isValidPacket(packet)).toBe(true);
+  });
+
+  it("accepts a silent packet", () => {
+    const packet = mockPacket({ isSilent: true });
+    expect(isValidPacket(packet)).toBe(true);
+    expect(packet.isSilent).toBe(true);
+  });
+
+  it("accepts a discontinuous packet", () => {
+    const packet = mockPacket({ isDiscontinuous: true });
+    expect(isValidPacket(packet)).toBe(true);
+    expect(packet.isDiscontinuous).toBe(true);
+  });
+
+  it("accepts a packet with timestamp error", () => {
+    const packet = mockPacket({ hasTimestampError: true });
+    expect(isValidPacket(packet)).toBe(true);
+    expect(packet.hasTimestampError).toBe(true);
+  });
+
+  it("rejects missing frameCount", () => {
+    const { frameCount: _, ...rest } = mockPacket();
+    expect(isValidPacket(rest)).toBe(false);
+  });
+
+  it("rejects wrong isSilent type", () => {
+    const packet = mockPacket() as Record<string, unknown>;
+    packet.isSilent = "yes";
+    expect(isValidPacket(packet)).toBe(false);
+  });
+
+  it("rejects null", () => {
+    expect(isValidPacket(null)).toBe(false);
+  });
+
+  it("rejects empty object", () => {
+    expect(isValidPacket({})).toBe(false);
+  });
+});
+
+describe("desktopCapturer source ID resolution", () => {
+  // Electron desktopCapturer source IDs use format "window:{hwnd}"
+  // The native helper resolves these via --resolve-source
+
+  interface SourceResolveResult {
+    found: boolean;
+    source?: AudioSource;
+    error?: string;
+  }
+
+  function isValidResolveResult(obj: unknown): obj is SourceResolveResult {
+    if (typeof obj !== "object" || obj === null) return false;
+    const r = obj as Record<string, unknown>;
+    if (typeof r.found !== "boolean") return false;
+    if (r.found) {
+      return isValidSource(r.source);
+    }
+    return typeof r.error === "string";
+  }
+
+  it("accepts valid resolve result with found=true", () => {
+    const result: SourceResolveResult = {
+      found: true,
+      source: mockAudioSource(),
+    };
+    expect(isValidResolveResult(result)).toBe(true);
+  });
+
+  it("accepts valid resolve result with found=false", () => {
+    const result: SourceResolveResult = {
+      found: false,
+      error: "No window found with HWND 0x999",
+    };
+    expect(isValidResolveResult(result)).toBe(true);
+  });
+
+  it("rejects resolve result with found=true but missing source", () => {
+    const result = { found: true } as Record<string, unknown>;
+    expect(isValidResolveResult(result)).toBe(false);
+  });
+
+  it("rejects resolve result with found=false but missing error", () => {
+    const result = { found: false } as Record<string, unknown>;
+    expect(isValidResolveResult(result)).toBe(false);
+  });
+
+  it("source ID format 'window:0xHEX' is valid for desktopCapturer", () => {
+    const sourceId = "window:0x1A2B3C";
+    expect(sourceId).toMatch(/^window:(0x[0-9a-fA-F]+|\d+)$/);
+  });
+
+  it("source ID format 'window:DECIMAL' is valid for desktopCapturer", () => {
+    const sourceId = "window:12345";
+    expect(sourceId).toMatch(/^window:(0x[0-9a-fA-F]+|\d+)$/);
+  });
+
+  it("source ID format 'screen:0' is NOT supported by --resolve-source", () => {
+    const sourceId = "screen:0";
+    // Our --resolve-source only handles "window:" prefix
+    expect(sourceId).not.toMatch(/^window:/);
+  });
+
+  it("rejects invalid source ID format", () => {
+    const sourceId = "invalid-format";
+    expect(sourceId).not.toMatch(/^window:(0x[0-9a-fA-F]+|\d+)$/);
+  });
+});
+
+describe("ProcessInfo with creation time", () => {
+  interface ProcessInfo {
+    processId: number;
+    parentProcessId: number;
+    processPath: string;
+    processName: string;
+    creationTimeUtc100ns: number;
+  }
+
+  function isValidProcessInfo(obj: unknown): obj is ProcessInfo {
+    if (typeof obj !== "object" || obj === null) return false;
+    const p = obj as Record<string, unknown>;
+    return (
+      typeof p.processId === "number" &&
+      typeof p.parentProcessId === "number" &&
+      typeof p.processPath === "string" &&
+      typeof p.processName === "string" &&
+      typeof p.creationTimeUtc100ns === "number"
+    );
+  }
+
+  it("accepts valid ProcessInfo with creation time", () => {
+    const info: ProcessInfo = {
+      processId: 1234,
+      parentProcessId: 100,
+      processPath: "C:\\Program Files\\App\\app.exe",
+      processName: "app.exe",
+      creationTimeUtc100ns: 1337000000000000000,
+    };
+    expect(isValidProcessInfo(info)).toBe(true);
+  });
+
+  it("rejects ProcessInfo missing creationTimeUtc100ns", () => {
+    const { creationTimeUtc100ns: _, ...rest } = {
+      processId: 1234,
+      parentProcessId: 100,
+      processPath: "C:\\Program Files\\App\\app.exe",
+      processName: "app.exe",
+      creationTimeUtc100ns: 1337000000000000000,
+    };
+    expect(isValidProcessInfo(rest)).toBe(false);
+  });
+
+  it("rejects ProcessInfo with wrong creationTimeUtc100ns type", () => {
+    const info = {
+      processId: 1234,
+      parentProcessId: 100,
+      processPath: "C:\\Program Files\\App\\app.exe",
+      processName: "app.exe",
+      creationTimeUtc100ns: "not-a-number",
+    };
+    expect(isValidProcessInfo(info)).toBe(false);
   });
 });

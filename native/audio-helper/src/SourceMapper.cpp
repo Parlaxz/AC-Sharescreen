@@ -96,6 +96,32 @@ bool ContainsElectronIc(const std::string& name) {
   return lower.find("electron") != std::string::npos;
 }
 
+// ── Electron confidence determination ──
+// Returns the confidence level based on process name and parent relationships.
+ElectronConfidence DetermineElectronConfidence(
+    uint32_t pid,
+    const std::string& processName,
+    const std::unordered_map<uint32_t, uint32_t>& parentMap,
+    const std::unordered_set<uint32_t>& electronPids) {
+
+  if (_stricmp(processName.c_str(), "electron.exe") == 0) {
+    return ElectronConfidence::kProcessName;
+  }
+  if (ContainsElectronIc(processName)) {
+    return ElectronConfidence::kLow;
+  }
+  if (electronPids.find(pid) != electronPids.end()) {
+    return ElectronConfidence::kProcessName;
+  }
+  for (auto electronPid : electronPids) {
+    auto it = parentMap.find(electronPid);
+    if (it != parentMap.end() && it->second == pid) {
+      return ElectronConfidence::kProcessName;
+    }
+  }
+  return ElectronConfidence::kNone;
+}
+
 } // anonymous namespace
 
 SourceEnumerateResult EnumerateAudioSources() {
@@ -133,38 +159,16 @@ SourceEnumerateResult EnumerateAudioSources() {
     source.sourceId = "source:" + std::to_string(source.processId) + ":" + std::to_string(source.hwnd);
 
     // Electron detection heuristics.
-    std::string lowerName = source.processName;
-    for (auto& c : lowerName) {
-      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
+    auto confidence = DetermineElectronConfidence(
+        source.processId, source.processName, parentMap, electronPids);
+    source.electronConfidence = confidence;
+    source.isElectron = (confidence != ElectronConfidence::kNone);
 
-    if (_stricmp(source.processName.c_str(), "electron.exe") == 0) {
-      // Direct match: process name is exactly electron.exe.
-      source.isElectron = true;
-      source.electronConfidence = ElectronConfidence::kProcessName;
-    } else if (ContainsElectronIc(source.processName)) {
-      // Weak match: process name contains "electron".
-      source.isElectron = true;
-      source.electronConfidence = ElectronConfidence::kLow;
-    } else if (electronPids.find(source.processId) != electronPids.end()) {
-      // This PID is itself an electron.exe process (should have been caught above,
-      // but handle edge case where processName might be truncated or different).
-      source.isElectron = true;
-      source.electronConfidence = ElectronConfidence::kProcessName;
-    } else {
-      // Check if this process is the parent of an electron.exe process.
-      for (auto electronPid : electronPids) {
-        auto it = parentMap.find(electronPid);
-        if (it != parentMap.end() && it->second == source.processId) {
-          source.isElectron = true;
-          source.electronConfidence = ElectronConfidence::kProcessName;
-          break;
-        }
-      }
-    }
+    // hasAudio: visible, non-cloaked windows with a valid PID can produce audio.
+    source.hasAudio = (source.isVisible && !source.isCloaked && source.processId != 0);
 
-    // hasAudio: visible, non-cloaked Electron apps are likely producing audio.
-    source.hasAudio = (source.isElectron && source.isVisible && !source.isCloaked);
+    // processCreationTimeUtc100ns from WindowInfo (populated by parallel task)
+    source.processCreationTimeUtc100ns = w.processCreationTimeUtc100ns;
 
     // displayName: use window title if non-empty, otherwise process name.
     if (!source.windowTitle.empty()) {
@@ -177,6 +181,100 @@ SourceEnumerateResult EnumerateAudioSources() {
   }
 
   result.succeeded = true;
+  return result;
+}
+
+SourceResolveResult ResolveDesktopCapturerSource(const std::string& sourceId) {
+  SourceResolveResult result;
+
+  // Parse source ID format: "window:0xHEXHWND" or "window:DECIMALHWND"
+  if (sourceId.size() < 7 || sourceId.substr(0, 7) != "window:") {
+    result.error = "Unsupported source ID format (expected 'window:...')";
+    return result;
+  }
+
+  std::string hwndStr = sourceId.substr(7);
+
+  uint64_t hwnd = 0;
+  try {
+    if (hwndStr.size() >= 2 && hwndStr[0] == '0' &&
+        (hwndStr[1] == 'x' || hwndStr[1] == 'X')) {
+      hwnd = std::stoull(hwndStr, nullptr, 16);
+    } else {
+      hwnd = std::stoull(hwndStr, nullptr, 10);
+    }
+  } catch (const std::exception&) {
+    result.error = "Invalid HWND in source ID";
+    return result;
+  }
+
+  if (hwnd == 0) {
+    result.error = "HWND is zero in source ID";
+    return result;
+  }
+
+  // Enumerate windows and find matching HWND
+  auto enumResult = EnumerateWindows();
+  if (!enumResult.succeeded) {
+    result.error = "EnumerateWindows failed: " + enumResult.failureReason;
+    return result;
+  }
+
+  const WindowInfo* match = nullptr;
+  for (const auto& w : enumResult.windows) {
+    if (w.hwnd == hwnd) {
+      match = &w;
+      break;
+    }
+  }
+
+  if (!match) {
+    result.error = "No window found with HWND " + hwndStr;
+    return result;
+  }
+
+  // Build AudioSource from WindowInfo
+  result.source.hwnd = match->hwnd;
+  result.source.processId = match->processId;
+  result.source.processPath = match->processPath;
+  result.source.windowTitle = match->windowTitle;
+  result.source.windowClass = match->windowClass;
+  result.source.isVisible = match->isVisible;
+  result.source.isCloaked = match->isCloaked;
+  result.source.processName = ExtractFilename(match->processPath);
+
+  // Source ID
+  result.source.sourceId = "source:" + std::to_string(result.source.processId) +
+                           ":" + std::to_string(result.source.hwnd);
+
+  // hasAudio based on visibility (not Electron)
+  result.source.hasAudio =
+      match->isVisible && !match->isCloaked && match->processId != 0;
+
+  // processCreationTimeUtc100ns from WindowInfo (added by parallel task)
+  result.source.processCreationTimeUtc100ns = match->processCreationTimeUtc100ns;
+
+  // Determine Electron confidence
+  {
+    std::unordered_map<uint32_t, uint32_t> parentMap;
+    std::unordered_set<uint32_t> electronPids;
+    BuildProcessMaps(parentMap, electronPids);
+
+    auto confidence = DetermineElectronConfidence(
+        result.source.processId, result.source.processName,
+        parentMap, electronPids);
+    result.source.electronConfidence = confidence;
+    result.source.isElectron = (confidence != ElectronConfidence::kNone);
+  }
+
+  // displayName
+  if (!result.source.windowTitle.empty()) {
+    result.source.displayName = result.source.windowTitle;
+  } else {
+    result.source.displayName = result.source.processName;
+  }
+
+  result.found = true;
   return result;
 }
 

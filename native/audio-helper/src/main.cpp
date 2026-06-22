@@ -63,7 +63,7 @@ void PrintError(const char* errorMsg, int& exitCodeOut, int exitCode) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude]\n";
+    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]\n";
     std::cout << "{\n"
               << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n"
               << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n"
@@ -160,6 +160,10 @@ int main(int argc, char* argv[]) {
       }
       if (screenlink::audio::ParseCommand("--resolve-process-tree") != screenlink::audio::Command::kResolveProcessTree) {
         std::cerr << "FAIL: ParseCommand('--resolve-process-tree') mismatch\n";
+        allPassed = false;
+      }
+      if (screenlink::audio::ParseCommand("--resolve-source") != screenlink::audio::Command::kResolveSource) {
+        std::cerr << "FAIL: ParseCommand('--resolve-source') mismatch\n";
         allPassed = false;
       }
       if (screenlink::audio::ParseCommand("--unknown") != screenlink::audio::Command::kUnknown) {
@@ -339,6 +343,60 @@ int main(int argc, char* argv[]) {
             std::cerr << "FAIL: ResolveProcessTree() current process path is empty\n";
             allPassed = false;
           }
+          // Current process should have a valid creation time
+          if (treeResult.processes[0].creationTimeUtc100ns == 0) {
+            std::cerr << "FAIL: ResolveProcessTree() current process creation time is 0\n";
+            allPassed = false;
+          }
+          // targetCreationTimeUtc100ns should match the first process
+          if (treeResult.targetCreationTimeUtc100ns != treeResult.processes[0].creationTimeUtc100ns) {
+            std::cerr << "FAIL: ResolveProcessTree() targetCreationTimeUtc100ns mismatch\n";
+            allPassed = false;
+          }
+          // Application root should be set (current process is not a system process,
+          // so it should be its own root)
+          if (treeResult.applicationRootPid == 0) {
+            std::cerr << "FAIL: ResolveProcessTree() applicationRootPid is 0\n";
+            allPassed = false;
+          }
+          if (treeResult.applicationRootName.empty()) {
+            std::cerr << "FAIL: ResolveProcessTree() applicationRootName is empty\n";
+            allPassed = false;
+          }
+        }
+      }
+
+      // ── IsSystemProcess test ──
+      {
+        if (screenlink::audio::IsSystemProcess("explorer.exe") != true) {
+          std::cerr << "FAIL: IsSystemProcess('explorer.exe') should be true\n";
+          allPassed = false;
+        }
+        if (screenlink::audio::IsSystemProcess("EXPLORER.EXE") != true) {
+          std::cerr << "FAIL: IsSystemProcess('EXPLORER.EXE') should be true (case insensitive)\n";
+          allPassed = false;
+        }
+        if (screenlink::audio::IsSystemProcess("notepad.exe") != false) {
+          std::cerr << "FAIL: IsSystemProcess('notepad.exe') should be false\n";
+          allPassed = false;
+        }
+        if (screenlink::audio::IsSystemProcess("") != false) {
+          std::cerr << "FAIL: IsSystemProcess('') should be false\n";
+          allPassed = false;
+        }
+      }
+
+      // ── GetProcessCreationTime test ──
+      {
+        uint64_t ct = screenlink::audio::GetProcessCreationTime(GetCurrentProcessId());
+        if (ct == 0) {
+          std::cerr << "FAIL: GetProcessCreationTime(current PID) returned 0\n";
+          allPassed = false;
+        }
+        // PID 0 should always fail
+        if (screenlink::audio::GetProcessCreationTime(0) != 0) {
+          std::cerr << "FAIL: GetProcessCreationTime(0) should return 0\n";
+          allPassed = false;
         }
       }
 
@@ -450,7 +508,8 @@ int main(int argc, char* argv[]) {
         std::cout << "      \"windowTitle\": \"" << JsonEscape(w.windowTitle) << "\",\n";
         std::cout << "      \"windowClass\": \"" << JsonEscape(w.windowClass) << "\",\n";
         std::cout << "      \"isVisible\": " << (w.isVisible ? "true" : "false") << ",\n";
-        std::cout << "      \"isCloaked\": " << (w.isCloaked ? "true" : "false") << "\n";
+        std::cout << "      \"isCloaked\": " << (w.isCloaked ? "true" : "false") << ",\n";
+        std::cout << "      \"processCreationTimeUtc100ns\": " << w.processCreationTimeUtc100ns << "\n";
         std::cout << "    }";
         if (i < result.windows.size() - 1) std::cout << ",";
         std::cout << "\n";
@@ -503,7 +562,8 @@ int main(int argc, char* argv[]) {
         std::cout << "      \"windowClass\": \"" << JsonEscape(s.windowClass) << "\",\n";
         std::cout << "      \"isVisible\": " << (s.isVisible ? "true" : "false") << ",\n";
         std::cout << "      \"isCloaked\": " << (s.isCloaked ? "true" : "false") << ",\n";
-        std::cout << "      \"hasAudio\": " << (s.hasAudio ? "true" : "false") << "\n";
+        std::cout << "      \"hasAudio\": " << (s.hasAudio ? "true" : "false") << ",\n";
+        std::cout << "      \"processCreationTimeUtc100ns\": " << s.processCreationTimeUtc100ns << "\n";
         std::cout << "    }";
         if (i < result.sources.size() - 1) std::cout << ",";
         std::cout << "\n";
@@ -555,6 +615,9 @@ int main(int argc, char* argv[]) {
       std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
       std::cout << "  \"status\": \"ok\",\n";
       std::cout << "  \"targetPid\": " << result.targetPid << ",\n";
+      std::cout << "  \"targetCreationTimeUtc100ns\": " << result.targetCreationTimeUtc100ns << ",\n";
+      std::cout << "  \"applicationRootPid\": " << result.applicationRootPid << ",\n";
+      std::cout << "  \"applicationRootName\": \"" << JsonEscape(result.applicationRootName) << "\",\n";
       std::cout << "  \"processChainDepth\": " << result.processes.size() << ",\n";
       std::cout << "  \"processes\": [\n";
       for (size_t i = 0; i < result.processes.size(); ++i) {
@@ -563,7 +626,8 @@ int main(int argc, char* argv[]) {
         std::cout << "      \"processId\": " << p.processId << ",\n";
         std::cout << "      \"parentProcessId\": " << p.parentProcessId << ",\n";
         std::cout << "      \"processPath\": \"" << JsonEscape(p.processPath) << "\",\n";
-        std::cout << "      \"processName\": \"" << JsonEscape(p.processName) << "\"\n";
+        std::cout << "      \"processName\": \"" << JsonEscape(p.processName) << "\",\n";
+        std::cout << "      \"creationTimeUtc100ns\": " << p.creationTimeUtc100ns << "\n";
         std::cout << "    }";
         if (i < result.processes.size() - 1) std::cout << ",";
         std::cout << "\n";
@@ -571,6 +635,53 @@ int main(int argc, char* argv[]) {
       std::cout << "  ]\n";
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
+    }
+
+    case screenlink::audio::Command::kResolveSource: {
+      if (argc < 3) {
+        std::cerr << "Missing source ID argument for --resolve-source\n";
+        std::cout << "{\n";
+        std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+        std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+        std::cout << "  \"status\": \"error\",\n";
+        std::cout << "  \"error\": \"missing-source-id-argument\"\n";
+        std::cout << "}\n";
+        return static_cast<int>(screenlink::audio::ExitCode::kSourceResolutionFailed);
+      }
+
+      std::string sourceId = argv[2];
+
+      auto result = screenlink::audio::ResolveDesktopCapturerSource(sourceId);
+
+      std::cout << "{\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+      std::cout << "  \"status\": \"ok\",\n";
+      std::cout << "  \"found\": " << (result.found ? "true" : "false") << ",\n";
+      if (result.found) {
+        std::cout << "  \"source\": {\n";
+        std::cout << "    \"sourceId\": \"" << JsonEscape(result.source.sourceId) << "\",\n";
+        std::cout << "    \"displayName\": \"" << JsonEscape(result.source.displayName) << "\",\n";
+        std::cout << "    \"processId\": " << result.source.processId << ",\n";
+        std::cout << "    \"hwnd\": " << result.source.hwnd << ",\n";
+        std::cout << "    \"processPath\": \"" << JsonEscape(result.source.processPath) << "\",\n";
+        std::cout << "    \"processName\": \"" << JsonEscape(result.source.processName) << "\",\n";
+        std::cout << "    \"isElectron\": " << (result.source.isElectron ? "true" : "false") << ",\n";
+        std::cout << "    \"electronConfidence\": " << static_cast<int>(result.source.electronConfidence) << ",\n";
+        std::cout << "    \"windowTitle\": \"" << JsonEscape(result.source.windowTitle) << "\",\n";
+        std::cout << "    \"windowClass\": \"" << JsonEscape(result.source.windowClass) << "\",\n";
+        std::cout << "    \"isVisible\": " << (result.source.isVisible ? "true" : "false") << ",\n";
+        std::cout << "    \"isCloaked\": " << (result.source.isCloaked ? "true" : "false") << ",\n";
+        std::cout << "    \"hasAudio\": " << (result.source.hasAudio ? "true" : "false") << ",\n";
+        std::cout << "    \"processCreationTimeUtc100ns\": " << result.source.processCreationTimeUtc100ns << "\n";
+        std::cout << "  }\n";
+      } else {
+        std::cout << "  \"error\": \"" << JsonEscape(result.error) << "\"\n";
+      }
+      std::cout << "}\n";
+      return result.found
+          ? static_cast<int>(screenlink::audio::ExitCode::kSuccess)
+          : static_cast<int>(screenlink::audio::ExitCode::kSourceResolutionFailed);
     }
 
     case screenlink::audio::Command::kCaptureTest: {
@@ -613,7 +724,7 @@ int main(int argc, char* argv[]) {
           }
         } else if (arg == "--output" && i + 1 < argc) {
           config.outputPath = argv[++i];
-        } else if (arg == "--mode" && i + 1 < argc) {
+          } else if (arg == "--mode" && i + 1 < argc) {
           std::string mode = argv[++i];
           if (mode == "include") {
             config.includeMode = true;
@@ -625,6 +736,17 @@ int main(int argc, char* argv[]) {
             PrintError("invalid-mode-argument", exitCode, exitCode);
             return exitCode;
           }
+        } else if (arg == "--creation-time" && i + 1 < argc) {
+          try {
+            config.expectedCreationTimeUtc100ns = std::stoull(argv[++i]);
+          } catch (const std::exception&) {
+            std::cerr << "Invalid --creation-time value: " << argv[i] << "\n";
+            int exitCode = static_cast<int>(screenlink::audio::ExitCode::kCaptureTestFailed);
+            PrintError("invalid-creation-time-argument", exitCode, exitCode);
+            return exitCode;
+          }
+        } else if (arg == "--overwrite") {
+          config.overwrite = true;
         }
       }
 

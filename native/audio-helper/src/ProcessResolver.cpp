@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -77,6 +78,43 @@ std::string ExtractFilename(const std::string& path) {
 
 } // anonymous namespace
 
+uint64_t GetProcessCreationTime(uint32_t pid) {
+  AutoHandle hProcess(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+  if (!hProcess.IsValid()) {
+    return 0;
+  }
+  FILETIME creationTime, exitTime, kernelTime, userTime;
+  if (!GetProcessTimes(hProcess.Get(), &creationTime, &exitTime, &kernelTime, &userTime)) {
+    return 0;
+  }
+  ULARGE_INTEGER uli;
+  uli.LowPart = creationTime.dwLowDateTime;
+  uli.HighPart = creationTime.dwHighDateTime;
+  return uli.QuadPart;
+}
+
+bool IsSystemProcess(const std::string& processName) {
+  // Convert to lowercase for comparison.
+  std::string lower = processName;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+  static const std::vector<std::string> kSystemProcesses = {
+    "explorer.exe", "dwm.exe", "csrss.exe", "lsass.exe", "lsm.exe",
+    "svchost.exe", "services.exe", "winlogon.exe", "wininit.exe",
+    "taskhostw.exe", "runtimebroker.exe", "sihost.exe",
+    "searchindexer.exe", "ctfmon.exe", "conhost.exe",
+    "fontdrvhost.exe", "dllhost.exe", "smss.exe",
+    "applicationframehost.exe", "shellexperiencehost.exe",
+    "searchui.exe", "taskbar.exe", "startmenuexperiencehost.exe",
+  };
+
+  for (const auto& sys : kSystemProcesses) {
+    if (lower == sys) return true;
+  }
+  return false;
+}
+
 ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
   ProcessTreeResult result;
   result.targetPid = targetPid;
@@ -138,7 +176,41 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
     info.processPath = path;
     info.processName = ExtractFilename(path);
 
+    // Get creation time.
+    info.creationTimeUtc100ns = GetProcessCreationTime(pid);
+
     result.processes.push_back(std::move(info));
+  }
+
+  // Set target creation time from the first process in the chain.
+  if (!result.processes.empty()) {
+    result.targetCreationTimeUtc100ns = result.processes[0].creationTimeUtc100ns;
+  }
+
+  // Find application root: the highest ancestor that is NOT a system process.
+  // If the target itself is not a system process, it is its own root.
+  // If all ancestors are system processes, the target is the root.
+  {
+    std::string targetName = result.processes.empty() ? "" : result.processes[0].processName;
+    if (targetName.empty() || !IsSystemProcess(targetName)) {
+      // Target is not a system process (or name unknown) -> it is its own root.
+      result.applicationRootPid = result.targetPid;
+      result.applicationRootName = targetName;
+    } else {
+      // Target is a system process; walk the chain to find the first
+      // ancestor that is NOT a system process.
+      uint32_t rootPid = result.targetPid;
+      std::string rootName = targetName;
+      for (const auto& p : result.processes) {
+        if (!IsSystemProcess(p.processName)) {
+          rootPid = p.processId;
+          rootName = p.processName;
+          break;
+        }
+      }
+      result.applicationRootPid = rootPid;
+      result.applicationRootName = rootName;
+    }
   }
 
   result.succeeded = true;

@@ -33,7 +33,8 @@ struct AudioSource {
   std::string windowClass;
   bool isVisible = false;
   bool isCloaked = false;
-  bool hasAudio = false;       // Electron apps with audio = likely producing audio
+  bool hasAudio = false;       // Visible, non-cloaked windows with valid PID
+  uint64_t processCreationTimeUtc100ns = 0;
 };
 
 struct SourceEnumerateResult {
@@ -45,6 +46,16 @@ struct SourceEnumerateResult {
 /// Enumerate all audio-capture sources by combining window enumeration
 /// with Electron detection heuristics.
 SourceEnumerateResult EnumerateAudioSources();
+
+/// Result of resolving a desktopCapturer source ID.
+struct SourceResolveResult {
+  bool found = false;
+  AudioSource source;
+  std::string error;
+};
+
+/// Resolve a desktopCapturer source ID (e.g., "window:0x1234") to an AudioSource.
+SourceResolveResult ResolveDesktopCapturerSource(const std::string& sourceId);
 
 } // namespace screenlink::audio
 

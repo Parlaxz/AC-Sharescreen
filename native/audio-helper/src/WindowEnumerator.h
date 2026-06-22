@@ -15,6 +15,7 @@ struct WindowInfo {
   std::string windowClass;    // Window class name
   bool isVisible = false;     // WS_VISIBLE flag set
   bool isCloaked = false;     // DWM cloaked (e.g. virtual desktops, tabs)
+  uint64_t processCreationTimeUtc100ns = 0;  // Process creation time in 100ns UTC ticks
 };
 
 struct EnumerateResult {

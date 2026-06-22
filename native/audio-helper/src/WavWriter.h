@@ -16,7 +16,8 @@ public:
     ~WavWriter() { if (IsOpen()) Close(); }
 
     bool Open(const std::string& path, uint32_t sampleRate,
-              uint16_t channels, uint16_t bitsPerSample);
+              uint16_t channels, uint16_t bitsPerSample,
+              bool overwrite = false);
     bool WriteFrames(const float* data, size_t frameCount);
     bool WriteFramesInt16(const int16_t* data, size_t frameCount);
     bool Close();

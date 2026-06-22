@@ -1,4 +1,5 @@
 #include "WindowEnumerator.h"
+#include "ProcessResolver.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -121,6 +122,7 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
   info.windowClass = std::move(windowClass);
   info.isVisible = isVisible;
   info.isCloaked = cloakedChecked && (isCloaked != FALSE);
+  info.processCreationTimeUtc100ns = screenlink::audio::GetProcessCreationTime(static_cast<uint32_t>(pid));
   windows.push_back(std::move(info));
 
   return TRUE; // continue enumeration
