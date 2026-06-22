@@ -31,6 +31,7 @@ set(SOURCES
   src/WavWriter.cpp
   src/LoopbackCapture.cpp
   src/PipeTransport.cpp
+  src/SyntheticSource.cpp
 )
 
 # Executable

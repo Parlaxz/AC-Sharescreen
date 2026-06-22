@@ -7,6 +7,7 @@
 #include "WavWriter.h"
 #include "LoopbackCapture.h"
 #include "PipeTransport.h"
+#include "SyntheticSource.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -641,6 +642,266 @@ int main(int argc, char* argv[]) {
               std::cerr << "FAIL: ValidatePcmHeader(mismatched payloadBytes) "
                            "should have failed\n";
               allPassed = false;
+          }
+      }
+
+      // ── SyntheticSource tests ──
+      {
+          auto expect = [&allPassed](bool cond, const char* label) {
+              if (!cond) { std::cerr << "FAIL: " << label << "\n"; allPassed = false; }
+          };
+
+          // 1. Synthetic continuous tone: 10 packets
+          {
+              std::vector<uint64_t> seqs;
+              std::vector<uint64_t> positions;
+              std::vector<uint64_t> timestamps;
+              std::vector<uint32_t> frameCounts;
+              std::vector<uint32_t> channels;
+
+              screenlink::audio::SyntheticConfig cfg;
+              cfg.mode = screenlink::audio::SyntheticMode::kContinuousTone;
+              cfg.totalPackets = 10;
+
+              screenlink::audio::SyntheticSource source;
+              uint64_t count = source.Run(cfg,
+                  [&](const screenlink::audio::AudioPacket& p) {
+                      seqs.push_back(p.sequenceNumber);
+                      positions.push_back(p.devicePosition);
+                      timestamps.push_back(p.qpcPosition100ns);
+                      frameCounts.push_back(p.frameCount);
+                      channels.push_back(p.channels);
+                      return true;
+                  });
+
+              expect(count == 10, "Synthetic tone: count == 10");
+              expect(frameCounts.size() == 10, "Synthetic tone: callback invoked 10 times");
+
+              if (!frameCounts.empty()) {
+                  bool allFrameCountOk = true;
+                  for (auto fc : frameCounts) {
+                      if (fc != 480) { allFrameCountOk = false; break; }
+                  }
+                  expect(allFrameCountOk, "Synthetic tone: all frameCount == 480");
+              }
+
+              if (!channels.empty()) {
+                  bool allChannelsOk = true;
+                  for (auto ch : channels) {
+                      if (ch != 2) { allChannelsOk = false; break; }
+                  }
+                  expect(allChannelsOk, "Synthetic tone: all channels == 2");
+              }
+
+              // Sequence numbers: 0, 1, 2, ..., 9
+              if (seqs.size() == 10) {
+                  bool seqOk = true;
+                  for (int i = 0; i < 10; ++i) {
+                      if (seqs[i] != static_cast<uint64_t>(i)) { seqOk = false; break; }
+                  }
+                  expect(seqOk, "Synthetic tone: sequence numbers 0..9");
+
+                  // Test 5: no gaps in sequence numbers
+                  bool noGaps = true;
+                  for (size_t i = 1; i < seqs.size(); ++i) {
+                      if (seqs[i] != seqs[i - 1] + 1) { noGaps = false; break; }
+                  }
+                  expect(noGaps, "Synthetic tone: no sequence gaps");
+              }
+
+              // Test 4: QPC timestamps are monotonically increasing
+              if (timestamps.size() >= 2) {
+                  bool monotonic = true;
+                  for (size_t i = 1; i < timestamps.size(); ++i) {
+                      if (timestamps[i] <= timestamps[i - 1]) { monotonic = false; break; }
+                  }
+                  expect(monotonic, "Synthetic tone: QPC timestamps monotonically increasing");
+              }
+
+              // Test 6: devicePosition increases by frameCount each packet
+              if (positions.size() >= 2) {
+                  bool posOk = true;
+                  for (size_t i = 1; i < positions.size(); ++i) {
+                      if (positions[i] != positions[i - 1] + 480) { posOk = false; break; }
+                  }
+                  expect(posOk, "Synthetic tone: devicePosition increments by frameCount");
+              }
+          }
+
+          // 2. Synthetic silence: 5 packets
+          {
+              std::vector<bool> silentFlags;
+              std::vector<uint64_t> seqs;
+
+              screenlink::audio::SyntheticConfig cfg;
+              cfg.mode = screenlink::audio::SyntheticMode::kSilence;
+              cfg.totalPackets = 5;
+
+              screenlink::audio::SyntheticSource source;
+              uint64_t count = source.Run(cfg,
+                  [&](const screenlink::audio::AudioPacket& p) {
+                      silentFlags.push_back(p.isSilent);
+                      seqs.push_back(p.sequenceNumber);
+                      return true;
+                  });
+
+              expect(count == 5, "Synthetic silence: count == 5");
+              expect(silentFlags.size() == 5, "Synthetic silence: callback invoked 5 times");
+
+              if (silentFlags.size() == 5) {
+                  bool allSilent = true;
+                  for (auto s : silentFlags) {
+                      if (!s) { allSilent = false; break; }
+                  }
+                  expect(allSilent, "Synthetic silence: all isSilent == true");
+              }
+
+              // Also verify sequence numbers
+              if (seqs.size() == 5) {
+                  bool seqOk = true;
+                  for (int i = 0; i < 5; ++i) {
+                      if (seqs[i] != static_cast<uint64_t>(i)) { seqOk = false; break; }
+                  }
+                  expect(seqOk, "Synthetic silence: sequence numbers 0..4");
+              }
+          }
+
+          // 3. Synthetic modes: kToneSilenceTone
+          {
+              std::vector<bool> silentFlags;
+              std::vector<bool> discFlags;
+
+              screenlink::audio::SyntheticConfig cfg;
+              cfg.mode = screenlink::audio::SyntheticMode::kToneSilenceTone;
+              cfg.totalPackets = 30;
+
+              screenlink::audio::SyntheticSource source;
+              uint64_t count = source.Run(cfg,
+                  [&](const screenlink::audio::AudioPacket& p) {
+                      silentFlags.push_back(p.isSilent);
+                      discFlags.push_back(p.isDiscontinuous);
+                      return true;
+                  });
+
+              expect(count == 30, "ToneSilenceTone: count == 30");
+
+              if (silentFlags.size() == 30) {
+                  // First 10: tone (not silent)
+                  int toneCount = 0;
+                  for (int i = 0; i < 10; ++i) {
+                      if (!silentFlags[i]) ++toneCount;
+                  }
+                  expect(toneCount == 10, "ToneSilenceTone: first 10 packets are tone");
+
+                  // Middle 10: silence
+                  int midSilenceCount = 0;
+                  for (int i = 10; i < 20; ++i) {
+                      if (silentFlags[i]) ++midSilenceCount;
+                  }
+                  expect(midSilenceCount == 10, "ToneSilenceTone: middle 10 packets are silence");
+
+                  // Last 10: tone
+                  int lastToneCount = 0;
+                  for (int i = 20; i < 30; ++i) {
+                      if (!silentFlags[i]) ++lastToneCount;
+                  }
+                  expect(lastToneCount == 10, "ToneSilenceTone: last 10 packets are tone");
+
+                  // First silence packet (index 10) should have isDiscontinuous = true
+                  expect(discFlags[10] == true, "ToneSilenceTone: packet 10 has discontinuity flag");
+                  expect(discFlags[9] == false, "ToneSilenceTone: packet 9 has no discontinuity");
+                  expect(discFlags[11] == false, "ToneSilenceTone: packet 11 has no discontinuity");
+              }
+          }
+
+          // Additional: kOneDiscontinuity
+          {
+              bool sawDiscontinuous = false;
+
+              screenlink::audio::SyntheticConfig cfg;
+              cfg.mode = screenlink::audio::SyntheticMode::kOneDiscontinuity;
+              cfg.totalPackets = 10;
+
+              screenlink::audio::SyntheticSource source;
+              uint64_t count = source.Run(cfg,
+                  [&](const screenlink::audio::AudioPacket& p) {
+                      if (p.isDiscontinuous) sawDiscontinuous = true;
+                      return true;
+                  });
+
+              expect(count == 10, "OneDiscontinuity: count == 10");
+              expect(sawDiscontinuous, "OneDiscontinuity: saw at least one discontinuous packet");
+          }
+
+          // Additional: kOneSkippedSequence
+          {
+              std::vector<uint64_t> seqs;
+              bool sawDiscontinuous = false;
+
+              screenlink::audio::SyntheticConfig cfg;
+              cfg.mode = screenlink::audio::SyntheticMode::kOneSkippedSequence;
+              cfg.totalPackets = 10;
+
+              screenlink::audio::SyntheticSource source;
+              uint64_t count = source.Run(cfg,
+                  [&](const screenlink::audio::AudioPacket& p) {
+                      seqs.push_back(p.sequenceNumber);
+                      if (p.isDiscontinuous) sawDiscontinuous = true;
+                      return true;
+                  });
+
+              expect(count == 10, "OneSkippedSequence: count == 10");
+              expect(sawDiscontinuous, "OneSkippedSequence: saw discontinuous flag");
+
+              // Should have 9 unique sequence numbers (0..9, one skipped)
+              // The skip is at index totalPackets/2 = 5
+              // So sequences should be: 0, 1, 2, 3, 4, 6, 7, 8, 9, 10
+              // Wait: seqAdjust happens at the skipped packet, so:
+              // packet 0: seq=0
+              // packet 1: seq=1
+              // packet 2: seq=2
+              // packet 3: seq=3
+              // packet 4: seq=4
+              // packet 5: seq=6 (skip 5), isDiscontinuous=true
+              // packet 6: seq=7
+              // packet 7: seq=8
+              // packet 8: seq=9
+              // packet 9: seq=10
+              if (seqs.size() == 10) {
+                  uint64_t expectedSeqs[] = {0, 1, 2, 3, 4, 6, 7, 8, 9, 10};
+                  bool seqOk = true;
+                  for (int i = 0; i < 10; ++i) {
+                      if (seqs[i] != expectedSeqs[i]) { seqOk = false; break; }
+                  }
+                  expect(seqOk, "OneSkippedSequence: correct sequence numbers");
+              }
+          }
+
+          // Additional: kEndOfStream
+          {
+              std::vector<bool> eosFlags;
+
+              screenlink::audio::SyntheticConfig cfg;
+              cfg.mode = screenlink::audio::SyntheticMode::kEndOfStream;
+              cfg.totalPackets = 5;
+
+              screenlink::audio::SyntheticSource source;
+              uint64_t count = source.Run(cfg,
+                  [&](const screenlink::audio::AudioPacket& p) {
+                      eosFlags.push_back(p.isEndOfStream);
+                      return true;
+                  });
+
+              expect(count == 5, "EndOfStream: count == 5");
+              expect(eosFlags.size() == 5, "EndOfStream: callback invoked 5 times");
+
+              if (eosFlags.size() == 5) {
+                  expect(!eosFlags[0], "EndOfStream: packet 0 not end");
+                  expect(!eosFlags[1], "EndOfStream: packet 1 not end");
+                  expect(!eosFlags[2], "EndOfStream: packet 2 not end");
+                  expect(!eosFlags[3], "EndOfStream: packet 3 not end");
+                  expect(eosFlags[4], "EndOfStream: packet 4 is end-of-stream");
+              }
           }
       }
 

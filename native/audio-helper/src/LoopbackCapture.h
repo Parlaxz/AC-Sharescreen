@@ -37,6 +37,7 @@ struct AudioPacket {
     bool isSilent = false;
     bool isDiscontinuous = false;
     bool hasTimestampError = false;
+    bool isEndOfStream = false;
 };
 
 /// Packet callback: return true to continue, false to stop.
