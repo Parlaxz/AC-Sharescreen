@@ -245,7 +245,9 @@ void PcmPipeWriter::Stop() {
 }
 
 void PcmPipeWriter::ThreadFunc() {
-    // ── 1. Create named pipe (server, write-only) ──
+    // ── 1. Create named pipe (server, duplex) ──
+    // Use PIPE_ACCESS_DUPLEX so the client can open with GENERIC_READ|GENERIC_WRITE
+    // (net.Socket on Windows uses both access flags).
 
     // Security: restrict pipe access to current user only
     SECURITY_ATTRIBUTES sa = {};
@@ -258,7 +260,7 @@ void PcmPipeWriter::ThreadFunc() {
 
     HANDLE hPipe = CreateNamedPipeA(
         pipeName_.c_str(),
-        PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1,                     // max instances
         65536,                 // outbound buffer size = 64KB
