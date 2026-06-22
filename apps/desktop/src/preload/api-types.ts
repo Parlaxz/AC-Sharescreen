@@ -85,9 +85,9 @@ export interface ScreenLinkAPI {
   }>;
 
   // Audio pipeline
-  requestAudioPort: () => Promise<void>;
+  requestAudioPort: () => Promise<{ success: boolean; error?: string }>;
   getAudioState: () => Promise<AudioStateDTO>;
-  startSyntheticAudio: (mode?: number) => Promise<void>;
+  startSyntheticAudio: (mode?: number) => Promise<{ success: boolean; error?: string }>;
   stopAudio: () => Promise<void>;
 
   // Phase 2E: Audio sessions
@@ -137,5 +137,5 @@ export interface PersistedSettings {
   autoWatchFriend: boolean;
   friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
-  lastAudioMode?: 'none' | 'application' | 'monitor';
+  lastAudioMode?: 'none' | 'application' | 'monitor' | 'test-tone';
 }

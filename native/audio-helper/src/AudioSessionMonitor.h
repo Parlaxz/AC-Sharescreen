@@ -40,6 +40,9 @@ public:
     // Initialize COM and enumerate sessions. Returns false on failure.
     bool Initialize();
 
+    // Get the last error code (HRESULT) from initialization, 0 if succeeded.
+    long LastErrorCode() const { return lastErrorCode_; }
+
     // Enumerate all current render audio sessions.
     std::vector<AudioSessionInfo> EnumerateSessions();
 
@@ -50,6 +53,7 @@ private:
     bool comInitialized_ = false;
     void* deviceEnumerator_ = nullptr;    // IMMDeviceEnumerator*
     void* audioSessionManager_ = nullptr; // IAudioSessionManager2*
+    long lastErrorCode_ = 0;              // HRESULT from last failed Initialize() step
 };
 
 } // namespace screenlink::audio

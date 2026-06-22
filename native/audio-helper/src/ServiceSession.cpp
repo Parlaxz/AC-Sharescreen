@@ -1178,13 +1178,17 @@ void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/
     // Create session monitor
     auto monitor = std::make_unique<AudioSessionMonitor>();
     if (!monitor->Initialize()) {
+        long hresult = monitor->LastErrorCode();
+        char errorBuf[96] = {};
+        snprintf(errorBuf, sizeof(errorBuf),
+                 "session-enumeration-failed (HRESULT=0x%08lx)", hresult);
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", static_cast<uint64_t>(0));
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "session-enumeration-failed");
+        resp.Set("error", errorBuf);
         resp.Set("result", "{}");
         response = resp.Str();
         return;
@@ -1390,13 +1394,18 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
     // Enumerate audio sessions
     auto monitor = std::make_unique<AudioSessionMonitor>();
     if (!monitor->Initialize()) {
+        // Report the precise HRESULT hex code for debugging
+        long hresult = monitor->LastErrorCode();
+        char errorBuf[96] = {};
+        snprintf(errorBuf, sizeof(errorBuf),
+                 "session-enumeration-failed (HRESULT=0x%08lx)", hresult);
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", static_cast<uint64_t>(0));
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "session-enumeration-failed");
+        resp.Set("error", errorBuf);
         resp.Set("result", "{}");
         response = resp.Str();
         return;

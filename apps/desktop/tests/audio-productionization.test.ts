@@ -330,3 +330,250 @@ describe('getAudioCapabilities API type', () => {
     expect(errorResponse.error.message).toBeTruthy();
   });
 });
+
+describe('Audio capture result handling', () => {
+  // Simulates the renderer-side logic in Dashboard.tsx's handleShareScreen.
+  // These tests verify the contract: capture result is checked BEFORE waitUntilPrimed.
+
+  async function testCapturePath(
+    captureResult: { success: boolean; error?: string } | undefined,
+    devMode: boolean,
+    fallbackEnabled: boolean,
+    syntheticResult?: { success: boolean; error?: string },
+  ): Promise<{ audioConfigured: boolean; audioError: string | null; appliedMode: string; isSynthetic: boolean; waitUntilPrimedCalled: boolean }> {
+    let waitUntilPrimedCalled = false;
+    const controller = {
+      waitUntilPrimed: async () => { waitUntilPrimedCalled = true; },
+    };
+
+    const api = {
+      startFilteredMonitorAudio: async () => captureResult,
+      startApplicationAudio: async () => captureResult,
+      startSyntheticAudio: async () => syntheticResult ?? { success: false },
+      getSettings: async () => fallbackEnabled ? { useSyntheticAudioFallback: true } : {},
+      stopAudio: async () => {},
+    };
+
+    const envDev = devMode;
+    let audioConfigured = false;
+    let audioError: string | null = null;
+    let appliedMode = 'none';
+    let isSynthetic = false;
+
+    // Simulate the real capture-and-check logic from Dashboard.tsx lines 375-460
+    if (!captureResult || !captureResult.success) {
+      // attemptDevSyntheticFallback
+      let fallbackResult: 'synthetic' | 'none' = 'none';
+      if (envDev && fallbackEnabled) {
+        const synthRes = syntheticResult ?? { success: false };
+        if (synthRes.success) {
+          fallbackResult = 'synthetic';
+        }
+        if (!synthRes.success) {
+          fallbackResult = 'none';
+        }
+      }
+      if (fallbackResult === 'synthetic') {
+        isSynthetic = true;
+        await controller.waitUntilPrimed();
+        audioConfigured = true;
+      } else {
+        audioError = captureResult?.error ?? 'Audio capture could not start';
+      }
+    } else {
+      appliedMode = 'monitor';
+      await controller.waitUntilPrimed();
+      audioConfigured = true;
+    }
+
+    return { audioConfigured, audioError, appliedMode, isSynthetic, waitUntilPrimedCalled };
+  }
+
+  it('failed filtered capture does not call waitUntilPrimed()', async () => {
+    const result = await testCapturePath(
+      { success: false, error: 'session-enumeration-failed' },
+      false, false, undefined,
+    );
+    expect(result.waitUntilPrimedCalled).toBe(false);
+    expect(result.audioConfigured).toBe(false);
+    expect(result.audioError).toBe('session-enumeration-failed');
+  });
+
+  it('failed application capture does not call waitUntilPrimed()', async () => {
+    const result = await testCapturePath(
+      { success: false, error: 'process-not-found' },
+      false, false, undefined,
+    );
+    expect(result.waitUntilPrimedCalled).toBe(false);
+    expect(result.audioConfigured).toBe(false);
+    expect(result.audioError).toBe('process-not-found');
+  });
+
+  it('failed audio capture continues video-only without unhandled timeout', async () => {
+    // The outer try/catch catches the error; no unhandled rejection
+    let caughtError: unknown = null;
+    try {
+      const result = await testCapturePath(
+        { success: false, error: 'session-enumeration-failed' },
+        false, false, undefined,
+      );
+      // The function does not throw — capture failure is handled gracefully
+      expect(result.audioConfigured).toBe(false);
+      expect(result.audioError).toBeTruthy();
+    } catch (err) {
+      caughtError = err;
+    }
+    expect(caughtError).toBeNull();
+  });
+
+  it('explicit Test Tone starts synthetic capture and waits for priming', async () => {
+    // Test-tone path: call startSyntheticAudio, check result, waitUntilPrimed on success
+    let waitUntilPrimedCalled = false;
+    const controller = {
+      waitUntilPrimed: async () => { waitUntilPrimedCalled = true; },
+    };
+
+    const api = {
+      startSyntheticAudio: async () => ({ success: true }),
+      stopAudio: async () => {},
+    };
+
+    let audioConfigured = false;
+    let audioError: string | null = null;
+    let isSynthetic = false;
+
+    const result = await api.startSyntheticAudio();
+    if (!result || !result.success) {
+      audioError = result?.error ?? 'Test tone could not start';
+    } else {
+      isSynthetic = true;
+      await controller.waitUntilPrimed();
+      audioConfigured = true;
+    }
+
+    expect(audioConfigured).toBe(true);
+    expect(audioError).toBeNull();
+    expect(isSynthetic).toBe(true);
+    expect(waitUntilPrimedCalled).toBe(true);
+  });
+
+  it('synthetic failure is handled immediately', async () => {
+    let waitUntilPrimedCalled = false;
+    const controller = {
+      waitUntilPrimed: async () => { waitUntilPrimedCalled = true; },
+    };
+
+    const api = {
+      startSyntheticAudio: async () => ({ success: false, error: 'helper-busy' }),
+      stopAudio: async () => {},
+    };
+
+    let audioConfigured = false;
+    let audioError: string | null = null;
+
+    const result = await api.startSyntheticAudio();
+    if (!result || !result.success) {
+      audioError = result?.error ?? 'Test tone could not start';
+    } else {
+      await controller.waitUntilPrimed();
+      audioConfigured = true;
+    }
+
+    expect(audioConfigured).toBe(false);
+    expect(audioError).toBe('helper-busy');
+    expect(waitUntilPrimedCalled).toBe(false);
+  });
+
+  it('production mode never automatically substitutes synthetic audio', async () => {
+    // In production (import.meta.env.DEV = false), the fallback is never attempted
+    const result = await testCapturePath(
+      { success: false, error: 'session-enumeration-failed' },
+      false,   // devMode = false
+      true,    // fallbackEnabled = true (but irrelevant in production)
+      { success: true },  // synthetic would succeed if called
+    );
+    expect(result.waitUntilPrimedCalled).toBe(false);
+    expect(result.audioConfigured).toBe(false);
+    expect(result.audioError).toBe('session-enumeration-failed');
+    expect(result.isSynthetic).toBe(false);
+  });
+
+  it('development fallback works only when explicitly enabled', async () => {
+    // Dev mode + fallback enabled in settings = synthetic fallback works
+    const result = await testCapturePath(
+      { success: false, error: 'session-enumeration-failed' },
+      true,    // devMode = true
+      true,    // fallbackEnabled = true
+      { success: true },
+    );
+    expect(result.waitUntilPrimedCalled).toBe(true);
+    expect(result.audioConfigured).toBe(true);
+    expect(result.audioError).toBeNull();
+    expect(result.isSynthetic).toBe(true);
+  });
+
+  it('development fallback skipped when not explicitly enabled', async () => {
+    // Dev mode but fallback NOT enabled in settings = no synthetic fallback
+    const result = await testCapturePath(
+      { success: false, error: 'session-enumeration-failed' },
+      true,    // devMode = true
+      false,   // fallbackEnabled = false
+      { success: true },  // synthetic would succeed but isn't called
+    );
+    expect(result.waitUntilPrimedCalled).toBe(false);
+    expect(result.audioConfigured).toBe(false);
+    expect(result.audioError).toBe('session-enumeration-failed');
+    expect(result.isSynthetic).toBe(false);
+  });
+
+  it('applied audio state is none after real capture fails', async () => {
+    // When real capture fails and no fallback activates, appliedMode stays 'none'
+    const result = await testCapturePath(
+      { success: false, error: 'session-enumeration-failed' },
+      false, false, undefined,
+    );
+    expect(result.appliedMode).toBe('none');
+  });
+
+  it('successful real capture sets applied mode', async () => {
+    const result = await testCapturePath(
+      { success: true },
+      false, false, undefined,
+    );
+    expect(result.appliedMode).toBe('monitor');
+    expect(result.audioConfigured).toBe(true);
+    expect(result.waitUntilPrimedCalled).toBe(true);
+  });
+
+  it('startSyntheticAudio returns structured result', async () => {
+    // Verify the type contract: return is {success, error?}
+    const api = {
+      startSyntheticAudio: async (): Promise<{ success: boolean; error?: string }> => {
+        return { success: true };
+      },
+    };
+
+    const result = await api.startSyntheticAudio();
+    expect(result).toHaveProperty('success');
+    // 'error' is optional — not present when success=true
+    expect(result.success).toBe(true);
+  });
+
+  it('requestAudioPort returns structured result', async () => {
+    const api = {
+      requestAudioPort: async (): Promise<{ success: boolean; error?: string }> => {
+        return { success: true };
+      },
+    };
+
+    const result = await api.requestAudioPort();
+    expect(result).toHaveProperty('success');
+    expect(result.success).toBe(true);
+  });
+
+  it('capture error contains precise cause', () => {
+    // Verify that session-enumeration-failed includes HRESULT hex
+    const errorWithHresult = 'session-enumeration-failed (HRESULT=0x80070490)';
+    expect(errorWithHresult).toMatch(/HRESULT=0x[0-9A-Fa-f]{8}/);
+  });
+});

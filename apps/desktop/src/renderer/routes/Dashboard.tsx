@@ -41,7 +41,10 @@ export function Dashboard() {
   const [remoteMuted, setRemoteMuted] = useState(false);
   const [remoteVolume, setRemoteVolume] = useState(1);
   const [showEnableAudioButton, setShowEnableAudioButton] = useState(false);
-  const [audioMode, setAudioMode] = useState<'none' | 'application' | 'monitor'>('none');
+  const [audioMode, setAudioMode] = useState<'none' | 'application' | 'monitor' | 'test-tone'>('none');
+  const [appliedAudioMode, setAppliedAudioMode] = useState<'none' | 'application' | 'monitor' | 'test-tone'>('none');
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const [audioIsSynthetic, setAudioIsSynthetic] = useState(false);
   // local stats now flow through PublisherManager events
 
   function formatBitsTransferred(bytes: number): string {
@@ -290,6 +293,40 @@ export function Dashboard() {
 
   // ── Sharing handlers ──────────────────────────────────────
 
+  /**
+   * Development-only synthetic audio fallback.
+   * Only activates when all conditions are met:
+   * - Running in dev mode (import.meta.env.DEV)
+   * - The user has explicitly enabled useSyntheticAudioFallback in settings
+   * - Real capture just failed
+   * Never activates in production.
+   * Returns 'synthetic' on success, 'none' if fallback not applicable or failed.
+   */
+  async function attemptDevSyntheticFallback(
+    api: import("../../preload/api-types.js").ScreenLinkAPI | undefined | null,
+    captureError: string | undefined,
+  ): Promise<'synthetic' | 'none'> {
+    // Production: never auto-substitute
+    if (!import.meta.env.DEV) return 'none';
+
+    try {
+      const settings = await api?.getSettings();
+      if (!settings || !('useSyntheticAudioFallback' in settings) || !(settings as any).useSyntheticAudioFallback) {
+        return 'none';
+      }
+    } catch {
+      return 'none';
+    }
+
+    console.warn("[Audio] Real capture failed, attempting dev fallback to synthetic:", captureError);
+    const result = await api?.startSyntheticAudio();
+    if (!result || !result.success) {
+      console.warn("[Audio] Dev synthetic fallback also failed:", result?.error);
+      return 'none';
+    }
+    return 'synthetic';
+  }
+
   const handleShareScreen = useCallback(async () => {
     setLocalShareState("selecting-source");
     try {
@@ -329,52 +366,101 @@ export function Dashboard() {
 
       // Audio setup (best-effort, failure does not block video-only sharing)
       let audioConfigured = false;
-      if (effectiveAudioMode !== 'none') {
+      setAudioError(null);
+      setAppliedAudioMode('none');
+      setAudioIsSynthetic(false);
+
+      // ── Test Tone mode: explicit synthetic, no fallback ──────────────
+      if (effectiveAudioMode === 'test-tone') {
         try {
           setAudioEnabled(true);
 
-          // 1. Create fresh port listener + request port from main process
           const portPromise = waitForNextAudioPort();
           const portResult = await api?.requestAudioPort();
           if (!portResult || !portResult.success) {
             throw new Error(portResult?.error || 'Audio helper unavailable');
           }
-
-          // 2. Await the MessagePort transferred from main process
           const port = await portPromise;
 
-          // 3. Create AudioContext + worklet (consumer ready, no priming wait)
           const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
           const controller = new ProcessAudioController();
           await controller.initialize(port);
-
-          // 4. Register controller before starting capture (publisher needs the track)
           mgr.setAudioController(controller);
 
-          // 5. Start native capture PRODUCER based on audio mode
-          if (effectiveAudioMode === 'application') {
-            // Application audio resolves the source via native helper (includes PID + creation-time validation)
-            await api?.startApplicationAudio({ sourceId });
+          const result = await api?.startSyntheticAudio();
+          if (!result || !result.success) {
+            setAudioError(result?.error ?? 'Test tone could not start');
+            setAudioEnabled(false);
+            try { api?.stopAudio(); } catch { /* ignore */ }
           } else {
-            // monitor mode: filtered monitor capture
-            await api?.startFilteredMonitorAudio({
-              excludeDiscord: true,
-              excludeScreenLink: true,
-            });
+            setAudioIsSynthetic(true);
+            setAppliedAudioMode('test-tone');
+            await controller.waitUntilPrimed();
+            audioConfigured = true;
           }
-
-          // 6. Wait for the worklet ring buffer to reach priming depth
-          await controller.waitUntilPrimed();
-          audioConfigured = true;
         } catch (err) {
-          console.warn("[Audio] Setup failed, continuing video-only:", err);
+          setAudioError(err instanceof Error ? err.message : String(err));
+          console.warn("[Audio] Test tone setup failed:", err);
           setAudioEnabled(false);
-          // Clean up partial audio state
-          try { api?.stopAudio(); } catch {}
-          // Audio is optional — continue with video only
+          try { api?.stopAudio(); } catch { /* ignore */ }
         }
       }
 
+      // ── Real capture modes: application or filtered monitor ──────────
+      if (effectiveAudioMode !== 'none' && effectiveAudioMode !== 'test-tone') {
+        try {
+          setAudioEnabled(true);
+
+          const portPromise = waitForNextAudioPort();
+          const portResult = await api?.requestAudioPort();
+          if (!portResult || !portResult.success) {
+            throw new Error(portResult?.error || 'Audio helper unavailable');
+          }
+          const port = await portPromise;
+
+          const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
+          const controller = new ProcessAudioController();
+          await controller.initialize(port);
+          mgr.setAudioController(controller);
+
+          // Start capture — check result BEFORE priming
+          let captureResult: { success: boolean; error?: string } | undefined;
+
+          if (effectiveAudioMode === 'application') {
+            captureResult = await api?.startApplicationAudio({ sourceId }) as { success: boolean; error?: string } | undefined;
+          } else {
+            captureResult = await api?.startFilteredMonitorAudio({
+              excludeDiscord: true,
+              excludeScreenLink: true,
+            }) as { success: boolean; error?: string } | undefined;
+          }
+
+          if (!captureResult || !captureResult.success) {
+            // Real capture failed — development-only synthetic fallback
+            const fallbackResult = await attemptDevSyntheticFallback(api, captureResult?.error);
+            if (fallbackResult === 'synthetic') {
+              setAudioIsSynthetic(true);
+              await controller.waitUntilPrimed();
+              audioConfigured = true;
+            } else {
+              setAudioError(captureResult?.error ?? 'Audio capture could not start');
+              setAudioEnabled(false);
+              try { api?.stopAudio(); } catch { /* ignore */ }
+            }
+          } else {
+            setAppliedAudioMode(effectiveAudioMode);
+            await controller.waitUntilPrimed();
+            audioConfigured = true;
+          }
+        } catch (err) {
+          setAudioError(err instanceof Error ? err.message : String(err));
+          console.warn("[Audio] Setup failed, continuing video-only:", err);
+          setAudioEnabled(false);
+          try { api?.stopAudio(); } catch { /* ignore */ }
+        }
+      }
+
+      // ── Video capture + publishing (regardless of audio success) ────
       const stream = await mgr.startCapture({
         sourceId, password, streamId,
         videoBitrate: captureBitrate,
@@ -394,11 +480,11 @@ export function Dashboard() {
       const { getControlConnection } = await import("../services/control-connection.js");
       getControlConnection().sendShareStarted();
 
-      // Persist audio mode preference
+      // Persist audio mode preference (user's intent, not applied mode)
       try {
         const settings = await api?.getSettings();
-        if (settings && settings.lastAudioMode !== effectiveAudioMode) {
-          await api?.updateSettings({ lastAudioMode: effectiveAudioMode });
+        if (settings && settings.lastAudioMode !== audioMode) {
+          await api?.updateSettings({ lastAudioMode: audioMode });
         }
       } catch { /* ignore */ }
     } catch (err) {
@@ -410,7 +496,7 @@ export function Dashboard() {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
       api?.stopAudio().catch(() => {});
     }
-  }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials, audioMode]);
+  }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials, audioMode, setAudioError, setAppliedAudioMode, setAudioIsSynthetic]);
 
   const handleShareScreenWithAudio = useCallback(
     () => handleShareScreen(),
@@ -438,7 +524,10 @@ export function Dashboard() {
     }
 
     setLocalShareState("idle");
-  }, [clearLocalMediaCredentials]);
+    setAudioError(null);
+    setAppliedAudioMode('none');
+    setAudioIsSynthetic(false);
+  }, [clearLocalMediaCredentials, setAudioError, setAppliedAudioMode, setAudioIsSynthetic]);
 
   async function handleEnableAudio() {
     if (!videoRef.current) return;
@@ -502,6 +591,10 @@ export function Dashboard() {
                   <input type="radio" name="audioMode" value="monitor" checked={audioMode === 'monitor'}
                     onChange={() => setAudioMode('monitor')} /> Filtered Monitor Audio
                 </label>
+                <label style={{ marginLeft: "1rem" }}>
+                  <input type="radio" name="audioMode" value="test-tone" checked={audioMode === 'test-tone'}
+                    onChange={() => setAudioMode('test-tone')} /> Test Tone
+                </label>
                 {audioMode === 'application' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
                     Captures audio from the selected application process tree only.
@@ -512,10 +605,27 @@ export function Dashboard() {
                     Captures audio from active applications. Discord and ScreenLink playback are excluded.
                   </p>
                 )}
+                {audioMode === 'test-tone' && (
+                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                    Diagnostic 440 Hz sine wave. Does not capture real system audio.
+                  </p>
+                )}
               </div>
             </>
           ) : (
-            <button className="danger" onClick={handleStopSharing}>Stop Sharing</button>
+            <>
+              <button className="danger" onClick={handleStopSharing}>Stop Sharing</button>
+              {audioIsSynthetic && (
+                <p className="dim" style={{ fontSize: "0.7rem", fontStyle: "italic", marginTop: "0.25rem" }}>
+                  Audio: test tone (real capture unavailable on this system)
+                </p>
+              )}
+              {audioError && (
+                <p className="dim" style={{ fontSize: "0.7rem", color: "var(--warning, #f59e0b)", marginTop: "0.25rem" }}>
+                  Audio: {audioError}
+                </p>
+              )}
+            </>
           )}
         </div>
         {localShareState === "sharing" && localMediaStats && (

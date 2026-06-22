@@ -126,9 +126,11 @@ AudioSessionMonitor::~AudioSessionMonitor() {
 
 bool AudioSessionMonitor::Initialize() {
     // 1. Initialize COM
+    lastErrorCode_ = 0;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     comInitialized_ = (hr == S_OK || hr == S_FALSE);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        lastErrorCode_ = static_cast<long>(hr);
         return false;
     }
 
@@ -139,6 +141,7 @@ bool AudioSessionMonitor::Initialize() {
         CLSCTX_ALL, IID_IMMDeviceEnumerator_,
         reinterpret_cast<void**>(&enumerator));
     if (FAILED(hr) || !enumerator) {
+        lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;
     }
@@ -148,6 +151,7 @@ bool AudioSessionMonitor::Initialize() {
     IMMDevice* device = nullptr;
     hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
     if (FAILED(hr) || !device) {
+        lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;
     }
@@ -159,6 +163,7 @@ bool AudioSessionMonitor::Initialize() {
                           reinterpret_cast<void**>(&sessionManager));
     SafeRelease(device);
     if (FAILED(hr) || !sessionManager) {
+        lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;
     }
