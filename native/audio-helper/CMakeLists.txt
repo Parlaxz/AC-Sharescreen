@@ -32,6 +32,7 @@ set(SOURCES
   src/LoopbackCapture.cpp
   src/PipeTransport.cpp
   src/SyntheticSource.cpp
+  src/ServiceSession.cpp
 )
 
 # Executable
