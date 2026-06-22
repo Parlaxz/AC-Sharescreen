@@ -8,7 +8,7 @@
  * Logs every step to both console and apps/desktop/electron-probe.log
  */
 
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import * as net from 'net';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -28,7 +28,7 @@ function log(msg) {
 function sha256(filePath) {
   try {
     const buf = fs.readFileSync(filePath);
-    const hash = require('crypto').createHash('sha256');
+    const hash = crypto.createHash('sha256');
     hash.update(buf);
     return hash.digest('hex');
   } catch { return 'error'; }
@@ -53,7 +53,7 @@ async function main() {
 
   // helper --version
   log('--- helper --version ---');
-  const verOut = require('child_process').execSync(`"${HELPER}" --version`, { encoding: 'utf-8', timeout: 5000 });
+  const verOut = execSync(`"${HELPER}" --version`, { encoding: 'utf-8', timeout: 5000 });
   log(`version output: ${verOut.trim()}`);
   log(`serviceProtocolVersion check: ${verOut.includes('0.3.0') ? 'PASS (0.3.0)' : 'FAIL'}`);
 
