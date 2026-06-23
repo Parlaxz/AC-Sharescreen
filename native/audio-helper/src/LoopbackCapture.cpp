@@ -19,19 +19,9 @@
 #include <vector>
 #include <system_error>
 
-// Define stream flags that may not be present in older SDK headers.
-#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
-#endif
-#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
-#endif
-
 namespace screenlink::audio {
 
 namespace {
-
-// Activation types and shared activation logic now in ProcessLoopbackActivator.h
 
 // ── Helper: build a human-readable error string from HRESULT ──
 
@@ -39,16 +29,6 @@ std::string HresultToString(HRESULT hr) {
     char buf[32] = {};
     snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
     return std::string(buf);
-}
-
-// ── Helper: release a COM pointer if non-null, then null it out ──
-
-template <typename T>
-void SafeRelease(T*& ptr) {
-    if (ptr) {
-        ptr->Release();
-        ptr = nullptr;
-    }
 }
 
 // ── RAII wrapper for Win32 HANDLE ──
@@ -90,20 +70,20 @@ private:
 static constexpr uint32_t kCaptureSampleRate = 48000;
 static constexpr uint16_t kCaptureChannels = 2;
 static constexpr uint16_t kCaptureBitsPerSample = 32;
-static constexpr uint16_t kCaptureBlockAlign = kCaptureChannels * (kCaptureBitsPerSample / 8); // 8
-static constexpr uint32_t kCaptureAvgBytesPerSec = kCaptureSampleRate * kCaptureBlockAlign;   // 384000
+static constexpr uint16_t kCaptureBlockAlign = kCaptureChannels * (kCaptureBitsPerSample / 8);
+static constexpr uint32_t kCaptureAvgBytesPerSec = kCaptureSampleRate * kCaptureBlockAlign;
 
-static WAVEFORMATEX MakeCaptureFormat() {
-    WAVEFORMATEX fmt = {};
-    fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-    fmt.nChannels = kCaptureChannels;
-    fmt.nSamplesPerSec = kCaptureSampleRate;
-    fmt.wBitsPerSample = kCaptureBitsPerSample;
-    fmt.nBlockAlign = kCaptureBlockAlign;
-    fmt.nAvgBytesPerSec = kCaptureAvgBytesPerSec;
-    fmt.cbSize = 0;
-    return fmt;
-}
+// ── Capture exit reason for proper result reporting ──
+
+enum class CaptureExitReason {
+    NotStarted,
+    StopRequested,
+    DurationElapsed,
+    PacketApiFailure,
+    EventWaitFailed,
+    DeviceInvalidated,
+    CallbackRequestedStop
+};
 
 } // anonymous namespace
 
@@ -113,10 +93,8 @@ bool IsProcessLoopbackSupported() {
     auto osInfo = DetectWindowsVersion();
     if (!osInfo.succeeded) return false;
 
-    // Documented-supported builds (>= 20348)
     if (osInfo.build >= kMinProcessLoopbackBuild) return true;
 
-    // Experimental candidate builds (19041–20347): check runtime probe
     if (osInfo.build >= kExperimentalProcessLoopbackFloor) {
         auto probeResult = ProbeProcessLoopbackRuntime();
         return probeResult.succeeded;
@@ -127,8 +105,10 @@ bool IsProcessLoopbackSupported() {
 
 // ── RunCaptureWithPacketCallback ──
 
-CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCallback onPacket) {
+CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCallback onPacket,
+                                           const CaptureLifecycleCallbacks& lifecycle) {
     CaptureResult result;
+    CaptureExitReason exitReason = CaptureExitReason::NotStarted;
 
     // 1. Check OS support
     if (!IsProcessLoopbackSupported()) {
@@ -184,36 +164,54 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
         }
     }
 
-    // 4. Initialize COM
+    // 4. Initialize COM (MTA required for process-loopback)
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         result.failureReason = "CoInitializeEx failed: " + HresultToString(hr);
         return result;
     }
 
-    // 5. Activate process-loopback virtual device
+    // 5. Activate process-loopback virtual device using production path
+    //    (WRL agile handler, official SDK types, WAVEFORMATEXTENSIBLE, event-driven)
     auto ar = ActivateProcessLoopback(
         config.targetPid,
         config.includeMode ? AcLoopbackMode::kIncludeTargetProcessTree : AcLoopbackMode::kExcludeTargetProcessTree,
         5000);
+
     if (!ar.succeeded) {
         result.failureReason = std::move(ar.failureReason);
         CoUninitialize();
         return result;
     }
 
-    IAudioClient* pAudioClient = ar.audioClient;
-    IAudioCaptureClient* pCaptureClient = ar.captureClient;
+    // ar now owns audioClient, captureClient, and sampleReadyEvent.
+    // They are valid as long as ar is in scope. Do NOT SafeRelease them.
 
-    // 6. Start the audio engine
-    hr = pAudioClient->Start();
-    if (FAILED(hr)) {
-        result.failureReason = "IAudioClient::Start failed: "
-            + HresultToString(hr);
-        SafeRelease(pCaptureClient);
-        SafeRelease(pAudioClient);
+    // Signal startup success immediately (before capture loop, before any packets).
+    // This is the correct readiness point — the stream was created successfully.
+    if (lifecycle.onReady) {
+        CaptureReadyInfo readyInfo;
+        readyInfo.targetPid = config.targetPid;
+        readyInfo.loopbackMode = config.includeMode
+            ? AcLoopbackMode::kIncludeTargetProcessTree
+            : AcLoopbackMode::kExcludeTargetProcessTree;
+        readyInfo.sampleRate = 48000;
+        readyInfo.channelCount = 2;
+        readyInfo.bitsPerSample = 32;
+        readyInfo.bufferFrames = ar.bufferFrames;
+        readyInfo.streamFlags =
+            AUDCLNT_STREAMFLAGS_LOOPBACK |
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
+        readyInfo.threadId = GetCurrentThreadId();
+        lifecycle.onReady(readyInfo);
+    }
 
+    // 6. Create stop event for signaling shutdown
+    HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!stopEvent) {
         CoUninitialize();
+        result.failureReason = "Failed to create stop event";
         return result;
     }
 
@@ -221,7 +219,7 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
     DWORD taskIndex = 0;
     HANDLE avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
 
-    // 8. Capture loop
+    // 8. Event-driven capture loop
     uint64_t framesCaptured = 0;
     uint64_t sequenceNumber = 0;
     auto startTime = std::chrono::steady_clock::now();
@@ -230,106 +228,150 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
     bool running = true;
     std::vector<float> floatBuffer;
 
+    HANDLE waitHandles[2] = { stopEvent, ar.sampleReadyEvent };
+    bool audioClientStarted = true;
+
     while (running) {
-        // Check timeout (durationMs==0 means infinite — no timeout)
+        // Check timeout (durationMs==0 means infinite)
         if (!infiniteDuration) {
             auto elapsed = std::chrono::steady_clock::now() - startTime;
             if (elapsed >= duration) {
+                exitReason = CaptureExitReason::DurationElapsed;
                 break;
             }
         }
 
-        // Get the next available packet
-        UINT32 packetSize = 0;
-        hr = pCaptureClient->GetNextPacketSize(&packetSize);
-        if (FAILED(hr)) {
+        // Wait for either stop signal or sample-ready
+        DWORD waitResult = WaitForMultipleObjects(
+            2,
+            waitHandles,
+            FALSE,
+            infiniteDuration ? INFINITE : duration.count() > 0 ? 10 : INFINITE);
+
+        if (waitResult == WAIT_OBJECT_0) {
+            // Stop event signaled
+            exitReason = CaptureExitReason::StopRequested;
             break;
         }
 
-        while (packetSize > 0) {
-            BYTE* pData = nullptr;
-            UINT32 numFramesAvailable = 0;
-            DWORD flags = 0;
-            UINT64 devicePosition = 0;
-            UINT64 qpcPosition = 0;
-
-            hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
-                                           &flags, &devicePosition, &qpcPosition);
-            if (FAILED(hr)) {
-                running = false;
-                break;
-            }
-
-            AudioPacket packet{};
-            packet.frameCount = numFramesAvailable;
-            packet.channels = kCaptureChannels;
-            packet.sequenceNumber = sequenceNumber;
-            packet.qpcPosition100ns = qpcPosition;
-            packet.devicePosition = devicePosition;
-            packet.isDiscontinuous =
-                (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
-            packet.hasTimestampError =
-                (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
-
-            if (numFramesAvailable > 0) {
-                size_t totalSamples =
-                    static_cast<size_t>(numFramesAvailable) * kCaptureChannels;
-
-                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                    // Zero-fill silent frames to preserve timeline
-                    floatBuffer.assign(totalSamples, 0.0f);
-                    packet.isSilent = true;
-                } else {
-                    floatBuffer.assign(
-                        reinterpret_cast<float*>(pData),
-                        reinterpret_cast<float*>(pData) + totalSamples);
+        if (waitResult == WAIT_OBJECT_0 + 1) {
+            // Sample-ready: drain all available packets
+            while (running) {
+                UINT32 packetSize = 0;
+                hr = ar.captureClient->GetNextPacketSize(&packetSize);
+                if (FAILED(hr)) {
+                    exitReason = CaptureExitReason::PacketApiFailure;
+                    running = false;
+                    break;
                 }
 
-                packet.frames = floatBuffer.data();
+                if (packetSize == 0) break;
+
+                BYTE* pData = nullptr;
+                UINT32 numFramesAvailable = 0;
+                DWORD flags = 0;
+                UINT64 devicePosition = 0;
+                UINT64 qpcPosition = 0;
+
+                hr = ar.captureClient->GetBuffer(&pData, &numFramesAvailable,
+                                                  &flags, &devicePosition, &qpcPosition);
+                if (FAILED(hr)) {
+                    exitReason = CaptureExitReason::PacketApiFailure;
+                    running = false;
+                    break;
+                }
+
+                AudioPacket packet{};
+                packet.frameCount = numFramesAvailable;
+                packet.channels = kCaptureChannels;
+                packet.sequenceNumber = sequenceNumber;
+                packet.qpcPosition100ns = qpcPosition;
+                packet.devicePosition = devicePosition;
+                packet.isDiscontinuous =
+                    (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+                packet.hasTimestampError =
+                    (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
+
+                if (numFramesAvailable > 0) {
+                    size_t totalSamples =
+                        static_cast<size_t>(numFramesAvailable) * kCaptureChannels;
+
+                    if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                        floatBuffer.assign(totalSamples, 0.0f);
+                        packet.isSilent = true;
+                    } else {
+                        floatBuffer.assign(
+                            reinterpret_cast<float*>(pData),
+                            reinterpret_cast<float*>(pData) + totalSamples);
+                    }
+
+                    packet.frames = floatBuffer.data();
+                }
+
+                if (!onPacket(packet)) {
+                    exitReason = CaptureExitReason::CallbackRequestedStop;
+                    running = false;
+                }
+
+                framesCaptured += numFramesAvailable;
+                sequenceNumber++;
+
+                hr = ar.captureClient->ReleaseBuffer(numFramesAvailable);
+                if (FAILED(hr)) {
+                    exitReason = CaptureExitReason::PacketApiFailure;
+                    running = false;
+                    break;
+                }
+
+                if (!running) break;
             }
-
-            // Invoke callback — always called even for silent packets
-            if (!onPacket(packet)) {
-                running = false;
-            }
-
-            framesCaptured += numFramesAvailable;
-            sequenceNumber++;
-
-            pCaptureClient->ReleaseBuffer(numFramesAvailable);
-
-            if (!running) break;
-
-            // Check for more packets
-            hr = pCaptureClient->GetNextPacketSize(&packetSize);
-            if (FAILED(hr)) {
-                running = false;
-                break;
-            }
-        }
-
-        // Brief sleep if no data available (avoid busy-wait)
-        if (packetSize == 0 && running) {
-            Sleep(1);
+        } else if (waitResult == WAIT_TIMEOUT) {
+            // Timeout on the wait -- check if duration expired
+            continue;
+        } else {
+            // WAIT_FAILED or other
+            exitReason = CaptureExitReason::EventWaitFailed;
+            break;
         }
     }
 
-    // 9. Stop the engine
-    pAudioClient->Stop();
+    // 9. Stop the audio engine
+    if (audioClientStarted && ar.audioClient) {
+        hr = ar.audioClient->Stop();
+        ar.stopHr = hr;
+    }
 
     // Revert Pro Audio priority
     if (avrtHandle) {
         AvRevertMmThreadCharacteristics(avrtHandle);
     }
 
-    // Populate result
+    // 10. Cleanup stop event
+    if (stopEvent) {
+        CloseHandle(stopEvent);
+    }
+
+    // 11. Populate result
     result.framesCaptured = framesCaptured;
     result.bytesWritten = framesCaptured * kCaptureBlockAlign;
-    result.succeeded = true;
 
-    // 10. Cleanup COM objects
-    SafeRelease(pCaptureClient);
-    SafeRelease(pAudioClient);
+    // Set success only for expected exits
+    if (exitReason == CaptureExitReason::StopRequested ||
+        exitReason == CaptureExitReason::DurationElapsed ||
+        exitReason == CaptureExitReason::CallbackRequestedStop) {
+        result.succeeded = true;
+    } else if (exitReason == CaptureExitReason::PacketApiFailure) {
+        result.failureReason = "Capture API failure: " + HresultToString(hr);
+    } else if (exitReason == CaptureExitReason::EventWaitFailed) {
+        result.failureReason = "Event wait failed: " + HresultToString(hr);
+    } else if (exitReason == CaptureExitReason::DeviceInvalidated) {
+        result.failureReason = "Audio device invalidated";
+    }
+
+    // 12. Cleanup COM -- AcActivationResult destructor releases COM objects.
+    // Must happen before CoUninitialize.
+    // ar goes out of scope here, releasing audioClient, captureClient, sampleReadyEvent.
+
     CoUninitialize();
 
     return result;
@@ -425,33 +467,24 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         return result;
     }
 
-    IAudioClient* pAudioClient = ar.audioClient;
-    IAudioCaptureClient* pCaptureClient = ar.captureClient;
-
-    WAVEFORMATEX captureFormat = MakeCaptureFormat();
+    // ar now owns audioClient, captureClient, sampleReadyEvent.
+    // Do NOT SafeRelease them.
 
     // 6. Open WAV writer with overwrite flag
     WavWriter writer;
     if (!writer.Open(result.outputPath, kCaptureSampleRate, kCaptureChannels,
                      kCaptureBitsPerSample, config.overwrite)) {
         result.failureReason = "Failed to open output WAV file: " + result.outputPath;
-        SafeRelease(pCaptureClient);
-        SafeRelease(pAudioClient);
-
         CoUninitialize();
         return result;
     }
 
-    // 7. Start audio engine
-    hr = pAudioClient->Start();
-    if (FAILED(hr)) {
-        result.failureReason = "IAudioClient::Start failed: "
-            + HresultToString(hr);
+    // 7. Create stop event
+    HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!stopEvent) {
         writer.Close();
-        SafeRelease(pCaptureClient);
-        SafeRelease(pAudioClient);
-
         CoUninitialize();
+        result.failureReason = "Failed to create stop event";
         return result;
     }
 
@@ -459,80 +492,107 @@ CaptureResult RunCapture(const CaptureConfig& config) {
     DWORD taskIndex = 0;
     HANDLE avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
 
-    // 9. Capture loop writing frames to WAV
+    // 9. Event-driven capture loop writing frames to WAV
     uint64_t framesCaptured = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::milliseconds(config.durationMs);
     bool infiniteDuration = (config.durationMs == 0);
     bool running = true;
     std::vector<float> floatBuffer;
+    CaptureExitReason exitReason = CaptureExitReason::NotStarted;
+
+    HANDLE waitHandles[2] = { stopEvent, ar.sampleReadyEvent };
+    bool audioClientStarted = true;
 
     while (running) {
-        // Check timeout (durationMs==0 means infinite — no timeout)
         if (!infiniteDuration) {
             auto elapsed = std::chrono::steady_clock::now() - startTime;
             if (elapsed >= duration) {
+                exitReason = CaptureExitReason::DurationElapsed;
                 break;
             }
         }
 
-        UINT32 packetSize = 0;
-        hr = pCaptureClient->GetNextPacketSize(&packetSize);
-        if (FAILED(hr)) break;
+        DWORD waitResult = WaitForMultipleObjects(
+            2,
+            waitHandles,
+            FALSE,
+            infiniteDuration ? INFINITE : 10);
 
-        while (packetSize > 0) {
-            BYTE* pData = nullptr;
-            UINT32 numFramesAvailable = 0;
-            DWORD flags = 0;
-            UINT64 devicePosition = 0;
-            UINT64 qpcPosition = 0;
+        if (waitResult == WAIT_OBJECT_0) {
+            exitReason = CaptureExitReason::StopRequested;
+            break;
+        }
 
-            hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
-                                           &flags, &devicePosition, &qpcPosition);
-            if (FAILED(hr)) {
-                running = false;
-                break;
-            }
-
-            if (numFramesAvailable > 0) {
-                size_t totalSamples =
-                    static_cast<size_t>(numFramesAvailable) * kCaptureChannels;
-
-                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                    // Zero-fill silent frames to preserve timeline
-                    floatBuffer.assign(totalSamples, 0.0f);
-                } else {
-                    floatBuffer.assign(
-                        reinterpret_cast<float*>(pData),
-                        reinterpret_cast<float*>(pData) + totalSamples);
-                }
-
-                if (!writer.WriteFrames(floatBuffer.data(), numFramesAvailable)) {
+        if (waitResult == WAIT_OBJECT_0 + 1) {
+            while (running) {
+                UINT32 packetSize = 0;
+                hr = ar.captureClient->GetNextPacketSize(&packetSize);
+                if (FAILED(hr)) {
+                    exitReason = CaptureExitReason::PacketApiFailure;
                     running = false;
                     break;
                 }
 
-                framesCaptured += numFramesAvailable;
+                if (packetSize == 0) break;
+
+                BYTE* pData = nullptr;
+                UINT32 numFramesAvailable = 0;
+                DWORD flags = 0;
+                UINT64 devicePosition = 0;
+                UINT64 qpcPosition = 0;
+
+                hr = ar.captureClient->GetBuffer(&pData, &numFramesAvailable,
+                                                  &flags, &devicePosition, &qpcPosition);
+                if (FAILED(hr)) {
+                    exitReason = CaptureExitReason::PacketApiFailure;
+                    running = false;
+                    break;
+                }
+
+                if (numFramesAvailable > 0) {
+                    size_t totalSamples =
+                        static_cast<size_t>(numFramesAvailable) * kCaptureChannels;
+
+                    if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                        floatBuffer.assign(totalSamples, 0.0f);
+                    } else {
+                        floatBuffer.assign(
+                            reinterpret_cast<float*>(pData),
+                            reinterpret_cast<float*>(pData) + totalSamples);
+                    }
+
+                    if (!writer.WriteFrames(floatBuffer.data(), numFramesAvailable)) {
+                        exitReason = CaptureExitReason::CallbackRequestedStop;
+                        running = false;
+                        break;
+                    }
+
+                    framesCaptured += numFramesAvailable;
+                }
+
+                hr = ar.captureClient->ReleaseBuffer(numFramesAvailable);
+                if (FAILED(hr)) {
+                    exitReason = CaptureExitReason::PacketApiFailure;
+                    running = false;
+                    break;
+                }
+
+                if (!running) break;
             }
-
-            pCaptureClient->ReleaseBuffer(numFramesAvailable);
-
-            if (!running) break;
-
-            hr = pCaptureClient->GetNextPacketSize(&packetSize);
-            if (FAILED(hr)) {
-                running = false;
-                break;
-            }
-        }
-
-        if (packetSize == 0 && running) {
-            Sleep(1);
+        } else if (waitResult == WAIT_TIMEOUT) {
+            continue;
+        } else {
+            exitReason = CaptureExitReason::EventWaitFailed;
+            break;
         }
     }
 
-    // 10. Stop and close WAV
-    pAudioClient->Stop();
+    // 10. Stop audio engine
+    if (audioClientStarted && ar.audioClient) {
+        hr = ar.audioClient->Stop();
+        ar.stopHr = hr;
+    }
 
     if (avrtHandle) {
         AvRevertMmThreadCharacteristics(avrtHandle);
@@ -540,15 +600,26 @@ CaptureResult RunCapture(const CaptureConfig& config) {
 
     writer.Close();
 
-    // Populate result
+    // 11. Cleanup stop event
+    if (stopEvent) {
+        CloseHandle(stopEvent);
+    }
+
+    // 12. Populate result
     result.framesCaptured = framesCaptured;
     result.bytesWritten = framesCaptured * kCaptureBlockAlign;
-    result.succeeded = true;
 
-    // 11. Cleanup COM
-    SafeRelease(pCaptureClient);
-    SafeRelease(pAudioClient);
+    if (exitReason == CaptureExitReason::StopRequested ||
+        exitReason == CaptureExitReason::DurationElapsed ||
+        exitReason == CaptureExitReason::CallbackRequestedStop) {
+        result.succeeded = true;
+    } else if (exitReason == CaptureExitReason::PacketApiFailure) {
+        result.failureReason = "Capture API failure: " + HresultToString(hr);
+    } else if (exitReason == CaptureExitReason::EventWaitFailed) {
+        result.failureReason = "Event wait failed: " + HresultToString(hr);
+    }
 
+    // 13. Cleanup -- ar destructor releases COM objects before CoUninitialize
     CoUninitialize();
 
     return result;

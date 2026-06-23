@@ -58,7 +58,6 @@ AppCaptureStartOutcome ApplicationCaptureSource::Start(
         if (!startupCv_.wait_for(lock, std::chrono::seconds(5),
                 [this] { return startupComplete_; }))
         {
-            // Timeout WASAPI init took too long
             running_.store(false);
             if (captureThread_.joinable()) captureThread_.join();
             out.result = AppCaptureStartResult::ActivationFailed;
@@ -69,7 +68,6 @@ AppCaptureStartOutcome ApplicationCaptureSource::Start(
     }
 
     if (out.result != AppCaptureStartResult::Success) {
-        // WASAPI init failed join the thread (it's already exiting)
         if (captureThread_.joinable()) captureThread_.join();
     }
 
@@ -101,26 +99,40 @@ void ApplicationCaptureSource::CaptureThread(uint32_t pid,
     config.includeMode = true;
     config.durationMs = 0; // 0 = infinite (runs until callback returns false)
 
-    // Signal startup on first successful packet delivery
-    std::atomic<bool> firstPacketSignaled{false};
+    // Delegate startup decision to RunCaptureWithPacketCallback:
+    // Signal success as soon as WASAPI is ready (before first packet).
+    // Keep firstPacketReceived as a separate diagnostic, NOT as readiness gate.
+    std::atomic<bool> firstPacketReceived{false};
+
+    // Lifecycle callbacks: onReady is called immediately after IAudioClient::Start
+    // succeeds and before entering the capture wait loop.
+    CaptureLifecycleCallbacks lifecycle;
+    lifecycle.onReady = [this](const CaptureReadyInfo& /*info*/) {
+        SignalStartupComplete(AppCaptureStartResult::Success, "");
+    };
 
     auto result = RunCaptureWithPacketCallback(config,
-        [this, &onPacket, &firstPacketSignaled](const AudioPacket& packet) -> bool {
-            // Signal startup success on first packet
-            if (!firstPacketSignaled.exchange(true)) {
-                SignalStartupComplete(AppCaptureStartResult::Success, "");
-            }
+        [this, &onPacket, &firstPacketReceived](const AudioPacket& packet) -> bool {
+            // Track first packet for diagnostics only — NOT for startup signaling
+            firstPacketReceived.store(true, std::memory_order_relaxed);
 
             if (!running_.load()) return false;
             return onPacket(packet);
-        });
+        },
+        lifecycle);
 
-    // If activation failed (no packets ever produced), signal failure
-    if (!firstPacketSignaled.load()) {
-        SignalStartupComplete(AppCaptureStartResult::ActivationFailed,
-                              result.failureReason.empty()
-                                  ? "Process-loopback activation failed"
-                                  : result.failureReason);
+    // If activation failed (RunCaptureWithPacketCallback returned without signaling ready),
+    // signal failure now
+    {
+        std::lock_guard<std::mutex> lock(startupMutex_);
+        if (!startupComplete_) {
+            startupOutcome_.result = AppCaptureStartResult::ActivationFailed;
+            startupOutcome_.failureReason = result.failureReason.empty()
+                ? "Process-loopback activation failed"
+                : result.failureReason;
+            startupComplete_ = true;
+            startupCv_.notify_one();
+        }
     }
 
     running_.store(false);

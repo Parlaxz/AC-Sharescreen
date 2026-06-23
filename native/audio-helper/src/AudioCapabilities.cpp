@@ -15,10 +15,6 @@ namespace screenlink::audio {
 namespace {
 
 // Minimum SDK build version that defines process-loopback APIs.
-// This is the COMPILE-TIME SDK version check, separate from the
-// runtime minimum (kMinProcessLoopbackBuild in Protocol.h, currently
-// 20348). The SDK that introduced PROCESS_LOOPBACK is 10.0.22000.0,
-// so this stays at 22000 regardless of runtime OS build.
 inline constexpr uint32_t kMinSdkBuildForProcessLoopback = 22000;
 
 std::vector<uint32_t> ParseVersionString(const std::string& version) {
@@ -35,23 +31,6 @@ std::vector<uint32_t> ParseVersionString(const std::string& version) {
   return parts;
 }
 
-
-template <typename T>
-void SafeRelease(T*& ptr) {
-    if (ptr) {
-        ptr->Release();
-        ptr = nullptr;
-    }
-}
-
-
-#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
-#endif
-#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
-#endif
-
 } // anonymous namespace
 
 CompileTimeSupport DetectCompileTimeSupport() {
@@ -61,9 +40,6 @@ CompileTimeSupport DetectCompileTimeSupport() {
   result.windowsSdkVersion = SCREENLINK_WIN_SDK_VERSION;
   auto parts = ParseVersionString(SCREENLINK_WIN_SDK_VERSION);
 
-  // Windows SDK 10.0.22000.0 is the minimum that defines the
-  // process-loopback audio APIs (PROCESS_LOOPBACK constant,
-  // ActivateAudioInterfaceAsync with process-loopback support).
   bool sdkHasProcessLoopback = false;
   if (parts.size() >= 3) {
     uint32_t sdkBuild = parts[2];
@@ -98,13 +74,10 @@ RuntimeSupport DetectRuntimeSupport(const WindowsVersionResult& osInfo) {
     result.osBuildExperimentalCandidate = false;
   }
 
-  // Check process architecture
   result.is64BitProcess = (sizeof(void*) == 8);
 
-  // Check OS architecture
   BOOL isWow64 = FALSE;
   if (result.is64BitProcess) {
-    // A 64-bit process can only run on 64-bit Windows
     result.is64BitOperatingSystem = true;
   } else if (IsWow64Process(GetCurrentProcess(), &isWow64) && isWow64) {
     result.is64BitOperatingSystem = true;
@@ -117,10 +90,10 @@ RuntimeSupport DetectRuntimeSupport(const WindowsVersionResult& osInfo) {
 
 // ── ProbeProcessLoopbackRuntime ──
 //
-// Performs a real runtime probe for process-loopback support.
-// Activates the VAD\Process_Loopback virtual device targeting the
-// helper's own PID, initializes IAudioClient, and attempts Start().
-// The probe is bounded (5s activation timeout + 2s start timeout).
+// Uses the same production activation path (ActivateProcessLoopback)
+// with WRL agile handler, official SDK types, WAVEFORMATEXTENSIBLE,
+// LOOPBACK|EVENTCALLBACK|AUTOCONVERTPCM flags, and event-driven capture.
+//
 // Thread-safe: uses call_once for synchronized one-time execution.
 // Result is cached for the helper's lifetime.
 
@@ -140,6 +113,7 @@ ProcessLoopbackProbeResult ProbeProcessLoopbackRuntime() {
     }
 
     if (osInfo.build >= kMinProcessLoopbackBuild) {
+      // Documented-supported build -- no probe needed
       result.probed = false;
       result.succeeded = true;
       cachedResult = result;
@@ -155,69 +129,94 @@ ProcessLoopbackProbeResult ProbeProcessLoopbackRuntime() {
       return;
     }
 
-    // ── Experimental candidate build: perform real probe ──
+    // ── Experimental candidate build: perform real probe using production path ──
     result.probed = true;
 
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr)) {
-      result.failureReason = "CoInitializeEx failed: " + std::to_string(hr);
-      result.lastHr = hr;
+    // Initialize COM for this probe thread (MTA required for process-loopback)
+    HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(comHr)) {
+      result.failureReason = "CoInitializeEx(MTA) failed: " + HresultHex(comHr);
       cachedResult = result;
       return;
     }
 
-    // Use shared activation path (this also verifies GetService works)
-    auto ar = ActivateProcessLoopback(
-        GetCurrentProcessId(),
-        AcLoopbackMode::kIncludeTargetProcessTree,
-        5000);
+    {
+      auto ar = ActivateProcessLoopback(
+          GetCurrentProcessId(),
+          AcLoopbackMode::kIncludeTargetProcessTree,
+          5000);
 
-    if (!ar.succeeded) {
-      result.failureReason = ar.failureReason;
-      result.lastHr = E_FAIL;
-      CoUninitialize();
-      cachedResult = result;
-      return;
+      // Transfer all per-stage HRESULTs to the probe result
+      result.activateCallHrHex = HresultHex(ar.activateCallHr);
+      result.getActivateResultCallHrHex = HresultHex(ar.getActivateResultCallHr);
+      result.activationResultHrHex = HresultHex(ar.activationResultHr);
+      result.initializeHrHex = HresultHex(ar.initializeHr);
+      result.getCaptureClientHrHex = HresultHex(ar.getCaptureClientHr);
+      result.setEventHandleHrHex = HresultHex(ar.setEventHandleHr);
+      result.startHrHex = HresultHex(ar.startHr);
+
+      if (!ar.succeeded) {
+        result.failureReason = ar.failureReason;
+        result.failureStage = ActivationStageToString(ar.stage);
+      } else {
+        result.succeeded = true;
+      }
+      // ar destructor releases COM objects before CoUninitialize
     }
 
-    IAudioClient* audioClient = ar.audioClient;
-    IAudioCaptureClient* captureClient = ar.captureClient;
-
-    // Start the audio engine
-    hr = audioClient->Start();
-    if (FAILED(hr)) {
-      result.failureReason = "IAudioClient::Start failed: " + std::to_string(hr);
-      result.lastHr = hr;
-      SafeRelease(captureClient);
-      SafeRelease(audioClient);
-      CoUninitialize();
-      cachedResult = result;
-      return;
-    }
-
-    // Verify full pipeline: GetNextPacketSize on IAudioCaptureClient
-    UINT32 packetSize = 0;
-    hr = captureClient->GetNextPacketSize(&packetSize);
-    if (FAILED(hr)) {
-      result.failureReason = "IAudioCaptureClient::GetNextPacketSize failed: " + std::to_string(hr);
-      result.lastHr = hr;
-    }
-
-    // Stop the engine
-    audioClient->Stop();
-
-    if (SUCCEEDED(hr)) {
-      result.succeeded = true;
-      result.lastHr = S_OK;
-    }
-
-    SafeRelease(captureClient);
-    SafeRelease(audioClient);
     CoUninitialize();
     cachedResult = result;
   });
 
   return cachedResult;
+}
+
+// ── UncachedProbeProcessLoopback ──
+//
+// Development-only direct probe that bypasses call_once caching.
+// Uses the exact same production activation path.
+// Result is NOT cached. Safe to call repeatedly.
+
+ProcessLoopbackProbeResult UncachedProbeProcessLoopback() {
+  ProcessLoopbackProbeResult result;
+  result.probed = true;
+
+  auto osInfo = DetectWindowsVersion();
+  if (!osInfo.succeeded) {
+    result.failureReason = "OS version detection failed";
+    return result;
+  }
+
+  HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  if (FAILED(comHr)) {
+    result.failureReason = "CoInitializeEx(MTA) failed: " + HresultHex(comHr);
+    return result;
+  }
+
+  {
+    auto ar = ActivateProcessLoopback(
+        GetCurrentProcessId(),
+        AcLoopbackMode::kIncludeTargetProcessTree,
+        5000);
+
+    result.activateCallHrHex = HresultHex(ar.activateCallHr);
+    result.getActivateResultCallHrHex = HresultHex(ar.getActivateResultCallHr);
+    result.activationResultHrHex = HresultHex(ar.activationResultHr);
+    result.initializeHrHex = HresultHex(ar.initializeHr);
+    result.getCaptureClientHrHex = HresultHex(ar.getCaptureClientHr);
+    result.setEventHandleHrHex = HresultHex(ar.setEventHandleHr);
+    result.startHrHex = HresultHex(ar.startHr);
+
+    if (!ar.succeeded) {
+      result.failureReason = ar.failureReason;
+      result.failureStage = ActivationStageToString(ar.stage);
+    } else {
+      result.succeeded = true;
+    }
+  }
+
+  CoUninitialize();
+  return result;
 }
 
 AudioCapability ComputeCapability(const CompileTimeSupport& ct,
@@ -228,10 +227,6 @@ AudioCapability ComputeCapability(const CompileTimeSupport& ct,
   cap.runtime = rt;
   cap.probeResult = probe;
 
-  // Endpoint loopback (AUDCLNT_STREAMFLAGS_LOOPBACK) is supported on
-  // all Windows 10+ builds. It works on Windows Vista and later, but
-  // our minimum target is Windows 10 so we always report true when
-  // the OS detection succeeded.
   cap.endpointLoopbackSupported = rt.osBuildNumber > 0;
 
   if (!ct.headersAvailable) {
@@ -247,28 +242,24 @@ AudioCapability ComputeCapability(const CompileTimeSupport& ct,
     cap.reasonCode = "not-64-bit-process";
     cap.reasonMessage = "The audio helper must run as a 64-bit process.";
   } else if (rt.osBuildEligible) {
-    // Documented-supported build (>= 20348)
     cap.usable = true;
     cap.experimentalCandidate = false;
     cap.reasonCode = "ok";
     cap.reasonMessage = "Process-loopback audio is supported (documented).";
   } else if (rt.osBuildExperimentalCandidate && probe.succeeded) {
-    // Experimental candidate build (19041–20347) with successful runtime probe
-    cap.usable = false;  // not documented-supported
+    cap.usable = false;
     cap.experimentalCandidate = true;
     cap.reasonCode = "experimental-runtime-supported";
     cap.reasonMessage = "Process-loopback audio is experimentally supported on build "
         + std::to_string(rt.osBuildNumber)
         + " (runtime probe succeeded).";
   } else if (rt.osBuildExperimentalCandidate && probe.probed && !probe.succeeded) {
-    // Experimental candidate build but probe failed
     cap.usable = false;
     cap.experimentalCandidate = false;
     cap.reasonCode = "experimental-probe-failed";
     cap.reasonMessage = "Process-loopback runtime probe failed on build "
         + std::to_string(rt.osBuildNumber) + ": " + probe.failureReason;
   } else if (!rt.osBuildEligible && rt.osBuildNumber > 0) {
-    // Build below experimental floor or probe not attempted
     cap.usable = false;
     cap.experimentalCandidate = false;
     cap.reasonCode = "unsupported-windows-build";
