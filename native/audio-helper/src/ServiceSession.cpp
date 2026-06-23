@@ -38,6 +38,12 @@ public:
         return *this;
     }
 
+    /// Set a raw JSON value without quoting/escaping (e.g. pre-built JSON object).
+    SimpleJson& SetRaw(const char* key, const std::string& rawJson) {
+        pairs_.emplace_back(std::string(key), rawJson);
+        return *this;
+    }
+
     SimpleJson& Set(const char* key, int64_t value) {
         pairs_.emplace_back(std::string(key), std::to_string(value));
         return *this;
@@ -550,7 +556,7 @@ void ServiceSession::ControlThread() {
                     resp.Set("success", false);
                     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
                     resp.Set("error", "authentication-failed");
-                    resp.Set("result", "{}");
+                    resp.SetRaw("result", "{}");
                     std::string respStr = resp.Str();
 
                     respStr += '\n';
@@ -574,7 +580,7 @@ void ServiceSession::ControlThread() {
                     resp.Set("success", false);
                     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
                     resp.Set("error", "unknown-command");
-                    resp.Set("result", "{}");
+                    resp.SetRaw("result", "{}");
                     std::string respStr = resp.Str();
                     respStr += '\n';
 
@@ -700,7 +706,7 @@ std::string ServiceSession::MakeErrorResponse(const std::string& errorCode) {
     resp.Set("success", false);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
     resp.Set("error", errorCode);
-    resp.Set("result", "{}");
+    resp.SetRaw("result", "{}");
     return resp.Str();
 }
 
@@ -723,7 +729,7 @@ void ServiceSession::HandleHello(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -741,7 +747,7 @@ void ServiceSession::HandleGetVersion(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -779,7 +785,7 @@ void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -817,7 +823,7 @@ void ServiceSession::HandleGetState(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(currentState));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -839,7 +845,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "already-capturing");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -853,7 +859,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", "idle");
         resp.Set("error", "invalid-mode");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -903,7 +909,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
             resp.Set("success", false);
             resp.Set("state", "idle");
             resp.Set("error", "pcm-not-connected");
-            resp.Set("result", "{}");
+            resp.SetRaw("result", "{}");
             response = resp.Str();
             return;
         }
@@ -924,7 +930,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "capturing");
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -946,7 +952,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "invalid-target-pid");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -960,7 +966,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "unsupported-os");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -974,7 +980,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "already-capturing");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1010,7 +1016,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "capturing");
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1027,7 +1033,7 @@ void ServiceSession::HandleStopCapture(const std::string& /*payload*/,
         resp.Set("success", false);
         resp.Set("state", StateToStr(previousState));
         resp.Set("error", "not-capturing");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1063,7 +1069,7 @@ void ServiceSession::HandleStopCapture(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "idle");
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1115,7 +1121,7 @@ void ServiceSession::HandleGetDiagnostics(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(currentState));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1135,7 +1141,7 @@ void ServiceSession::HandlePing(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1164,7 +1170,7 @@ void ServiceSession::HandleShutdown(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "idle");
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1189,7 +1195,7 @@ void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", errorBuf);
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1239,7 +1245,7 @@ void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1258,7 +1264,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "invalid-target-pid");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1273,7 +1279,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "process-not-found");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1286,7 +1292,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "creation-time-mismatch");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1301,7 +1307,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "process-resolution-failed");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1325,7 +1331,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
             resp.Set("success", false);
             resp.Set("state", StateToStr(static_cast<int>(state_.load())));
             resp.Set("error", "mixer-start-failed");
-            resp.Set("result", "{}");
+            resp.SetRaw("result", "{}");
             response = resp.Str();
             return;
         }
@@ -1351,7 +1357,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "capture-start-failed");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1379,7 +1385,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1406,7 +1412,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", errorBuf);
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1446,7 +1452,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
             resp.Set("success", false);
             resp.Set("state", StateToStr(static_cast<int>(state_.load())));
             resp.Set("error", "mixer-start-failed");
-            resp.Set("result", "{}");
+            resp.SetRaw("result", "{}");
             response = resp.Str();
             return;
         }
@@ -1564,7 +1570,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1585,7 +1591,7 @@ void ServiceSession::HandleGetMixerState(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1600,7 +1606,7 @@ void ServiceSession::HandleGetMixerDiagnostics(const std::string& /*payload*/,
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
         resp.Set("error", "mixer-not-running");
-        resp.Set("result", "{}");
+        resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
     }
@@ -1657,7 +1663,7 @@ void ServiceSession::HandleGetMixerDiagnostics(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.Set("result", result);
+    resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
 }
