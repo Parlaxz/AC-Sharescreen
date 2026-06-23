@@ -29,6 +29,14 @@ describe('AudioWorklet module', () => {
     expect(content).not.toContain('this.workletNode.port.onmessage');
   });
 
+  it('controller explicitly starts the worklet message port after addEventListener wiring', () => {
+    const content = fs.readFileSync(controllerPath, 'utf-8');
+    const addListenerIndex = content.indexOf('this.workletNode.port.addEventListener');
+    const portStartIndex = content.indexOf('this.workletNode.port.start()');
+    expect(addListenerIndex).toBeGreaterThan(0);
+    expect(portStartIndex).toBeGreaterThan(addListenerIndex);
+  });
+
   it('ProcessAudioController is constructable', async () => {
     const { ProcessAudioController } = await import('../src/renderer/audio/ProcessAudioController');
     const controller = new ProcessAudioController();
@@ -69,6 +77,18 @@ describe('AudioWorklet module', () => {
       expect(content).toContain('numberOfInputs: 0');
       expect(content).toContain('numberOfOutputs: 1');
       expect(content).toContain("channelCountMode: 'explicit'");
+    });
+
+    it('loads the worklet through Vite worker bundling instead of raw new URL()', () => {
+      const content = fs.readFileSync(controllerPath, 'utf-8');
+      expect(content).toContain("process-pcm-worklet.ts?worker&url");
+      expect(content).not.toContain("new URL('./process-pcm-worklet.ts', import.meta.url)");
+    });
+
+    it('worklet imports the shared PcmRingBuffer module instead of duplicating it inline', () => {
+      const content = fs.readFileSync(workletPath, 'utf-8');
+      expect(content).toContain("import { PcmRingBuffer } from './PcmRingBuffer'");
+      expect(content).not.toContain('class PcmRingBuffer');
     });
   });
 

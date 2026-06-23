@@ -112,7 +112,15 @@ export class PcmRingBuffer {
     return this.overrunFrames_;
   }
 
+  get overrun(): number {
+    return this.overrunFrames_;
+  }
+
   get underrunFrames(): number {
+    return this.underrunFrames_;
+  }
+
+  get underrun(): number {
     return this.underrunFrames_;
   }
 

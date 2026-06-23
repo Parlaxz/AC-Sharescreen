@@ -31,6 +31,29 @@ export interface OsVersion {
 /** User-facing audio mode names and capability requirements. */
 export type AudioMode = 'none' | 'system' | 'application' | 'monitor' | 'test-tone';
 
+/** Canonical ordered list of all valid AudioMode values. */
+export const AUDIO_MODES: readonly AudioMode[] = [
+  'none',
+  'system',
+  'application',
+  'monitor',
+  'test-tone',
+] as const;
+
+/** Returns true when `value` is one of the five canonical AudioMode literals. */
+export function isAudioMode(value: unknown): value is AudioMode {
+  return AUDIO_MODES.includes(value as AudioMode);
+}
+
+/**
+ * Normalise an arbitrary persisted value to a valid AudioMode.
+ * Any value that is not one of the five canonical literals is mapped to `'none'`.
+ */
+export function normalizeAudioMode(value: unknown): AudioMode {
+  if (isAudioMode(value)) return value;
+  return 'none';
+}
+
 export interface AudioModeInfo {
   mode: AudioMode;
   label: string;
@@ -48,7 +71,7 @@ export function getAudioModeInfo(caps: AudioCapabilityResult | null): AudioModeI
     {
       mode: 'system',
       label: 'System Audio',
-      description: 'Shares all sound played through your default Windows output device',
+      description: 'Shares all sound played through your default Windows output device.',
       supported: !!caps?.endpointLoopbackSupported,
       reason: caps?.endpointLoopbackSupported ? undefined : 'System Audio requires a Windows output device',
     },

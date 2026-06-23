@@ -1,3 +1,5 @@
+import { PcmRingBuffer } from './PcmRingBuffer';
+
 /**
  * ProcessPcmWorklet — AudioWorkletProcessor for ScreenLink PCM transport.
  *
@@ -47,93 +49,6 @@ interface WorkletStats {
   hasRenderedNonZero: boolean;
   /** Real stream generation (propagated from native capture). */
   streamGeneration: number;
-}
-
-class PcmRingBuffer {
-  private buffer: Float32Array;
-  private writeIndex = 0;
-  private readIndex = 0;
-  private framesAvailable_ = 0;
-  private frameCapacity: number;
-  private totalWritten = 0;
-  private totalRead = 0;
-  private overrunFrames = 0;
-  private underrunFrames = 0;
-  private readonly channels: number;
-
-  constructor(capacityFrames: number, channels = 2) {
-    this.frameCapacity = capacityFrames;
-    this.channels = channels;
-    this.buffer = new Float32Array(capacityFrames * channels);
-  }
-
-  write(samples: Float32Array, frameCount: number): number {
-    const avail = this.framesAvailable_;
-    const free = this.frameCapacity - avail;
-    const toDrop = frameCount - free;
-    if (toDrop > 0) {
-      const dropSamples = toDrop * this.channels;
-      this.readIndex = (this.readIndex + dropSamples) % this.buffer.length;
-      this.framesAvailable_ -= toDrop;
-      this.overrunFrames += toDrop;
-    }
-    const actual = Math.min(frameCount, this.frameCapacity);
-    const sampleCount = actual * this.channels;
-    for (let i = 0; i < sampleCount; i++) {
-      this.buffer[this.writeIndex] = samples[i];
-      this.writeIndex = (this.writeIndex + 1) % this.buffer.length;
-    }
-    this.framesAvailable_ += actual;
-    this.totalWritten += actual;
-    return actual;
-  }
-
-  read(output: Float32Array[], frameCount: number): number {
-    const actual = Math.min(frameCount, this.framesAvailable_);
-    if (actual < frameCount) {
-      this.underrunFrames += (frameCount - actual);
-    }
-    if (actual === 0) {
-      for (let ch = 0; ch < this.channels; ch++) {
-        output[ch].fill(0, 0, frameCount);
-      }
-      return 0;
-    }
-    for (let f = 0; f < actual; f++) {
-      for (let ch = 0; ch < this.channels; ch++) {
-        output[ch][f] = this.buffer[this.readIndex++];
-      }
-    }
-    this.readIndex %= this.buffer.length;
-    for (let ch = 0; ch < this.channels; ch++) {
-      for (let f = actual; f < frameCount; f++) {
-        output[ch][f] = 0;
-      }
-    }
-    this.framesAvailable_ -= actual;
-    this.totalRead += actual;
-    return actual;
-  }
-
-  get framesAvailable(): number { return this.framesAvailable_; }
-  get overrun(): number { return this.overrunFrames; }
-  get underrun(): number { return this.underrunFrames; }
-
-  flushAudio(): void {
-    this.framesAvailable_ = 0;
-    this.writeIndex = 0;
-    this.readIndex = 0;
-  }
-
-  reset(): void {
-    this.writeIndex = 0;
-    this.readIndex = 0;
-    this.framesAvailable_ = 0;
-    this.totalWritten = 0;
-    this.totalRead = 0;
-    this.overrunFrames = 0;
-    this.underrunFrames = 0;
-  }
 }
 
 class ProcessPcmWorklet extends AudioWorkletProcessor {

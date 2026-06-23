@@ -1,9 +1,23 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
-import { generateVdoStreamId, generateVdoPassword } from "@screenlink/shared";
+import {
+  generateVdoStreamId,
+  generateVdoPassword,
+  getAudioModeInfo,
+  normalizeAudioMode,
+  type AudioMode,
+} from "@screenlink/shared";
 import { ViewerClient } from "@screenlink/vdo-adapter";
+import { ProcessAudioController } from "../audio/ProcessAudioController.js";
 import { PublisherManager } from "../services/publisher-manager.js";
 import { MediaStatsPoller, type MediaStatsSnapshot } from "../services/media-stats-service.js";
+import {
+  buildAvailabilityMap,
+  resolveInitialAudioMode,
+  resolveHydrationConflict,
+  validateSharePreflight,
+  type AudioAvailabilityMap,
+} from "../audio/audio-hydration-helper.js";
 
 export function Dashboard() {
   const {
@@ -41,11 +55,17 @@ export function Dashboard() {
   const [remoteMuted, setRemoteMuted] = useState(false);
   const [remoteVolume, setRemoteVolume] = useState(1);
   const [showEnableAudioButton, setShowEnableAudioButton] = useState(false);
-  const [audioMode, setAudioMode] = useState<'none' | 'system' | 'application' | 'monitor' | 'test-tone'>('none');
-  const [appliedAudioMode, setAppliedAudioMode] = useState<'none' | 'system' | 'application' | 'monitor' | 'test-tone'>('none');
+  const [audioMode, setAudioMode] = useState<AudioMode>('none');
+  const [appliedAudioMode, setAppliedAudioMode] = useState<AudioMode>('none');
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioIsSynthetic, setAudioIsSynthetic] = useState(false);
-  const [capAudioModes, setCapAudioModes] = useState<Record<string, boolean> | null>(null);
+  const [capAudioModes, setCapAudioModes] = useState<AudioAvailabilityMap | null>(null);
+  const [audioOptionsReady, setAudioOptionsReady] = useState(false);
+  const [audioInitializationError, setAudioInitializationError] = useState<string | null>(null);
+  const userSelectedAudioModeRef = useRef<AudioMode | null>(null);
+  const audioModeRef = useRef<AudioMode>('none');
+  // Keep ref in sync with state
+  audioModeRef.current = audioMode;
   // local stats now flow through PublisherManager events
 
   function formatBitsTransferred(bytes: number): string {
@@ -72,46 +92,85 @@ export function Dashboard() {
         }
   }
 
-  // Restore saved source and audio mode from settings on mount; load capabilities
+  // Load settings + capabilities concurrently, calculate initial audio mode once
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-      const s = await api?.getSettings();
-      if (s && s.lastSourceId && s.lastSourceName) {
-        setSource(s.lastSourceId, s.lastSourceName);
-      }
-      let resolvedMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
-      if (s && s.lastAudioMode) {
-        resolvedMode = s.lastAudioMode;
-        setAudioMode(resolvedMode);
+
+      // Load settings and capabilities concurrently
+      const [settingsResult, capsResult] = await Promise.all([
+        api?.getSettings().catch(() => null) ?? Promise.resolve(null),
+        api?.getAudioCapabilities().catch(() => null) ?? Promise.resolve(null),
+      ]);
+
+      if (cancelled) return;
+
+      // Restore source
+      if (settingsResult && settingsResult.lastSourceId && settingsResult.lastSourceName) {
+        setSource(settingsResult.lastSourceId, settingsResult.lastSourceName);
       }
 
-      // Load capability model to drive UI mode availability
+      // Build availability map from capabilities
+      let availability: AudioAvailabilityMap = {
+        none: true,
+        system: true,
+        application: true,
+        monitor: true,
+        'test-tone': true,
+      };
       try {
-        const capsResp = await api?.getAudioCapabilities();
-        if (capsResp?.success && capsResp.data) {
-          const { getAudioModeInfo } = await import("@screenlink/shared");
-          const modes = getAudioModeInfo(capsResp.data);
-          const modeMap: Record<string, boolean> = {};
-          for (const m of modes) {
-            modeMap[m.mode] = m.supported;
-          }
-          setCapAudioModes(modeMap);
-
-          // If the persisted mode is unsupported on this build, override to 'none'
-          if (modeMap[resolvedMode] === false) {
-            resolvedMode = 'none';
-            setAudioMode('none');
-          }
+        if (capsResult?.success && capsResult.data) {
+          const modes = getAudioModeInfo(capsResult.data);
+          availability = buildAvailabilityMap(modes);
         }
       } catch { /* best effort */ }
+      setCapAudioModes(availability);
+
+      // Resolve initial mode once
+      const persisted = settingsResult?.lastAudioMode ?? null;
+      const { resolved, wasDowngraded } = resolveInitialAudioMode(persisted, availability);
+      const hydration = resolveHydrationConflict({
+        persistedMode: persisted,
+        userSelectedMode: userSelectedAudioModeRef.current,
+        capabilities: availability,
+      });
+      const initialMode = hydration.final ?? resolved;
+
+      if (!cancelled) {
+        if (userSelectedAudioModeRef.current == null) {
+          setAudioMode(initialMode);
+          audioModeRef.current = initialMode;
+        }
+        setAudioOptionsReady(true);
+        if (wasDowngraded) {
+          setAudioInitializationError(`Saved audio mode "${persisted}" is not available on this system`);
+        }
+      }
     })();
+
+    return () => { cancelled = true; };
   }, []);
 
   // Cleanup viewer on unmount
   useEffect(() => {
     return () => { viewerRef.current?.disconnect(); };
   }, []);
+
+  // ── Single selectAudioMode handler used by all radio buttons ──
+
+  function selectAudioMode(mode: AudioMode) {
+    userSelectedAudioModeRef.current = mode;
+    audioModeRef.current = mode;
+    setAudioMode(mode);
+    console.log(`[Audio] selectedMode=${mode}`);
+    // Persist lastAudioMode immediately
+    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    api?.updateSettings({ lastAudioMode: mode }).catch((error) => {
+      console.warn('[Audio] Failed to persist selected mode', error);
+    });
+  }
 
   // ── Audio port promise (fresh listener per share attempt) ──
 
@@ -358,12 +417,26 @@ export function Dashboard() {
   }
 
   const handleShareScreen = useCallback(async () => {
+    if (localShareState === 'starting') {
+      return;
+    }
+
     setLocalShareState("selecting-source");
     try {
       if (!sourceId) {
+        setLocalShareState("idle");
         navigate("source-picker" as Page);
         return;
       }
+
+      // Guard: audio options must be ready before sharing
+      if (!audioOptionsReady) {
+        console.warn("[Audio] Blocking share: audio options not yet ready");
+        setAudioError("Audio options are not ready yet. Please wait.");
+        setLocalShareState("idle");
+        return;
+      }
+
       setLocalShareState("starting");
 
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -383,21 +456,66 @@ export function Dashboard() {
       });
       publisherManagerRef.current = mgr;
 
-      // Source validation and capability check for audio mode
-      let effectiveAudioMode = audioMode;
-      if (audioMode === 'application' && sourceId && !sourceId.startsWith('window:')) {
-        console.warn("[Audio] Application audio requires a window source, not a screen");
-        effectiveAudioMode = 'none';
-        setAudioMode('none');
-      } else if (audioMode === 'application' && !sourceId) {
-        effectiveAudioMode = 'none';
-        setAudioMode('none');
-      } else if (capAudioModes && capAudioModes[audioMode] === false) {
-        // Capability check: if the selected mode is unsupported on this build, fall back
-        console.warn(`[Audio] Mode "${audioMode}" is unsupported on this build, falling back to none`);
-        effectiveAudioMode = 'none';
-        setAudioMode('none');
+      // ── Authoritative share preflight ──────────────────────
+      // Validate the mode selection before any audio setup runs.
+      // This catches stale availability, unsupported modes, and
+      // incomplete initialization  deterministically.
+      const currentAudioMode = normalizeAudioMode(audioModeRef.current);
+      let effectiveAudioMode: AudioMode = currentAudioMode;
+      let unavailableReason: string | null = null;
+      const userSelectedMode = userSelectedAudioModeRef.current;
+      const lastAudioMode = normalizeAudioMode((await api?.getSettings())?.lastAudioMode);
+
+      // Source validation: application audio requires a window source
+      if (currentAudioMode === 'application' && sourceId && !sourceId.startsWith('window:')) {
+        unavailableReason = 'application-audio-requires-window-source';
+        setAudioError(unavailableReason);
+        setLocalShareState('idle');
+        return;
+      } else if (currentAudioMode === 'application' && !sourceId) {
+        unavailableReason = 'application-audio-requires-window-source';
+        setAudioError(unavailableReason);
+        setLocalShareState('idle');
+        return;
+      } else if (currentAudioMode !== 'none' && capAudioModes && capAudioModes[currentAudioMode] === false) {
+        unavailableReason = `${currentAudioMode}-not-supported`;
       }
+
+      console.log('[Audio] share preflight', {
+        requestedMode: currentAudioMode,
+        reactStateMode: audioMode,
+        audioOptionsReady,
+        userSelectedMode,
+        available: currentAudioMode === 'none' ? true : capAudioModes?.[currentAudioMode] !== false,
+        unavailableReason,
+        lastAudioMode,
+      });
+
+      if (effectiveAudioMode !== 'none' && capAudioModes) {
+        try {
+          const preflight = validateSharePreflight(
+            { mode: effectiveAudioMode, available: capAudioModes },
+            userSelectedAudioModeRef.current,
+            capAudioModes,
+          );
+          console.log("[Audio] Preflight OK:", JSON.stringify(preflight.metadata));
+        } catch (preflightErr) {
+          const msg = preflightErr instanceof Error ? preflightErr.message : String(preflightErr);
+          console.warn("[Audio] Preflight rejected:", msg);
+          // Do not silently downgrade explicit system to none — surface the error
+          if (msg.startsWith('requested-audio-mode-was-discarded:')) {
+            setAudioError(msg);
+            setLocalShareState("idle");
+            return;
+          }
+          // For unsupported modes (application/monitor), fall back to none
+          setAudioError(msg);
+          setLocalShareState('idle');
+          return;
+        }
+      }
+
+      console.log(`[Audio] effectiveMode=${effectiveAudioMode}`);
 
       // Audio setup (best-effort, failure does not block video-only sharing)
       let audioConfigured = false;
@@ -420,7 +538,6 @@ export function Dashboard() {
           }
           const port = await portPromise;
 
-          const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
           provisionalController = new ProcessAudioController();
           await provisionalController.initialize(port);
 
@@ -493,7 +610,6 @@ export function Dashboard() {
           }
           const port = await portPromise;
 
-          const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
           provisionalController = new ProcessAudioController();
           await provisionalController.initialize(port);
 
@@ -644,7 +760,22 @@ export function Dashboard() {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
       api?.stopAudio().catch(() => {});
     }
-  }, [sourceId, captureWidth, captureHeight, captureFps, captureBitrate, navigate, setLocalMediaCredentials, audioMode, setAudioError, setAppliedAudioMode, setAudioIsSynthetic]);
+  }, [
+    sourceId,
+    captureWidth,
+    captureHeight,
+    captureFps,
+    captureBitrate,
+    navigate,
+    setLocalMediaCredentials,
+    audioMode,
+    audioOptionsReady,
+    capAudioModes,
+    localShareState,
+    setAudioError,
+    setAppliedAudioMode,
+    setAudioIsSynthetic,
+  ]);
 
   const handleShareScreenWithAudio = useCallback(
     () => handleShareScreen(),
@@ -723,37 +854,47 @@ export function Dashboard() {
         <div className="actions" style={{ marginTop: "0.75rem" }}>
           {localShareState !== "sharing" ? (
             <>
-              <button onClick={handleShareScreen}>Share Screen</button>
+              <button onClick={handleShareScreen} disabled={!audioOptionsReady}>Share Screen</button>
               <button onClick={handleShareWindow}>Share Window</button>
                 <div className="card" style={{ marginTop: "0.5rem", padding: "0.5rem" }}>
                 <h4>Audio</h4>
                 <label>
                   <input type="radio" name="audioMode" value="none" checked={audioMode === 'none'}
-                    onChange={() => setAudioMode('none')} /> No Audio
+                    onChange={() => selectAudioMode('none')} /> No Audio
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="system" checked={audioMode === 'system'}
                     disabled={capAudioModes?.['system'] === false}
-                    onChange={() => setAudioMode('system')} /> System Audio
+                    onChange={() => selectAudioMode('system')} /> System Audio
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="application" checked={audioMode === 'application'}
                     disabled={capAudioModes?.['application'] === false}
-                    onChange={() => setAudioMode('application')} /> App Audio (window only)
+                    onChange={() => selectAudioMode('application')} /> App Audio (window only)
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="monitor" checked={audioMode === 'monitor'}
                     disabled={capAudioModes?.['monitor'] === false}
-                    onChange={() => setAudioMode('monitor')} /> Filtered Monitor Audio
+                    onChange={() => selectAudioMode('monitor')} /> Filtered Monitor Audio
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="test-tone" checked={audioMode === 'test-tone'}
                     disabled={capAudioModes?.['test-tone'] === false}
-                    onChange={() => setAudioMode('test-tone')} /> Test Tone
+                    onChange={() => selectAudioMode('test-tone')} /> Test Tone
                 </label>
                 {audioMode === 'system' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Shares all sound played through your default Windows output device. Works on all Windows 10+ builds.
+                    Shares all sound played through your default Windows output device.
+                  </p>
+                )}
+                {!audioOptionsReady && (
+                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                    Loading audio options...
+                  </p>
+                )}
+                {audioInitializationError && (
+                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem", color: "var(--warning, #f59e0b)" }}>
+                    {audioInitializationError}
                   </p>
                 )}
                 {audioMode === 'application' && (

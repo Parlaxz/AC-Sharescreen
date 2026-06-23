@@ -1,6 +1,7 @@
 import { app } from "electron";
 import path from "path";
 import fs from "fs";
+import { normalizeAudioMode, type AudioMode } from "@screenlink/shared";
 
 /**
  * Persisted settings shape matching the IPC contract defined by the preload API.
@@ -28,6 +29,7 @@ export interface PersistedSettings {
   encryptedPairSecret?: string;
   lastSourceId?: string;
   lastSourceName?: string;
+  lastAudioMode?: AudioMode;
 }
 
 const CURRENT_VERSION = 1;
@@ -51,6 +53,7 @@ function getDefaults(): PersistedSettings {
     windowBounds: null,
     monitorFingerprint: null,
     hostPolicy: {},
+    lastAudioMode: 'none',
   };
 }
 
@@ -81,6 +84,9 @@ export class SettingsStore {
       if (fs.existsSync(this.filePath)) {
         const raw = fs.readFileSync(this.filePath, "utf-8");
         const data = JSON.parse(raw) as PersistedSettings;
+        if (data.lastAudioMode !== undefined) {
+          data.lastAudioMode = normalizeAudioMode(data.lastAudioMode);
+        }
         return data;
       }
     } catch {
@@ -91,6 +97,9 @@ export class SettingsStore {
       if (fs.existsSync(this.backupPath)) {
         const raw = fs.readFileSync(this.backupPath, "utf-8");
         const data = JSON.parse(raw) as PersistedSettings;
+        if (data.lastAudioMode !== undefined) {
+          data.lastAudioMode = normalizeAudioMode(data.lastAudioMode);
+        }
         // Restore backup to main location
         fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), "utf-8");
         return data;

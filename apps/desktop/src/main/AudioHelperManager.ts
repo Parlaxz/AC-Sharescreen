@@ -317,27 +317,39 @@ export class AudioHelperManager {
   async startApplicationCapture(options: {
     targetPid: number;
     expectedCreationTimeUtc100ns: number;
-  }): Promise<any> {
+  }): Promise<{ success: boolean; streamGeneration?: number; error?: string }> {
     this.ensureReady();
     const result = await this.control!.startApplicationAudio(options);
-    this.streamGeneration = (result.streamGeneration as number) || this.streamGeneration;
+    const gen = Number(result.streamGeneration);
+    if (!Number.isSafeInteger(gen)) throw new Error(`Invalid streamGeneration: ${gen}`);
+    this.streamGeneration = gen;
     this.currentSourceType = 'application';
-    return result;
+    this.state = 'capturing';
+    this.parser?.reset();
+    this.pcmBridge.forwardReset(gen);
+    this.pcmBridge.sendCanary?.();
+    return { success: true, streamGeneration: gen };
   }
 
   async startFilteredMonitorCapture(options: {
     excludeDiscord?: boolean;
     excludeScreenLink?: boolean;
-  }): Promise<any> {
+  }): Promise<{ success: boolean; streamGeneration: number; error?: string }> {
     this.ensureReady();
     const resp = await this.control!.sendRequest('startFilteredMonitorAudio', {
       excludeDiscord: options.excludeDiscord ?? true,
       excludeScreenLink: options.excludeScreenLink ?? true,
       screenLinkPid: process.pid,
     });
-    this.streamGeneration = (resp.result?.streamGeneration as number) || this.streamGeneration;
+    const gen = Number(resp.result?.streamGeneration);
+    if (!Number.isSafeInteger(gen)) throw new Error(`Invalid gen: ${gen}`);
+    this.streamGeneration = gen;
     this.currentSourceType = 'monitor';
-    return resp;
+    this.state = 'capturing';
+    this.parser?.reset();
+    this.pcmBridge.forwardReset(gen);
+    this.pcmBridge.sendCanary?.();
+    return { success: true, streamGeneration: gen };
   }
 
   async getMixerState(): Promise<any> {

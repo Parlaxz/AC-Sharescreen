@@ -1,3 +1,7 @@
+/// <reference types="vite/client" />
+
+import processPcmWorkletUrl from './process-pcm-worklet.ts?worker&url';
+
 export type AudioWorkletState =
   | 'closed'
   | 'loading'
@@ -87,7 +91,7 @@ export class ProcessAudioController {
       }
 
       await this.audioContext.audioWorklet.addModule(
-        new URL('./process-pcm-worklet.ts', import.meta.url),
+        processPcmWorkletUrl,
       );
 
       this.state = 'loaded';
@@ -119,8 +123,11 @@ export class ProcessAudioController {
             this.handlePcmPacket(msg.packet);
             break;
           case 'pcm:reset':
-            this.currentStreamGeneration = -1;
-            this.workletNode?.port.postMessage({ type: 'pcm:reset' });
+            this.currentStreamGeneration = msg.streamGeneration ?? this.currentStreamGeneration;
+            this.workletNode?.port.postMessage({
+              type: 'pcm:reset',
+              streamGeneration: msg.streamGeneration ?? this.currentStreamGeneration,
+            });
             break;
           case 'pcm:canary': break;
         }
@@ -174,6 +181,7 @@ export class ProcessAudioController {
         }
       };
       this.workletNode.port.addEventListener('message', this.workletMessageHandler);
+      this.workletNode.port.start();
 
       this.analyserNode = this.audioContext.createAnalyser();
       this.analyserNode.fftSize = 2048;

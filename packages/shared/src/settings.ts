@@ -1,4 +1,5 @@
 import type { Friend, DisplayFingerprint } from "./schemas.js";
+import type { AudioMode } from "./audio-capabilities.js";
 
 /**
  * Persisted settings schema for the ScreenLink desktop application.
@@ -49,4 +50,7 @@ export interface PersistedSettings {
 
   /** Whether the preview window is enabled */
   previewEnabled: boolean;
+
+  /** Last selected audio mode (persisted across sessions) */
+  lastAudioMode?: AudioMode;
 }

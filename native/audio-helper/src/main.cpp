@@ -19,8 +19,11 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -1110,6 +1113,9 @@ int main(int argc, char* argv[]) {
             // Start mixer and collect one output packet.
             // IMPORTANT: Copy frame data inside the callback since the
             // mixer's output buffer is thread-local and destroyed after Stop().
+            std::mutex outputMutex;
+            std::condition_variable outputCv;
+            bool outputReceived = false;
             std::vector<float> capturedMix;
             std::vector<screenlink::audio::AudioPacket> outputPackets;
             mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
@@ -1121,10 +1127,21 @@ int main(int argc, char* argv[]) {
                 if (!capturedMix.empty()) {
                     outputPackets.back().frames = capturedMix.data();
                 }
+                {
+                    std::lock_guard<std::mutex> lock(outputMutex);
+                    outputReceived = true;
+                }
+                outputCv.notify_one();
                 return false; // stop after first packet
             });
 
-            // Wait for mixer thread to finish (callback returned false)
+            {
+                std::unique_lock<std::mutex> lock(outputMutex);
+                outputCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+                    return outputReceived;
+                });
+            }
+
             mixer.Stop();
 
             expect(!outputPackets.empty(), "MultiSourceMixer: output received");
@@ -1159,6 +1176,9 @@ int main(int argc, char* argv[]) {
         {
             screenlink::audio::MultiSourceMixer mixer(48000, 2);
 
+            std::mutex outputMutex;
+            std::condition_variable outputCv;
+            bool outputReceived = false;
             std::vector<float> capturedMix;
             std::vector<screenlink::audio::AudioPacket> outputPackets;
             mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
@@ -1169,8 +1189,20 @@ int main(int argc, char* argv[]) {
                 if (!capturedMix.empty()) {
                     outputPackets.back().frames = capturedMix.data();
                 }
+                {
+                    std::lock_guard<std::mutex> lock(outputMutex);
+                    outputReceived = true;
+                }
+                outputCv.notify_one();
                 return false;
             });
+
+            {
+                std::unique_lock<std::mutex> lock(outputMutex);
+                outputCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+                    return outputReceived;
+                });
+            }
 
             mixer.Stop();
 
@@ -1202,6 +1234,9 @@ int main(int argc, char* argv[]) {
 
             mixer.FeedPacket(source1, p);
 
+            std::mutex outputMutex;
+            std::condition_variable outputCv;
+            bool outputReceived = false;
             std::vector<float> capturedMix;
             std::vector<screenlink::audio::AudioPacket> outputPackets;
             mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
@@ -1212,8 +1247,20 @@ int main(int argc, char* argv[]) {
                 if (!capturedMix.empty()) {
                     outputPackets.back().frames = capturedMix.data();
                 }
+                {
+                    std::lock_guard<std::mutex> lock(outputMutex);
+                    outputReceived = true;
+                }
+                outputCv.notify_one();
                 return false;
             });
+
+            {
+                std::unique_lock<std::mutex> lock(outputMutex);
+                outputCv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+                    return outputReceived;
+                });
+            }
 
             mixer.Stop();
             mixer.RemoveSource(source1);

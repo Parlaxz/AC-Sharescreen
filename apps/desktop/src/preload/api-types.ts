@@ -1,4 +1,4 @@
-import type { Friend } from "@screenlink/shared";
+import type { Friend, AudioMode } from "@screenlink/shared";
 
 export interface ScreenLinkAPI {
   // Sources
@@ -140,5 +140,5 @@ export interface PersistedSettings {
   autoWatchFriend: boolean;
   friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
-  lastAudioMode?: 'none' | 'system' | 'application' | 'monitor' | 'test-tone';
+  lastAudioMode?: AudioMode;
 }

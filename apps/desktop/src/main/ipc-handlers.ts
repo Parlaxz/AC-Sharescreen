@@ -420,24 +420,20 @@ export function registerIpcHandlers(
   });
 
   ipcMain.handle('start-application-audio', async (_event, options: {
-    sourceId: string;  // desktopCapturer source ID like "window:0x1234"
+    sourceId: string;
   }) => {
-    if (!currentAudioHelper) {
-      return { success: false, error: 'no-audio-helper' };
-    }
+    if (!currentAudioHelper) return { success: false, error: 'no-audio-helper' };
     try {
-      // Step 1: Resolve the source through the native helper
-      const resolveResult = await currentAudioHelper.resolveSource(options.sourceId);
-      if (!resolveResult.found) {
-        return { success: false, error: `Source not found: ${resolveResult.error}` };
-      }
-
-      // Step 2: Start application capture with validated source identity
-      return await currentAudioHelper.startApplicationCapture({
-        targetPid: resolveResult.source.pid,
-        expectedCreationTimeUtc100ns: resolveResult.source.processCreationTimeUtc100ns,
+      const src = await currentAudioHelper.resolveSource(options.sourceId);
+      if (!src.found) return { success: false, error: `Source not found: ${src.error}` };
+      const { streamGeneration } = await currentAudioHelper.startApplicationCapture({
+        targetPid: src.source.pid,
+        expectedCreationTimeUtc100ns: src.source.processCreationTimeUtc100ns,
       });
+      setCurrentAudioState('active');
+      return { success: true, streamGeneration };
     } catch (err) {
+      setCurrentAudioState('error');
       return { success: false, error: String(err) };
     }
   });
@@ -450,8 +446,11 @@ export function registerIpcHandlers(
       return { success: false, error: 'no-audio-helper' };
     }
     try {
-      return await currentAudioHelper.startFilteredMonitorCapture(options);
+      const result = await currentAudioHelper.startFilteredMonitorCapture(options);
+      setCurrentAudioState('active');
+      return { success: true, streamGeneration: result.streamGeneration };
     } catch (err) {
+      setCurrentAudioState('error');
       return { success: false, error: String(err) };
     }
   });
@@ -460,9 +459,11 @@ export function registerIpcHandlers(
     try {
       const helper = await ensureAudioHelper();
       const streamGen = await helper.startEndpointLoopback();
+      setCurrentAudioState('active');
       return { success: true, streamGeneration: streamGen };
     } catch (err) {
       console.error("[IPC] start-system-audio failed:", err);
+      setCurrentAudioState('error');
       return { success: false, error: String(err) };
     }
   });
