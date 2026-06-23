@@ -127,14 +127,19 @@ private:
     std::atomic<uint64_t> totalControlRequests_{0};
     std::atomic<uint64_t> failedControlRequests_{0};
     // Pipeline counters
-    std::atomic<uint64_t> synthPacketsProduced_{0};
-    std::atomic<uint64_t> synthBytesProduced_{0};
+    std::atomic<uint64_t> capturePacketsProduced_{0};
+    std::atomic<uint64_t> captureBytesProduced_{0};
     std::atomic<uint64_t> sourcePacketsEnqueued_{0};
-    std::atomic<uint64_t> sourcePacketsDequeued_{0};
-    std::atomic<uint64_t> pcmPipeWriteAttempts_{0};
-    std::atomic<uint64_t> pcmPipeWriteSuccesses_{0};
-    std::atomic<uint64_t> pcmPipeBytesWritten_{0};
-    std::atomic<uint64_t> pcmPipeWriteFailures_{0};
+
+    // Phase 3: Endpoint loopback counters
+    std::atomic<uint64_t> endpointPacketsCaptured_{0};
+    std::atomic<uint64_t> endpointNonZeroPackets_{0};
+    std::atomic<uint64_t> endpointSilentPackets_{0};
+    std::atomic<uint64_t> mixerFeedPackets_{0};
+    std::atomic<uint64_t> mixerOutputPackets_{0};
+    std::atomic<uint64_t> mixerNonZeroOutputPackets_{0};
+    std::atomic<uint64_t> onCaptureAccepted_{0};
+    std::atomic<uint64_t> onCaptureRejectedState_{0};
 
     // Phase 2F: Production diagnostics
     uint32_t helperStartCount_ = 0;

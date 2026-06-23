@@ -475,6 +475,7 @@ export function Dashboard() {
             mgr.clearAudioController();
             try { await api?.stopAudio(); } catch { /* ignore */ }
           }
+          setAppliedAudioMode('none');
           setAudioEnabled(false);
         }
       }
@@ -568,7 +569,6 @@ export function Dashboard() {
               await provisionalController.waitUntilPrimed();
             }
 
-            console.log(`[Publisher] audioTracks=${mgr.getAudioTrack() ? 1 : 0}`);
             const outputTrack = provisionalController.getTrack();
             if (!outputTrack) {
               throw new Error('system-audio-output-track-missing');
@@ -587,6 +587,7 @@ export function Dashboard() {
             });
             mgr.setAudioController(provisionalController, effectiveAudioMode);
             provisionalController = null;
+            console.log(`[Publisher] audioTracks=${mgr.getAudioTrack() ? 1 : 0}`);
             console.log('[Audio] provisionalControllerReleased=true');
             audioConfigured = true;
           }
@@ -602,6 +603,7 @@ export function Dashboard() {
             mgr.clearAudioController();
             try { await api?.stopAudio(); } catch { /* ignore */ }
           }
+          setAppliedAudioMode('none');
           setAudioEnabled(false);
         }
       }

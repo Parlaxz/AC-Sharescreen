@@ -304,25 +304,69 @@ EndpointLoopbackSource::EndpointLoopbackSource() {
 }
 
 EndpointLoopbackSource::~EndpointLoopbackSource() {
+    Stop();
     delete resampler_;
     resampler_ = nullptr;
-    Stop();
 }
 
-bool EndpointLoopbackSource::Start(
+void EndpointLoopbackSource::SignalStartupComplete(EndpointStartResult result, HRESULT hr) {
+    std::lock_guard<std::mutex> lock(startupMutex_);
+    startupOutcome_.result = result;
+    startupOutcome_.hr = hr;
+    startupComplete_ = true;
+    startupCv_.notify_one();
+}
+
+EndpointStartOutcome EndpointLoopbackSource::Start(
     std::function<bool(const AudioPacket&)> onPacket) {
-    if (running_.load()) return false;
+    if (running_.load()) {
+        EndpointStartOutcome out;
+        out.result = EndpointStartResult::ComInitFailed; // already running
+        return out;
+    }
+
+    // Reset startup state
+    {
+        std::lock_guard<std::mutex> lock(startupMutex_);
+        startupComplete_ = false;
+        startupOutcome_ = {};
+    }
 
     running_.store(true);
 
     try {
         captureThread_ = std::thread(&EndpointLoopbackSource::CaptureThread,
                                       this, std::move(onPacket));
-        return true;
     } catch (const std::exception&) {
         running_.store(false);
-        return false;
+        EndpointStartOutcome out;
+        out.result = EndpointStartResult::ComInitFailed;
+        return out;
     }
+
+    // Wait for the capture thread to report readiness (bounded)
+    EndpointStartOutcome out;
+    {
+        std::unique_lock<std::mutex> lock(startupMutex_);
+        if (!startupCv_.wait_for(lock, std::chrono::seconds(5),
+                [this] { return startupComplete_; }))
+        {
+            // Timeout — WASAPI init took too long
+            running_.store(false);
+            if (captureThread_.joinable()) captureThread_.join();
+            out.result = EndpointStartResult::InitializeFailed;
+            out.hr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
+            return out;
+        }
+        out = startupOutcome_;
+    }
+
+    if (out.result != EndpointStartResult::Success) {
+        // WASAPI init failed — join the thread (it's already exiting)
+        if (captureThread_.joinable()) captureThread_.join();
+    }
+
+    return out;
 }
 
 void EndpointLoopbackSource::Stop() {
@@ -339,8 +383,8 @@ void EndpointLoopbackSource::Stop() {
     // Wake any blocked WASAPI call by stopping the audio client.
     // IAudioClient::Stop() causes GetBuffer / GetNextPacketSize to return
     // or wake up on the capture thread, allowing it to see running_ == false.
-    if (audioClient_) {
-        audioClient_->Stop();
+    if (IAudioClient* client = audioClient_.load()) {
+        client->Stop();
     }
 
     if (captureThread_.joinable()) {
@@ -360,7 +404,15 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr)) {
         std::cerr << "[EndpointLoopback] CoInitializeEx failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::ComInitFailed, hr);
         running_.store(false);
+        return;
+    }
+
+    // Check if Stop() was called during COM init
+    if (!running_.load()) {
+        SignalStartupComplete(EndpointStartResult::Cancelled, S_OK);
+        CoUninitialize();
         return;
     }
 
@@ -373,6 +425,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr) || !pEnumerator) {
         std::cerr << "[EndpointLoopback] CoCreateInstance(MMDeviceEnumerator) failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::EnumeratorFailed, hr);
         CoUninitialize();
         running_.store(false);
         return;
@@ -384,6 +437,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr) || !pDevice) {
         std::cerr << "[EndpointLoopback] GetDefaultAudioEndpoint failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::EndpointNotFound, hr);
         SafeRelease(pEnumerator);
         CoUninitialize();
         running_.store(false);
@@ -398,6 +452,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr) || !pAudioClient) {
         std::cerr << "[EndpointLoopback] Activate(IAudioClient) failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::AudioClientActivationFailed, hr);
         SafeRelease(pEnumerator);
         CoUninitialize();
         running_.store(false);
@@ -410,6 +465,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr) || !pMixFormat) {
         std::cerr << "[EndpointLoopback] GetMixFormat failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::GetMixFormatFailed, hr);
         SafeRelease(pAudioClient);
         SafeRelease(pEnumerator);
         CoUninitialize();
@@ -480,6 +536,7 @@ void EndpointLoopbackSource::CaptureThread(
             std::cerr << "[EndpointLoopback] Device invalidated during init" << std::endl;
         }
 
+        SignalStartupComplete(EndpointStartResult::InitializeFailed, hr);
         CoTaskMemFree(pMixFormat);
         SafeRelease(pAudioClient);
         SafeRelease(pEnumerator);
@@ -496,6 +553,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr) || !pCaptureClient) {
         std::cerr << "[EndpointLoopback] GetService(IAudioCaptureClient) failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::CaptureClientFailed, hr);
         CoTaskMemFree(pMixFormat);
         SafeRelease(pAudioClient);
         SafeRelease(pEnumerator);
@@ -529,6 +587,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr)) {
         std::cerr << "[EndpointLoopback] GetBufferSize failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::InitializeFailed, hr);
         CoTaskMemFree(pMixFormat);
         SafeRelease(pCaptureClient);
         SafeRelease(pAudioClient);
@@ -543,6 +602,7 @@ void EndpointLoopbackSource::CaptureThread(
     if (FAILED(hr)) {
         std::cerr << "[EndpointLoopback] IAudioClient::Start failed: "
                   << HresultToString(hr) << std::endl;
+        SignalStartupComplete(EndpointStartResult::AudioEngineStartFailed, hr);
         CoTaskMemFree(pMixFormat);
         SafeRelease(pCaptureClient);
         SafeRelease(pAudioClient);
@@ -551,6 +611,23 @@ void EndpointLoopbackSource::CaptureThread(
         running_.store(false);
         return;
     }
+
+    // Check for cancellation before signaling success
+    if (!running_.load()) {
+        pAudioClient->Stop();
+        SignalStartupComplete(EndpointStartResult::Cancelled, S_OK);
+        CoTaskMemFree(pMixFormat);
+        SafeRelease(pCaptureClient);
+        SafeRelease(pAudioClient);
+        SafeRelease(pEnumerator);
+        CoUninitialize();
+        running_.store(false);
+        return;
+    }
+
+    // Make client accessible to Stop() before signaling success
+    audioClient_.store(pAudioClient);
+    SignalStartupComplete(EndpointStartResult::Success, S_OK);
 
     // ── 11. Set Pro Audio thread priority ──
     DWORD taskIndex = 0;
@@ -643,9 +720,8 @@ void EndpointLoopbackSource::CaptureThread(
 
             // ── Format conversion ──
             // With AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, WASAPI delivers data
-            // in our target format (48 kHz stereo float).  If the source mix
-            // format happens to match, we reference the buffer directly;
-            // otherwise we convert.
+            // in our target format (48 kHz stereo float).  Data is always
+            // interpreted as target format when not silent.
 
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 // Zero-fill silent frames to preserve timeline
@@ -654,123 +730,11 @@ void EndpointLoopbackSource::CaptureThread(
                 conversionBuffer_.assign(totalSamples, 0.0f);
                 packet.frames = conversionBuffer_.data();
                 packet.isSilent = true;
-                packet.channels = kTargetChannels;
-            } else if (srcFmt.isFloat &&
-                       srcFmt.sampleRate == kTargetSampleRate &&
-                       srcFmt.channels == kTargetChannels) {
-                // Data already matches our target format — reference directly
-                packet.frames = reinterpret_cast<const float*>(pData);
-                packet.channels = kTargetChannels;
             } else {
-                // Need to convert from source format (srcFmt) to target format
-                size_t srcTotalSamples =
-                    static_cast<size_t>(numFramesAvailable) * srcFmt.channels;
-
-                if (srcFmt.isFloat) {
-                    // Already float — just reference
-                    const float* srcFloat =
-                        reinterpret_cast<const float*>(pData);
-                    conversionBuffer_.assign(srcFloat, srcFloat + srcTotalSamples);
-                } else {
-                    // Integer formats — convert to float
-                    conversionBuffer_.resize(srcTotalSamples);
-                    if (srcFmt.bitsPerSample == 16) {
-                        const int16_t* srcInt =
-                            reinterpret_cast<const int16_t*>(pData);
-                        for (size_t i = 0; i < srcTotalSamples; ++i) {
-                            conversionBuffer_[i] = srcInt[i] / 32768.0f;
-                        }
-                    } else if (srcFmt.bitsPerSample == 24) {
-                        // 24-bit samples are stored as 3-byte values (little-endian)
-                        const uint8_t* srcBytes =
-                            reinterpret_cast<const uint8_t*>(pData);
-                        for (size_t i = 0; i < srcTotalSamples; ++i) {
-                            size_t byteOff = i * 3;
-                            int32_t sample =
-                                static_cast<int32_t>(srcBytes[byteOff]) |
-                                (static_cast<int32_t>(srcBytes[byteOff + 1]) << 8) |
-                                (static_cast<int32_t>(srcBytes[byteOff + 2]) << 16);
-                            // Sign-extend 24-bit to 32-bit
-                            if (sample & 0x800000) {
-                                sample |= ~0xFFFFFF;
-                            }
-                            conversionBuffer_[i] = sample / 8388608.0f;
-                        }
-                    } else if (srcFmt.bitsPerSample == 32) {
-                        const int32_t* srcInt =
-                            reinterpret_cast<const int32_t*>(pData);
-                        for (size_t i = 0; i < srcTotalSamples; ++i) {
-                            conversionBuffer_[i] = srcInt[i] / 2147483648.0f;
-                        }
-                    } else {
-                        // Unsupported bit depth — treat as silence
-                        conversionBuffer_.assign(srcTotalSamples, 0.0f);
-                    }
-                }
-
-                // Step 2: Downmix to stereo (if multichannel)
-                if (srcFmt.channels > kTargetChannels) {
-                    stereoBuffer_.resize(
-                        static_cast<size_t>(numFramesAvailable) * kTargetChannels);
-
-                    // Configure downmixer for this source format
-                    ChannelDownmixer dm;
-                    dm.Configure(srcFmt.channels, srcFmt.channelMask);
-
-                    for (UINT32 f = 0; f < numFramesAvailable; ++f) {
-                        float left, right;
-                        dm.ProcessFrame(
-                            &conversionBuffer_[static_cast<size_t>(f) * srcFmt.channels],
-                            left, right);
-                        stereoBuffer_[static_cast<size_t>(f) * 2 + 0] = left;
-                        stereoBuffer_[static_cast<size_t>(f) * 2 + 1] = right;
-                    }
-
-                    // Replace conversion buffer with stereo output
-                    conversionBuffer_.swap(stereoBuffer_);
-                } else if (srcFmt.channels == 1) {
-                    // Mono to stereo: duplicate
-                    stereoBuffer_.resize(
-                        static_cast<size_t>(numFramesAvailable) * 2);
-                    for (UINT32 f = 0; f < numFramesAvailable; ++f) {
-                        float s = conversionBuffer_[f];
-                        stereoBuffer_[f * 2 + 0] = s;
-                        stereoBuffer_[f * 2 + 1] = s;
-                    }
-                    conversionBuffer_.swap(stereoBuffer_);
-                }
-
-                // Step 3: Sample rate conversion (if needed)
-                if (srcFmt.sampleRate != kTargetSampleRate) {
-                    // Use the persistent resampler for phase continuity across packets
-                    resampleBuffer_.clear();
-
-                    if (resampler_) {
-                        if (lastSourceRate_ != srcFmt.sampleRate) {
-                            resampler_->Configure(srcFmt.sampleRate, kTargetChannels);
-                            lastSourceRate_ = srcFmt.sampleRate;
-                        }
-                        resampleBuffer_.reserve(static_cast<size_t>(
-                            numFramesAvailable * kTargetSampleRate / srcFmt.sampleRate + 4) * 2);
-
-                        uint32_t stereoFrames = static_cast<uint32_t>(
-                            conversionBuffer_.size() / kTargetChannels);
-                        resampler_->Process(conversionBuffer_.data(), stereoFrames, resampleBuffer_);
-
-                        // Update frame count
-                        uint32_t resampledFrames = static_cast<uint32_t>(
-                            resampleBuffer_.size() / kTargetChannels);
-                        packet.frameCount = resampledFrames;
-                        conversionBuffer_.swap(resampleBuffer_);
-                    }
-                }
-
-                // Update channels and reference
-                packet.channels = kTargetChannels;
-                if (!conversionBuffer_.empty()) {
-                    packet.frames = conversionBuffer_.data();
-                }
+                // AUTOCONVERTPCM delivers in target format directly
+                packet.frames = reinterpret_cast<const float*>(pData);
             }
+            packet.channels = kTargetChannels;
 
             // Invoke callback
             if (!onPacket(packet)) {
@@ -802,7 +766,10 @@ void EndpointLoopbackSource::CaptureThread(
     }
 
     // ── 13. Stop the engine ──
-    pAudioClient->Stop();
+    // Only stop if the control thread didn't already do it
+    if (running_.load()) {
+        pAudioClient->Stop();
+    }
 
     // Revert Pro Audio priority
     if (avrtHandle) {
@@ -812,6 +779,7 @@ void EndpointLoopbackSource::CaptureThread(
     // ── 14. Cleanup ──
     CoTaskMemFree(pMixFormat);
     SafeRelease(pCaptureClient);
+    audioClient_.store(nullptr);
     SafeRelease(pAudioClient);
     SafeRelease(pEnumerator);
     CoUninitialize();

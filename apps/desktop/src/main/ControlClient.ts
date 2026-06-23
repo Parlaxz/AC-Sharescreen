@@ -68,6 +68,16 @@ export interface HelperDiagnostics {
   activeSourceType: string;
   state: string;
   streamGeneration: number;
+  endpointPacketsCaptured?: number;
+  endpointNonZeroPackets?: number;
+  endpointSilentPackets?: number;
+  mixerFeedPackets?: number;
+  mixerOutputPackets?: number;
+  mixerNonZeroOutputPackets?: number;
+  onCaptureAccepted?: boolean;
+  onCaptureRejectedState?: string;
+  capturePacketsProduced?: number;
+  captureBytesProduced?: number;
 }
 
 // ── ControlClient ──

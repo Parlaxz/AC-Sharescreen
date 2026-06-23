@@ -64,6 +64,8 @@ export interface AudioHelperStats {
 export interface PcmPipelineSnapshot {
   synthPacketsProduced?: number;
   synthBytesProduced?: number;
+  capturePacketsProduced?: number;
+  captureBytesProduced?: number;
   sourcePacketsEnqueued?: number;
   sourcePacketsDequeued?: number;
   pcmPipeWriteAttempts?: number;
@@ -76,6 +78,14 @@ export interface PcmPipelineSnapshot {
   parserBytesParsed: number;
   parserInvalidHeaders: number;
   parserBufferedBytes: number;
+  endpointPacketsCaptured?: number;
+  endpointNonZeroPackets?: number;
+  endpointSilentPackets?: number;
+  mixerFeedPackets?: number;
+  mixerOutputPackets?: number;
+  mixerNonZeroOutputPackets?: number;
+  onCaptureAccepted?: boolean;
+  onCaptureRejectedState?: string;
   bridge: PcmBridgeDiagnostics;
   helperState: HelperStateEnum;
   helperUptimeMs: number;
@@ -279,9 +289,17 @@ export class AudioHelperManager {
   async startEndpointLoopback(): Promise<number> {
     this.ensureReady();
     const result = await this.control!.startEndpointLoopback();
-    this.streamGeneration = (result.streamGeneration as number) || this.streamGeneration;
+    const gen = result.streamGeneration;
+    if (!Number.isSafeInteger(gen)) {
+      throw new Error(`Invalid streamGeneration from endpoint loopback: ${gen}`);
+    }
+    this.streamGeneration = gen;
     this.currentSourceType = 'system';
-    return result.streamGeneration;
+    this.state = 'capturing';
+    this.parser?.reset();
+    this.pcmBridge.forwardReset(gen);
+    this.pcmBridge.sendCanary?.();
+    return gen;
   }
 
   // ── Phase 2E: Audio sessions ──
@@ -387,12 +405,30 @@ export class AudioHelperManager {
     } catch { /* best effort */ }
 
     return {
-      synthPacketsProduced: helperDiag ? (helperDiag as any).synthPacketsProduced ?? undefined : undefined,
-      synthBytesProduced: helperDiag ? (helperDiag as any).synthBytesProduced ?? undefined : undefined,
+      synthPacketsProduced: helperDiag
+        ? ((helperDiag as any).synthPacketsProduced ?? helperDiag.capturePacketsProduced ?? undefined)
+        : undefined,
+      synthBytesProduced: helperDiag
+        ? ((helperDiag as any).synthBytesProduced ?? helperDiag.captureBytesProduced ?? undefined)
+        : undefined,
+      capturePacketsProduced: helperDiag
+        ? (helperDiag.capturePacketsProduced ?? (helperDiag as any).synthPacketsProduced ?? undefined)
+        : undefined,
+      captureBytesProduced: helperDiag
+        ? (helperDiag.captureBytesProduced ?? (helperDiag as any).synthBytesProduced ?? undefined)
+        : undefined,
       sourcePacketsEnqueued: helperDiag ? (helperDiag as any).sourcePacketsEnqueued ?? undefined : undefined,
       pcmPipeWriteAttempts: helperDiag ? (helperDiag as any).pcmPipeWriteAttempts ?? undefined : undefined,
       pcmPipeWriteSuccesses: helperDiag ? (helperDiag as any).pcmPipeWriteSuccesses ?? undefined : undefined,
       pcmPipeWriteFailures: helperDiag ? (helperDiag as any).pcmPipeWriteFailures ?? undefined : undefined,
+      endpointPacketsCaptured: helperDiag?.endpointPacketsCaptured ?? undefined,
+      endpointNonZeroPackets: helperDiag?.endpointNonZeroPackets ?? undefined,
+      endpointSilentPackets: helperDiag?.endpointSilentPackets ?? undefined,
+      mixerFeedPackets: helperDiag?.mixerFeedPackets ?? undefined,
+      mixerOutputPackets: helperDiag?.mixerOutputPackets ?? undefined,
+      mixerNonZeroOutputPackets: helperDiag?.mixerNonZeroOutputPackets ?? undefined,
+      onCaptureAccepted: helperDiag?.onCaptureAccepted ?? undefined,
+      onCaptureRejectedState: helperDiag?.onCaptureRejectedState ?? undefined,
       electronSocketChunksReceived: this.diagSocketChunks,
       electronSocketBytesReceived: this.diagSocketBytes,
       parserFramesParsed: this.parser?.getStats().totalPackets ?? 0,
