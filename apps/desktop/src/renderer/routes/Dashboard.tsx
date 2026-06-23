@@ -670,20 +670,10 @@ export function Dashboard() {
             console.log(`[Audio] appliedMode=${effectiveAudioMode} streamGeneration=${captureResult.streamGeneration ?? '(not set)'}`);
             setAppliedAudioMode(effectiveAudioMode);
 
-            if (typeof captureResult.streamGeneration === 'number' && Number.isSafeInteger(captureResult.streamGeneration)) {
-              provisionalController.setStreamGeneration(captureResult.streamGeneration);
-            }
-
-            if (effectiveAudioMode === 'test-tone') {
-              setAudioIsSynthetic(true);
-              // Test Tone requires nonzero rendering before publication
-              await provisionalController.waitUntilRendering();
-            } else {
-              setAudioIsSynthetic(false);
-              // Real audio (system/application/monitor) does not require waitUntilRendering
-              // because the source may be legitimately silent
-              await provisionalController.waitUntilPrimed();
-            }
+            setAudioIsSynthetic(false);
+            // Real audio (system/application/monitor) does not require waitUntilRendering
+            // because the source may be legitimately silent
+            await provisionalController.waitUntilPrimed();
 
             const outputTrack = provisionalController.getTrack();
             if (!outputTrack) {
@@ -768,7 +758,6 @@ export function Dashboard() {
     captureBitrate,
     navigate,
     setLocalMediaCredentials,
-    audioMode,
     audioOptionsReady,
     capAudioModes,
     localShareState,

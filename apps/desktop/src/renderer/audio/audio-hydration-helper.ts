@@ -128,6 +128,7 @@ export function validateSharePreflight(
   }
 
   const mode = audioOptions.mode;
+  const availability = audioOptions.available ?? liveCapabilities;
 
   // Guard: explicit system selection that was discarded (e.g. loopback
   // was available at init but revoked before share)
@@ -136,12 +137,12 @@ export function validateSharePreflight(
   }
 
   // Guard: unsupported application
-  if (mode === 'application' && liveCapabilities.application === false) {
+  if (mode === 'application' && availability.application === false) {
     throw new Error(`application audio is not supported: mode=${mode}`);
   }
 
   // Guard: unsupported monitor
-  if (mode === 'monitor' && liveCapabilities.monitor === false) {
+  if (mode === 'monitor' && availability.monitor === false) {
     throw new Error(`monitor audio is not supported: mode=${mode}`);
   }
 
@@ -149,7 +150,7 @@ export function validateSharePreflight(
     allowed: true,
     metadata: {
       mode,
-      available: { ...liveCapabilities },
+      available: { ...availability },
     },
   };
 }
