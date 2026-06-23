@@ -80,9 +80,10 @@ export function Dashboard() {
       if (s && s.lastSourceId && s.lastSourceName) {
         setSource(s.lastSourceId, s.lastSourceName);
       }
+      let resolvedMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
       if (s && s.lastAudioMode) {
-        // If the persisted mode is unsupported on this build, fall back to 'none'
-        setAudioMode(s.lastAudioMode);
+        resolvedMode = s.lastAudioMode;
+        setAudioMode(resolvedMode);
       }
 
       // Load capability model to drive UI mode availability
@@ -97,8 +98,9 @@ export function Dashboard() {
           }
           setCapAudioModes(modeMap);
 
-          // If the current selection is now unsupported, reset to 'none'
-          if (modeMap[audioMode] === false) {
+          // If the persisted mode is unsupported on this build, override to 'none'
+          if (modeMap[resolvedMode] === false) {
+            resolvedMode = 'none';
             setAudioMode('none');
           }
         }
@@ -381,13 +383,18 @@ export function Dashboard() {
       });
       publisherManagerRef.current = mgr;
 
-      // Source validation for application audio mode
+      // Source validation and capability check for audio mode
       let effectiveAudioMode = audioMode;
       if (audioMode === 'application' && sourceId && !sourceId.startsWith('window:')) {
         console.warn("[Audio] Application audio requires a window source, not a screen");
         effectiveAudioMode = 'none';
         setAudioMode('none');
       } else if (audioMode === 'application' && !sourceId) {
+        effectiveAudioMode = 'none';
+        setAudioMode('none');
+      } else if (capAudioModes && capAudioModes[audioMode] === false) {
+        // Capability check: if the selected mode is unsupported on this build, fall back
+        console.warn(`[Audio] Mode "${audioMode}" is unsupported on this build, falling back to none`);
         effectiveAudioMode = 'none';
         setAudioMode('none');
       }
