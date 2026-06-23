@@ -85,10 +85,14 @@ struct SourceFormat {
     DWORD channelMask = 0; // 0 = unknown/use default order
 };
 
+} // anonymous namespace
+
 // ── Linear interpolation sample-rate converter ──
 //
 // Stateful resampler that converts from an arbitrary source rate to
 // kTargetSampleRate (48000). Keeps a fractional phase position across calls.
+// Defined in screenlink::audio namespace (not anonymous) so the
+// EndpointLoopbackSource header forward declaration works.
 
 class LinearResampler {
 public:
@@ -291,15 +295,17 @@ private:
     std::vector<ChannelCoeff> coeffs_;
 };
 
-} // anonymous namespace
-
 // ========================================================================
 // EndpointLoopbackSource
 // ========================================================================
 
-EndpointLoopbackSource::EndpointLoopbackSource() = default;
+EndpointLoopbackSource::EndpointLoopbackSource() {
+    resampler_ = new LinearResampler();
+}
 
 EndpointLoopbackSource::~EndpointLoopbackSource() {
+    delete resampler_;
+    resampler_ = nullptr;
     Stop();
 }
 
@@ -327,7 +333,15 @@ void EndpointLoopbackSource::Stop() {
         return;
     }
 
+    // Signal the capture thread to stop
     running_.store(false);
+
+    // Wake any blocked WASAPI call by stopping the audio client.
+    // IAudioClient::Stop() causes GetBuffer / GetNextPacketSize to return
+    // or wake up on the capture thread, allowing it to see running_ == false.
+    if (audioClient_) {
+        audioClient_->Stop();
+    }
 
     if (captureThread_.joinable()) {
         captureThread_.join();
@@ -567,10 +581,10 @@ void EndpointLoopbackSource::CaptureThread(
     // AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM. If the engine delivers a different format
     // despite the conversion flag, the capture loop below handles manual conversion
     // from the mix format (srcFmt) as a fallback.
-    // Pre-allocate conversion buffers
-    std::vector<float> conversionBuffer;
-    std::vector<float> stereoBuffer;
-    std::vector<float> resampleBuffer;
+    // Pre-allocate conversion buffers (member variables, reused across packets)
+    conversionBuffer_.clear();
+    stereoBuffer_.clear();
+    resampleBuffer_.clear();
 
     uint64_t sequenceNumber = 0;
     uint64_t framesCaptured = 0;
@@ -637,8 +651,8 @@ void EndpointLoopbackSource::CaptureThread(
                 // Zero-fill silent frames to preserve timeline
                 size_t totalSamples =
                     static_cast<size_t>(numFramesAvailable) * kTargetChannels;
-                conversionBuffer.assign(totalSamples, 0.0f);
-                packet.frames = conversionBuffer.data();
+                conversionBuffer_.assign(totalSamples, 0.0f);
+                packet.frames = conversionBuffer_.data();
                 packet.isSilent = true;
                 packet.channels = kTargetChannels;
             } else if (srcFmt.isFloat &&
@@ -656,15 +670,15 @@ void EndpointLoopbackSource::CaptureThread(
                     // Already float — just reference
                     const float* srcFloat =
                         reinterpret_cast<const float*>(pData);
-                    conversionBuffer.assign(srcFloat, srcFloat + srcTotalSamples);
+                    conversionBuffer_.assign(srcFloat, srcFloat + srcTotalSamples);
                 } else {
                     // Integer formats — convert to float
-                    conversionBuffer.resize(srcTotalSamples);
+                    conversionBuffer_.resize(srcTotalSamples);
                     if (srcFmt.bitsPerSample == 16) {
                         const int16_t* srcInt =
                             reinterpret_cast<const int16_t*>(pData);
                         for (size_t i = 0; i < srcTotalSamples; ++i) {
-                            conversionBuffer[i] = srcInt[i] / 32768.0f;
+                            conversionBuffer_[i] = srcInt[i] / 32768.0f;
                         }
                     } else if (srcFmt.bitsPerSample == 24) {
                         // 24-bit samples are stored as 3-byte values (little-endian)
@@ -680,23 +694,23 @@ void EndpointLoopbackSource::CaptureThread(
                             if (sample & 0x800000) {
                                 sample |= ~0xFFFFFF;
                             }
-                            conversionBuffer[i] = sample / 8388608.0f;
+                            conversionBuffer_[i] = sample / 8388608.0f;
                         }
                     } else if (srcFmt.bitsPerSample == 32) {
                         const int32_t* srcInt =
                             reinterpret_cast<const int32_t*>(pData);
                         for (size_t i = 0; i < srcTotalSamples; ++i) {
-                            conversionBuffer[i] = srcInt[i] / 2147483648.0f;
+                            conversionBuffer_[i] = srcInt[i] / 2147483648.0f;
                         }
                     } else {
                         // Unsupported bit depth — treat as silence
-                        conversionBuffer.assign(srcTotalSamples, 0.0f);
+                        conversionBuffer_.assign(srcTotalSamples, 0.0f);
                     }
                 }
 
                 // Step 2: Downmix to stereo (if multichannel)
                 if (srcFmt.channels > kTargetChannels) {
-                    stereoBuffer.resize(
+                    stereoBuffer_.resize(
                         static_cast<size_t>(numFramesAvailable) * kTargetChannels);
 
                     // Configure downmixer for this source format
@@ -706,49 +720,55 @@ void EndpointLoopbackSource::CaptureThread(
                     for (UINT32 f = 0; f < numFramesAvailable; ++f) {
                         float left, right;
                         dm.ProcessFrame(
-                            &conversionBuffer[static_cast<size_t>(f) * srcFmt.channels],
+                            &conversionBuffer_[static_cast<size_t>(f) * srcFmt.channels],
                             left, right);
-                        stereoBuffer[static_cast<size_t>(f) * 2 + 0] = left;
-                        stereoBuffer[static_cast<size_t>(f) * 2 + 1] = right;
+                        stereoBuffer_[static_cast<size_t>(f) * 2 + 0] = left;
+                        stereoBuffer_[static_cast<size_t>(f) * 2 + 1] = right;
                     }
 
                     // Replace conversion buffer with stereo output
-                    conversionBuffer.swap(stereoBuffer);
+                    conversionBuffer_.swap(stereoBuffer_);
                 } else if (srcFmt.channels == 1) {
                     // Mono to stereo: duplicate
-                    stereoBuffer.resize(
+                    stereoBuffer_.resize(
                         static_cast<size_t>(numFramesAvailable) * 2);
                     for (UINT32 f = 0; f < numFramesAvailable; ++f) {
-                        float s = conversionBuffer[f];
-                        stereoBuffer[f * 2 + 0] = s;
-                        stereoBuffer[f * 2 + 1] = s;
+                        float s = conversionBuffer_[f];
+                        stereoBuffer_[f * 2 + 0] = s;
+                        stereoBuffer_[f * 2 + 1] = s;
                     }
-                    conversionBuffer.swap(stereoBuffer);
+                    conversionBuffer_.swap(stereoBuffer_);
                 }
 
                 // Step 3: Sample rate conversion (if needed)
                 if (srcFmt.sampleRate != kTargetSampleRate) {
-                    resampleBuffer.clear();
-                    resampleBuffer.reserve(static_cast<size_t>(
-                        numFramesAvailable * kTargetSampleRate / srcFmt.sampleRate + 4) * 2);
+                    // Use the persistent resampler for phase continuity across packets
+                    resampleBuffer_.clear();
 
-                    LinearResampler localResampler;
-                    localResampler.Configure(srcFmt.sampleRate, kTargetChannels);
-                    uint32_t stereoFrames = static_cast<uint32_t>(
-                        conversionBuffer.size() / kTargetChannels);
-                    localResampler.Process(conversionBuffer.data(), stereoFrames, resampleBuffer);
+                    if (resampler_) {
+                        if (lastSourceRate_ != srcFmt.sampleRate) {
+                            resampler_->Configure(srcFmt.sampleRate, kTargetChannels);
+                            lastSourceRate_ = srcFmt.sampleRate;
+                        }
+                        resampleBuffer_.reserve(static_cast<size_t>(
+                            numFramesAvailable * kTargetSampleRate / srcFmt.sampleRate + 4) * 2);
 
-                    // Update frame count
-                    uint32_t resampledFrames = static_cast<uint32_t>(
-                        resampleBuffer.size() / kTargetChannels);
-                    packet.frameCount = resampledFrames;
-                    conversionBuffer.swap(resampleBuffer);
+                        uint32_t stereoFrames = static_cast<uint32_t>(
+                            conversionBuffer_.size() / kTargetChannels);
+                        resampler_->Process(conversionBuffer_.data(), stereoFrames, resampleBuffer_);
+
+                        // Update frame count
+                        uint32_t resampledFrames = static_cast<uint32_t>(
+                            resampleBuffer_.size() / kTargetChannels);
+                        packet.frameCount = resampledFrames;
+                        conversionBuffer_.swap(resampleBuffer_);
+                    }
                 }
 
                 // Update channels and reference
                 packet.channels = kTargetChannels;
-                if (!conversionBuffer.empty()) {
-                    packet.frames = conversionBuffer.data();
+                if (!conversionBuffer_.empty()) {
+                    packet.frames = conversionBuffer_.data();
                 }
             }
 
