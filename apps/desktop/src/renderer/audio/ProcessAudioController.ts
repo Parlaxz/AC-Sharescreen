@@ -159,6 +159,16 @@ export class ProcessAudioController {
       }
       this.audioTrack = tracks[0];
 
+      // 8. Resume AudioContext — may be suspended if user gesture was consumed
+      // by preceding async calls (await consumes transient activation in Chrome/Electron).
+      if (this.audioContext.state === 'suspended') {
+        try {
+          await this.audioContext.resume();
+        } catch (resumeErr) {
+          console.warn('[ProcessAudioController] AudioContext.resume() failed:', resumeErr);
+        }
+      }
+
       // Note: priming is NOT awaited here. The consumer is ready, but
       // no PCM can arrive until the producer starts. Call waitUntilPrimed()
       // after starting the native capture producer.
@@ -231,7 +241,8 @@ export class ProcessAudioController {
     if (!this.workletNode) throw new Error('Worklet not initialized');
 
     return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      this.primingTimeout = setTimeout(() => {
+        this.primingTimeout = null;
         this.workletNode!.port.onmessage = null;
         this.state = 'error';
         this.onStateChange?.('error');
@@ -244,7 +255,8 @@ export class ProcessAudioController {
         if (!msg || typeof msg !== 'object') return;
 
         if (msg.type === 'pcm:primed') {
-          clearTimeout(timeout);
+          clearTimeout(this.primingTimeout!);
+          this.primingTimeout = null;
           this.state = 'primed';
           this.onStateChange?.('primed');
           this.workletNode!.port.onmessage = originalHandler;
