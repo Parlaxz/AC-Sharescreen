@@ -98,13 +98,19 @@ describe('getAudioModeInfo — Windows build 19045 availability', () => {
     compiledWindowsSdkVersion: '10.0.22000.0',
     processLoopbackHeadersAvailable: true,
     processLoopbackRuntimeSupported: false,
+    processLoopbackDocumentedSupported: false,
+    processLoopbackExperimentalCandidate: false,
+    processLoopbackProbed: true,
+    processLoopbackProbeSucceeded: false,
     applicationLoopbackSupported: false,
     endpointLoopbackSupported: true,
     usable: false,
     is64BitProcess: true,
     is64BitOperatingSystem: true,
-    reasonCode: 'unsupported-windows-build',
-    reasonMessage: 'Build 19045 is below 20348',
+    osBuildExperimentalCandidate: true,
+    experimentalCandidate: false,
+    reasonCode: 'experimental-probe-failed',
+    reasonMessage: 'Runtime probe failed on build 19045',
     status: 'ok',
   };
 
@@ -123,12 +129,52 @@ describe('getAudioModeInfo — Windows build 19045 availability', () => {
     expect(modeMap.get('test-tone')!.supported).toBe(true);
   });
 
-  it('"application" is NOT supported on build 19045 (requires 20348+)', () => {
+  it('"application" is NOT supported on build 19045 when probe failed', () => {
     expect(modeMap.get('application')!.supported).toBe(false);
   });
 
-  it('"monitor" is NOT supported on build 19045 (requires 20348+)', () => {
+  it('"monitor" is NOT supported on build 19045 when probe failed', () => {
     expect(modeMap.get('monitor')!.supported).toBe(false);
+  });
+});
+
+describe('getAudioModeInfo — Windows build 19045 experimental probe passed', () => {
+  const build19045Caps: AudioCapabilityResult = {
+    protocolVersion: '0.1.0',
+    helperVersion: '0.1.0',
+    architecture: 'x64',
+    operatingSystem: 'Windows',
+    osVersion: { major: 10, minor: 0, build: 19045, revision: 0 },
+    detectionMethod: 'RtlGetVersion',
+    detectionSucceeded: true,
+    compiledWindowsSdkVersion: '10.0.22000.0',
+    processLoopbackHeadersAvailable: true,
+    processLoopbackRuntimeSupported: true,
+    processLoopbackDocumentedSupported: false,
+    processLoopbackExperimentalCandidate: true,
+    processLoopbackProbed: true,
+    processLoopbackProbeSucceeded: true,
+    applicationLoopbackSupported: true,
+    endpointLoopbackSupported: true,
+    usable: false,
+    is64BitProcess: true,
+    is64BitOperatingSystem: true,
+    osBuildExperimentalCandidate: true,
+    experimentalCandidate: true,
+    reasonCode: 'experimental-runtime-supported',
+    reasonMessage: 'Process-loopback is experimentally supported on build 19045 (runtime probe succeeded).',
+    status: 'ok',
+  };
+
+  const modes = getAudioModeInfo(build19045Caps);
+  const modeMap = new Map(modes.map((m) => [m.mode, m]));
+
+  it('"application" IS supported on build 19045 when probe passed', () => {
+    expect(modeMap.get('application')!.supported).toBe(true);
+  });
+
+  it('"monitor" IS supported on build 19045 when probe passed', () => {
+    expect(modeMap.get('monitor')!.supported).toBe(true);
   });
 });
 
@@ -148,6 +194,8 @@ describe('getAudioModeInfo — system audio description', () => {
     compiledWindowsSdkVersion: '10.0.22000.0',
     processLoopbackHeadersAvailable: true,
     processLoopbackRuntimeSupported: true,
+    processLoopbackDocumentedSupported: true,
+    processLoopbackExperimentalCandidate: false,
     applicationLoopbackSupported: true,
     endpointLoopbackSupported: true,
     usable: true,

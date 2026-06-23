@@ -9,7 +9,7 @@ namespace screenlink::audio {
 /// Current protocol version for capability reporting.
 /// Bump this when adding, removing, or changing fields in the
 /// capability response. Breaking changes = major bump.
-inline constexpr std::string_view kProtocolVersion = "0.1.0";
+inline constexpr std::string_view kProtocolVersion = "0.2.0";
 
 /// Protocol version for the service control protocol (--serve mode).
 inline constexpr std::string_view kServiceProtocolVersion = "0.3.0";
@@ -23,13 +23,28 @@ inline constexpr std::string_view kHelperVersion = "0.1.0";
 /// (Windows Server 2022 / Windows 10 21H2 Server). Windows 11 build 22000
 /// (and later Windows 10 22H2) also support it.
 ///
-/// This is the RUNTIME minimum — the OS build the helper runs on must be
-/// >= 20348. The compile-time SDK check (kMinSdkBuildForProcessLoopback) is
-/// a separate constant that reflects the Windows SDK version used to build.
+/// This is the DOCUMENTED-SUPPORT minimum — the OS build the helper
+/// officially supports for process-loopback. The compile-time SDK check
+/// (kMinSdkBuildForProcessLoopback) is a separate constant that reflects
+/// the Windows SDK version used to build.
 ///
 /// Source: Microsoft Docs — "Loopback Recording"
 /// https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording
 inline constexpr uint32_t kMinProcessLoopbackBuild = 20348;
+
+/// Experimental candidate floor for process-loopback audio.
+/// Builds between this floor and kMinProcessLoopbackBuild (19041–20347)
+/// may support process-loopback at runtime even though Microsoft does not
+/// officially document support until build 20348. OBS Studio targets
+/// Windows 10 2004+ (build 19041) as its minimum for process-loopback.
+///
+/// On these builds, ScreenLink performs a real runtime probe
+/// (ProbeProcessLoopbackRuntime) that activates the VAD\Process_Loopback
+/// virtual device and attempts IAudioClient::Start to confirm the API
+/// actually works. If the probe succeeds, process-loopback features are
+/// offered as "experimental-runtime-supported" rather than
+/// "documented-supported".
+inline constexpr uint32_t kExperimentalProcessLoopbackFloor = 19041;
 
 /// Maximum duration for a capture test in milliseconds.
 /// Prevents runaway captures that could fill the disk.

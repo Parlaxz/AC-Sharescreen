@@ -40,7 +40,12 @@ export interface HelperCapabilities {
   osVersion: { major: number; minor: number; build: number; revision: number };
   compiledWindowsSdkVersion: string;
   processLoopbackRuntimeSupported: boolean;
+  processLoopbackDocumentedSupported?: boolean;
+  processLoopbackExperimentalCandidate?: boolean;
+  processLoopbackProbed?: boolean;
+  processLoopbackProbeSucceeded?: boolean;
   usable: boolean;
+  experimentalCandidate?: boolean;
   reasonCode: string;
   reasonMessage: string;
 }

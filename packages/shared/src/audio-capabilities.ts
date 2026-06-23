@@ -10,12 +10,19 @@ export interface AudioCapabilityResult {
   compiledWindowsSdkVersion: string;
   processLoopbackHeadersAvailable: boolean;
   processLoopbackRuntimeSupported: boolean;
-  applicationLoopbackSupported: boolean;
+  processLoopbackDocumentedSupported?: boolean;
+  processLoopbackExperimentalCandidate?: boolean;
+  processLoopbackProbed?: boolean;
+  processLoopbackProbeSucceeded?: boolean;
+  processLoopbackProbeFailureReason?: string;
   /** System audio (endpoint loopback) is supported on all Windows 10+ builds. */
   endpointLoopbackSupported: boolean;
+  applicationLoopbackSupported: boolean;
   usable: boolean;
   is64BitProcess: boolean;
   is64BitOperatingSystem: boolean;
+  osBuildExperimentalCandidate?: boolean;
+  experimentalCandidate?: boolean;
   reasonCode: string;
   reasonMessage: string;
   status: string;
@@ -64,7 +71,9 @@ export interface AudioModeInfo {
 
 export function getAudioModeInfo(caps: AudioCapabilityResult | null): AudioModeInfo[] {
   const build = caps?.osVersion?.build ?? 0;
-  const is20348Plus = build >= 20348;
+  const documented = caps?.processLoopbackDocumentedSupported === true;
+  const experimental = caps?.processLoopbackExperimentalCandidate === true;
+  const runtimeSupported = documented || experimental;
 
   return [
     { mode: 'none', label: 'No Audio', description: 'No system audio will be shared', supported: true },
@@ -78,24 +87,38 @@ export function getAudioModeInfo(caps: AudioCapabilityResult | null): AudioModeI
     {
       mode: 'application',
       label: 'Application Audio',
-      description: 'Audio from the selected application only (requires Windows build 20348+)',
-      supported: is20348Plus && !!caps?.applicationLoopbackSupported,
-      reason: is20348Plus && !caps?.applicationLoopbackSupported
-        ? 'Application Audio headers or runtime support not detected'
-        : is20348Plus
-          ? undefined
-          : 'Application Audio requires Windows build 20348 or newer',
+      description: runtimeSupported
+        ? 'Audio from the selected application only'
+        : experimental
+          ? 'Application Audio runtime probe succeeded (experimental)'
+          : 'Requires Windows build 20348 or newer',
+      supported: !!caps?.applicationLoopbackSupported,
+      reason: caps?.applicationLoopbackSupported
+        ? undefined
+        : caps?.reasonCode === 'experimental-probe-failed'
+          ? `Application Audio probe failed on build ${build}: ${caps.reasonMessage}`
+          : caps?.reasonCode === 'experimental-not-probed'
+            ? `Application Audio is potentially available on build ${build} but was not probed`
+            : documented
+              ? 'Application Audio headers or runtime support not detected'
+              : caps?.reasonCode === 'experimental-runtime-supported'
+                ? ''
+                : `Application Audio requires Windows build 20348 or newer (build ${build} detected)`,
     },
     {
       mode: 'monitor',
       label: 'Filtered Monitor',
-      description: 'Desktop audio excluding ScreenLink and configured applications',
-      supported: is20348Plus && !!caps?.processLoopbackRuntimeSupported,
-      reason: is20348Plus && !caps?.processLoopbackRuntimeSupported
-        ? 'Filtered Monitor runtime support not detected'
-        : is20348Plus
-          ? undefined
-          : 'Filtered Monitor requires Windows build 20348 or newer because it uses process-specific loopback capture',
+      description: runtimeSupported
+        ? 'Desktop audio excluding ScreenLink and configured applications'
+        : experimental
+          ? 'Filtered Monitor runtime probe succeeded (experimental)'
+          : 'Requires Windows build 20348 or newer',
+      supported: runtimeSupported,
+      reason: runtimeSupported
+        ? undefined
+        : experimental
+          ? ''
+          : `Filtered Monitor requires Windows build 20348 or newer because it uses process-specific loopback capture (build ${build} detected)`,
     },
     { mode: 'test-tone', label: 'Test Tone', description: 'Diagnostic 440 Hz tone (does not capture real audio)', supported: true },
   ];

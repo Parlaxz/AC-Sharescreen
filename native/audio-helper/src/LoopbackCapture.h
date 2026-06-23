@@ -59,7 +59,9 @@ CaptureResult RunCaptureWithCallback(const CaptureConfig& config, FrameCallback 
 CaptureResult RunCapture(const CaptureConfig& config);
 
 /// Check if current OS supports process-loopback capture.
-/// @note Requires Windows build >= 20348. On older builds, returns false.
+/// @note Returns true on Windows build >= 20348 (documented) or
+/// build >= 19041 with a successful runtime probe (experimental).
+/// On builds below 19041, always returns false.
 bool IsProcessLoopbackSupported();
 
 } // namespace screenlink::audio

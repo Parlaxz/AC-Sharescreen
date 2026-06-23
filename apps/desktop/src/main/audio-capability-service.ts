@@ -143,7 +143,7 @@ export async function getAudioCapabilities(): Promise<HelperResult<AudioCapabili
 
       const cap = parsed as Record<string, unknown>;
 
-      if (typeof cap.protocolVersion !== "string" || cap.protocolVersion !== "0.1.0") {
+      if (typeof cap.protocolVersion !== "string" || cap.protocolVersion !== "0.2.0") {
         resolve(
           errorResult(
             "unsupported-protocol",

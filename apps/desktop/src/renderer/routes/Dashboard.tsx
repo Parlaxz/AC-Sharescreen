@@ -889,14 +889,14 @@ export function Dashboard() {
                 {audioMode === 'application' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
                     {capAudioModes?.['application'] === false
-                      ? 'Requires Windows build 20348 or newer.'
+                      ? 'Application Audio is not available on this system.'
                       : 'Captures audio from the selected application process tree only.'}
                   </p>
                 )}
                 {audioMode === 'monitor' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
                     {capAudioModes?.['monitor'] === false
-                      ? 'Filtered Monitor requires Windows build 20348 or newer because it uses process-specific loopback capture.'
+                      ? 'Filtered Monitor is not available on this system.'
                       : 'Captures audio from active applications. Discord and ScreenLink playback are excluded.'}
                   </p>
                 )}

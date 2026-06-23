@@ -1,4 +1,5 @@
 #include "LoopbackCapture.h"
+#include "AudioCapabilities.h"
 #include "WavWriter.h"
 #include "WindowsVersion.h"
 #include "Protocol.h"
@@ -328,8 +329,18 @@ ActivationResult ActivateProcessLoopback(const CaptureConfig& config) {
 
 bool IsProcessLoopbackSupported() {
     auto osInfo = DetectWindowsVersion();
-    return osInfo.succeeded &&
-           osInfo.build >= kMinProcessLoopbackBuild;
+    if (!osInfo.succeeded) return false;
+
+    // Documented-supported builds (>= 20348)
+    if (osInfo.build >= kMinProcessLoopbackBuild) return true;
+
+    // Experimental candidate builds (19041–20347): check runtime probe
+    if (osInfo.build >= kExperimentalProcessLoopbackFloor) {
+        auto probeResult = ProbeProcessLoopbackRuntime();
+        return probeResult.succeeded;
+    }
+
+    return false;
 }
 
 // ── RunCaptureWithPacketCallback ──
@@ -340,10 +351,17 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
     // 1. Check OS support
     if (!IsProcessLoopbackSupported()) {
         auto osInfo = DetectWindowsVersion();
-        result.failureReason = "Process-loopback capture requires Windows build "
-            + std::to_string(kMinProcessLoopbackBuild)
-            + " or later (current build: "
-            + std::to_string(osInfo.build) + ")";
+        auto probeResult = ProbeProcessLoopbackRuntime();
+        if (osInfo.build >= kExperimentalProcessLoopbackFloor && osInfo.build < kMinProcessLoopbackBuild) {
+            result.failureReason = "Process-loopback capture is experimentally available on build "
+                + std::to_string(osInfo.build) + " but the runtime probe failed: "
+                + probeResult.failureReason;
+        } else {
+            result.failureReason = "Process-loopback capture requires Windows build "
+                + std::to_string(kMinProcessLoopbackBuild)
+                + " or later (current build: "
+                + std::to_string(osInfo.build) + ")";
+        }
         return result;
     }
 
@@ -555,10 +573,17 @@ CaptureResult RunCapture(const CaptureConfig& config) {
     // 1. Check OS support
     if (!IsProcessLoopbackSupported()) {
         auto osInfo = DetectWindowsVersion();
-        result.failureReason = "Process-loopback capture requires Windows build "
-            + std::to_string(kMinProcessLoopbackBuild)
-            + " or later (current build: "
-            + std::to_string(osInfo.build) + ")";
+        auto probeResult = ProbeProcessLoopbackRuntime();
+        if (osInfo.build >= kExperimentalProcessLoopbackFloor && osInfo.build < kMinProcessLoopbackBuild) {
+            result.failureReason = "Process-loopback capture is experimentally available on build "
+                + std::to_string(osInfo.build) + " but the runtime probe failed: "
+                + probeResult.failureReason;
+        } else {
+            result.failureReason = "Process-loopback capture requires Windows build "
+                + std::to_string(kMinProcessLoopbackBuild)
+                + " or later (current build: "
+                + std::to_string(osInfo.build) + ")";
+        }
         return result;
     }
 

@@ -761,7 +761,10 @@ void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
     auto osInfo = DetectWindowsVersion();
     auto compileTime = DetectCompileTimeSupport();
     auto runtime = DetectRuntimeSupport(osInfo);
-    auto cap = ComputeCapability(compileTime, runtime);
+    auto probe = ProbeProcessLoopbackRuntime();
+    auto cap = ComputeCapability(compileTime, runtime, probe);
+
+    bool runtimeSupported = cap.usable || cap.experimentalCandidate;
 
     // Build result as a JSON string
     std::string result = "{";
@@ -774,11 +777,23 @@ void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
     result += "\"compiledWindowsSdkVersion\":\"";
     result += compileTime.windowsSdkVersion + "\",";
     result += "\"processLoopbackRuntimeSupported\":";
-    result += (runtime.osBuildEligible ? "true" : "false") + std::string(",");
+    result += (runtimeSupported ? "true" : "false") + std::string(",");
+    result += "\"processLoopbackDocumentedSupported\":";
+    result += (cap.usable ? "true" : "false") + std::string(",");
+    result += "\"processLoopbackExperimentalCandidate\":";
+    result += (cap.experimentalCandidate ? "true" : "false") + std::string(",");
+    result += "\"processLoopbackProbed\":";
+    result += (probe.probed ? "true" : "false") + std::string(",");
+    result += "\"processLoopbackProbeSucceeded\":";
+    result += (probe.succeeded ? "true" : "false") + std::string(",");
+    result += "\"processLoopbackProbeFailureReason\":\"";
+    result += probe.failureReason + "\",";
     result += "\"endpointLoopbackSupported\":";
     result += (cap.endpointLoopbackSupported ? "true" : "false") + std::string(",");
     result += "\"usable\":";
     result += (cap.usable ? "true" : "false") + std::string(",");
+    result += "\"experimentalCandidate\":";
+    result += (cap.experimentalCandidate ? "true" : "false") + std::string(",");
     result += "\"reasonCode\":\"";
     result += cap.reasonCode + "\",";
     result += "\"reasonMessage\":\"";
@@ -965,14 +980,33 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
 
     // Check process-loopback support
     if (!IsProcessLoopbackSupported()) {
+        auto osInfo = DetectWindowsVersion();
+        auto probeResult = ProbeProcessLoopbackRuntime();
+        std::string result;
+        if (osInfo.build >= kExperimentalProcessLoopbackFloor && osInfo.build < kMinProcessLoopbackBuild) {
+            result = "{";
+            result += "\"error\":\"process-loopback-experimental-probe-failed\",";
+            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
+            result += "\"currentBuild\":" + std::to_string(osInfo.build) + ",";
+            result += "\"experimentalFloor\":" + std::to_string(kExperimentalProcessLoopbackFloor) + ",";
+            result += "\"probeFailure\":\"" + probeResult.failureReason + "\"";
+            result += "}";
+        } else {
+            result = "{";
+            result += "\"error\":\"process-loopback-unsupported\",";
+            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
+            result += "\"currentBuild\":" + std::to_string(osInfo.build);
+            result += "}";
+        }
+
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", static_cast<uint64_t>(0));
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "unsupported-os");
-        resp.SetRaw("result", "{}");
+        resp.Set("error", "process-loopback-unsupported");
+        resp.SetRaw("result", result);
         response = resp.Str();
         return;
     }
@@ -1333,10 +1367,22 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     // Check process-loopback support (Application Audio requires it)
     if (!IsProcessLoopbackSupported()) {
         auto osInfo = DetectWindowsVersion();
-        std::string result = "{";
-        result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
-        result += "\"currentBuild\":" + std::to_string(osInfo.build);
-        result += "}";
+        auto probeResult = ProbeProcessLoopbackRuntime();
+        std::string result;
+        if (osInfo.build >= kExperimentalProcessLoopbackFloor && osInfo.build < kMinProcessLoopbackBuild) {
+            result = "{";
+            result += "\"error\":\"process-loopback-experimental-probe-failed\",";
+            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
+            result += "\"currentBuild\":" + std::to_string(osInfo.build) + ",";
+            result += "\"experimentalFloor\":" + std::to_string(kExperimentalProcessLoopbackFloor) + ",";
+            result += "\"probeFailure\":\"" + probeResult.failureReason + "\"";
+            result += "}";
+        } else {
+            result = "{";
+            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
+            result += "\"currentBuild\":" + std::to_string(osInfo.build);
+            result += "}";
+        }
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1475,11 +1521,23 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
     auto osInfo = DetectWindowsVersion();
     uint32_t currentBuild = osInfo.build;
     if (!IsProcessLoopbackSupported()) {
-        std::string result = "{";
-        result += "\"error\":\"process-loopback-unsupported\",";
-        result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
-        result += "\"currentBuild\":" + std::to_string(currentBuild);
-        result += "}";
+        auto probeResult = ProbeProcessLoopbackRuntime();
+        std::string result;
+        if (currentBuild >= kExperimentalProcessLoopbackFloor && currentBuild < kMinProcessLoopbackBuild) {
+            result = "{";
+            result += "\"error\":\"process-loopback-experimental-probe-failed\",";
+            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
+            result += "\"currentBuild\":" + std::to_string(currentBuild) + ",";
+            result += "\"experimentalFloor\":" + std::to_string(kExperimentalProcessLoopbackFloor) + ",";
+            result += "\"probeFailure\":\"" + probeResult.failureReason + "\"";
+            result += "}";
+        } else {
+            result = "{";
+            result += "\"error\":\"process-loopback-unsupported\",";
+            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
+            result += "\"currentBuild\":" + std::to_string(currentBuild);
+            result += "}";
+        }
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));

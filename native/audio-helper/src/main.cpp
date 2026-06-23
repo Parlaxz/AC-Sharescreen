@@ -133,7 +133,10 @@ int main(int argc, char* argv[]) {
       auto osInfo = screenlink::audio::DetectWindowsVersion();
       auto compileTime = screenlink::audio::DetectCompileTimeSupport();
       auto runtime = screenlink::audio::DetectRuntimeSupport(osInfo);
-      auto cap = screenlink::audio::ComputeCapability(compileTime, runtime);
+      auto probe = screenlink::audio::ProbeProcessLoopbackRuntime();
+      auto cap = screenlink::audio::ComputeCapability(compileTime, runtime, probe);
+
+      bool runtimeSupported = cap.usable || cap.experimentalCandidate;
 
       std::cout << "{\n";
       std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
@@ -154,16 +157,28 @@ int main(int argc, char* argv[]) {
       std::cout << "  \"processLoopbackHeadersAvailable\": "
                 << (compileTime.headersAvailable ? "true" : "false") << ",\n";
       std::cout << "  \"processLoopbackRuntimeSupported\": "
-                << (runtime.osBuildEligible ? "true" : "false") << ",\n";
+                << (runtimeSupported ? "true" : "false") << ",\n";
+      std::cout << "  \"processLoopbackDocumentedSupported\": "
+                << (cap.usable ? "true" : "false") << ",\n";
+      std::cout << "  \"processLoopbackExperimentalCandidate\": "
+                << (cap.experimentalCandidate ? "true" : "false") << ",\n";
+      std::cout << "  \"processLoopbackProbed\": "
+                << (probe.probed ? "true" : "false") << ",\n";
+      std::cout << "  \"processLoopbackProbeSucceeded\": "
+                << (probe.succeeded ? "true" : "false") << ",\n";
+      std::cout << "  \"processLoopbackProbeFailureReason\": \""
+                << probe.failureReason << "\",\n";
       std::cout << "  \"endpointLoopbackSupported\": "
                 << (cap.endpointLoopbackSupported ? "true" : "false") << ",\n";
       std::cout << "  \"applicationLoopbackSupported\": "
-                << (cap.usable ? "true" : "false") << ",\n";
+                << (runtimeSupported ? "true" : "false") << ",\n";
       std::cout << "  \"usable\": " << (cap.usable ? "true" : "false") << ",\n";
       std::cout << "  \"is64BitProcess\": "
                 << (runtime.is64BitProcess ? "true" : "false") << ",\n";
       std::cout << "  \"is64BitOperatingSystem\": "
                 << (runtime.is64BitOperatingSystem ? "true" : "false") << ",\n";
+      std::cout << "  \"osBuildExperimentalCandidate\": "
+                << (runtime.osBuildExperimentalCandidate ? "true" : "false") << ",\n";
       std::cout << "  \"reasonCode\": \"" << cap.reasonCode << "\",\n";
       std::cout << "  \"reasonMessage\": \"" << cap.reasonMessage << "\"\n";
       std::cout << "}\n";
@@ -273,7 +288,7 @@ int main(int argc, char* argv[]) {
       }
 
       // ── Capability computation tests ──
-      auto cap = screenlink::audio::ComputeCapability(compileTime, runtime);
+      auto cap = screenlink::audio::ComputeCapability(compileTime, runtime, screenlink::audio::ProcessLoopbackProbeResult{});
       if (cap.reasonCode.empty()) {
         std::cerr << "FAIL: reasonCode should not be empty\n";
         allPassed = false;
@@ -312,7 +327,7 @@ int main(int argc, char* argv[]) {
         fakeOs.detectionMethod = "simulated";
 
         auto fakeRuntime = screenlink::audio::DetectRuntimeSupport(fakeOs);
-        auto bcCap = screenlink::audio::ComputeCapability(sdkOk, fakeRuntime);
+        auto bcCap = screenlink::audio::ComputeCapability(sdkOk, fakeRuntime, screenlink::audio::ProcessLoopbackProbeResult{});
 
         if (bcCap.usable != bc.expectedUsable) {
           std::cerr << "FAIL: build-boundary [" << bc.label << "] usable="
@@ -326,6 +341,67 @@ int main(int argc, char* argv[]) {
             std::cerr << "FAIL: build-boundary [" << bc.label << "] reasonCode='"
                       << bcCap.reasonCode << "' (expected '"
                       << bc.expectedReasonCode << "')\n";
+            allPassed = false;
+          }
+        }
+      }
+
+      // ── Process-loopback experimental probe-aware tests ──
+      {
+        screenlink::audio::WindowsVersionResult fakeOs;
+        fakeOs.major = 10; fakeOs.minor = 0; fakeOs.build = 19045;
+        fakeOs.revision = 0; fakeOs.succeeded = true; fakeOs.detectionMethod = "simulated";
+
+        auto experimentalRuntime = screenlink::audio::DetectRuntimeSupport(fakeOs);
+
+        // Case 1: no probe attempted — should report unsupported
+        {
+          auto capNoProbe = screenlink::audio::ComputeCapability(
+              sdkOk, experimentalRuntime, screenlink::audio::ProcessLoopbackProbeResult{});
+          if (capNoProbe.usable) {
+            std::cerr << "FAIL: experimental-without-probe usable should be false\n";
+            allPassed = false;
+          }
+          if (capNoProbe.reasonCode != "unsupported-windows-build") {
+            std::cerr << "FAIL: experimental-without-probe reasonCode='"
+                      << capNoProbe.reasonCode << "' (expected 'unsupported-windows-build')\n";
+            allPassed = false;
+          }
+        }
+
+        // Case 2: successful probe — should report experimental-runtime-supported
+        {
+          screenlink::audio::ProcessLoopbackProbeResult passedProbe;
+          passedProbe.probed = true;
+          passedProbe.succeeded = true;
+          auto capProbeOk = screenlink::audio::ComputeCapability(
+              sdkOk, experimentalRuntime, passedProbe);
+          if (capProbeOk.experimentalCandidate != true) {
+            std::cerr << "FAIL: experimental-with-passed-probe experimentalCandidate should be true\n";
+            allPassed = false;
+          }
+          if (capProbeOk.reasonCode != "experimental-runtime-supported") {
+            std::cerr << "FAIL: experimental-with-passed-probe reasonCode='"
+                      << capProbeOk.reasonCode << "' (expected 'experimental-runtime-supported')\n";
+            allPassed = false;
+          }
+        }
+
+        // Case 3: failed probe — should report experimental-probe-failed
+        {
+          screenlink::audio::ProcessLoopbackProbeResult failedProbe;
+          failedProbe.probed = true;
+          failedProbe.succeeded = false;
+          failedProbe.failureReason = "test failure";
+          auto capProbeFail = screenlink::audio::ComputeCapability(
+              sdkOk, experimentalRuntime, failedProbe);
+          if (capProbeFail.experimentalCandidate) {
+            std::cerr << "FAIL: experimental-with-failed-probe experimentalCandidate should be false\n";
+            allPassed = false;
+          }
+          if (capProbeFail.reasonCode != "experimental-probe-failed") {
+            std::cerr << "FAIL: experimental-with-failed-probe reasonCode='"
+                      << capProbeFail.reasonCode << "' (expected 'experimental-probe-failed')\n";
             allPassed = false;
           }
         }
