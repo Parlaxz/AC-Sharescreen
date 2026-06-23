@@ -26,6 +26,8 @@
 
 #include <coml2api.h>     // StringFromGUID2
 #include <mmdeviceapi.h>  // IMMDeviceEnumerator, IMMDevice
+#include <audiopolicy.h>  // IAudioSessionManager2, IAudioSessionEnumerator
+#include <audioclient.h>  // IAudioClient (for __uuidof)
 #include <processthreadsapi.h> // IsWow64Process2
 
 namespace {
@@ -83,11 +85,20 @@ void PrintError(const char* errorMsg, int& exitCodeOut, int exitCode) {
   exitCodeOut = exitCode;
 }
 
+// COM helper: release a COM pointer and null it out.
+template <typename T>
+void SafeRelease(T*& ptr) {
+    if (ptr) {
+        ptr->Release();
+        ptr = nullptr;
+    }
+}
+
 } // anonymous namespace
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--probe-mmdevice|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
+    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--probe-mmdevice|--probe-audio-sessions|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
     std::cout << "{\n"
               << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n"
               << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n"
@@ -141,6 +152,8 @@ int main(int argc, char* argv[]) {
                 << (compileTime.headersAvailable ? "true" : "false") << ",\n";
       std::cout << "  \"processLoopbackRuntimeSupported\": "
                 << (runtime.osBuildEligible ? "true" : "false") << ",\n";
+      std::cout << "  \"endpointLoopbackSupported\": "
+                << (cap.endpointLoopbackSupported ? "true" : "false") << ",\n";
       std::cout << "  \"applicationLoopbackSupported\": "
                 << (cap.usable ? "true" : "false") << ",\n";
       std::cout << "  \"usable\": " << (cap.usable ? "true" : "false") << ",\n";
@@ -203,6 +216,14 @@ int main(int argc, char* argv[]) {
       }
       if (screenlink::audio::ParseCommand("--serve") != screenlink::audio::Command::kServe) {
         std::cerr << "FAIL: ParseCommand('--serve') mismatch\n";
+        allPassed = false;
+      }
+      if (screenlink::audio::ParseCommand("--probe-audio-sessions") != screenlink::audio::Command::kProbeAudioSessions) {
+        std::cerr << "FAIL: ParseCommand('--probe-audio-sessions') mismatch\n";
+        allPassed = false;
+      }
+      if (screenlink::audio::ParseCommand("--probe-mmdevice") != screenlink::audio::Command::kProbeMmdevice) {
+        std::cerr << "FAIL: ParseCommand('--probe-mmdevice') mismatch\n";
         allPassed = false;
       }
       if (screenlink::audio::ParseCommand("--unknown") != screenlink::audio::Command::kUnknown) {
@@ -1862,11 +1883,15 @@ int main(int argc, char* argv[]) {
     case screenlink::audio::Command::kEnumerateAudioSessions: {
       screenlink::audio::AudioSessionMonitor monitor;
       if (!monitor.Initialize()) {
+        long errCode = monitor.LastErrorCode();
+        char hrBuf[32] = {};
+        snprintf(hrBuf, sizeof(hrBuf), "0x%08lX", static_cast<unsigned long>(errCode));
         std::cout << "{\n";
         std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
         std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
         std::cout << "  \"status\": \"error\",\n";
-        std::cout << "  \"error\": \"session-enumeration-failed\"\n";
+        std::cout << "  \"error\": \"session-enumeration-failed\",\n";
+        std::cout << "  \"hresult\": \"" << hrBuf << "\"\n";
         std::cout << "}\n";
         return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
       }
@@ -1940,29 +1965,25 @@ int main(int argc, char* argv[]) {
         }
       }
 
-      // Local GUIDs (matching AudioSessionMonitor.cpp)
-      const GUID kClsid = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
-      const GUID kIid   = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
-
       std::string clsidStr;
       std::string iidStr;
       {
         WCHAR buf[64] = {};
-        if (StringFromGUID2(kClsid, buf, 64) > 0) clsidStr = WideToUtf8(buf);
+        if (StringFromGUID2(__uuidof(MMDeviceEnumerator), buf, 64) > 0) clsidStr = WideToUtf8(buf);
       }
       {
         WCHAR buf[64] = {};
-        if (StringFromGUID2(kIid, buf, 64) > 0) iidStr = WideToUtf8(buf);
+        if (StringFromGUID2(__uuidof(IMMDeviceEnumerator), buf, 64) > 0) iidStr = WideToUtf8(buf);
       }
 
-      // CoCreateInstance
+      // CoCreateInstance using SDK __uuidof
       static constexpr int kClsCtx = CLSCTX_ALL;
       std::string hresultStr;
       bool enumeratorCreated = false;
       std::string deviceId;
 
       IMMDeviceEnumerator* enumerator = nullptr;
-      hr = CoCreateInstance(kClsid, nullptr, kClsCtx, kIid, reinterpret_cast<void**>(&enumerator));
+      hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, kClsCtx, __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
       {
         char buf[32] = {};
         snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
@@ -2005,6 +2026,125 @@ int main(int argc, char* argv[]) {
       std::cout << "  \"processArchitecture\": \"" << JsonEscape(procArch) << "\",\n";
       std::cout << "  \"executablePath\": \"" << JsonEscape(exePath) << "\",\n";
       std::cout << "  \"deviceId\": \"" << JsonEscape(deviceId) << "\"\n";
+      std::cout << "}\n";
+      return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
+    }
+
+    case screenlink::audio::Command::kProbeAudioSessions: {
+      // ── Diagnostic probe for audio session enumeration ──
+
+      // Process architecture
+      std::string procArch = "unknown";
+      {
+        USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        if (IsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+          char archBuf[32] = {};
+          snprintf(archBuf, sizeof(archBuf), "0x%04hX", processMachine);
+          procArch = archBuf;
+        }
+      }
+
+      auto osInfo = screenlink::audio::DetectWindowsVersion();
+
+      // Helper to emit a failure result
+      auto fail = [&](const char* step, const char* reason, HRESULT hr) {
+        char hrBuf[32] = {};
+        snprintf(hrBuf, sizeof(hrBuf), "0x%08lX", static_cast<unsigned long>(hr));
+        std::cout << "{\n";
+        std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+        std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+        std::cout << "  \"status\": \"error\",\n";
+        std::cout << "  \"error\": \"" << reason << "\",\n";
+        std::cout << "  \"step\": \"" << step << "\",\n";
+        std::cout << "  \"hresult\": \"" << hrBuf << "\",\n";
+        std::cout << "  \"osBuild\": " << (osInfo.succeeded ? static_cast<int>(osInfo.build) : 0) << ",\n";
+        std::cout << "  \"processArchitecture\": \"" << JsonEscape(procArch) << "\",\n";
+        {
+          WCHAR iidBuf[64] = {};
+          if (StringFromGUID2(__uuidof(IAudioSessionManager2), iidBuf, 64) > 0) {
+            std::cout << "  \"requestedIid\": \"" << WideToUtf8(iidBuf) << "\"\n";
+          } else {
+            std::cout << "  \"requestedIid\": \"(unknown)\"\n";
+          }
+        }
+        std::cout << "}\n";
+      };
+
+      // 1. Initialize COM
+      HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      bool comOwned = SUCCEEDED(hr);
+      if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        fail("CoInitializeEx", "com-initialization-failed", hr);
+        return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
+      }
+
+      // 2. Create device enumerator
+      IMMDeviceEnumerator* enumerator = nullptr;
+      hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                            CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                            reinterpret_cast<void**>(&enumerator));
+      if (FAILED(hr) || !enumerator) {
+        fail("CoCreateInstance(MMDeviceEnumerator)", "device-enumerator-activation-failed", hr);
+        if (comOwned) CoUninitialize();
+        return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
+      }
+
+      // 3. Get default render endpoint
+      IMMDevice* device = nullptr;
+      hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+      if (FAILED(hr) || !device) {
+        SafeRelease(enumerator);
+        fail("GetDefaultAudioEndpoint(eRender,eConsole)", "default-render-endpoint-not-found", hr);
+        if (comOwned) CoUninitialize();
+        return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
+      }
+
+      // 4. Activate IAudioSessionManager2 using SDK __uuidof
+      IAudioSessionManager2* sessionManager = nullptr;
+      hr = device->Activate(__uuidof(IAudioSessionManager2),
+                            CLSCTX_ALL, nullptr,
+                            reinterpret_cast<void**>(&sessionManager));
+      SafeRelease(device);
+      if (FAILED(hr) || !sessionManager) {
+        SafeRelease(enumerator);
+        fail("device->Activate(IAudioSessionManager2)", "session-manager-activation-failed", hr);
+        if (comOwned) CoUninitialize();
+        return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
+      }
+
+      // 5. Get session enumerator
+      IAudioSessionEnumerator* sessionEnum = nullptr;
+      hr = sessionManager->GetSessionEnumerator(&sessionEnum);
+      if (FAILED(hr) || !sessionEnum) {
+        SafeRelease(sessionManager);
+        SafeRelease(enumerator);
+        fail("GetSessionEnumerator", "session-enumerator-failed", hr);
+        if (comOwned) CoUninitialize();
+        return static_cast<int>(screenlink::audio::ExitCode::kSessionEnumerationFailed);
+      }
+
+      // 6. Get session count
+      int sessionCount = 0;
+      hr = sessionEnum->GetCount(&sessionCount);
+
+      // 7. Release COM objects
+      SafeRelease(sessionEnum);
+      SafeRelease(sessionManager);
+      SafeRelease(enumerator);
+      if (comOwned) CoUninitialize();
+
+      // 8. Return structured JSON
+      std::cout << "{\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+      std::cout << "  \"status\": \"ok\",\n";
+      std::cout << "  \"success\": true,\n";
+      std::cout << "  \"osBuild\": " << (osInfo.succeeded ? static_cast<int>(osInfo.build) : 0) << ",\n";
+      std::cout << "  \"processArchitecture\": \"" << JsonEscape(procArch) << "\",\n";
+      std::cout << "  \"endpointResolved\": true,\n";
+      std::cout << "  \"sessionManagerActivated\": true,\n";
+      std::cout << "  \"sessionCount\": " << (SUCCEEDED(hr) ? sessionCount : -1) << "\n";
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }

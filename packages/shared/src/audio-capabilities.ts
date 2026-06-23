@@ -49,23 +49,31 @@ export function getAudioModeInfo(caps: AudioCapabilityResult | null): AudioModeI
     {
       mode: 'system',
       label: 'System Audio',
-      description: 'All sound played through your default output device',
+      description: 'All sound played through your default output device — works on all Windows 10+ builds',
       supported: isWin10,
       reason: isWin10 ? undefined : 'System Audio requires Windows 10 or newer',
     },
     {
       mode: 'application',
       label: 'Application Audio',
-      description: 'Audio from the selected application only',
+      description: 'Audio from the selected application only (requires Windows build 20348+)',
       supported: is20348Plus && !!caps?.applicationLoopbackSupported,
-      reason: is20348Plus ? undefined : 'Application Audio requires Windows build 20348 or newer',
+      reason: is20348Plus && !caps?.applicationLoopbackSupported
+        ? 'Application Audio headers or runtime support not detected'
+        : is20348Plus
+          ? undefined
+          : 'Application Audio requires Windows build 20348 or newer',
     },
     {
       mode: 'monitor',
       label: 'Filtered Monitor',
       description: 'Desktop audio excluding ScreenLink and configured applications',
       supported: is20348Plus && !!caps?.processLoopbackRuntimeSupported,
-      reason: is20348Plus ? undefined : 'Filtered process audio requires Windows build 20348 or newer',
+      reason: is20348Plus && !caps?.processLoopbackRuntimeSupported
+        ? 'Filtered Monitor runtime support not detected'
+        : is20348Plus
+          ? undefined
+          : 'Filtered Monitor requires Windows build 20348 or newer because it uses process-specific loopback capture',
     },
     { mode: 'test-tone', label: 'Test Tone', description: 'Diagnostic 440 Hz tone (does not capture real audio)', supported: true },
   ];

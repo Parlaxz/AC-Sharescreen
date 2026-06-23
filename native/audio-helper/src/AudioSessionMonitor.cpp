@@ -19,43 +19,6 @@ namespace screenlink::audio {
 
 namespace {
 
-// ── Local COM interface IIDs (avoid linker dependency on uuid.lib) ──
-
-// {D666063F-1587-4E43-81F1-B948E807363F}
-static const GUID IID_IMMDevice_ = {
-    0xD666063F, 0x1587, 0x4E43, { 0x81, 0xF1, 0xB9, 0x48, 0xE8, 0x07, 0x36, 0x3F }
-};
-
-// {77AA99A0-1BD6-4840-94BC-2E6D6018714A}
-static const GUID IID_IAudioSessionManager2_ = {
-    0x77AA99A0, 0x1BD6, 0x4840, { 0x94, 0xBC, 0x2E, 0x6D, 0x60, 0x18, 0x71, 0x4A }
-};
-
-// {E2F5BB11-0570-40CA-ACDD-3AA01277DEE8}
-static const GUID IID_IAudioSessionEnumerator_ = {
-    0xE2F5BB11, 0x0570, 0x40CA, { 0xAC, 0xDD, 0x3A, 0xA0, 0x12, 0x77, 0xDE, 0xE8 }
-};
-
-// {F4B1A599-7266-4319-A8CA-E70ACB11E8CD}
-static const GUID IID_IAudioSessionControl_ = {
-    0xF4B1A599, 0x7266, 0x4319, { 0xA8, 0xCA, 0xE7, 0x0A, 0xCB, 0x11, 0xE8, 0xCD }
-};
-
-// {BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}
-static const GUID IID_IAudioSessionControl2_ = {
-    0xBFB7FF88, 0x7239, 0x4FC9, { 0x8F, 0xA2, 0x07, 0xC9, 0x50, 0xBE, 0x9C, 0x6D }
-};
-
-// BCDE0395-E52F-467C-8E3D-C4579291692E
-static const GUID CLSID_MMDeviceEnumerator_ = {
-    0xBCDE0395, 0xE52F, 0x467C, { 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E }
-};
-
-// A95664D2-9614-4F35-A746-DE8DB63617E6
-static const GUID IID_IMMDeviceEnumerator_ = {
-    0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 }
-};
-
 // ── COM helpers ──
 
 template <typename T>
@@ -150,23 +113,15 @@ bool AudioSessionMonitor::Initialize() {
         return false;
     }
 
-    // 2. Create device enumerator
-    {
-        WCHAR clsidStr[64] = {};
-        WCHAR iidStr[64] = {};
-        StringFromGUID2(CLSID_MMDeviceEnumerator_, clsidStr, 64);
-        StringFromGUID2(IID_IMMDeviceEnumerator_, iidStr, 64);
-        std::cerr << "[AudioSessionMonitor] CoCreateInstance: CLSID=" << WideToUtf8(clsidStr)
-                  << " IID=" << WideToUtf8(iidStr)
-                  << " CLSCTX=" << CLSCTX_ALL << std::endl;
-    }
+    // 2. Create device enumerator using SDK __uuidof
     IMMDeviceEnumerator* enumerator = nullptr;
     hr = CoCreateInstance(
-        CLSID_MMDeviceEnumerator_, nullptr,
-        CLSCTX_ALL, IID_IMMDeviceEnumerator_,
+        __uuidof(MMDeviceEnumerator), nullptr,
+        CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
         reinterpret_cast<void**>(&enumerator));
     if (FAILED(hr) || !enumerator) {
-        std::cerr << "[AudioSessionMonitor] CoCreateInstance failed: " << HresultToString(hr) << std::endl;
+        std::cerr << "[AudioSessionMonitor] CoCreateInstance(MMDeviceEnumerator) failed: "
+                  << HresultToString(hr) << std::endl;
         {
             std::cerr << "[AudioSessionMonitor] Process ID: " << GetCurrentProcessId() << std::endl;
             USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
@@ -195,19 +150,15 @@ bool AudioSessionMonitor::Initialize() {
         return false;
     }
 
-    // 4. Activate session manager
+    // 4. Activate session manager using SDK __uuidof
     IAudioSessionManager2* sessionManager = nullptr;
-    hr = device->Activate(IID_IAudioSessionManager2_,
+    hr = device->Activate(__uuidof(IAudioSessionManager2),
                           CLSCTX_ALL, nullptr,
                           reinterpret_cast<void**>(&sessionManager));
     SafeRelease(device);
     if (FAILED(hr) || !sessionManager) {
-        {
-            WCHAR iidStr[64] = {};
-            StringFromGUID2(IID_IAudioSessionManager2_, iidStr, 64);
-            std::cerr << "[AudioSessionMonitor] Activate failed: " << HresultToString(hr)
-                      << " IID=" << WideToUtf8(iidStr) << std::endl;
-        }
+        std::cerr << "[AudioSessionMonitor] Activate(IAudioSessionManager2) failed: "
+                  << HresultToString(hr) << std::endl;
         lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;
@@ -222,11 +173,9 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
 
     if (!audioSessionManager_) return sessions;
 
-    IAudioSessionManager2* mgr = static_cast<IAudioSessionManager2*>(audioSessionManager_);
-
     // Get session enumerator
     IAudioSessionEnumerator* sessionEnum = nullptr;
-    HRESULT hr = mgr->GetSessionEnumerator(&sessionEnum);
+    HRESULT hr = audioSessionManager_->GetSessionEnumerator(&sessionEnum);
     if (FAILED(hr) || !sessionEnum) {
         return sessions;
     }
@@ -249,7 +198,7 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
 
         // Get IAudioSessionControl2 for extended info
         IAudioSessionControl2* ctrl2 = nullptr;
-        hr = sessionCtrl->QueryInterface(IID_IAudioSessionControl2_,
+        hr = sessionCtrl->QueryInterface(__uuidof(IAudioSessionControl2),
                                           reinterpret_cast<void**>(&ctrl2));
         if (FAILED(hr) || !ctrl2) {
             SafeRelease(sessionCtrl);
@@ -312,11 +261,11 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
 
 void AudioSessionMonitor::Stop() {
     if (audioSessionManager_) {
-        SafeRelease(*reinterpret_cast<IAudioSessionManager2**>(&audioSessionManager_));
+        audioSessionManager_->Release();
         audioSessionManager_ = nullptr;
     }
     if (deviceEnumerator_) {
-        SafeRelease(*reinterpret_cast<IMMDeviceEnumerator**>(&deviceEnumerator_));
+        deviceEnumerator_->Release();
         deviceEnumerator_ = nullptr;
     }
     if (comInitialized_) {

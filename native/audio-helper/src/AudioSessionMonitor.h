@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+struct IMMDeviceEnumerator;
+struct IAudioSessionManager2;
+
 namespace screenlink::audio {
 
 /// Information about a single audio render session.
@@ -51,8 +54,8 @@ public:
 
 private:
     bool comInitialized_ = false;
-    void* deviceEnumerator_ = nullptr;    // IMMDeviceEnumerator*
-    void* audioSessionManager_ = nullptr; // IAudioSessionManager2*
+    IMMDeviceEnumerator* deviceEnumerator_ = nullptr;
+    IAudioSessionManager2* audioSessionManager_ = nullptr;
     long lastErrorCode_ = 0;              // HRESULT from last failed Initialize() step
 };
 

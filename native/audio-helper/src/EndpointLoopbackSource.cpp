@@ -19,32 +19,10 @@
 namespace screenlink::audio {
 
 // ========================================================================
-// Local GUID definitions (avoid linker dependency on uuid.lib)
+// Helpers
 // ========================================================================
 
 namespace {
-
-// BCDE0395-E52F-467C-8E3D-C4579291692E
-static const GUID CLSID_MMDeviceEnumerator_ = {
-    0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x92, 0x69, 0x2E}
-};
-
-// A95664D2-9614-4F35-A746-DE8DB63617E6
-static const GUID IID_IMMDeviceEnumerator_ = {
-    0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}
-};
-
-// 1CB9AD4C-DBFA-4C32-B178-C2F568A703B2
-static const GUID IID_IAudioClient_ = {
-    0x1CB9AD4C, 0xDBFA, 0x4C32, {0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2}
-};
-
-// C8ADBD64-E71E-48A0-A4DE-185C395CD317
-static const GUID IID_IAudioCaptureClient_ = {
-    0xC8ADBD64, 0xE71E, 0x48A0, {0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17}
-};
-
-// ── Helpers ──
 
 std::string HresultToString(HRESULT hr) {
     char buf[32] = {};
@@ -375,8 +353,8 @@ void EndpointLoopbackSource::CaptureThread(
     // ── 2. Create device enumerator ──
     IMMDeviceEnumerator* pEnumerator = nullptr;
     hr = CoCreateInstance(
-        CLSID_MMDeviceEnumerator_, nullptr, CLSCTX_ALL,
-        IID_IMMDeviceEnumerator_,
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator),
         reinterpret_cast<void**>(&pEnumerator));
     if (FAILED(hr) || !pEnumerator) {
         std::cerr << "[EndpointLoopback] CoCreateInstance(MMDeviceEnumerator) failed: "
@@ -400,7 +378,7 @@ void EndpointLoopbackSource::CaptureThread(
 
     // ── 4. Activate IAudioClient ──
     IAudioClient* pAudioClient = nullptr;
-    hr = pDevice->Activate(IID_IAudioClient_, CLSCTX_ALL,
+    hr = pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
                            nullptr, reinterpret_cast<void**>(&pAudioClient));
     SafeRelease(pDevice);
     if (FAILED(hr) || !pAudioClient) {
@@ -499,7 +477,7 @@ void EndpointLoopbackSource::CaptureThread(
     // ── 9. Get capture client ──
     IAudioCaptureClient* pCaptureClient = nullptr;
     hr = pAudioClient->GetService(
-        IID_IAudioCaptureClient_,
+        __uuidof(IAudioCaptureClient),
         reinterpret_cast<void**>(&pCaptureClient));
     if (FAILED(hr) || !pCaptureClient) {
         std::cerr << "[EndpointLoopback] GetService(IAudioCaptureClient) failed: "

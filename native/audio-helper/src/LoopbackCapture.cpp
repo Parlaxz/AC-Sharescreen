@@ -29,33 +29,6 @@ namespace screenlink::audio {
 
 namespace {
 
-// ── COM GUID definitions (defined locally to avoid linker dependency on uuid.lib) ──
-
-// BCDE0395-E52F-467C-8E3D-C4579291692E
-static const GUID CLSID_MMDeviceEnumerator_ = {
-    0xBCDE0395, 0xE52F, 0x467C, { 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x92, 0x69, 0x2E }
-};
-
-// A95664D2-9614-4F35-A746-DE8DB63617E6
-static const GUID IID_IMMDeviceEnumerator_ = {
-    0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 }
-};
-
-// 1CB9AD4C-DBFA-4C32-B178-C2F568A703B2
-static const GUID IID_IAudioClient_ = {
-    0x1CB9AD4C, 0xDBFA, 0x4C32, { 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2 }
-};
-
-// C8ADBD64-E71E-48A0-A4DE-185C395CD317
-static const GUID IID_IAudioCaptureClient_ = {
-    0xC8ADBD64, 0xE71E, 0x48A0, { 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17 }
-};
-
-// 41D949AB-D986-43B2-8748-0BA6E6E2E78E
-static const GUID IID_IActivateAudioInterfaceCompletionHandler_ = {
-    0x41D949AB, 0xD986, 0x43B2, { 0x87, 0x48, 0x0B, 0xA6, 0xE6, 0xE2, 0xE7, 0x8E }
-};
-
 // ── Process-loopback activation types ──
 
 enum class AudioClientActivationType : int32_t {
@@ -102,8 +75,8 @@ public:
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override {
         if (!ppvObject) return E_POINTER;
         *ppvObject = nullptr;
-        if (riid == IID_IUnknown ||
-            riid == IID_IActivateAudioInterfaceCompletionHandler_) {
+        if (riid == __uuidof(IUnknown) ||
+            riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
             *ppvObject = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
             AddRef();
             return S_OK;
@@ -133,8 +106,8 @@ public:
 
         hr = activateOperation->GetActivateResult(&result_, &pAudioInterface);
         if (SUCCEEDED(hr) && SUCCEEDED(result_) && pAudioInterface) {
-            hr = pAudioInterface->QueryInterface(IID_IAudioClient_,
-                                                  reinterpret_cast<void**>(&audioClient_));
+            hr = pAudioInterface->QueryInterface(__uuidof(IAudioClient),
+                                                   reinterpret_cast<void**>(&audioClient_));
             if (FAILED(hr)) {
                 result_ = hr;
             }
@@ -272,7 +245,7 @@ ActivationResult ActivateProcessLoopback(const CaptureConfig& config) {
     IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
     HRESULT hr = ActivateAudioInterfaceAsync(
         kVirtualAudioDeviceProcessLoopback,
-        IID_IAudioClient_,
+        __uuidof(IAudioClient),
         &variant,
         ar.handler,
         &asyncOp);
@@ -332,7 +305,7 @@ ActivationResult ActivateProcessLoopback(const CaptureConfig& config) {
 
     // Get the capture client
     hr = ar.audioClient->GetService(
-        IID_IAudioCaptureClient_,
+        __uuidof(IAudioCaptureClient),
         reinterpret_cast<void**>(&ar.captureClient));
 
     if (FAILED(hr) || !ar.captureClient) {
