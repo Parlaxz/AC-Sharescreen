@@ -12,8 +12,8 @@ export class PcmRingBuffer {
   private framesAvailable_: number = 0;
   private totalFramesWritten: number = 0;
   private totalFramesRead: number = 0;
-  private overrunFrames: number = 0;
-  private underrunFrames: number = 0;
+  private overrunFrames_: number = 0;
+  private underrunFrames_: number = 0;
 
   constructor(capacityFrames: number, private channels: number = 2) {
     this.frameCapacity = capacityFrames;
@@ -35,7 +35,7 @@ export class PcmRingBuffer {
       const dropSamples = framesToDrop * this.channels;
       this.readIndex = (this.readIndex + dropSamples) % this.buffer.length;
       this.framesAvailable_ -= framesToDrop;
-      this.overrunFrames += framesToDrop;
+      this.overrunFrames_ += framesToDrop;
       // If we dropped everything, return 0 (consumer will see discontinuity)
     }
 
@@ -70,7 +70,7 @@ export class PcmRingBuffer {
 
     // Count underrun frames (requested but not available)
     if (actual < frameCount) {
-      this.underrunFrames += (frameCount - actual);
+      this.underrunFrames_ += (frameCount - actual);
     }
 
     if (actual === 0) {
@@ -109,11 +109,11 @@ export class PcmRingBuffer {
   }
 
   get overrunFrames(): number {
-    return this.overrunFrames;
+    return this.overrunFrames_;
   }
 
   get underrunFrames(): number {
-    return this.underrunFrames;
+    return this.underrunFrames_;
   }
 
   get totalWritten(): number {
@@ -136,12 +136,12 @@ export class PcmRingBuffer {
   resetSessionStats(): void {
     this.totalFramesWritten = 0;
     this.totalFramesRead = 0;
-    this.overrunFrames = 0;
-    this.underrunFrames = 0;
+    this.overrunFrames_ = 0;
+    this.underrunFrames_ = 0;
   }
 
   get silentFrames(): number {
-    return this.underrunFrames; // All underrun frames are output as silence
+    return this.underrunFrames_; // All underrun frames are output as silence
   }
 
   reset(): void {
@@ -150,7 +150,7 @@ export class PcmRingBuffer {
     this.framesAvailable_ = 0;
     this.totalFramesWritten = 0;
     this.totalFramesRead = 0;
-    this.overrunFrames = 0;
-    this.underrunFrames = 0;
+    this.overrunFrames_ = 0;
+    this.underrunFrames_ = 0;
   }
 }

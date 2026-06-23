@@ -1762,6 +1762,9 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
 
     totalPackets_.fetch_add(1, std::memory_order_relaxed);
     totalPayloadBytes_.fetch_add(hdr.payloadBytes, std::memory_order_relaxed);
+    synthPacketsProduced_.fetch_add(1, std::memory_order_relaxed);
+    synthBytesProduced_.fetch_add(hdr.payloadBytes, std::memory_order_relaxed);
+    sourcePacketsEnqueued_.fetch_add(1, std::memory_order_relaxed);
 
     // Push to queue: always succeeds (drops oldest if full).
     // Dropped packets are counted in pcmWriter_.Queue().DroppedCount().

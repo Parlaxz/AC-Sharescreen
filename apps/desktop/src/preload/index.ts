@@ -55,6 +55,7 @@ const api: ScreenLinkAPI = {
   startFilteredMonitorAudio: (options) => ipcRenderer.invoke("start-filtered-monitor-audio", options),
   getMixerState: () => ipcRenderer.invoke("get-mixer-state"),
   getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
+  getPipelineSnapshot: () => ipcRenderer.invoke("get-pipeline-snapshot"),
 };
 
 contextBridge.exposeInMainWorld("screenlink", api);

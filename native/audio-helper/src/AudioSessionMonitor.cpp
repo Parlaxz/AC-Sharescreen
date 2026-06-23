@@ -8,6 +8,10 @@
 #include <audiopolicy.h>
 #include <audioclient.h>
 
+#include <coml2api.h>
+#include <processthreadsapi.h>
+
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -129,18 +133,52 @@ bool AudioSessionMonitor::Initialize() {
     lastErrorCode_ = 0;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     comInitialized_ = (hr == S_OK || hr == S_FALSE);
+    std::cerr << "[AudioSessionMonitor] CoInitializeEx result: " << HresultToString(hr) << std::endl;
+    {
+        APTTYPE aptType;
+        APTTYPEQUALIFIER aptQualifier;
+        HRESULT aptHr = CoGetApartmentType(&aptType, &aptQualifier);
+        if (SUCCEEDED(aptHr)) {
+            std::cerr << "[AudioSessionMonitor] Apartment type: " << static_cast<int>(aptType)
+                      << ", qualifier: " << static_cast<int>(aptQualifier) << std::endl;
+        } else {
+            std::cerr << "[AudioSessionMonitor] CoGetApartmentType failed: " << HresultToString(aptHr) << std::endl;
+        }
+    }
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         lastErrorCode_ = static_cast<long>(hr);
         return false;
     }
 
     // 2. Create device enumerator
+    {
+        WCHAR clsidStr[64] = {};
+        WCHAR iidStr[64] = {};
+        StringFromGUID2(CLSID_MMDeviceEnumerator_, clsidStr, 64);
+        StringFromGUID2(IID_IMMDeviceEnumerator_, iidStr, 64);
+        std::cerr << "[AudioSessionMonitor] CoCreateInstance: CLSID=" << WideToUtf8(clsidStr)
+                  << " IID=" << WideToUtf8(iidStr)
+                  << " CLSCTX=" << CLSCTX_ALL << std::endl;
+    }
     IMMDeviceEnumerator* enumerator = nullptr;
     hr = CoCreateInstance(
         CLSID_MMDeviceEnumerator_, nullptr,
         CLSCTX_ALL, IID_IMMDeviceEnumerator_,
         reinterpret_cast<void**>(&enumerator));
     if (FAILED(hr) || !enumerator) {
+        std::cerr << "[AudioSessionMonitor] CoCreateInstance failed: " << HresultToString(hr) << std::endl;
+        {
+            std::cerr << "[AudioSessionMonitor] Process ID: " << GetCurrentProcessId() << std::endl;
+            USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+            USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+            if (IsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+                std::cerr << "[AudioSessionMonitor] Process arch: " << processMachine
+                          << ", Native arch: " << nativeMachine << std::endl;
+            }
+            WCHAR exePath[MAX_PATH + 1] = {};
+            DWORD pathLen = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+            std::cerr << "[AudioSessionMonitor] Executable: " << WideToUtf8(exePath, static_cast<int>(pathLen)) << std::endl;
+        }
         lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;
@@ -151,6 +189,7 @@ bool AudioSessionMonitor::Initialize() {
     IMMDevice* device = nullptr;
     hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
     if (FAILED(hr) || !device) {
+        std::cerr << "[AudioSessionMonitor] GetDefaultAudioEndpoint failed: " << HresultToString(hr) << std::endl;
         lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;
@@ -163,6 +202,12 @@ bool AudioSessionMonitor::Initialize() {
                           reinterpret_cast<void**>(&sessionManager));
     SafeRelease(device);
     if (FAILED(hr) || !sessionManager) {
+        {
+            WCHAR iidStr[64] = {};
+            StringFromGUID2(IID_IAudioSessionManager2_, iidStr, 64);
+            std::cerr << "[AudioSessionMonitor] Activate failed: " << HresultToString(hr)
+                      << " IID=" << WideToUtf8(iidStr) << std::endl;
+        }
         lastErrorCode_ = static_cast<long>(hr);
         Stop();
         return false;

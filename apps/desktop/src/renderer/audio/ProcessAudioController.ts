@@ -30,6 +30,10 @@ export class ProcessAudioController {
   private onStats: ((stats: WorkletStatsReport) => void) | null = null;
   private primingTimeout: ReturnType<typeof setTimeout> | null = null;
   private currentStreamGeneration: number = -1;
+  private diagMessagesReceived = 0;
+  private diagPacketsReceived = 0;
+  private diagBytesReceived = 0;
+  private diagResetMessages = 0;
 
   readonly TARGET_FRAMES = 3840; // ~80ms at 48kHz
   readonly PRIMING_TIMEOUT_MS = 5000;
@@ -84,23 +88,45 @@ export class ProcessAudioController {
 
       // 4. Connect MessagePort to worklet
       this.port = pcmPort;
-      this.port.onmessage = (event: MessageEvent) => {
+
+      // Strong reference to prevent GC
+      this.port = pcmPort;
+
+      // Explicitly start the port (required when using addEventListener)
+      this.port.start();
+
+      // Send ready handshake to main process
+      this.port.postMessage({ type: 'pcm:ready' });
+
+      this.port.addEventListener('message', (event: MessageEvent) => {
         const msg = event.data;
         if (!msg || typeof msg !== 'object') return;
 
+        this.diagMessagesReceived++;
+
         switch (msg.type) {
           case 'pcm:handshake':
-            // Received from main process PcmBridge — ignore here, we get packets via the port
+            // Ignore — handshake from main
             break;
           case 'pcm:packet':
+            this.diagPacketsReceived++;
+            this.diagBytesReceived += msg.packet?.pcmData?.byteLength ?? 0;
             this.handlePcmPacket(msg.packet);
             break;
           case 'pcm:reset':
+            this.diagResetMessages++;
             this.currentStreamGeneration = -1;
             this.workletNode?.port.postMessage({ type: 'pcm:reset' });
             break;
+          case 'pcm:canary':
+            console.log('[ProcessAudioController] Port canary received, port is alive');
+            break;
         }
-      };
+      });
+
+      this.port.addEventListener('messageerror', (event) => {
+        console.error('[ProcessAudioController] Port messageerror:', event);
+      });
 
       // 5. Listen for worklet messages
       this.workletNode.port.onmessage = (event: MessageEvent) => {
@@ -182,6 +208,15 @@ export class ProcessAudioController {
 
   getState(): AudioWorkletState {
     return this.state;
+  }
+
+  getPortDiagnostics(): { messagesReceived: number; packetsReceived: number; bytesReceived: number; resetMessages: number } {
+    return {
+      messagesReceived: this.diagMessagesReceived,
+      packetsReceived: this.diagPacketsReceived,
+      bytesReceived: this.diagBytesReceived,
+      resetMessages: this.diagResetMessages,
+    };
   }
 
   /**

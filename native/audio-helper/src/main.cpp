@@ -24,6 +24,10 @@
 #include <string>
 #include <vector>
 
+#include <coml2api.h>     // StringFromGUID2
+#include <mmdeviceapi.h>  // IMMDeviceEnumerator, IMMDevice
+#include <processthreadsapi.h> // IsWow64Process2
+
 namespace {
 
 // ── JSON string escaping ──
@@ -55,6 +59,19 @@ std::string JsonEscape(const std::string& s) {
   return out;
 }
 
+// Convert wide string to UTF-8.
+std::string WideToUtf8(PCWSTR wideStr, int length = -1) {
+    if (wideStr == nullptr) return {};
+    int realLength = (length >= 0) ? length : static_cast<int>(wcslen(wideStr));
+    if (realLength == 0) return {};
+    int needed = WideCharToMultiByte(CP_UTF8, 0, wideStr, realLength, nullptr, 0, nullptr, nullptr);
+    if (needed <= 0) return {};
+    std::string result(static_cast<size_t>(needed), '\0');
+    int written = WideCharToMultiByte(CP_UTF8, 0, wideStr, realLength, &result[0], needed, nullptr, nullptr);
+    if (written <= 0) return {};
+    return result;
+}
+
 // Common JSON error output helper.
 void PrintError(const char* errorMsg, int& exitCodeOut, int exitCode) {
   std::cout << "{\n";
@@ -70,7 +87,7 @@ void PrintError(const char* errorMsg, int& exitCodeOut, int exitCode) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
+    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--probe-mmdevice|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
     std::cout << "{\n"
               << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n"
               << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n"
@@ -1838,6 +1855,7 @@ int main(int argc, char* argv[]) {
       }
 
       screenlink::audio::ServiceSession session(svcConfig);
+      std::cerr << "[helper] sizeof(PcmPacketHeader)=" << sizeof(screenlink::audio::PcmPacketHeader) << " HEADER_SIZE=68" << std::endl;
       return session.Run();
     }
 
@@ -1876,6 +1894,117 @@ int main(int argc, char* argv[]) {
         std::cout << "\n";
       }
       std::cout << "  ]\n";
+      std::cout << "}\n";
+      return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
+    }
+
+    case screenlink::audio::Command::kProbeMmdevice: {
+      // ── Diagnostic probe for MMDevice enumeration ──
+      DWORD pid = GetCurrentProcessId();
+
+      // Process architecture
+      std::string procArch = "unknown";
+      {
+        USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        if (IsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine)) {
+          char archBuf[32] = {};
+          snprintf(archBuf, sizeof(archBuf), "0x%04hX", processMachine);
+          procArch = archBuf;
+        }
+      }
+
+      // Executable path
+      std::string exePath;
+      {
+        WCHAR buf[MAX_PATH + 1] = {};
+        DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        exePath = WideToUtf8(buf, static_cast<int>(len));
+      }
+
+      // COM init
+      std::string comInitResult = "unknown";
+      int apartmentType = -1;
+      HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+      {
+        char buf[32] = {};
+        snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
+        comInitResult = buf;
+      }
+      if (SUCCEEDED(hr) || hr == S_FALSE || hr == RPC_E_CHANGED_MODE) {
+        APTTYPE aptType;
+        APTTYPEQUALIFIER aptQualifier;
+        HRESULT aptHr = CoGetApartmentType(&aptType, &aptQualifier);
+        if (SUCCEEDED(aptHr)) {
+          apartmentType = static_cast<int>(aptType);
+        }
+      }
+
+      // Local GUIDs (matching AudioSessionMonitor.cpp)
+      const GUID kClsid = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x92, 0x69, 0x2E}};
+      const GUID kIid   = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
+
+      std::string clsidStr;
+      std::string iidStr;
+      {
+        WCHAR buf[64] = {};
+        if (StringFromGUID2(kClsid, buf, 64) > 0) clsidStr = WideToUtf8(buf);
+      }
+      {
+        WCHAR buf[64] = {};
+        if (StringFromGUID2(kIid, buf, 64) > 0) iidStr = WideToUtf8(buf);
+      }
+
+      // CoCreateInstance
+      static constexpr int kClsCtx = CLSCTX_ALL;
+      std::string hresultStr;
+      bool enumeratorCreated = false;
+      std::string deviceId;
+
+      IMMDeviceEnumerator* enumerator = nullptr;
+      hr = CoCreateInstance(kClsid, nullptr, kClsCtx, kIid, reinterpret_cast<void**>(&enumerator));
+      {
+        char buf[32] = {};
+        snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
+        hresultStr = buf;
+      }
+
+      if (SUCCEEDED(hr) && enumerator) {
+        enumeratorCreated = true;
+
+        // Query default render endpoint
+        IMMDevice* device = nullptr;
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (SUCCEEDED(hr) && device) {
+          LPWSTR devId = nullptr;
+          if (SUCCEEDED(device->GetId(&devId)) && devId) {
+            deviceId = WideToUtf8(devId);
+            CoTaskMemFree(devId);
+          }
+          device->Release();
+        }
+
+        enumerator->Release();
+      }
+
+      CoUninitialize();
+
+      // Output structured JSON
+      std::cout << "{\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+      std::cout << "  \"status\": \"ok\",\n";
+      std::cout << "  \"comInitResult\": \"" << comInitResult << "\",\n";
+      std::cout << "  \"apartmentType\": " << apartmentType << ",\n";
+      std::cout << "  \"clsid\": \"" << JsonEscape(clsidStr) << "\",\n";
+      std::cout << "  \"iid\": \"" << JsonEscape(iidStr) << "\",\n";
+      std::cout << "  \"clsctx\": " << kClsCtx << ",\n";
+      std::cout << "  \"hresult\": \"" << hresultStr << "\",\n";
+      std::cout << "  \"enumeratorCreated\": " << (enumeratorCreated ? "true" : "false") << ",\n";
+      std::cout << "  \"processId\": " << pid << ",\n";
+      std::cout << "  \"processArchitecture\": \"" << JsonEscape(procArch) << "\",\n";
+      std::cout << "  \"executablePath\": \"" << JsonEscape(exePath) << "\",\n";
+      std::cout << "  \"deviceId\": \"" << JsonEscape(deviceId) << "\"\n";
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }

@@ -59,9 +59,16 @@ export function Dashboard() {
     try {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
       await api?.toggleFullscreen();
-    } catch (err) {
-      console.warn("Fullscreen toggle failed:", err);
-    }
+        } catch (err) {
+          console.warn("[Audio] Setup failed, continuing video-only:", err);
+          // Emit pipeline snapshot for diagnostics
+          try {
+            const snapshot = await api?.getPipelineSnapshot?.();
+            console.warn("[Audio-Pipeline] Full snapshot:", JSON.stringify(snapshot));
+          } catch { /* best effort */ }
+          setAudioEnabled(false);
+          try { api?.stopAudio(); } catch { /* ignore */ }
+        }
   }
 
   // Restore saved source and audio mode from settings on mount
@@ -401,6 +408,15 @@ export function Dashboard() {
         } catch (err) {
           setAudioError(err instanceof Error ? err.message : String(err));
           console.warn("[Audio] Test tone setup failed:", err);
+          // Emit pipeline snapshot for diagnostics
+          try {
+            const portDiag = controller?.getPortDiagnostics?.();
+            console.warn("[Audio-Pipeline] Controller port diag:", JSON.stringify(portDiag));
+          } catch { /* best effort */ }
+          try {
+            const snapshot = await api?.getPipelineSnapshot?.();
+            console.warn("[Audio-Pipeline] Full snapshot:", JSON.stringify(snapshot));
+          } catch { /* best effort */ }
           setAudioEnabled(false);
           try { api?.stopAudio(); } catch { /* ignore */ }
         }

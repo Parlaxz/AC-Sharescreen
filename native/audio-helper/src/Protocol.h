@@ -65,6 +65,7 @@ enum class Command {
   kResolveSource,
   kServe,
   kEnumerateAudioSessions,
+  kProbeMmdevice,
   kUnknown,
 };
 
@@ -80,6 +81,7 @@ inline Command ParseCommand(std::string_view arg) {
   if (arg == "--resolve-source") return Command::kResolveSource;
   if (arg == "--serve") return Command::kServe;
   if (arg == "--enumerate-audio-sessions") return Command::kEnumerateAudioSessions;
+  if (arg == "--probe-mmdevice") return Command::kProbeMmdevice;
   return Command::kUnknown;
 }
 

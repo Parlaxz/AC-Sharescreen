@@ -21,10 +21,25 @@ export interface RendererPcmPacket {
   pcmData: ArrayBuffer;
 }
 
+export interface PcmBridgeDiagnostics {
+  packetsReceived: number;
+  packetsForwarded: number;
+  droppedNoPort: number;
+  droppedWrongGeneration: number;
+  postErrors: number;
+  lastError: string | null;
+}
+
 export class PcmBridge {
   private port: Electron.MessagePortMain | null = null;
   private streamGeneration: number = -1;
   private packetsForwarded: number = 0;
+  private diagPacketsReceived = 0;
+  private diagPacketsForwarded = 0;
+  private diagDroppedNoPort = 0;
+  private diagDroppedWrongGeneration = 0;
+  private diagPostErrors = 0;
+  private diagLastError: string | null = null;
 
   /**
    * Transfer a MessagePort to the target WebContents for PCM delivery.
@@ -58,13 +73,19 @@ export class PcmBridge {
    * Converts the full ParsedPcmPacket to a sanitized RendererPcmPacket.
    */
   forwardPacket(packet: ParsedPcmPacket): void {
-    if (!this.port) return;
+    this.diagPacketsReceived++;
+
+    if (!this.port) {
+      this.diagDroppedNoPort++;
+      return;
+    }
 
     // Check stream generation
     if (this.streamGeneration < 0) {
       this.streamGeneration = packet.header.streamGeneration;
     } else if (packet.header.streamGeneration !== this.streamGeneration) {
       // Old generation — discard
+      this.diagDroppedWrongGeneration++;
       return;
     }
 
@@ -91,12 +112,18 @@ export class PcmBridge {
     // ArrayBuffer transfers.  The pcmData ArrayBuffer arrives as a
     // structured-clone copy on the renderer side.  Zero-copy is not
     // available at this boundary.
-    this.port.postMessage({
-      type: 'pcm:packet',
-      packet: rendererPacket,
-    });
+    try {
+      this.port.postMessage({
+        type: 'pcm:packet',
+        packet: rendererPacket,
+      });
 
-    this.packetsForwarded++;
+      this.packetsForwarded++;
+      this.diagPacketsForwarded++;
+    } catch (err) {
+      this.diagPostErrors++;
+      this.diagLastError = err instanceof Error ? err.message : String(err);
+    }
   }
 
   /** Forward a stream reset signal to the renderer */
@@ -121,6 +148,25 @@ export class PcmBridge {
     }
     this.streamGeneration = -1;
     this.packetsForwarded = 0;
+  }
+
+  getDiagnostics(): PcmBridgeDiagnostics {
+    return {
+      packetsReceived: this.diagPacketsReceived,
+      packetsForwarded: this.diagPacketsForwarded,
+      droppedNoPort: this.diagDroppedNoPort,
+      droppedWrongGeneration: this.diagDroppedWrongGeneration,
+      postErrors: this.diagPostErrors,
+      lastError: this.diagLastError,
+    };
+  }
+
+  sendCanary(): void {
+    if (this.port) {
+      try {
+        this.port.postMessage({ type: 'pcm:canary', sequence: Date.now() });
+      } catch { /* canary failures are non-fatal */ }
+    }
   }
 
   getPacketsForwarded(): number {

@@ -370,6 +370,7 @@ void PcmPipeWriter::ThreadFunc() {
         }
 
         // Write header
+        writeAttempts_.fetch_add(1, std::memory_order_relaxed);
         DWORD bytesWritten = 0;
         OVERLAPPED writeOv = {};
         BOOL writeOk = WriteFile(

@@ -4,7 +4,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser.js';
-import { PcmBridge } from './PcmBridge.js';
+import { PcmBridge, PcmBridgeDiagnostics } from './PcmBridge.js';
 import {
   ControlClient,
   HelperCapabilities,
@@ -59,6 +59,29 @@ export interface AudioHelperStats {
   lastError: string | null;
 }
 
+// ── Pipeline Diagnostics ──
+
+export interface PcmPipelineSnapshot {
+  synthPacketsProduced?: number;
+  synthBytesProduced?: number;
+  sourcePacketsEnqueued?: number;
+  sourcePacketsDequeued?: number;
+  pcmPipeWriteAttempts?: number;
+  pcmPipeWriteSuccesses?: number;
+  pcmPipeBytesWritten?: number;
+  pcmPipeWriteFailures?: number;
+  electronSocketChunksReceived: number;
+  electronSocketBytesReceived: number;
+  parserFramesParsed: number;
+  parserBytesParsed: number;
+  parserInvalidHeaders: number;
+  parserBufferedBytes: number;
+  bridge: PcmBridgeDiagnostics;
+  helperState: HelperStateEnum;
+  helperUptimeMs: number;
+  streamGeneration: number;
+}
+
 // ── AudioHelperManager ──
 
 /**
@@ -100,6 +123,8 @@ export class AudioHelperManager {
   private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
   private shuttingDown_: boolean = false;
   readonly pcmBridge: PcmBridge = new PcmBridge();
+  private diagSocketChunks = 0;
+  private diagSocketBytes = 0;
 
   constructor(config: AudioHelperConfig) {
     this.config = config;
@@ -231,6 +256,8 @@ export class AudioHelperManager {
     this.state = 'capturing';
     this.parser?.reset();
     this.pcmBridge.forwardReset(result.streamGeneration);
+    // Send diagnostic canary to verify MessagePort is alive
+    this.pcmBridge.sendCanary?.();
     return result.streamGeneration;
   }
 
@@ -341,6 +368,34 @@ export class AudioHelperManager {
   async getDiagnostics(): Promise<HelperDiagnostics> {
     this.ensureReady();
     return this.control!.getDiagnostics();
+  }
+
+  async getPipelineSnapshot(): Promise<PcmPipelineSnapshot> {
+    let helperDiag: HelperDiagnostics | null = null;
+    try {
+      if (this.state === 'ready' || this.state === 'capturing') {
+        helperDiag = await this.control!.getDiagnostics();
+      }
+    } catch { /* best effort */ }
+
+    return {
+      synthPacketsProduced: helperDiag ? (helperDiag as any).synthPacketsProduced ?? undefined : undefined,
+      synthBytesProduced: helperDiag ? (helperDiag as any).synthBytesProduced ?? undefined : undefined,
+      sourcePacketsEnqueued: helperDiag ? (helperDiag as any).sourcePacketsEnqueued ?? undefined : undefined,
+      pcmPipeWriteAttempts: helperDiag ? (helperDiag as any).pcmPipeWriteAttempts ?? undefined : undefined,
+      pcmPipeWriteSuccesses: helperDiag ? (helperDiag as any).pcmPipeWriteSuccesses ?? undefined : undefined,
+      pcmPipeWriteFailures: helperDiag ? (helperDiag as any).pcmPipeWriteFailures ?? undefined : undefined,
+      electronSocketChunksReceived: this.diagSocketChunks,
+      electronSocketBytesReceived: this.diagSocketBytes,
+      parserFramesParsed: this.parser?.getStats().totalPackets ?? 0,
+      parserBytesParsed: this.parser?.getStats().totalBytes ?? 0,
+      parserInvalidHeaders: this.parser?.getStats().malformedPackets ?? 0,
+      parserBufferedBytes: this.parser?.getStats().bufferBytes ?? 0,
+      bridge: this.pcmBridge.getDiagnostics(),
+      helperState: this.state,
+      helperUptimeMs: this.stats.helperUptimeMs,
+      streamGeneration: this.streamGeneration,
+    };
   }
 
   getStats(): AudioHelperStats {
@@ -463,6 +518,8 @@ export class AudioHelperManager {
     );
 
     socket.on('data', (chunk: Buffer) => {
+      this.diagSocketChunks++;
+      this.diagSocketBytes += chunk.byteLength;
       try {
         this.parser!.feed(chunk);
         const s = this.parser!.getStats();

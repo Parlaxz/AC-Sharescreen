@@ -478,6 +478,17 @@ export function registerIpcHandlers(
     }
   });
 
+  ipcMain.handle('get-pipeline-snapshot', async () => {
+    if (!currentAudioHelper) {
+      return { success: false, error: 'no-audio-helper' };
+    }
+    try {
+      return await currentAudioHelper.getPipelineSnapshot();
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
   // ── Tray state updates ──────────────────────────────────────────────────
 
   ipcMain.on("tray-set-sharing", (_event, sharing: boolean) => {

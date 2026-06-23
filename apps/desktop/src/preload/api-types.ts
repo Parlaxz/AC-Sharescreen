@@ -96,6 +96,8 @@ export interface ScreenLinkAPI {
   startFilteredMonitorAudio: (options?: { excludeDiscord?: boolean; excludeScreenLink?: boolean }) => Promise<any>;
   getMixerState: () => Promise<any>;
   getMixerDiagnostics: () => Promise<any>;
+  /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
+  getPipelineSnapshot: () => Promise<any>;
 }
 
 export type AudioStateDTO =

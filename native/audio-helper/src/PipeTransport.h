@@ -127,6 +127,7 @@ public:
     PcmPacketQueue& Queue() { return queue_; }
     size_t PacketsWritten() const { return packetsWritten_.load(); }
     size_t WriteErrors() const { return writeErrors_.load(); }
+    size_t WriteAttempts() const { return writeAttempts_.load(); }
 
 private:
     void ThreadFunc();
@@ -140,6 +141,7 @@ private:
     mutable std::mutex mutex_;  // protects pipe_ during Start/Stop/ThreadFunc
     std::atomic<size_t> packetsWritten_{0};
     std::atomic<size_t> writeErrors_{0};
+    std::atomic<size_t> writeAttempts_{0};
     uint32_t expectedClientPid_ = 0;
     std::atomic<bool> clientConnected_{false};
     PcmPacketQueue queue_{kPcmDefaultQueueSize};
