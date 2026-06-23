@@ -78,6 +78,24 @@ public:
     explicit MultiSourceMixer(uint32_t sampleRate, uint16_t channels);
     ~MultiSourceMixer();
 
+    /// Structured error codes for Start() failures.
+    enum class StartError {
+        None,
+        AlreadyRunning,
+        NoOutputCallback,
+        InvalidFormat,
+        NoActiveSources,
+        ThreadCreationFailed,
+        StaleThreadNotJoined,
+    };
+
+    /// Structured result from Start().
+    struct StartResult {
+        bool success = false;
+        StartError error = StartError::None;
+        std::size_t registeredSources = 0;
+    };
+
     // Add a source: receives AudioPackets from one process-loopback capture.
     // Returns a sourceId (opaque identifier) for remove/query.
     uint32_t AddSource(uint32_t pid, uint64_t creationTimeUtc100ns);
@@ -94,7 +112,8 @@ public:
 
     // Start the mixer output thread. Produces 480-frame packets at 48kHz.
     // @param onPacket Callback for each mixed output packet
-    void Start(PacketCallback onPacket);
+    // @return Structured result with success/failure and diagnostics
+    StartResult Start(PacketCallback onPacket);
 
     // Stop the mixer output thread.
     void Stop();

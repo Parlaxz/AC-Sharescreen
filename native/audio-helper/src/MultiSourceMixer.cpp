@@ -155,18 +155,77 @@ void MultiSourceMixer::FeedPacket(uint32_t sourceId, const AudioPacket& packet) 
     }
 }
 
-void MultiSourceMixer::Start(PacketCallback onPacket) {
-    if (running_.load()) return;
+auto MultiSourceMixer::Start(PacketCallback onPacket) -> MultiSourceMixer::StartResult {
+    StartResult result;
+    std::cerr << "[Mixer] start.enter: sampleRate=" << sampleRate_
+              << " channels=" << channels_
+              << " running=" << running_.load()
+              << " threadJoinable=" << mixerThread_.joinable() << std::endl;
+
+    if (running_.load()) {
+        result.error = StartError::AlreadyRunning;
+        return result;
+    }
+
+    // Check for stale thread from a previous incomplete stop
+    if (mixerThread_.joinable()) {
+        result.error = StartError::StaleThreadNotJoined;
+        std::cerr << "[Mixer] Start failed: previous thread still joinable" << std::endl;
+        return result;
+    }
+
+    if (!onPacket) {
+        result.error = StartError::NoOutputCallback;
+        std::cerr << "[Mixer] Start failed: no output callback provided" << std::endl;
+        return result;
+    }
+
+    if (sampleRate_ == 0 || channels_ == 0) {
+        result.error = StartError::InvalidFormat;
+        std::cerr << "[Mixer] Start failed: invalid format (rate="
+                  << sampleRate_ << " ch=" << channels_ << ")" << std::endl;
+        return result;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(sourcesMutex_);
+        result.registeredSources = sources_.size();
+    }
 
     outputCallback_ = std::move(onPacket);
     threadStarted_.store(false);
     running_.store(true);
-    mixerThread_ = std::thread(&MultiSourceMixer::MixerThread, this);
+
+    try {
+        mixerThread_ = std::thread(&MultiSourceMixer::MixerThread, this);
+    } catch (const std::system_error& e) {
+        running_.store(false);
+        result.error = StartError::ThreadCreationFailed;
+        std::cerr << "[Mixer] Start failed: thread creation error: " << e.what() << std::endl;
+        return result;
+    }
 
     // Wait for the mixer thread to actually start before returning
-    while (!threadStarted_.load() && running_.load()) {
+    int waitLoops = 0;
+    while (!threadStarted_.load() && running_.load() && waitLoops < 10000) {
         Sleep(0);
+        waitLoops++;
     }
+
+    if (!threadStarted_.load()) {
+        // Thread failed to start in reasonable time
+        running_.store(false);
+        if (mixerThread_.joinable()) mixerThread_.join();
+        result.error = StartError::ThreadCreationFailed;
+        std::cerr << "[Mixer] Start failed: thread did not start within timeout" << std::endl;
+        return result;
+    }
+
+    result.success = true;
+    result.error = StartError::None;
+    std::cerr << "[Mixer] Started successfully: " << result.registeredSources
+              << " registered sources" << std::endl;
+    return result;
 }
 
 void MultiSourceMixer::Stop() {
@@ -240,6 +299,9 @@ MixerDiagnostics MultiSourceMixer::GetDiagnostics() const {
 }
 
 void MultiSourceMixer::MixerThread() {
+    // Signal that the thread has started
+    threadStarted_.store(true);
+
     // Set thread priority
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
