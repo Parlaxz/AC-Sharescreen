@@ -41,9 +41,15 @@ export class PublisherManager {
   private config: PublisherConfig | null = null;
   private stopping_: boolean = false;
   private stopPromise_: Promise<void> | null = null;
+  private static nextId = 0;
+  private readonly instanceId: number;
+  private appliedAudioMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
 
   constructor(events: PublisherEvents) {
+    PublisherManager.nextId++;
+    this.instanceId = PublisherManager.nextId;
     this.events = events;
+    console.log(`[PublisherManager] constructed id=${this.instanceId}`);
   }
 
   getState(): PublisherState {
@@ -66,22 +72,58 @@ export class PublisherManager {
     return this._audioState;
   }
 
-  setAudioController(controller: ProcessAudioController): void {
+  getInstanceId(): number {
+    return this.instanceId;
+  }
+
+  setAudioController(controller: ProcessAudioController, mode: 'system' | 'application' | 'monitor' | 'test-tone'): void {
+    const previous = this.audioController;
+
     this.audioController = controller;
     this.audioTrack = controller.getTrack();
+    this.appliedAudioMode = mode;
     this._audioState = "active";
+
+    console.log('[PublisherManager] controllerSet', {
+      managerInstanceId: this.instanceId,
+      controllerId: controller.getInstanceId?.() ?? 'unknown',
+      mode,
+      hasAudioTrack: this.audioTrack !== null,
+      audioTrackReadyState: this.audioTrack?.readyState ?? null,
+    });
+
+    if (previous && previous !== controller) {
+      previous.close('replacement').catch(() => {});
+    }
   }
 
   /** Remove a previously set audio controller without closing it (caller owns teardown). */
   clearAudioController(): void {
     this.audioController = null;
     this.audioTrack = null;
+    this.appliedAudioMode = 'none';
     this._audioState = "disabled";
   }
 
   private buildCombinedStream(): MediaStream {
     const videoTracks = this.captureStream?.getVideoTracks() ?? [];
-    const audioTrack = this.audioController?.getTrack() ?? null;
+    const audioController = this.audioController;
+    const audioTrack = audioController?.getTrack() ?? null;
+
+    console.log('[PublisherManager] audio input', {
+      managerInstanceId: this.instanceId,
+      hasAudioController: audioController !== null,
+      controllerId: audioController?.getInstanceId?.() ?? null,
+      appliedAudioMode: this.appliedAudioMode,
+      hasAudioTrack: audioTrack !== null,
+      audioTrack: audioTrack ? {
+        id: audioTrack.id,
+        kind: audioTrack.kind,
+        enabled: audioTrack.enabled,
+        muted: audioTrack.muted,
+        readyState: audioTrack.readyState,
+      } : null,
+    });
 
     const stream = new MediaStream();
 
@@ -89,12 +131,15 @@ export class PublisherManager {
       stream.addTrack(videoTracks[0]);
     }
 
-    // Only add audio when controller is rendering (nonzero output produced)
-    // or at minimum primed (buffer filled). A live track alone is insufficient —
-    // MediaStreamAudioDestinationNode tracks are always "live" even when silent.
-    if (audioTrack && audioTrack.readyState === "live") {
-      const ctrlState = this.audioController?.getState();
-      if (ctrlState === "rendering" || ctrlState === "primed") {
+    if (audioTrack) {
+      if (audioTrack.kind !== 'audio') {
+        throw new Error('publisher-audio-track-wrong-kind');
+      }
+      if (audioTrack.readyState !== 'live') {
+        throw new Error(`publisher-audio-track-${audioTrack.readyState}`);
+      }
+      const ctrlState = audioController?.getState();
+      if (ctrlState === 'rendering' || ctrlState === 'primed') {
         stream.addTrack(audioTrack);
       } else {
         console.warn('[PublisherManager] Audio track is live but controller state is',
@@ -142,6 +187,18 @@ export class PublisherManager {
       this.combinedStream = this.buildCombinedStream();
       stream = this.combinedStream;
     }
+
+    // Publication invariant: if audio mode was applied, audio track must be present
+    if (this.appliedAudioMode !== 'none' && !stream.getAudioTracks().length) {
+      throw new Error(`audio-track-missing-before-publish:${this.appliedAudioMode}`);
+    }
+
+    console.log('[PublisherManager] combined stream', {
+      managerInstanceId: this.instanceId,
+      videoTracks: stream.getVideoTracks().length,
+      audioTracks: stream.getAudioTracks().length,
+      controllerId: this.audioController?.getInstanceId?.() ?? null,
+    });
 
     // Log combined stream contents for diagnostics
     console.table(
@@ -220,7 +277,11 @@ export class PublisherManager {
 
         // 2. Stop audio controller
         if (this.audioController) {
-          await this.audioController.close();
+          console.log('[PublisherManager] closing audio controller', {
+            managerInstanceId: this.instanceId,
+            controllerId: this.audioController.getInstanceId?.() ?? 'unknown',
+          });
+          await this.audioController.close('shutdown');
           this.audioController = null;
         }
 
@@ -234,6 +295,7 @@ export class PublisherManager {
         this.captureStream?.getTracks().forEach(t => t.stop());
         this.captureStream = null;
         this.audioTrack = null;
+        this.appliedAudioMode = 'none';
         this._audioState = "disabled";
         this.config = null;
 

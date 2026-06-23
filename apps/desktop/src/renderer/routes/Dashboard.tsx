@@ -449,8 +449,19 @@ export function Dashboard() {
           }
 
           // All validation passed — attach controller to publisher
-          mgr.setAudioController(provisionalController);
+          const testToneTrack = provisionalController.getTrack();
+          if (!testToneTrack || testToneTrack.readyState !== 'live') {
+            throw new Error('test-tone-output-track-not-live');
+          }
+          console.log('[Audio] transferring controller', {
+            controllerId: provisionalController.getInstanceId(),
+            trackId: testToneTrack.id,
+            trackKind: testToneTrack.kind,
+            trackReadyState: testToneTrack.readyState,
+          });
+          mgr.setAudioController(provisionalController, 'test-tone');
           provisionalController = null; // ownership transferred
+          console.log('[Audio] provisionalControllerReleased=true');
           audioConfigured = true;
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -461,9 +472,9 @@ export function Dashboard() {
           if (provisionalController) {
             try { await provisionalController.close(); } catch { /* ignore */ }
             provisionalController = null;
+            mgr.clearAudioController();
+            try { await api?.stopAudio(); } catch { /* ignore */ }
           }
-          mgr.clearAudioController();
-          try { await api?.stopAudio(); } catch { /* ignore */ }
           setAudioEnabled(false);
         }
       }
@@ -520,8 +531,9 @@ export function Dashboard() {
               setAudioIsSynthetic(true);
               await provisionalController.waitUntilPrimed();
               // Real audio does not require waitUntilRendering (source may be legitimately silent)
-              mgr.setAudioController(provisionalController);
+              mgr.setAudioController(provisionalController, 'test-tone');
               provisionalController = null;
+              audioConfigured = true;
               console.log('[Audio] Using synthetic fallback audio');
             } else {
               // Real audio failure with no synthetic fallback — continue video-only
@@ -541,6 +553,10 @@ export function Dashboard() {
             console.log(`[Audio] appliedMode=${effectiveAudioMode} streamGeneration=${captureResult.streamGeneration ?? '(not set)'}`);
             setAppliedAudioMode(effectiveAudioMode);
 
+            if (typeof captureResult.streamGeneration === 'number' && Number.isSafeInteger(captureResult.streamGeneration)) {
+              provisionalController.setStreamGeneration(captureResult.streamGeneration);
+            }
+
             if (effectiveAudioMode === 'test-tone') {
               setAudioIsSynthetic(true);
               // Test Tone requires nonzero rendering before publication
@@ -553,30 +569,28 @@ export function Dashboard() {
             }
 
             console.log(`[Publisher] audioTracks=${mgr.getAudioTrack() ? 1 : 0}`);
-            mgr.setAudioController(provisionalController);
-            provisionalController = null;
-          }
-
-          if (!captureResult || !captureResult.success) {
-            // Real capture failed — development-only synthetic fallback
-            const fallbackResult = await attemptDevSyntheticFallback(api, captureResult?.error);
-            if (fallbackResult === 'synthetic') {
-              setAudioIsSynthetic(true);
-              await provisionalController.waitUntilPrimed();
-              // Real audio does not require waitUntilRendering (source may be legitimately silent)
-              mgr.setAudioController(provisionalController);
-              provisionalController = null;
-              audioConfigured = true;
-            } else {
-              throw new Error(captureResult?.error ?? 'Audio capture could not start');
+            const outputTrack = provisionalController.getTrack();
+            if (!outputTrack) {
+              throw new Error('system-audio-output-track-missing');
             }
-          } else {
-            setAppliedAudioMode(effectiveAudioMode);
-            await provisionalController.waitUntilPrimed();
-            mgr.setAudioController(provisionalController);
+            if (outputTrack.kind !== 'audio') {
+              throw new Error('system-audio-output-track-wrong-kind');
+            }
+            if (outputTrack.readyState !== 'live') {
+              throw new Error(`system-audio-output-track-${outputTrack.readyState}`);
+            }
+            console.log('[Audio] transferring controller', {
+              controllerId: provisionalController.getInstanceId?.() ?? 'unknown',
+              trackId: outputTrack.id,
+              trackKind: outputTrack.kind,
+              trackReadyState: outputTrack.readyState,
+            });
+            mgr.setAudioController(provisionalController, effectiveAudioMode);
             provisionalController = null;
+            console.log('[Audio] provisionalControllerReleased=true');
             audioConfigured = true;
           }
+
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           setAudioError(errorMsg);
@@ -585,9 +599,9 @@ export function Dashboard() {
           if (provisionalController) {
             try { await provisionalController.close(); } catch { /* ignore */ }
             provisionalController = null;
+            mgr.clearAudioController();
+            try { await api?.stopAudio(); } catch { /* ignore */ }
           }
-          mgr.clearAudioController();
-          try { await api?.stopAudio(); } catch { /* ignore */ }
           setAudioEnabled(false);
         }
       }

@@ -168,8 +168,8 @@ describe('AudioWorklet module', () => {
 
     it('buildCombinedStream checks controller state (not just readyState)', () => {
       const content = fs.readFileSync(publisherManagerPath, 'utf-8');
-      expect(content).toContain('ctrlState === "rendering"');
-      expect(content).toContain('ctrlState === "primed"');
+      expect(content).toContain("ctrlState === 'rendering'");
+      expect(content).toContain("ctrlState === 'primed'");
     });
 
     it('controller has getFatalError method', async () => {
@@ -199,7 +199,7 @@ describe('AudioWorklet module', () => {
     it('close() rejects pending waiters before cleaning up', () => {
       const content = fs.readFileSync(controllerPath, 'utf-8');
       // rejectAllWaiters must be called early in close (before track/port cleanup)
-      const closeBlock = content.indexOf('async close()');
+      const closeBlock = content.indexOf('async close(');
       const closePortion = content.slice(closeBlock, closeBlock + 600);
       expect(closePortion.indexOf('rejectAllWaiters')).toBeGreaterThan(0);
       expect(closePortion.indexOf('rejectAllWaiters')).toBeLessThan(

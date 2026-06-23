@@ -41,6 +41,9 @@ export class ProcessAudioController {
   private outputShapeOk = false;
   private fatalError: string | null = null;
   private closed_ = false;
+  private static nextId = 0;
+  private readonly instanceId: number;
+  private closeOwner: string | null = null;
 
   /** Permanent worklet message handler (stored for removeEventListener during close). */
   private workletMessageHandler: ((event: MessageEvent) => void) | null = null;
@@ -55,6 +58,11 @@ export class ProcessAudioController {
   readonly PRIMING_TIMEOUT_MS = 5000;
   readonly RENDERING_TIMEOUT_MS = 5000;
   readonly SAMPLE_RATE = 48000;
+
+  constructor() {
+    ProcessAudioController.nextId++;
+    this.instanceId = ProcessAudioController.nextId;
+  }
 
   async initialize(
     pcmPort: MessagePort,
@@ -226,6 +234,10 @@ export class ProcessAudioController {
     return this.audioTrack;
   }
 
+  getOutputTrack(): MediaStreamTrack | null {
+    return this.audioTrack;
+  }
+
   getStream(): MediaStream | null {
     return this.mediaDestination?.stream ?? null;
   }
@@ -236,6 +248,10 @@ export class ProcessAudioController {
 
   getStreamGeneration(): number {
     return this.currentStreamGeneration;
+  }
+
+  getInstanceId(): number {
+    return this.instanceId;
   }
 
   getFatalError(): string | null {
@@ -331,9 +347,11 @@ export class ProcessAudioController {
     return false;
   }
 
-  async close(): Promise<void> {
+  async close(owner?: string): Promise<void> {
     if (this.closed_) return;
     this.closed_ = true;
+    this.closeOwner = owner ?? 'unknown';
+    console.log(`[AudioController] close id=${this.instanceId} owner=${this.closeOwner}`);
 
     // Reject all pending waiters
     this.rejectAllWaiters(new Error('Controller closed'));
@@ -382,5 +400,21 @@ export class ProcessAudioController {
 
     this.mediaDestination = null;
     this.state = 'closed';
+  }
+
+  logState(label: string): void {
+    const track = this.audioTrack;
+    console.log(`[AudioController] id=${this.instanceId} ${label}`, {
+      contextState: this.audioContext?.state,
+      contextCurrentTime: this.audioContext?.currentTime,
+      destinationTrackCount: this.mediaDestination?.stream.getAudioTracks().length ?? 0,
+      trackId: track?.id ?? null,
+      trackKind: track?.kind ?? null,
+      trackEnabled: track?.enabled ?? null,
+      trackMuted: track?.muted ?? null,
+      trackReadyState: track?.readyState ?? null,
+      controllerState: this.state,
+      streamGeneration: this.currentStreamGeneration,
+    });
   }
 }
