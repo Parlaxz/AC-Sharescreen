@@ -82,6 +82,8 @@ enum class Command {
   kEnumerateAudioSessions,
   kProbeMmdevice,
   kProbeAudioSessions,
+  kProbeProcessLoopbackNow,
+  kCaptureProcess,
   kUnknown,
 };
 
@@ -99,6 +101,8 @@ inline Command ParseCommand(std::string_view arg) {
   if (arg == "--enumerate-audio-sessions") return Command::kEnumerateAudioSessions;
   if (arg == "--probe-mmdevice") return Command::kProbeMmdevice;
   if (arg == "--probe-audio-sessions") return Command::kProbeAudioSessions;
+  if (arg == "--probe-process-loopback-now") return Command::kProbeProcessLoopbackNow;
+  if (arg == "--capture-process") return Command::kCaptureProcess;
   return Command::kUnknown;
 }
 

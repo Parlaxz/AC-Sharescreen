@@ -101,7 +101,7 @@ void SafeRelease(T*& ptr) {
 
 int main(int argc, char* argv[]) {
   if (argc < 2) {
-    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--probe-mmdevice|--probe-audio-sessions|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
+    std::cerr << "Usage: screenlink-audio-helper.exe --version|--capabilities|--self-test|--enumerate-windows|--enumerate-sources|--resolve-process-tree <pid>|--resolve-source <sourceId>|--capture-test <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--capture-process <pid> [--duration-ms <ms>] [--output <path>] [--mode include|exclude] [--creation-time <value>] [--overwrite]|--enumerate-audio-sessions|--probe-mmdevice|--probe-audio-sessions|--probe-process-loopback-now|--serve --control-pipe <name> --pcm-pipe <name> --session-id <uuid> --auth-token <token> --parent-pid <pid>\n";
     std::cout << "{\n"
               << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n"
               << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n"
@@ -2271,6 +2271,106 @@ int main(int argc, char* argv[]) {
       std::cout << "  \"endpointResolved\": true,\n";
       std::cout << "  \"sessionManagerActivated\": true,\n";
       std::cout << "  \"sessionCount\": " << (SUCCEEDED(hr) ? sessionCount : -1) << "\n";
+      std::cout << "}\n";
+      return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
+    }
+
+    case screenlink::audio::Command::kProbeProcessLoopbackNow: {
+      // Development-only uncached probe, bypasses call_once
+      auto probe = screenlink::audio::UncachedProbeProcessLoopback();
+
+      std::cout << "{\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+      std::cout << "  \"status\": \"ok\",\n";
+      std::cout << "  \"probed\": " << (probe.probed ? "true" : "false") << ",\n";
+      std::cout << "  \"succeeded\": " << (probe.succeeded ? "true" : "false") << ",\n";
+      std::cout << "  \"failureStage\": \"" << JsonEscape(probe.failureStage) << "\",\n";
+      std::cout << "  \"failureReason\": \"" << JsonEscape(probe.failureReason) << "\",\n";
+      std::cout << "  \"activateCallHrHex\": \"" << probe.activateCallHrHex << "\",\n";
+      std::cout << "  \"getActivateResultCallHrHex\": \"" << probe.getActivateResultCallHrHex << "\",\n";
+      std::cout << "  \"activationResultHrHex\": \"" << probe.activationResultHrHex << "\",\n";
+      std::cout << "  \"initializeHrHex\": \"" << probe.initializeHrHex << "\",\n";
+      std::cout << "  \"getCaptureClientHrHex\": \"" << probe.getCaptureClientHrHex << "\",\n";
+      std::cout << "  \"setEventHandleHrHex\": \"" << probe.setEventHandleHrHex << "\",\n";
+      std::cout << "  \"startHrHex\": \"" << probe.startHrHex << "\"\n";
+      std::cout << "}\n";
+      return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
+    }
+
+    case screenlink::audio::Command::kCaptureProcess: {
+      if (argc < 3) {
+        int exitCode = static_cast<int>(screenlink::audio::ExitCode::kCaptureTestFailed);
+        PrintError("missing-pid-argument", exitCode, exitCode);
+        return exitCode;
+      }
+
+      uint32_t targetPid = 0;
+      try {
+        targetPid = static_cast<uint32_t>(std::stoul(argv[2]));
+      } catch (const std::exception&) {
+        std::cerr << "Invalid PID argument: " << argv[2] << "\n";
+        std::cout << "{\n";
+        std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+        std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+        std::cout << "  \"status\": \"error\",\n";
+        std::cout << "  \"error\": \"invalid-pid-argument\"\n";
+        std::cout << "}\n";
+        return static_cast<int>(screenlink::audio::ExitCode::kCaptureTestFailed);
+      }
+
+      screenlink::audio::CaptureConfig config;
+      config.targetPid = targetPid;
+      config.durationMs = 5000;
+      config.includeMode = true;
+      config.outputPath = "capture-" + std::to_string(targetPid) + ".wav";
+
+      // Parse optional args from argv[3..]
+      for (int i = 3; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--duration-ms" && i + 1 < argc) {
+          try {
+            config.durationMs = static_cast<uint32_t>(std::stoul(argv[++i]));
+          } catch (const std::exception&) {
+            std::cerr << "Invalid --duration-ms value: " << argv[i] << "\n";
+            int exitCode = static_cast<int>(screenlink::audio::ExitCode::kCaptureTestFailed);
+            PrintError("invalid-duration-ms-argument", exitCode, exitCode);
+            return exitCode;
+          }
+        } else if (arg == "--output" && i + 1 < argc) {
+          config.outputPath = argv[++i];
+        } else if (arg == "--mode" && i + 1 < argc) {
+          std::string mode = argv[++i];
+          config.includeMode = (mode == "include");
+        } else if (arg == "--creation-time" && i + 1 < argc) {
+          try {
+            config.expectedCreationTimeUtc100ns = std::stoull(argv[++i]);
+          } catch (const std::exception&) {
+            std::cerr << "Invalid --creation-time value: " << argv[i] << "\n";
+            int exitCode = static_cast<int>(screenlink::audio::ExitCode::kCaptureTestFailed);
+            PrintError("invalid-creation-time-argument", exitCode, exitCode);
+            return exitCode;
+          }
+        } else if (arg == "--overwrite") {
+          config.overwrite = true;
+        }
+      }
+
+      auto result = screenlink::audio::RunCapture(config);
+
+      if (!result.succeeded) {
+        int exitCode = static_cast<int>(screenlink::audio::ExitCode::kCaptureTestFailed);
+        PrintError(JsonEscape(result.failureReason).c_str(), exitCode, exitCode);
+        return exitCode;
+      }
+
+      std::cout << "{\n";
+      std::cout << "  \"protocolVersion\": \"" << screenlink::audio::kProtocolVersion << "\",\n";
+      std::cout << "  \"helperVersion\": \"" << screenlink::audio::kHelperVersion << "\",\n";
+      std::cout << "  \"status\": \"ok\",\n";
+      std::cout << "  \"framesCaptured\": " << result.framesCaptured << ",\n";
+      std::cout << "  \"bytesWritten\": " << result.bytesWritten << ",\n";
+      std::cout << "  \"outputPath\": \"" << JsonEscape(result.outputPath) << "\"\n";
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }
