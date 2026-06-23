@@ -326,7 +326,7 @@ describe("Audio capability integration", () => {
 
     const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
     expect(parsed.status).toBe("ok");
-    expect(parsed.protocolVersion).toBe("0.1.0");
+    expect(parsed.protocolVersion).toBe("0.2.0");
     expect(parsed.helperVersion).toBe("0.1.0");
     expect(parsed.architecture).toBe("x64");
     expect(parsed.operatingSystem).toBe("Windows");
