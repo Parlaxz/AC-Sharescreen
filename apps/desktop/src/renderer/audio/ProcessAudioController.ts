@@ -17,11 +17,20 @@ export interface WorkletStatsReport {
   discontinuities: number;
   maxBufferDepth: number;
   currentBufferDepth: number;
+  /** Render diagnostics */
+  peak: number;
+  rms: number;
+  nonZeroSamples: number;
+  processCalls: number;
+  outputFrames: number;
+  underflowFrames: number;
+  ringFramesAvailable: number;
 }
 
 export class ProcessAudioController {
   private audioContext: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private analyserNode: AnalyserNode | null = null;
   private mediaDestination: MediaStreamAudioDestinationNode | null = null;
   private audioTrack: MediaStreamTrack | null = null;
   private port: MessagePort | null = null;
@@ -34,6 +43,7 @@ export class ProcessAudioController {
   private diagPacketsReceived = 0;
   private diagBytesReceived = 0;
   private diagResetMessages = 0;
+  private diagAnalyserSamples: { peak: number; rms: number; timestamp: number }[] = [];
 
   readonly TARGET_FRAMES = 3840; // ~80ms at 48kHz
   readonly PRIMING_TIMEOUT_MS = 5000;
@@ -148,26 +158,71 @@ export class ProcessAudioController {
         }
       };
 
-      // 6. Create media destination (NOT connected to destination — no local playback)
-      this.mediaDestination = this.audioContext.createMediaStreamDestination();
-      this.workletNode.connect(this.mediaDestination);
+      // 6. Create AnalyserNode for diagnostic probing
+      // Graph: workletNode → analyserNode → mediaDestination
+      this.analyserNode = this.audioContext.createAnalyser();
+      this.analyserNode.fftSize = 2048;
+      this.analyserNode.smoothingTimeConstant = 0;
 
-      // 7. Get audio track
+      // 7. Create media destination (NOT connected to destination — no local playback)
+      this.mediaDestination = this.audioContext.createMediaStreamDestination();
+      this.workletNode.connect(this.analyserNode);
+      this.analyserNode.connect(this.mediaDestination);
+
+      // 8. Get audio track
       const tracks = this.mediaDestination.stream.getAudioTracks();
       if (tracks.length !== 1) {
         throw new Error(`Expected 1 audio track, got ${tracks.length}`);
       }
       this.audioTrack = tracks[0];
 
-      // 8. Resume AudioContext — may be suspended if user gesture was consumed
-      // by preceding async calls (await consumes transient activation in Chrome/Electron).
+      // Log audio track diagnostics
+      console.log('[Audio destination track]', {
+        count: tracks.length,
+        id: this.audioTrack.id,
+        kind: this.audioTrack.kind,
+        label: this.audioTrack.label,
+        enabled: this.audioTrack.enabled,
+        muted: this.audioTrack.muted,
+        readyState: this.audioTrack.readyState,
+        settings: this.audioTrack.getSettings(),
+      });
+
+      // Listen for track state changes
+      this.audioTrack.addEventListener('mute', () =>
+        console.warn('[Audio track] muted'),
+      );
+      this.audioTrack.addEventListener('unmute', () =>
+        console.log('[Audio track] unmuted'),
+      );
+      this.audioTrack.addEventListener('ended', () =>
+        console.error('[Audio track] ended'),
+      );
+
+      // 9. Resume AudioContext — critical for Chrome's autoplay policy.
+      // Context may be suspended if created after transient activation was consumed
+      // by preceding async calls.
       if (this.audioContext.state === 'suspended') {
+        console.log('[ProcessAudioController] AudioContext suspended, resuming...');
         try {
           await this.audioContext.resume();
         } catch (resumeErr) {
           console.warn('[ProcessAudioController] AudioContext.resume() failed:', resumeErr);
         }
       }
+
+      // Verify the context actually started
+      if (this.audioContext.state !== 'running') {
+        console.warn(
+          `[ProcessAudioController] AudioContext state is "${this.audioContext.state}" after resume`,
+        );
+      } else {
+        console.log('[ProcessAudioController] AudioContext running');
+      }
+
+      // Sample analyser twice, 250ms apart, to verify the audio graph is producing audio
+      this.sampleAnalyser('post-init');
+      setTimeout(() => this.sampleAnalyser('post-init+250ms'), 250);
 
       // Note: priming is NOT awaited here. The consumer is ready, but
       // no PCM can arrive until the producer starts. Call waitUntilPrimed()
@@ -189,6 +244,19 @@ export class ProcessAudioController {
     } else if (packet.streamGeneration !== this.currentStreamGeneration) {
       // Old generation — discard
       return;
+    }
+
+    // Log first packet details for diagnostics
+    if (this.diagPacketsReceived === 1) {
+      console.log('[ProcessAudioController] First PCM packet', {
+        frameCount: packet.frameCount,
+        channels: packet.channels,
+        sampleRate: packet.sampleRate,
+        sampleFormat: packet.sampleFormat,
+        flags: packet.flags,
+        pcmDataByteLength: packet.pcmData?.byteLength,
+        streamGeneration: packet.streamGeneration,
+      });
     }
 
     // Forward continuity metadata
@@ -214,6 +282,47 @@ export class ProcessAudioController {
 
   getStream(): MediaStream | null {
     return this.mediaDestination?.stream ?? null;
+  }
+
+  /**
+   * Sample the AnalyserNode and log the result.
+   * Returns the peak and RMS values for diagnostic use.
+   */
+  sampleAnalyser(label?: string): { peak: number; rms: number } | null {
+    if (!this.analyserNode) return null;
+
+    const samples = new Float32Array(this.analyserNode.fftSize);
+    this.analyserNode.getFloatTimeDomainData(samples);
+
+    let sumSquares = 0;
+    let peak = 0;
+
+    for (const sample of samples) {
+      const abs = Math.abs(sample);
+      if (abs > peak) peak = abs;
+      sumSquares += sample * sample;
+    }
+
+    const rms = Math.sqrt(sumSquares / samples.length);
+    const entry = { peak, rms, timestamp: Date.now() };
+    this.diagAnalyserSamples.push(entry);
+    // Keep last 10
+    if (this.diagAnalyserSamples.length > 10) {
+      this.diagAnalyserSamples.shift();
+    }
+
+    console.log(`[Audio graph]${label ? ` ${label}` : ''}`, {
+      contextState: this.audioContext?.state,
+      peak,
+      rms,
+      fftSize: this.analyserNode.fftSize,
+    });
+
+    return { peak, rms };
+  }
+
+  getAnalyserReadings(): { peak: number; rms: number; timestamp: number }[] {
+    return [...this.diagAnalyserSamples];
   }
 
   getState(): AudioWorkletState {
@@ -268,10 +377,26 @@ export class ProcessAudioController {
     });
   }
 
-  async resume(): Promise<void> {
-    if (this.audioContext?.state === 'suspended') {
-      await this.audioContext.resume();
+  async resume(): Promise<boolean> {
+    if (!this.audioContext) return false;
+    if (this.audioContext.state === 'running') return true;
+
+    if (this.audioContext.state === 'suspended') {
+      try {
+        await this.audioContext.resume();
+        const ok = this.audioContext.state === 'running';
+        console.log(`[ProcessAudioController] Resume ${ok ? 'succeeded' : 'failed'}, state: ${this.audioContext.state}`);
+        if (ok) {
+          this.sampleAnalyser('post-resume');
+        }
+        return ok;
+      } catch (err) {
+        console.warn('[ProcessAudioController] resume() threw:', err);
+        return false;
+      }
     }
+
+    return false;
   }
 
   async close(): Promise<void> {
@@ -294,6 +419,16 @@ export class ProcessAudioController {
         /* ignore */
       }
       this.workletNode = null;
+    }
+
+    // Disconnect analyser
+    if (this.analyserNode) {
+      try {
+        this.analyserNode.disconnect();
+      } catch {
+        /* ignore */
+      }
+      this.analyserNode = null;
     }
 
     // Close audio context

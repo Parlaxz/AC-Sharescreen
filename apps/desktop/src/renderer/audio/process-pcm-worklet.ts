@@ -32,6 +32,14 @@ interface WorkletStats {
   targetBufferDepth: number;
   messagesReceived: number;
   invalidMessages: number;
+  /** Render diagnostic fields */
+  peak: number;
+  rms: number;
+  nonZeroSamples: number;
+  processCalls: number;
+  outputFrames: number;
+  underflowFrames: number;
+  ringFramesAvailable: number;
 }
 
 /**
@@ -177,6 +185,13 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       targetBufferDepth: kTargetBufferFrames,
       messagesReceived: 0,
       invalidMessages: 0,
+      peak: 0,
+      rms: 0,
+      nonZeroSamples: 0,
+      processCalls: 0,
+      outputFrames: 0,
+      underflowFrames: 0,
+      ringFramesAvailable: 0,
     };
 
     // Receive messages from the renderer main thread
@@ -233,6 +248,7 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
     outputs: Float32Array[][],
     _params: Record<string, Float32Array>,
   ): boolean {
+    this.stats.processCalls++;
     const output = outputs[0];
     if (!output || output.length < 2) {
       // No output channels — keep processor alive
@@ -247,6 +263,7 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
         output[ch].fill(0);
       }
       this.stats.silentFrames += renderQuantum;
+      this.stats.outputFrames += renderQuantum;
       return true;
     }
 
@@ -254,21 +271,46 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
     const framesRead = this.ringBuffer.read(output, renderQuantum);
     this.stats.framesRendered += framesRead;
     this.stats.underrunFrames = this.ringBuffer.underrun;
+    this.stats.outputFrames += renderQuantum;
 
     if (framesRead === 0) {
       this.stats.silentFrames += renderQuantum;
     }
 
+    // Calculate render diagnostics (peak, RMS, non-zero samples)
+    let sumSquares = 0;
+    let samplePeak = 0;
+    let nonZero = 0;
+    for (let ch = 0; ch < output.length; ch++) {
+      for (let f = 0; f < renderQuantum; f++) {
+        const s = output[ch][f];
+        const abs = Math.abs(s);
+        if (abs > samplePeak) samplePeak = abs;
+        sumSquares += s * s;
+        if (abs > 0) nonZero++;
+      }
+    }
+    this.stats.peak = samplePeak;
+    this.stats.rms = Math.sqrt(sumSquares / (renderQuantum * output.length));
+    this.stats.nonZeroSamples += nonZero;
+
+    // Track underflow frames (requested frames that were not available)
+    if (framesRead < renderQuantum) {
+      this.stats.underflowFrames += renderQuantum - framesRead;
+    }
+
     // Update buffer depth stats
+    this.stats.ringFramesAvailable = this.ringBuffer.framesAvailable;
     this.stats.currentBufferDepth = this.ringBuffer.framesAvailable;
     this.stats.maxBufferDepth = Math.max(
       this.stats.maxBufferDepth,
       this.ringBuffer.framesAvailable,
     );
 
-    // Send periodic stats
-    if (this.stats.framesRendered % (480 * 100) === 0) {
-      // Every ~100 packets
+    // Send periodic stats every ~1 second at 48kHz
+    if (this.stats.framesRendered % 48000 === 0) {
+      // Reset per-second diagnostics
+      this.stats.nonZeroSamples = 0;
       this.port.postMessage({
         type: 'pcm:stats',
         stats: { ...this.stats },

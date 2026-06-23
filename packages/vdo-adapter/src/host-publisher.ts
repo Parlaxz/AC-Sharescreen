@@ -46,6 +46,10 @@ export class HostPublisher {
 
   async createAndConnect(options: HostPublisherOptions): Promise<void> {
     const Ctor = getSDKConstructor();
+    if (!Ctor) {
+      throw new CompatibilityError("SDK constructor not found on window.VDONinjaSDK");
+    }
+
     this.sdk = new Ctor({
       host: options.host ?? "wss://wss.vdo.ninja",
       password: options.password,
@@ -58,6 +62,12 @@ export class HostPublisher {
       autoPingViewer: false,
     });
 
+    if (!this.sdk) {
+      throw new CompatibilityError("SDK constructor returned null/undefined");
+    }
+
+    console.log('[HostPublisher] SDK created, type:', typeof this.sdk, 'has publish:', typeof this.sdk.publish);
+
     // Register any handlers that were queued before SDK creation
     for (const [event, handlers] of this.pendingHandlers) {
       for (const handler of handlers) {
@@ -65,7 +75,9 @@ export class HostPublisher {
       }
     }
 
-    await withTimeout(this.sdk!.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
+    await withTimeout(this.sdk.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
+
+    console.log('[HostPublisher] SDK connected, sdk still set:', this.sdk !== null);
   }
 
   async publish(stream: MediaStream, options: PublishOptions): Promise<void> {

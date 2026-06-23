@@ -127,9 +127,24 @@ export class PublisherManager {
       stream = this.combinedStream;
     }
 
+    // Log combined stream contents for diagnostics
+    console.table(
+      stream.getTracks().map((track) => ({
+        id: track.id,
+        kind: track.kind,
+        enabled: track.enabled,
+        muted: track.muted,
+        readyState: track.readyState,
+        label: track.label,
+      })),
+    );
+
     const publisher = new HostPublisher();
 
+    console.log('[PublisherManager] Connecting publisher...');
     await publisher.createAndConnect({ password: config.password });
+
+    console.log('[PublisherManager] Publishing stream...');
     await publisher.publish(stream, {
       streamID: config.streamId,
       label: "ScreenLink Host",
@@ -140,11 +155,34 @@ export class PublisherManager {
         height: config.videoHeight,
         frameRate: config.videoFps,
       },
+      audioBitrate: 64000, // 64 kbps for Opus stereo
     });
 
     this.publisher = publisher;
     this.config = config;
     this.setState("sharing");
+
+    // Log audio sender presence immediately after publish
+    try {
+      const sdk = publisher.getSDK();
+      if (sdk) {
+        const entries = Array.from(sdk.connections.entries());
+        const senders = entries.flatMap(([, g]) => {
+          const pc = g.publisher?.pc;
+          return pc ? pc.getSenders() : [];
+        });
+        console.table(
+          senders.map((s) => ({
+            kind: s.track?.kind,
+            trackId: s.track?.id,
+            enabled: s.track?.enabled,
+            readyState: s.track?.readyState,
+          })),
+        );
+      }
+    } catch (err) {
+      console.warn("[PublisherManager] Sender diagnostic failed:", err);
+    }
   }
 
   async stopCapture(): Promise<void> {
