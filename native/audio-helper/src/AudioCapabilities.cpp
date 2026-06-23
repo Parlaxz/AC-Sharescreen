@@ -94,6 +94,12 @@ AudioCapability ComputeCapability(const CompileTimeSupport& ct,
   cap.compileTime = ct;
   cap.runtime = rt;
 
+  // Endpoint loopback (AUDCLNT_STREAMFLAGS_LOOPBACK) is supported on
+  // all Windows 10+ builds. It works on Windows Vista and later, but
+  // our minimum target is Windows 10 so we always report true when
+  // the OS detection succeeded.
+  cap.endpointLoopbackSupported = rt.osBuildNumber > 0;
+
   if (!ct.headersAvailable) {
     cap.usable = false;
     cap.reasonCode = "old-windows-sdk";

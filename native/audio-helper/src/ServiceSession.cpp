@@ -679,6 +679,10 @@ bool ServiceSession::DispatchCommand(const std::string& command,
                command == "getmixerdiagnostics") {
         HandleGetMixerDiagnostics(payload, response);
         return true;
+    } else if (command == "startEndpointLoopback" ||
+               command == "startendpointloopback") {
+        HandleStartEndpointLoopback(payload, response);
+        return true;
     }
     return false;
 }
@@ -771,6 +775,8 @@ void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
     result += compileTime.windowsSdkVersion + "\",";
     result += "\"processLoopbackRuntimeSupported\":";
     result += (runtime.osBuildEligible ? "true" : "false") + std::string(",");
+    result += "\"endpointLoopbackSupported\":";
+    result += (cap.endpointLoopbackSupported ? "true" : "false") + std::string(",");
     result += "\"usable\":";
     result += (cap.usable ? "true" : "false") + std::string(",");
     result += "\"reasonCode\":\"";
@@ -1575,6 +1581,113 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
     response = resp.Str();
 }
 
+void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
+                                                  std::string& response) {
+    // Parse payload (if any) — currently no options needed.
+    // Future: could add eMultimedia/eCommunications/eConsole routing.
+
+    // Check we're not already capturing via the simple capture path
+    if (state_.load() != static_cast<SessionState>(0)) { // kIdle
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("error", "already-capturing");
+        resp.SetRaw("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    state_.store(static_cast<SessionState>(1)); // kStarting
+    uint32_t gen = streamGeneration_.fetch_add(1) + 1;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSourceType_ = "endpoint-loopback";
+    }
+
+    // Create mixer if not already running
+    if (!mixer_) {
+        mixer_ = std::make_unique<MultiSourceMixer>(48000, static_cast<uint16_t>(2));
+
+        // Start mixer with callback to PCM writer
+        mixer_->Start([this](const AudioPacket& p) -> bool {
+            return OnCapturePacket(p);
+        });
+
+        if (!mixer_->IsRunning()) {
+            state_.store(static_cast<SessionState>(0)); // kIdle
+            {
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                activeSourceType_ = "";
+            }
+            streamGeneration_.fetch_sub(1);
+            SimpleJson resp;
+            resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+            resp.Set("requestId", static_cast<uint64_t>(0));
+            resp.Set("sessionId", config_.sessionId);
+            resp.Set("success", false);
+            resp.Set("state", "idle");
+            resp.Set("error", "mixer-start-failed");
+            resp.SetRaw("result", "{}");
+            response = resp.Str();
+            return;
+        }
+    }
+
+    // Add a source to the mixer for the endpoint loopback (PID 0 = system audio)
+    uint32_t sourceId = mixer_->AddSource(0, 0);
+
+    // Start endpoint loopback source, feeding packets into the mixer
+    endpointSource_ = std::make_unique<EndpointLoopbackSource>();
+    bool started = endpointSource_->Start(
+        [this, sourceId](const AudioPacket& p) -> bool {
+            mixer_->FeedPacket(sourceId, p);
+            return true;
+        });
+
+    if (!started) {
+        mixer_->RemoveSource(sourceId);
+        endpointSource_.reset();
+        state_.store(static_cast<SessionState>(0)); // kIdle
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            activeSourceType_ = "";
+        }
+        streamGeneration_.fetch_sub(1);
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", false);
+        resp.Set("state", "idle");
+        resp.Set("error", "capture-start-failed");
+        resp.SetRaw("result", "{}");
+        response = resp.Str();
+        return;
+    }
+
+    state_.store(static_cast<SessionState>(2)); // kCapturing
+
+    std::string result = "{";
+    result += "\"streamGeneration\":" + std::to_string(gen) + ",";
+    result += "\"sourceId\":" + std::to_string(sourceId) + ",";
+    result += "\"sourceType\":\"endpoint-loopback\"";
+    result += "}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", "capturing");
+    resp.SetRaw("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
 void ServiceSession::HandleGetMixerState(const std::string& /*payload*/,
                                           std::string& response) {
     bool mixerRunning = mixer_ && mixer_->IsRunning();
@@ -1722,6 +1835,12 @@ void ServiceSession::StopPhase2EResources() {
         if (src) src->Stop();
     }
     captureSources_.clear();
+
+    // Stop endpoint loopback source
+    if (endpointSource_) {
+        endpointSource_->Stop();
+        endpointSource_.reset();
+    }
 
     // Stop session monitor
     if (sessionMonitor_) {

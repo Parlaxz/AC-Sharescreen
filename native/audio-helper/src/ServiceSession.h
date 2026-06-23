@@ -16,6 +16,7 @@
 #include "AudioSessionMonitor.h"   // AudioSessionMonitor, AudioSessionInfo
 #include "MultiSourceMixer.h"      // MultiSourceMixer, MixerDiagnostics
 #include "ApplicationCaptureSource.h" // ApplicationCaptureSource
+#include "EndpointLoopbackSource.h"   // EndpointLoopbackSource
 
 namespace screenlink::audio {
 
@@ -65,6 +66,7 @@ private:
     void HandleEnumerateAudioSessions(const std::string& payload, std::string& response);
     void HandleStartApplicationAudio(const std::string& payload, std::string& response);
     void HandleStartFilteredMonitorAudio(const std::string& payload, std::string& response);
+    void HandleStartEndpointLoopback(const std::string& payload, std::string& response);
     void HandleGetMixerState(const std::string& payload, std::string& response);
     void HandleGetMixerDiagnostics(const std::string& payload, std::string& response);
 
@@ -146,6 +148,7 @@ private:
     std::unique_ptr<AudioSessionMonitor> sessionMonitor_;
     std::unique_ptr<MultiSourceMixer> mixer_;
     std::vector<std::unique_ptr<ApplicationCaptureSource>> captureSources_;
+    std::unique_ptr<EndpointLoopbackSource> endpointSource_;
 };
 
 } // namespace screenlink::audio

@@ -1,5 +1,3 @@
-import { PcmRingBuffer } from './PcmRingBuffer';
-
 export type AudioWorkletState =
   | 'closed'
   | 'loading'
@@ -27,6 +25,8 @@ export interface WorkletStatsReport {
   ringFramesAvailable: number;
 }
 
+type Waiter = { type: 'primed' | 'rendering'; resolve: () => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> };
+
 export class ProcessAudioController {
   private audioContext: AudioContext | null = null;
   private workletNode: AudioWorkletNode | null = null;
@@ -37,16 +37,19 @@ export class ProcessAudioController {
   private state: AudioWorkletState = 'closed';
   private onStateChange: ((state: AudioWorkletState) => void) | null = null;
   private onStats: ((stats: WorkletStatsReport) => void) | null = null;
-  private primingTimeout: ReturnType<typeof setTimeout> | null = null;
-  private renderingTimeout: ReturnType<typeof setTimeout> | null = null;
   private currentStreamGeneration: number = -1;
   private outputShapeOk = false;
   private fatalError: string | null = null;
-  private diagMessagesReceived = 0;
-  private diagPacketsReceived = 0;
-  private diagBytesReceived = 0;
-  private diagResetMessages = 0;
-  private diagAnalyserSamples: { peak: number; rms: number; timestamp: number }[] = [];
+  private closed_ = false;
+
+  /** Permanent worklet message handler (stored for removeEventListener during close). */
+  private workletMessageHandler: ((event: MessageEvent) => void) | null = null;
+  /** Permanent port message handler. */
+  private portMessageHandler: ((event: MessageEvent) => void) | null = null;
+  private portMessageErrorHandler: ((event: MessageEvent) => void) | null = null;
+
+  /** Internal waiters for priming/rendering. */
+  private waiters: Waiter[] = [];
 
   readonly TARGET_FRAMES = 3840;
   readonly PRIMING_TIMEOUT_MS = 5000;
@@ -72,9 +75,7 @@ export class ProcessAudioController {
       });
 
       if (this.audioContext.sampleRate !== this.SAMPLE_RATE) {
-        throw new Error(
-          `Unsupported sample rate: ${this.audioContext.sampleRate} (expected ${this.SAMPLE_RATE})`,
-        );
+        throw new Error(`Unsupported sample rate: ${this.audioContext.sampleRate} (expected ${this.SAMPLE_RATE})`);
       }
 
       await this.audioContext.audioWorklet.addModule(
@@ -84,9 +85,6 @@ export class ProcessAudioController {
       this.state = 'loaded';
       this.onStateChange?.('loaded');
 
-      // Create worklet node with explicit stereo output configuration.
-      // Without outputChannelCount: [2], the browser may deliver mono
-      // output to process(), causing the worklet to skip rendering.
       this.workletNode = new AudioWorkletNode(
         this.audioContext,
         'process-pcm-worklet',
@@ -102,69 +100,56 @@ export class ProcessAudioController {
       this.state = 'buffering';
       this.onStateChange?.('buffering');
 
+      // Set up permanent MessagePort listener (NEVER replaced)
       this.port = pcmPort;
-      this.port.start();
-      this.port.postMessage({ type: 'pcm:ready' });
-
-      this.port.addEventListener('message', (event: MessageEvent) => {
+      this.portMessageHandler = (event: MessageEvent) => {
         const msg = event.data;
         if (!msg || typeof msg !== 'object') return;
-        this.diagMessagesReceived++;
         switch (msg.type) {
-          case 'pcm:handshake':
-            break;
+          case 'pcm:handshake': break;
           case 'pcm:packet':
-            this.diagPacketsReceived++;
-            this.diagBytesReceived += msg.packet?.pcmData?.byteLength ?? 0;
             this.handlePcmPacket(msg.packet);
             break;
           case 'pcm:reset':
-            this.diagResetMessages++;
             this.currentStreamGeneration = -1;
             this.workletNode?.port.postMessage({ type: 'pcm:reset' });
             break;
-          case 'pcm:canary':
-            console.log('[ProcessAudioController] Port canary received, port is alive');
-            break;
+          case 'pcm:canary': break;
         }
-      });
+      };
+      this.port.addEventListener('message', this.portMessageHandler);
 
-      this.port.addEventListener('messageerror', (event) => {
+      this.portMessageErrorHandler = (event: MessageEvent) => {
         console.error('[ProcessAudioController] Port messageerror:', event);
-      });
+      };
+      this.port.addEventListener('messageerror', this.portMessageErrorHandler);
 
-      // Listen for worklet messages
-      this.workletNode.port.onmessage = (event: MessageEvent) => {
+      this.port.start();
+      this.port.postMessage({ type: 'pcm:ready' });
+
+      // Set up permanent worklet message listener (NEVER replaced)
+      this.workletMessageHandler = (event: MessageEvent) => {
         const msg = event.data;
         if (!msg || typeof msg !== 'object') return;
 
         switch (msg.type) {
           case 'pcm:primed':
-            this.state = 'primed';
-            this.onStateChange?.('primed');
-            if (this.primingTimeout) {
-              clearTimeout(this.primingTimeout);
-              this.primingTimeout = null;
+            if (this.state === 'buffering') {
+              this.state = 'primed';
+              this.onStateChange?.('primed');
             }
+            this.resolveWaiters('primed');
             break;
 
           case 'pcm:rendering':
-            this.state = 'rendering';
-            this.onStateChange?.('rendering');
-            console.log('[ProcessAudioController] Worklet rendering, peak:', msg.peak, 'rms:', msg.rms);
-            if (this.renderingTimeout) {
-              clearTimeout(this.renderingTimeout);
-              this.renderingTimeout = null;
+            if (this.state !== 'rendering') {
+              this.state = 'rendering';
+              this.onStateChange?.('rendering');
             }
+            this.resolveWaiters('rendering');
             break;
 
           case 'pcm:output-shape':
-            console.log('[ProcessAudioController] Worklet output shape:', {
-              outputCount: msg.outputCount,
-              channelCount: msg.channelCount,
-              quantumFrames: msg.quantumFrames,
-              sampleRate: msg.sampleRate,
-            });
             this.outputShapeOk = msg.channelCount === 2;
             break;
 
@@ -172,8 +157,7 @@ export class ProcessAudioController {
             this.fatalError = msg.error;
             this.state = 'error';
             this.onStateChange?.('error');
-            console.error('[ProcessAudioController] Worklet fatal:', msg.error,
-              'expected', msg.expectedChannels, 'actual', msg.actualChannels);
+            this.rejectAllWaiters(new Error(`Worklet fatal: ${msg.error}`));
             break;
 
           case 'pcm:stats':
@@ -181,8 +165,8 @@ export class ProcessAudioController {
             break;
         }
       };
+      this.workletNode.port.addEventListener('message', this.workletMessageHandler);
 
-      // Create AnalyserNode for diagnostic probing
       this.analyserNode = this.audioContext.createAnalyser();
       this.analyserNode.fftSize = 2048;
       this.analyserNode.smoothingTimeConstant = 0;
@@ -197,49 +181,11 @@ export class ProcessAudioController {
       }
       this.audioTrack = tracks[0];
 
-      console.log('[Audio destination track]', {
-        count: tracks.length,
-        id: this.audioTrack.id,
-        kind: this.audioTrack.kind,
-        label: this.audioTrack.label,
-        enabled: this.audioTrack.enabled,
-        muted: this.audioTrack.muted,
-        readyState: this.audioTrack.readyState,
-        settings: this.audioTrack.getSettings(),
-      });
-
-      this.audioTrack.addEventListener('mute', () =>
-        console.warn('[Audio track] muted'),
-      );
-      this.audioTrack.addEventListener('unmute', () =>
-        console.log('[Audio track] unmuted'),
-      );
-      this.audioTrack.addEventListener('ended', () =>
-        console.error('[Audio track] ended'),
-      );
-
-      // Resume AudioContext
       if (this.audioContext.state === 'suspended') {
-        console.log('[ProcessAudioController] AudioContext suspended, resuming...');
-        try {
-          await this.audioContext.resume();
-        } catch (resumeErr) {
-          console.warn('[ProcessAudioController] AudioContext.resume() failed:', resumeErr);
-        }
+        try { await this.audioContext.resume(); } catch { /* best effort */ }
       }
 
-      if (this.audioContext.state !== 'running') {
-        console.warn(
-          `[ProcessAudioController] AudioContext state is "${this.audioContext.state}" after resume`,
-        );
-      } else {
-        console.log('[ProcessAudioController] AudioContext running');
-      }
-
-      // Sample analyser at init and 250ms later
       this.sampleAnalyser('post-init');
-      setTimeout(() => this.sampleAnalyser('post-init+250ms'), 250);
-
     } catch (err) {
       this.state = 'error';
       this.onStateChange?.('error');
@@ -248,25 +194,14 @@ export class ProcessAudioController {
     }
   }
 
+  /** Forward a PCM packet to the worklet, checking stream-generation. */
   private handlePcmPacket(packet: any): void {
-    if (!this.workletNode) return;
+    if (!this.workletNode || this.closed_) return;
 
     if (this.currentStreamGeneration < 0) {
       this.currentStreamGeneration = packet.streamGeneration;
     } else if (packet.streamGeneration !== this.currentStreamGeneration) {
-      return;
-    }
-
-    if (this.diagPacketsReceived === 1) {
-      console.log('[ProcessAudioController] First PCM packet', {
-        frameCount: packet.frameCount,
-        channels: packet.channels,
-        sampleRate: packet.sampleRate,
-        sampleFormat: packet.sampleFormat,
-        flags: packet.flags,
-        pcmDataByteLength: packet.pcmData?.byteLength,
-        streamGeneration: packet.streamGeneration,
-      });
+      return; // stale generation — discard
     }
 
     if (packet.flags & 2 || packet.droppedPackets > 0) {
@@ -275,13 +210,16 @@ export class ProcessAudioController {
 
     const pcmFloat32 = new Float32Array(packet.pcmData);
     this.workletNode.port.postMessage(
-      {
-        type: 'pcm:data',
-        data: pcmFloat32,
-        frameCount: packet.frameCount,
-      },
+      { type: 'pcm:data', data: pcmFloat32, frameCount: packet.frameCount },
       packet.pcmData.byteLength > 0 ? [packet.pcmData] : undefined,
     );
+  }
+
+  /** Set the stream generation (called after native capture starts). */
+  setStreamGeneration(gen: number): void {
+    this.currentStreamGeneration = gen;
+    // Forward reset to worklet with real generation
+    this.workletNode?.port.postMessage({ type: 'pcm:reset', streamGeneration: gen });
   }
 
   getTrack(): MediaStreamTrack | null {
@@ -292,47 +230,12 @@ export class ProcessAudioController {
     return this.mediaDestination?.stream ?? null;
   }
 
-  /**
-   * Sample the AnalyserNode and return { peak, rms }.
-   */
-  sampleAnalyser(label?: string): { peak: number; rms: number } | null {
-    if (!this.analyserNode) return null;
-
-    const samples = new Float32Array(this.analyserNode.fftSize);
-    this.analyserNode.getFloatTimeDomainData(samples);
-
-    let sumSquares = 0;
-    let peak = 0;
-
-    for (const sample of samples) {
-      const abs = Math.abs(sample);
-      if (abs > peak) peak = abs;
-      sumSquares += sample * sample;
-    }
-
-    const rms = Math.sqrt(sumSquares / samples.length);
-    const entry = { peak, rms, timestamp: Date.now() };
-    this.diagAnalyserSamples.push(entry);
-    if (this.diagAnalyserSamples.length > 10) {
-      this.diagAnalyserSamples.shift();
-    }
-
-    console.log(`[Audio graph]${label ? ` ${label}` : ''}`, {
-      contextState: this.audioContext?.state,
-      peak,
-      rms,
-      fftSize: this.analyserNode.fftSize,
-    });
-
-    return { peak, rms };
-  }
-
-  getAnalyserReadings(): { peak: number; rms: number; timestamp: number }[] {
-    return [...this.diagAnalyserSamples];
-  }
-
   getState(): AudioWorkletState {
     return this.state;
+  }
+
+  getStreamGeneration(): number {
+    return this.currentStreamGeneration;
   }
 
   getFatalError(): string | null {
@@ -343,100 +246,85 @@ export class ProcessAudioController {
     return this.outputShapeOk;
   }
 
-  getPortDiagnostics(): { messagesReceived: number; packetsReceived: number; bytesReceived: number; resetMessages: number } {
-    return {
-      messagesReceived: this.diagMessagesReceived,
-      packetsReceived: this.diagPacketsReceived,
-      bytesReceived: this.diagBytesReceived,
-      resetMessages: this.diagResetMessages,
-    };
+  sampleAnalyser(label?: string): { peak: number; rms: number } | null {
+    if (!this.analyserNode) return null;
+    const samples = new Float32Array(this.analyserNode.fftSize);
+    this.analyserNode.getFloatTimeDomainData(samples);
+    let sumSquares = 0;
+    let peak = 0;
+    for (const sample of samples) {
+      const abs = Math.abs(sample);
+      if (abs > peak) peak = abs;
+      sumSquares += sample * sample;
+    }
+    const rms = Math.sqrt(sumSquares / samples.length);
+    return { peak, rms };
   }
 
-  /**
-   * Wait until the worklet ring buffer reaches its priming target.
-   */
+  /** Wait until the worklet ring buffer reaches priming target. */
   async waitUntilPrimed(): Promise<void> {
     if (this.state === 'primed' || this.state === 'rendering') return;
     if (!this.workletNode) throw new Error('Worklet not initialized');
-
-    return new Promise<void>((resolve, reject) => {
-      this.primingTimeout = setTimeout(() => {
-        this.primingTimeout = null;
-        this.state = 'error';
-        this.onStateChange?.('error');
-        reject(new Error('Priming timeout: no PCM received within 5000ms'));
-      }, this.PRIMING_TIMEOUT_MS);
-
-      const handler = (event: MessageEvent) => {
-        const msg = event.data;
-        if (!msg || typeof msg !== 'object') return;
-        if (msg.type === 'pcm:primed' || msg.type === 'pcm:rendering') {
-          clearTimeout(this.primingTimeout!);
-          this.primingTimeout = null;
-          this.state = msg.type === 'pcm:rendering' ? 'rendering' : 'primed';
-          this.onStateChange?.(this.state);
-          this.workletNode!.port.onmessage = null;
-          resolve();
-        }
-      };
-      this.workletNode!.port.onmessage = handler;
-    });
+    return this.addWaiter('primed', this.PRIMING_TIMEOUT_MS);
   }
 
-  /**
-   * Wait until the worklet has produced nonzero output samples (pcm:rendering).
-   * Only call after waitUntilPrimed has resolved and the native producer is running.
-   */
+  /** Wait until nonzero output is produced (Test Tone only). */
   async waitUntilRendering(): Promise<void> {
     if (this.state === 'rendering') return;
     if (!this.workletNode) throw new Error('Worklet not initialized');
+    return this.addWaiter('rendering', this.RENDERING_TIMEOUT_MS);
+  }
 
+  /**
+   * Add a deferred waiter that resolves when the worklet emits the target message,
+   * or rejects on timeout / fatal / close.
+   */
+  private addWaiter(type: 'primed' | 'rendering', timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      this.renderingTimeout = setTimeout(() => {
-        this.renderingTimeout = null;
-        reject(new Error('Rendering timeout: no nonzero output within 5000ms'));
-      }, this.RENDERING_TIMEOUT_MS);
+      const timer = setTimeout(() => {
+        this.removeWaiter(waiter);
+        reject(new Error(`${type === 'primed' ? 'Priming' : 'Rendering'} timeout: no ${type} within ${timeoutMs}ms`));
+      }, timeoutMs);
 
-      const handler = (event: MessageEvent) => {
-        const msg = event.data;
-        if (!msg || typeof msg !== 'object') return;
-
-        if (msg.type === 'pcm:rendering') {
-          clearTimeout(this.renderingTimeout!);
-          this.renderingTimeout = null;
-          this.state = 'rendering';
-          this.onStateChange?.('rendering');
-          console.log('[ProcessAudioController] Rendering confirmed, peak:', msg.peak, 'rms:', msg.rms);
-          this.workletNode!.port.onmessage = null;
-          resolve();
-        } else if (msg.type === 'pcm:fatal') {
-          clearTimeout(this.renderingTimeout!);
-          this.renderingTimeout = null;
-          this.fatalError = msg.error;
-          this.state = 'error';
-          this.onStateChange?.('error');
-          reject(new Error(`Worklet fatal: ${msg.error}`));
-        }
-      };
-      this.workletNode!.port.onmessage = handler;
+      const waiter: Waiter = { type, resolve, reject, timer };
+      this.waiters.push(waiter);
     });
+  }
+
+  private resolveWaiters(type: 'primed' | 'rendering'): void {
+    for (let i = this.waiters.length - 1; i >= 0; i--) {
+      const w = this.waiters[i];
+      if (w.type === type) {
+        clearTimeout(w.timer);
+        this.waiters.splice(i, 1);
+        w.resolve();
+      }
+    }
+  }
+
+  private removeWaiter(waiter: Waiter): void {
+    const idx = this.waiters.indexOf(waiter);
+    if (idx >= 0) this.waiters.splice(idx, 1);
+  }
+
+  private rejectAllWaiters(err: Error): void {
+    for (const w of this.waiters) {
+      clearTimeout(w.timer);
+      w.reject(err);
+    }
+    this.waiters = [];
   }
 
   async resume(): Promise<boolean> {
     if (!this.audioContext) return false;
     if (this.audioContext.state === 'running') return true;
-
     if (this.audioContext.state === 'suspended') {
       try {
         await this.audioContext.resume();
         const ok = this.audioContext.state === 'running';
-        console.log(`[ProcessAudioController] Resume ${ok ? 'succeeded' : 'failed'}, state: ${this.audioContext.state}`);
-        if (ok) {
-          this.sampleAnalyser('post-resume');
-        }
+        if (ok) this.sampleAnalyser('post-resume');
         return ok;
-      } catch (err) {
-        console.warn('[ProcessAudioController] resume() threw:', err);
+      } catch {
         return false;
       }
     }
@@ -444,45 +332,55 @@ export class ProcessAudioController {
   }
 
   async close(): Promise<void> {
-    if (this.primingTimeout) {
-      clearTimeout(this.primingTimeout);
-      this.primingTimeout = null;
+    if (this.closed_) return;
+    this.closed_ = true;
+
+    // Reject all pending waiters
+    this.rejectAllWaiters(new Error('Controller closed'));
+
+    // Cancel own timeouts (legacy — kept for safety)
+    // (waiters are cleaned up via rejectAllWaiters above)
+
+    // Remove permanent listeners
+    if (this.port && this.portMessageHandler) {
+      this.port.removeEventListener('message', this.portMessageHandler);
     }
-    if (this.renderingTimeout) {
-      clearTimeout(this.renderingTimeout);
-      this.renderingTimeout = null;
+    if (this.port && this.portMessageErrorHandler) {
+      this.port.removeEventListener('messageerror', this.portMessageErrorHandler);
+    }
+    if (this.workletNode && this.workletMessageHandler) {
+      this.workletNode.port.removeEventListener('message', this.workletMessageHandler);
     }
 
+    // Close MessagePort
     if (this.port) {
-      this.port.close();
+      try { this.port.close(); } catch { /* ignore */ }
       this.port = null;
     }
 
-    if (this.workletNode) {
-      try {
-        this.workletNode.disconnect();
-      } catch {
-        /* ignore */
-      }
-      this.workletNode = null;
+    // Stop destination track
+    if (this.audioTrack) {
+      try { this.audioTrack.stop(); } catch { /* ignore */ }
+      this.audioTrack = null;
     }
 
+    // Disconnect nodes
+    if (this.workletNode) {
+      try { this.workletNode.disconnect(); } catch { /* ignore */ }
+      this.workletNode = null;
+    }
     if (this.analyserNode) {
-      try {
-        this.analyserNode.disconnect();
-      } catch {
-        /* ignore */
-      }
+      try { this.analyserNode.disconnect(); } catch { /* ignore */ }
       this.analyserNode = null;
     }
 
+    // Close AudioContext
     if (this.audioContext) {
       await this.audioContext.close();
       this.audioContext = null;
     }
 
     this.mediaDestination = null;
-    this.audioTrack = null;
     this.state = 'closed';
   }
 }

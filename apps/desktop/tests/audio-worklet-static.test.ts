@@ -22,6 +22,13 @@ describe('AudioWorklet module', () => {
     expect(content).not.toContain('ScriptProcessorNode');
   });
 
+  it('controller uses addEventListener not onmessage for worklet node port', () => {
+    const content = fs.readFileSync(controllerPath, 'utf-8');
+    // Permanent listener via addEventListener, never replaced by waiters
+    expect(content).toContain('this.workletNode.port.addEventListener');
+    expect(content).not.toContain('this.workletNode.port.onmessage');
+  });
+
   it('ProcessAudioController is constructable', async () => {
     const { ProcessAudioController } = await import('../src/renderer/audio/ProcessAudioController');
     const controller = new ProcessAudioController();
@@ -31,6 +38,19 @@ describe('AudioWorklet module', () => {
     expect(typeof controller.getTrack).toBe('function');
     expect(typeof controller.waitUntilPrimed).toBe('function');
     expect(typeof controller.waitUntilRendering).toBe('function');
+    expect(typeof controller.setStreamGeneration).toBe('function');
+    expect(typeof controller.getStreamGeneration).toBe('function');
+    // setStreamGeneration updates the internal generation even before initialize
+    controller.setStreamGeneration(42);
+    expect(controller.getStreamGeneration()).toBe(42);
+  });
+
+  it('controller has addWaiter/resolveWaiters/rejectAllWaiters methods', () => {
+    const content = fs.readFileSync(controllerPath, 'utf-8');
+    // addWaiter is private but exists in the source
+    expect(content).toContain('addWaiter');
+    expect(content).toContain('resolveWaiters');
+    expect(content).toContain('rejectAllWaiters');
   });
 
   it('PcmRingBuffer is exported', async () => {
@@ -67,6 +87,12 @@ describe('AudioWorklet module', () => {
       expect(content).toContain('expectedChannels: 2');
     });
 
+    it('worklet checks output.length !== 2 for invalid shape (no separate mono branch)', () => {
+      const content = fs.readFileSync(workletPath, 'utf-8');
+      // Must use !== 2 (not < 2 with separate mono handling)
+      expect(content).toContain('output.length !== 2');
+    });
+
     it('worklet fills invalid channels with zero (does not silently return)', () => {
       const content = fs.readFileSync(workletPath, 'utf-8');
       // Must fill zero in invalid-shape branch
@@ -91,6 +117,25 @@ describe('AudioWorklet module', () => {
       expect(primedIndex).toBeGreaterThan(0);
       expect(renderedIndex).toBeGreaterThan(0);
       expect(renderedIndex).toBeGreaterThan(primedIndex);
+    });
+  });
+
+  describe('Worklet real stream generation', () => {
+    it('worklet propagates streamGeneration in pcm:reset handler', () => {
+      const content = fs.readFileSync(workletPath, 'utf-8');
+      expect(content).toContain('msg.streamGeneration');
+      expect(content).toContain('this.stats.streamGeneration = msg.streamGeneration');
+    });
+
+    it('worklet includes generation in pcm:rendering message', () => {
+      const content = fs.readFileSync(workletPath, 'utf-8');
+      expect(content).toContain('pcm:rendering');
+      expect(content).toContain('generation: this.stats.streamGeneration');
+    });
+
+    it('controller setStreamGeneration forwards real generation to worklet', () => {
+      const content = fs.readFileSync(controllerPath, 'utf-8');
+      expect(content).toContain("type: 'pcm:reset', streamGeneration: gen");
     });
   });
 
@@ -138,6 +183,46 @@ describe('AudioWorklet module', () => {
       const controller = new ProcessAudioController();
       expect(typeof controller.isOutputShapeValid).toBe('function');
     });
+
+    it('close() stops audioTrack, rejects waiters, removes event listeners', () => {
+      const content = fs.readFileSync(controllerPath, 'utf-8');
+      // Track stop
+      expect(content).toContain('this.audioTrack.stop()');
+      // Waiter rejection
+      expect(content).toContain('rejectAllWaiters');
+      // Listener removal
+      expect(content).toContain('removeEventListener');
+      // Double-close guard
+      expect(content).toContain('this.closed_');
+    });
+
+    it('close() rejects pending waiters before cleaning up', () => {
+      const content = fs.readFileSync(controllerPath, 'utf-8');
+      // rejectAllWaiters must be called early in close (before track/port cleanup)
+      const closeBlock = content.indexOf('async close()');
+      const closePortion = content.slice(closeBlock, closeBlock + 600);
+      expect(closePortion.indexOf('rejectAllWaiters')).toBeGreaterThan(0);
+      expect(closePortion.indexOf('rejectAllWaiters')).toBeLessThan(
+        closePortion.indexOf('audioTrack.stop') > 0
+          ? closePortion.indexOf('audioTrack.stop')
+          : Infinity,
+      );
+    });
+
+    it('hasAudio() returns false after clearAudioController()', async () => {
+      const { PublisherManager } = await import('../src/renderer/services/publisher-manager');
+      const mgr = new PublisherManager({
+        onStateChange: () => {},
+        onStats: () => {},
+        onError: () => {},
+        onTrackEnded: () => {},
+      });
+      // Before any controller is set, hasAudio() should be false
+      expect(mgr.hasAudio()).toBe(false);
+      // After clearAudioController with no controller, still false
+      mgr.clearAudioController();
+      expect(mgr.hasAudio()).toBe(false);
+    });
   });
 
   describe('Worklet stats', () => {
@@ -145,6 +230,12 @@ describe('AudioWorklet module', () => {
       const content = fs.readFileSync(workletPath, 'utf-8');
       expect(content).toContain('framesSinceReport');
       expect(content).toContain('framesSinceReport >= 48000');
+    });
+
+    it('framesSinceReport uses subtract not reset to zero', () => {
+      const content = fs.readFileSync(workletPath, 'utf-8');
+      expect(content).toContain('framesSinceReport -= 48000');
+      expect(content).not.toContain('framesSinceReport = 0');
     });
 
     it('stats reset nonZeroSamples after reporting', () => {

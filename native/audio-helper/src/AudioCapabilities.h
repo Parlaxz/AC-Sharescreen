@@ -25,6 +25,7 @@ struct AudioCapability {
   CompileTimeSupport compileTime;
   RuntimeSupport runtime;
   bool usable = false;
+  bool endpointLoopbackSupported = false;
   std::string reasonCode;
   std::string reasonMessage;
 };
