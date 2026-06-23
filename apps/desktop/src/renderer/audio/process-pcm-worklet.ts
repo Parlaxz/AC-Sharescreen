@@ -4,18 +4,19 @@
  * Receives float32 interleaved PCM samples from the renderer's main thread
  * through its MessagePort, stores them in a ring buffer, and serves them
  * to the audio rendering callback.
+ *
+ * Expected output shape: exactly 2 channels (stereo).
+ * If the output shape differs, a fatal diagnostic is emitted.
  */
 
-// Import types are not available in AudioWorklet scope
-// (AudioWorkletGlobalScope), so we use inline types.
+// Buffer sizes: 8192 frames = ~170ms at 48kHz (within 250ms hard limit)
+const kBufferFrames = 8192;
+const kTargetBufferFrames = 3840; // ~80ms target priming
 
 interface WorkletMessage {
   type: 'pcm:data' | 'pcm:reset' | 'pcm:discontinuity';
-  /** Interleaved float32 PCM data */
   data?: Float32Array;
-  /** Frame count for this message */
   frameCount?: number;
-  /** New stream generation on reset */
   streamGeneration?: number;
 }
 
@@ -32,7 +33,6 @@ interface WorkletStats {
   targetBufferDepth: number;
   messagesReceived: number;
   invalidMessages: number;
-  /** Render diagnostic fields */
   peak: number;
   rms: number;
   nonZeroSamples: number;
@@ -40,13 +40,12 @@ interface WorkletStats {
   outputFrames: number;
   underflowFrames: number;
   ringFramesAvailable: number;
+  /** Accumulator: frames since last stats report */
+  framesSinceReport: number;
+  /** Whether rendering (nonzero output) has ever happened */
+  hasRenderedNonZero: boolean;
 }
 
-/**
- * Self-contained ring buffer for AudioWorklet scope.
- * Logic mirrors PcmRingBuffer but cannot import it due to
- * AudioWorklet scope restrictions.
- */
 class PcmRingBuffer {
   private buffer: Float32Array;
   private writeIndex = 0;
@@ -97,21 +96,17 @@ class PcmRingBuffer {
       }
       return 0;
     }
-    // Read interleaved buffer into planar output
     for (let f = 0; f < actual; f++) {
       for (let ch = 0; ch < this.channels; ch++) {
         output[ch][f] = this.buffer[this.readIndex++];
       }
     }
-    // Handle wraparound
     this.readIndex %= this.buffer.length;
-
     for (let ch = 0; ch < this.channels; ch++) {
       for (let f = actual; f < frameCount; f++) {
         output[ch][f] = 0;
       }
     }
-
     this.framesAvailable_ -= actual;
     this.totalRead += actual;
     return actual;
@@ -133,14 +128,6 @@ class PcmRingBuffer {
     return this.underrunFrames;
   }
 
-  get totalRenderedFrames(): number {
-    return this.totalRead;
-  }
-
-  get totalReceivedFrames(): number {
-    return this.totalWritten;
-  }
-
   flushAudio(): void {
     this.framesAvailable_ = 0;
     this.writeIndex = 0;
@@ -158,16 +145,13 @@ class PcmRingBuffer {
   }
 }
 
-// Buffer sizes: 8192 frames = ~170ms at 48kHz (within 250ms hard limit)
-const kBufferFrames = 8192;
-const kTargetBufferFrames = 3840; // ~80ms target priming
-
 class ProcessPcmWorklet extends AudioWorkletProcessor {
   private ringBuffer: PcmRingBuffer;
   private stats: WorkletStats;
   private primed = false;
-  private discontinuityPending = false;
-  private currentStreamGeneration: number = 0;
+  private renderedNonZero = false;
+  private outputShapeReported = false;
+  private fatalShapeReported = false;
 
   constructor(options: AudioWorkletNodeOptions) {
     super();
@@ -192,9 +176,10 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       outputFrames: 0,
       underflowFrames: 0,
       ringFramesAvailable: 0,
+      framesSinceReport: 0,
+      hasRenderedNonZero: false,
     };
 
-    // Receive messages from the renderer main thread
     this.port.onmessage = (event: MessageEvent<WorkletMessage>) => {
       this.handleMessage(event.data);
     };
@@ -210,7 +195,6 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
           this.stats.framesReceived += written;
           this.stats.overrunFrames = this.ringBuffer.overrun;
 
-          // Check if primed — use actual buffer depth, not cumulative
           if (!this.primed && this.ringBuffer.framesAvailable >= kTargetBufferFrames) {
             this.primed = true;
             this.port.postMessage({ type: 'pcm:primed' });
@@ -224,16 +208,14 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       case 'pcm:reset': {
         this.ringBuffer.reset();
         this.primed = false;
-        this.discontinuityPending = false;
+        this.renderedNonZero = false;
         break;
       }
 
       case 'pcm:discontinuity': {
-        this.discontinuityPending = true;
         this.stats.discontinuities++;
-        // Flush pre-discontinuity audio, preserve session counters
         this.ringBuffer.flushAudio();
-        this.primed = false; // Must re-prime after discontinuity
+        this.primed = false;
         break;
       }
 
@@ -250,14 +232,65 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
   ): boolean {
     this.stats.processCalls++;
     const output = outputs[0];
+
+    // Report output shape on first call
+    if (!this.outputShapeReported) {
+      this.outputShapeReported = true;
+      const channelCount = output ? output.length : 0;
+      this.port.postMessage({
+        type: 'pcm:output-shape',
+        outputCount: outputs.length,
+        channelCount,
+        quantumFrames: output && output[0] ? output[0].length : 0,
+        sampleRate: sampleRate,
+        generation: this.primed ? 1 : 0,
+      });
+    }
+
+    // Validate output shape — must be exactly 2 channels
     if (!output || output.length < 2) {
-      // No output channels — keep processor alive
+      // Emit fatal diagnostic once
+      if (!this.fatalShapeReported) {
+        this.fatalShapeReported = true;
+        this.port.postMessage({
+          type: 'pcm:fatal',
+          error: 'invalid-output-channel-count',
+          expectedChannels: 2,
+          actualChannels: output ? output.length : 0,
+          generation: 0,
+        });
+      }
+      // Fill all available channels with zero to keep graph alive
+      if (output) {
+        for (let ch = 0; ch < output.length; ch++) {
+          output[ch].fill(0);
+        }
+      }
+      this.stats.outputFrames += output && output[0] ? output[0].length : 128;
       return true;
     }
 
-    const renderQuantum = output[0].length; // Typically 128
+    // Handle mono (exactly 1 channel) by emitting fatal but still filling
+    if (output.length === 1) {
+      if (!this.fatalShapeReported) {
+        this.fatalShapeReported = true;
+        this.port.postMessage({
+          type: 'pcm:fatal',
+          error: 'invalid-output-channel-count',
+          expectedChannels: 2,
+          actualChannels: 1,
+          generation: 0,
+        });
+      }
+      output[0].fill(0);
+      this.stats.silentFrames += output[0].length;
+      this.stats.outputFrames += output[0].length;
+      return true;
+    }
 
-    // If not primed yet, output silence without consuming buffer
+    const renderQuantum = output[0].length;
+
+    // Not primed — silence, preserve buffer
     if (!this.primed) {
       for (let ch = 0; ch < output.length; ch++) {
         output[ch].fill(0);
@@ -267,17 +300,18 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       return true;
     }
 
-    // Normal processing
+    // Normal processing: read from ring buffer
     const framesRead = this.ringBuffer.read(output, renderQuantum);
     this.stats.framesRendered += framesRead;
     this.stats.underrunFrames = this.ringBuffer.underrun;
     this.stats.outputFrames += renderQuantum;
+    this.stats.framesSinceReport += renderQuantum;
 
     if (framesRead === 0) {
       this.stats.silentFrames += renderQuantum;
     }
 
-    // Calculate render diagnostics (peak, RMS, non-zero samples)
+    // Calculate render diagnostics
     let sumSquares = 0;
     let samplePeak = 0;
     let nonZero = 0;
@@ -294,12 +328,10 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
     this.stats.rms = Math.sqrt(sumSquares / (renderQuantum * output.length));
     this.stats.nonZeroSamples += nonZero;
 
-    // Track underflow frames (requested frames that were not available)
     if (framesRead < renderQuantum) {
       this.stats.underflowFrames += renderQuantum - framesRead;
     }
 
-    // Update buffer depth stats
     this.stats.ringFramesAvailable = this.ringBuffer.framesAvailable;
     this.stats.currentBufferDepth = this.ringBuffer.framesAvailable;
     this.stats.maxBufferDepth = Math.max(
@@ -307,9 +339,21 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       this.ringBuffer.framesAvailable,
     );
 
-    // Send periodic stats every ~1 second at 48kHz
-    if (this.stats.framesRendered % 48000 === 0) {
-      // Reset per-second diagnostics
+    // Emit pcm:rendering once nonzero output has been produced
+    if (!this.renderedNonZero && samplePeak > 0) {
+      this.renderedNonZero = true;
+      this.stats.hasRenderedNonZero = true;
+      this.port.postMessage({
+        type: 'pcm:rendering',
+        peak: samplePeak,
+        rms: this.stats.rms,
+        framesRendered: this.stats.framesRendered,
+      });
+    }
+
+    // Send periodic stats every ~1s (48000 frames) using accumulator
+    if (this.stats.framesSinceReport >= 48000) {
+      this.stats.framesSinceReport = 0;
       this.stats.nonZeroSamples = 0;
       this.port.postMessage({
         type: 'pcm:stats',
@@ -317,7 +361,6 @@ class ProcessPcmWorklet extends AudioWorkletProcessor {
       });
     }
 
-    // Return true to keep processor alive
     return true;
   }
 }

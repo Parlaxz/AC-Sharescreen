@@ -72,6 +72,13 @@ export class PublisherManager {
     this._audioState = "active";
   }
 
+  /** Remove a previously set audio controller without closing it (caller owns teardown). */
+  clearAudioController(): void {
+    this.audioController = null;
+    this.audioTrack = null;
+    this._audioState = "disabled";
+  }
+
   private buildCombinedStream(): MediaStream {
     const videoTracks = this.captureStream?.getVideoTracks() ?? [];
     const audioTrack = this.audioController?.getTrack() ?? null;
@@ -82,8 +89,17 @@ export class PublisherManager {
       stream.addTrack(videoTracks[0]);
     }
 
+    // Only add audio when controller is rendering (nonzero output produced)
+    // or at minimum primed (buffer filled). A live track alone is insufficient —
+    // MediaStreamAudioDestinationNode tracks are always "live" even when silent.
     if (audioTrack && audioTrack.readyState === "live") {
-      stream.addTrack(audioTrack);
+      const ctrlState = this.audioController?.getState();
+      if (ctrlState === "rendering" || ctrlState === "primed") {
+        stream.addTrack(audioTrack);
+      } else {
+        console.warn('[PublisherManager] Audio track is live but controller state is',
+          ctrlState, '- skipping audio from combined stream');
+      }
     }
 
     return stream;

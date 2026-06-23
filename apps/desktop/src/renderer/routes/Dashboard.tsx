@@ -378,10 +378,13 @@ export function Dashboard() {
       setAudioIsSynthetic(false);
 
       // ── Test Tone mode: explicit synthetic, no fallback ──────────────
+      // Uses a provisional controller: created, validated, and only attached
+      // to the publisher after priming AND rendering (nonzero output) succeed.
       if (effectiveAudioMode === 'test-tone') {
-        try {
-          setAudioEnabled(true);
+        let provisionalController: ProcessAudioController | null = null;
+        setAudioEnabled(true);
 
+        try {
           const portPromise = waitForNextAudioPort();
           const portResult = await api?.requestAudioPort();
           if (!portResult || !portResult.success) {
@@ -390,43 +393,59 @@ export function Dashboard() {
           const port = await portPromise;
 
           const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
-          const controller = new ProcessAudioController();
-          await controller.initialize(port);
-          mgr.setAudioController(controller);
+          provisionalController = new ProcessAudioController();
+          await provisionalController.initialize(port);
 
           const result = await api?.startSyntheticAudio();
           if (!result || !result.success) {
-            setAudioError(result?.error ?? 'Test tone could not start');
-            setAudioEnabled(false);
-            try { api?.stopAudio(); } catch { /* ignore */ }
-          } else {
-            setAudioIsSynthetic(true);
-            setAppliedAudioMode('test-tone');
-            await controller.waitUntilPrimed();
-            audioConfigured = true;
+            throw new Error(result?.error ?? 'Test tone could not start');
           }
+
+          setAudioIsSynthetic(true);
+          setAppliedAudioMode('test-tone');
+
+          // Wait for ring buffer to fill (primed)
+          await provisionalController.waitUntilPrimed();
+          console.log('[Audio] Test tone primed');
+
+          // Wait for nonzero output (rendering) — confirms worklet output path works
+          await provisionalController.waitUntilRendering();
+          console.log('[Audio] Test tone rendering confirmed');
+
+          // Sample analyser to verify nonzero audio in the graph
+          const analyserReading = provisionalController.sampleAnalyser('pre-publish');
+          if (!analyserReading || analyserReading.peak === 0) {
+            console.warn('[Audio] Analyser shows zero peak before publish — Test Tone may be silent');
+          } else {
+            console.log('[Audio] Analyser OK — peak:', analyserReading.peak, 'rms:', analyserReading.rms);
+          }
+
+          // All validation passed — attach controller to publisher
+          mgr.setAudioController(provisionalController);
+          provisionalController = null; // ownership transferred
+          audioConfigured = true;
         } catch (err) {
-          setAudioError(err instanceof Error ? err.message : String(err));
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          setAudioError(errorMsg);
           console.warn("[Audio] Test tone setup failed:", err);
-          // Emit pipeline snapshot for diagnostics
-          try {
-            const portDiag = controller?.getPortDiagnostics?.();
-            console.warn("[Audio-Pipeline] Controller port diag:", JSON.stringify(portDiag));
-          } catch { /* best effort */ }
-          try {
-            const snapshot = await api?.getPipelineSnapshot?.();
-            console.warn("[Audio-Pipeline] Full snapshot:", JSON.stringify(snapshot));
-          } catch { /* best effort */ }
+
+          // Full cleanup of provisional controller
+          if (provisionalController) {
+            try { await provisionalController.close(); } catch { /* ignore */ }
+            provisionalController = null;
+          }
+          mgr.clearAudioController();
+          try { await api?.stopAudio(); } catch { /* ignore */ }
           setAudioEnabled(false);
-          try { api?.stopAudio(); } catch { /* ignore */ }
         }
       }
 
       // ── Real capture modes: application or filtered monitor ──────────
       if (effectiveAudioMode !== 'none' && effectiveAudioMode !== 'test-tone') {
-        try {
-          setAudioEnabled(true);
+        let provisionalController: ProcessAudioController | null = null;
+        setAudioEnabled(true);
 
+        try {
           const portPromise = waitForNextAudioPort();
           const portResult = await api?.requestAudioPort();
           if (!portResult || !portResult.success) {
@@ -435,9 +454,8 @@ export function Dashboard() {
           const port = await portPromise;
 
           const { ProcessAudioController } = await import("../audio/ProcessAudioController.js");
-          const controller = new ProcessAudioController();
-          await controller.initialize(port);
-          mgr.setAudioController(controller);
+          provisionalController = new ProcessAudioController();
+          await provisionalController.initialize(port);
 
           // Start capture — check result BEFORE priming
           let captureResult: { success: boolean; error?: string } | undefined;
@@ -456,23 +474,33 @@ export function Dashboard() {
             const fallbackResult = await attemptDevSyntheticFallback(api, captureResult?.error);
             if (fallbackResult === 'synthetic') {
               setAudioIsSynthetic(true);
-              await controller.waitUntilPrimed();
+              await provisionalController.waitUntilPrimed();
+              // Real audio does not require waitUntilRendering (source may be legitimately silent)
+              mgr.setAudioController(provisionalController);
+              provisionalController = null;
               audioConfigured = true;
             } else {
-              setAudioError(captureResult?.error ?? 'Audio capture could not start');
-              setAudioEnabled(false);
-              try { api?.stopAudio(); } catch { /* ignore */ }
+              throw new Error(captureResult?.error ?? 'Audio capture could not start');
             }
           } else {
             setAppliedAudioMode(effectiveAudioMode);
-            await controller.waitUntilPrimed();
+            await provisionalController.waitUntilPrimed();
+            mgr.setAudioController(provisionalController);
+            provisionalController = null;
             audioConfigured = true;
           }
         } catch (err) {
-          setAudioError(err instanceof Error ? err.message : String(err));
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          setAudioError(errorMsg);
           console.warn("[Audio] Setup failed, continuing video-only:", err);
+
+          if (provisionalController) {
+            try { await provisionalController.close(); } catch { /* ignore */ }
+            provisionalController = null;
+          }
+          mgr.clearAudioController();
+          try { await api?.stopAudio(); } catch { /* ignore */ }
           setAudioEnabled(false);
-          try { api?.stopAudio(); } catch { /* ignore */ }
         }
       }
 
