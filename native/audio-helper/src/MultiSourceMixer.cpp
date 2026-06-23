@@ -206,19 +206,17 @@ auto MultiSourceMixer::Start(PacketCallback onPacket) -> MultiSourceMixer::Start
     }
 
     // Wait for the mixer thread to actually start before returning
-    int waitLoops = 0;
-    while (!threadStarted_.load() && running_.load() && waitLoops < 10000) {
-        Sleep(0);
-        waitLoops++;
-    }
-
-    if (!threadStarted_.load()) {
+    {
+        std::unique_lock<std::mutex> lock(threadStartedMutex_);
+        if (!threadStartedCv_.wait_for(lock, std::chrono::seconds(1),
+                [this]() { return threadStarted_.load(); })) {
         // Thread failed to start in reasonable time
-        running_.store(false);
-        if (mixerThread_.joinable()) mixerThread_.join();
-        result.error = StartError::ThreadCreationFailed;
-        std::cerr << "[Mixer] Start failed: thread did not start within timeout" << std::endl;
-        return result;
+            running_.store(false);
+            if (mixerThread_.joinable()) mixerThread_.join();
+            result.error = StartError::ThreadCreationFailed;
+            std::cerr << "[Mixer] Start failed: thread did not start within timeout" << std::endl;
+            return result;
+        }
     }
 
     result.success = true;
@@ -300,7 +298,11 @@ MixerDiagnostics MultiSourceMixer::GetDiagnostics() const {
 
 void MultiSourceMixer::MixerThread() {
     // Signal that the thread has started
-    threadStarted_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(threadStartedMutex_);
+        threadStarted_.store(true);
+    }
+    threadStartedCv_.notify_one();
 
     // Set thread priority
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);

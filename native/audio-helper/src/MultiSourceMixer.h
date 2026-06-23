@@ -2,6 +2,7 @@
 #define SCREENLINK_MULTI_SOURCE_MIXER_H
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -137,6 +138,8 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> threadStarted_{false};
+    std::mutex threadStartedMutex_;
+    std::condition_variable threadStartedCv_;
     std::thread mixerThread_;
 
     // Per-source capture state

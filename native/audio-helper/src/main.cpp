@@ -1118,7 +1118,7 @@ int main(int argc, char* argv[]) {
             bool outputReceived = false;
             std::vector<float> capturedMix;
             std::vector<screenlink::audio::AudioPacket> outputPackets;
-            mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
+            auto startResult = mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
                 // Copy frame data while still in the mixer thread
                 if (p.frames && p.frameCount > 0) {
                     capturedMix.assign(p.frames, p.frames + p.frameCount * p.channels);
@@ -1134,6 +1134,7 @@ int main(int argc, char* argv[]) {
                 outputCv.notify_one();
                 return false; // stop after first packet
             });
+            expect(startResult.success, "MultiSourceMixer: Start() succeeded");
 
             {
                 std::unique_lock<std::mutex> lock(outputMutex);
@@ -1181,7 +1182,7 @@ int main(int argc, char* argv[]) {
             bool outputReceived = false;
             std::vector<float> capturedMix;
             std::vector<screenlink::audio::AudioPacket> outputPackets;
-            mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
+            auto startResult = mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
                 if (p.frames && p.frameCount > 0) {
                     capturedMix.assign(p.frames, p.frames + p.frameCount * p.channels);
                 }
@@ -1196,6 +1197,7 @@ int main(int argc, char* argv[]) {
                 outputCv.notify_one();
                 return false;
             });
+            expect(startResult.success, "MultiSourceMixer: Start() succeeded with no sources");
 
             {
                 std::unique_lock<std::mutex> lock(outputMutex);
@@ -1239,7 +1241,7 @@ int main(int argc, char* argv[]) {
             bool outputReceived = false;
             std::vector<float> capturedMix;
             std::vector<screenlink::audio::AudioPacket> outputPackets;
-            mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
+            auto startResult = mixer.Start([&](const screenlink::audio::AudioPacket& p) -> bool {
                 if (p.frames && p.frameCount > 0) {
                     capturedMix.assign(p.frames, p.frames + p.frameCount * p.channels);
                 }
@@ -1254,6 +1256,7 @@ int main(int argc, char* argv[]) {
                 outputCv.notify_one();
                 return false;
             });
+            expect(startResult.success, "MultiSourceMixer: Start() succeeded for stereo test");
 
             {
                 std::unique_lock<std::mutex> lock(outputMutex);
