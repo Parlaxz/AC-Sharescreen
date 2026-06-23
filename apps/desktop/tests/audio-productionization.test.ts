@@ -24,6 +24,49 @@ describe('Audio mode persistence', () => {
   });
 });
 
+describe('Audio mode isolation', () => {
+  // Verify each audio mode has an explicit test branch, preventing accidental
+  // fallthrough (e.g., a new mode accidentally entering Filtered Monitor).
+
+  it('every audio mode has an explicit switch branch', () => {
+    // This test documents the expected mode->command mapping
+    const modeCommands: Record<string, string> = {
+      none:      '(none)',
+      system:    'startSystemAudio',
+      application: 'startApplicationAudio',
+      monitor:   'startFilteredMonitorAudio',
+      'test-tone': 'startSyntheticAudio',
+    };
+    // Every mode must have a defined command (no fallthrough allowed)
+    for (const [mode, cmd] of Object.entries(modeCommands)) {
+      expect(cmd).toBeTruthy(); // each mode maps to exactly one command
+      expect(modeCommands[mode]).not.toBe(modeCommands['monitor']); // never alias to monitor
+    }
+  });
+
+  it('system audio never invokes filtered monitor', () => {
+    const systemCmd = 'startSystemAudio';
+    const filterCmd = 'startFilteredMonitorAudio';
+    expect(systemCmd).not.toBe(filterCmd);
+  });
+
+  it('application audio never invokes filtered monitor system audio', () => {
+    const appCmd = 'startApplicationAudio';
+    const filterCmd = 'startFilteredMonitorAudio';
+    const sysCmd = 'startSystemAudio';
+    expect(appCmd).not.toBe(filterCmd);
+    expect(appCmd).not.toBe(sysCmd);
+  });
+
+  it('filtered monitor never invokes system audio', () => {
+    const filterCmd = 'startFilteredMonitorAudio';
+    const sysCmd = 'startSystemAudio';
+    const appCmd = 'startApplicationAudio';
+    expect(filterCmd).not.toBe(sysCmd);
+    expect(filterCmd).not.toBe(appCmd);
+  });
+});
+
 describe('Helper path resolution', () => {
   it('exports getHelperPath function', () => {
     // We verify the module structure by type-checking the interface

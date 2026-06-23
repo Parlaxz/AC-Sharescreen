@@ -45,6 +45,7 @@ export function Dashboard() {
   const [appliedAudioMode, setAppliedAudioMode] = useState<'none' | 'system' | 'application' | 'monitor' | 'test-tone'>('none');
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioIsSynthetic, setAudioIsSynthetic] = useState(false);
+  const [capAudioModes, setCapAudioModes] = useState<Record<string, boolean> | null>(null);
   // local stats now flow through PublisherManager events
 
   function formatBitsTransferred(bytes: number): string {
@@ -71,7 +72,7 @@ export function Dashboard() {
         }
   }
 
-  // Restore saved source and audio mode from settings on mount
+  // Restore saved source and audio mode from settings on mount; load capabilities
   useEffect(() => {
     (async () => {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -80,8 +81,28 @@ export function Dashboard() {
         setSource(s.lastSourceId, s.lastSourceName);
       }
       if (s && s.lastAudioMode) {
+        // If the persisted mode is unsupported on this build, fall back to 'none'
         setAudioMode(s.lastAudioMode);
       }
+
+      // Load capability model to drive UI mode availability
+      try {
+        const capsResp = await api?.getAudioCapabilities();
+        if (capsResp?.success && capsResp.data) {
+          const { getAudioModeInfo } = await import("@screenlink/shared");
+          const modes = getAudioModeInfo(capsResp.data);
+          const modeMap: Record<string, boolean> = {};
+          for (const m of modes) {
+            modeMap[m.mode] = m.supported;
+          }
+          setCapAudioModes(modeMap);
+
+          // If the current selection is now unsupported, reset to 'none'
+          if (modeMap[audioMode] === false) {
+            setAudioMode('none');
+          }
+        }
+      } catch { /* best effort */ }
     })();
   }, []);
 
@@ -458,17 +479,75 @@ export function Dashboard() {
           await provisionalController.initialize(port);
 
           // Start capture — check result BEFORE priming
+          console.log(`[Audio] requestedMode=${effectiveAudioMode}`);
           let captureResult: { success: boolean; error?: string; streamGeneration?: number } | undefined;
 
-          if (effectiveAudioMode === 'system') {
-            captureResult = await api?.startSystemAudio() as { success: boolean; error?: string; streamGeneration?: number } | undefined;
-          } else if (effectiveAudioMode === 'application') {
-            captureResult = await api?.startApplicationAudio({ sourceId }) as { success: boolean; error?: string } | undefined;
+          // Explicit switch: every audio mode must have its own branch.
+          // NEVER fall through to a default that aliases one mode to another.
+          switch (effectiveAudioMode) {
+            case 'system': {
+              console.log('[Audio] ipcCommand=audio:start-system');
+              captureResult = await api?.startSystemAudio() as { success: boolean; error?: string; streamGeneration?: number } | undefined;
+              console.log(`[Audio] captureResult=`, JSON.stringify(captureResult));
+              break;
+            }
+            case 'application': {
+              captureResult = await api?.startApplicationAudio({ sourceId }) as { success: boolean; error?: string; streamGeneration?: number } | undefined;
+              break;
+            }
+            case 'monitor': {
+              captureResult = await api?.startFilteredMonitorAudio({
+                excludeDiscord: true,
+                excludeScreenLink: true,
+              }) as { success: boolean; error?: string; streamGeneration?: number } | undefined;
+              break;
+            }
+            default:
+              throw new Error(`Unsupported audio mode: ${effectiveAudioMode}`);
+          }
+
+          if (!captureResult || !captureResult.success) {
+            // Real capture failed — development-only synthetic fallback
+            const fallbackResult = await attemptDevSyntheticFallback(api, captureResult?.error);
+            if (fallbackResult === 'synthetic') {
+              setAudioIsSynthetic(true);
+              await provisionalController.waitUntilPrimed();
+              // Real audio does not require waitUntilRendering (source may be legitimately silent)
+              mgr.setAudioController(provisionalController);
+              provisionalController = null;
+              console.log('[Audio] Using synthetic fallback audio');
+            } else {
+              // Real audio failure with no synthetic fallback — continue video-only
+              console.warn('[Audio] Real audio capture failed, continuing video-only:', captureResult?.error ?? 'unknown');
+              setAppliedAudioMode('none');
+              if (provisionalController) {
+                try { await provisionalController.close(); } catch { /* ignore */ }
+                provisionalController = null;
+              }
+              mgr.clearAudioController();
+              try { await api?.stopAudio(); } catch { /* ignore */ }
+              setAudioEnabled(false);
+              captureResult = undefined;
+            }
           } else {
-            captureResult = await api?.startFilteredMonitorAudio({
-              excludeDiscord: true,
-              excludeScreenLink: true,
-            }) as { success: boolean; error?: string } | undefined;
+            // Real capture succeeded
+            console.log(`[Audio] appliedMode=${effectiveAudioMode} streamGeneration=${captureResult.streamGeneration ?? '(not set)'}`);
+            setAppliedAudioMode(effectiveAudioMode);
+
+            if (effectiveAudioMode === 'test-tone') {
+              setAudioIsSynthetic(true);
+              // Test Tone requires nonzero rendering before publication
+              await provisionalController.waitUntilRendering();
+            } else {
+              setAudioIsSynthetic(false);
+              // Real audio (system/application/monitor) does not require waitUntilRendering
+              // because the source may be legitimately silent
+              await provisionalController.waitUntilPrimed();
+            }
+
+            console.log(`[Publisher] audioTracks=${mgr.getAudioTrack() ? 1 : 0}`);
+            mgr.setAudioController(provisionalController);
+            provisionalController = null;
           }
 
           if (!captureResult || !captureResult.success) {
@@ -623,7 +702,7 @@ export function Dashboard() {
             <>
               <button onClick={handleShareScreen}>Share Screen</button>
               <button onClick={handleShareWindow}>Share Window</button>
-              <div className="card" style={{ marginTop: "0.5rem", padding: "0.5rem" }}>
+                <div className="card" style={{ marginTop: "0.5rem", padding: "0.5rem" }}>
                 <h4>Audio</h4>
                 <label>
                   <input type="radio" name="audioMode" value="none" checked={audioMode === 'none'}
@@ -631,18 +710,22 @@ export function Dashboard() {
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="system" checked={audioMode === 'system'}
+                    disabled={capAudioModes?.['system'] === false}
                     onChange={() => setAudioMode('system')} /> System Audio
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="application" checked={audioMode === 'application'}
+                    disabled={capAudioModes?.['application'] === false}
                     onChange={() => setAudioMode('application')} /> App Audio (window only)
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="monitor" checked={audioMode === 'monitor'}
+                    disabled={capAudioModes?.['monitor'] === false}
                     onChange={() => setAudioMode('monitor')} /> Filtered Monitor Audio
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="test-tone" checked={audioMode === 'test-tone'}
+                    disabled={capAudioModes?.['test-tone'] === false}
                     onChange={() => setAudioMode('test-tone')} /> Test Tone
                 </label>
                 {audioMode === 'system' && (
@@ -652,12 +735,16 @@ export function Dashboard() {
                 )}
                 {audioMode === 'application' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Captures audio from the selected application process tree only.
+                    {capAudioModes?.['application'] === false
+                      ? 'Requires Windows build 20348 or newer.'
+                      : 'Captures audio from the selected application process tree only.'}
                   </p>
                 )}
                 {audioMode === 'monitor' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Captures audio from active applications. Discord and ScreenLink playback are excluded.
+                    {capAudioModes?.['monitor'] === false
+                      ? 'Filtered Monitor requires Windows build 20348 or newer because it uses process-specific loopback capture.'
+                      : 'Captures audio from active applications. Discord and ScreenLink playback are excluded.'}
                   </p>
                 )}
                 {audioMode === 'test-tone' && (
