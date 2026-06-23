@@ -40,8 +40,15 @@ describe('Audio mode isolation', () => {
     // Every mode must have a defined command (no fallthrough allowed)
     for (const [mode, cmd] of Object.entries(modeCommands)) {
       expect(cmd).toBeTruthy(); // each mode maps to exactly one command
-      expect(modeCommands[mode]).not.toBe(modeCommands['monitor']); // never alias to monitor
+      // Only non-monitor modes should not equal the monitor command
+      if (mode !== 'monitor') {
+        expect(modeCommands[mode]).not.toBe(modeCommands['monitor']);
+      }
     }
+    // Verify no two distinct modes share the same command (no aliasing)
+    const commands = Object.values(modeCommands);
+    const uniqueCommands = new Set(commands);
+    expect(uniqueCommands.size).toBe(commands.length);
   });
 
   it('system audio never invokes filtered monitor', () => {
