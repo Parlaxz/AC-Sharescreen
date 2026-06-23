@@ -325,6 +325,10 @@ export class ControlClient {
     return resp.result as Record<string, unknown>;
   }
 
+  async startEndpointLoopback(): Promise<{ streamGeneration: number }> {
+    return this.sendRequest('startEndpointLoopback');
+  }
+
   async stopCapture(): Promise<ControlResponse> { return this.sendRequest('stopCapture'); }
 
   async getDiagnostics(): Promise<HelperDiagnostics> {

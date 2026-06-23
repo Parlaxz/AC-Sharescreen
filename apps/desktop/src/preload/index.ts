@@ -53,6 +53,7 @@ const api: ScreenLinkAPI = {
   enumerateAudioSessions: () => ipcRenderer.invoke("enumerate-audio-sessions"),
   startApplicationAudio: (options) => ipcRenderer.invoke("start-application-audio", options),
   startFilteredMonitorAudio: (options) => ipcRenderer.invoke("start-filtered-monitor-audio", options),
+  startSystemAudio: () => ipcRenderer.invoke("start-system-audio"),
   getMixerState: () => ipcRenderer.invoke("get-mixer-state"),
   getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
   getPipelineSnapshot: () => ipcRenderer.invoke("get-pipeline-snapshot"),

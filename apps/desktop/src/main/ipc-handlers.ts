@@ -456,6 +456,17 @@ export function registerIpcHandlers(
     }
   });
 
+  ipcMain.handle("start-system-audio", async () => {
+    try {
+      const helper = await ensureAudioHelper();
+      const streamGen = await helper.startEndpointLoopback();
+      return { success: true, streamGeneration: streamGen };
+    } catch (err) {
+      console.error("[IPC] start-system-audio failed:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+
   ipcMain.handle('get-mixer-state', async () => {
     if (!currentAudioHelper) {
       return { state: 'stopped', activeSources: 0 };

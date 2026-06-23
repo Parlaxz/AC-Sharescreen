@@ -109,7 +109,7 @@ export class AudioHelperManager {
 
   private state: HelperStateEnum = 'disconnected';
   private streamGeneration: number = -1;
-  private currentSourceType: 'synthetic' | 'process' | 'application' | 'monitor' | null = null;
+  private currentSourceType: 'synthetic' | 'process' | 'application' | 'monitor' | 'system' | null = null;
   private stats: AudioHelperStats;
   private lastError_: string | null = null;
   private restartCount: number = 0;
@@ -273,6 +273,14 @@ export class AudioHelperManager {
     this.state = 'capturing';
     this.parser?.reset();
     this.pcmBridge.forwardReset(result.streamGeneration);
+    return result.streamGeneration;
+  }
+
+  async startEndpointLoopback(): Promise<number> {
+    this.ensureReady();
+    const result = await this.control!.startEndpointLoopback();
+    this.streamGeneration = (result.streamGeneration as number) || this.streamGeneration;
+    this.currentSourceType = 'system';
     return result.streamGeneration;
   }
 

@@ -41,7 +41,6 @@ export interface AudioModeInfo {
 
 export function getAudioModeInfo(caps: AudioCapabilityResult | null): AudioModeInfo[] {
   const build = caps?.osVersion?.build ?? 0;
-  const isWin10 = caps?.operatingSystem === 'Windows' && build > 0;
   const is20348Plus = build >= 20348;
 
   return [
@@ -49,9 +48,9 @@ export function getAudioModeInfo(caps: AudioCapabilityResult | null): AudioModeI
     {
       mode: 'system',
       label: 'System Audio',
-      description: 'All sound played through your default output device — works on all Windows 10+ builds',
-      supported: isWin10,
-      reason: isWin10 ? undefined : 'System Audio requires Windows 10 or newer',
+      description: 'Shares all sound played through your default Windows output device',
+      supported: !!caps?.endpointLoopbackSupported,
+      reason: caps?.endpointLoopbackSupported ? undefined : 'System Audio requires a Windows output device',
     },
     {
       mode: 'application',

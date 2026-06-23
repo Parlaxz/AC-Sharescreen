@@ -94,6 +94,7 @@ export interface ScreenLinkAPI {
   enumerateAudioSessions: () => Promise<any>;
   startApplicationAudio: (options: { sourceId: string }) => Promise<any>;
   startFilteredMonitorAudio: (options?: { excludeDiscord?: boolean; excludeScreenLink?: boolean }) => Promise<any>;
+  startSystemAudio: () => Promise<{ success: boolean; streamGeneration?: number; error?: string }>;
   getMixerState: () => Promise<any>;
   getMixerDiagnostics: () => Promise<any>;
   /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
@@ -139,5 +140,5 @@ export interface PersistedSettings {
   autoWatchFriend: boolean;
   friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
-  lastAudioMode?: 'none' | 'application' | 'monitor' | 'test-tone';
+  lastAudioMode?: 'none' | 'system' | 'application' | 'monitor' | 'test-tone';
 }

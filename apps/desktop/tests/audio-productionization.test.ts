@@ -3,16 +3,16 @@ import type { AudioCapabilityResult } from '@screenlink/shared';
 
 describe('Audio mode persistence', () => {
   it('lastAudioMode should be valid values', () => {
-    const validModes = ['none', 'application', 'monitor'] as const;
+    const validModes = ['none', 'system', 'application', 'monitor'] as const;
     for (const mode of validModes) {
-      expect(['none', 'application', 'monitor']).toContain(mode);
+      expect(['none', 'system', 'application', 'monitor']).toContain(mode);
     }
   });
 
   it('lastAudioMode rejects invalid values', () => {
-    // At type level, only 'none' | 'application' | 'monitor' is accepted
-    const invalidModes = ['', 'all', 'system', 'mic', null, undefined] as readonly string[];
-    const validModes = ['none', 'application', 'monitor'];
+    // At type level, only the AudioMode union is accepted
+    const invalidModes = ['', 'all', 'mic', null, undefined] as readonly string[];
+    const validModes = ['none', 'system', 'application', 'monitor'];
     for (const mode of invalidModes) {
       if (mode == null) {
         // null/undefined represent "not set" which is valid for optional field

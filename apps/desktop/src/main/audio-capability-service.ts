@@ -181,6 +181,7 @@ export async function getAudioCapabilities(): Promise<HelperResult<AudioCapabili
         typeof cap.processLoopbackHeadersAvailable === "boolean" &&
         typeof cap.processLoopbackRuntimeSupported === "boolean" &&
         typeof cap.applicationLoopbackSupported === "boolean" &&
+        typeof cap.endpointLoopbackSupported === "boolean" &&
         typeof cap.usable === "boolean" &&
         typeof cap.is64BitProcess === "boolean" &&
         typeof cap.is64BitOperatingSystem === "boolean" &&
