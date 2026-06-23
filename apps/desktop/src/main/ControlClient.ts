@@ -326,7 +326,9 @@ export class ControlClient {
   }
 
   async startEndpointLoopback(): Promise<{ streamGeneration: number }> {
-    return this.sendRequest('startEndpointLoopback');
+    const resp = await this.sendRequest('startEndpointLoopback');
+    if (!resp.success || !resp.result) throw new Error(`startEndpointLoopback failed: ${resp.error ?? 'unknown'}`);
+    return { streamGeneration: resp.result.streamGeneration as number };
   }
 
   async stopCapture(): Promise<ControlResponse> { return this.sendRequest('stopCapture'); }
