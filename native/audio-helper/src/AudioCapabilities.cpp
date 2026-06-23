@@ -1,4 +1,5 @@
 #include "AudioCapabilities.h"
+#include "ProcessLoopbackActivator.h"
 #include "Protocol.h"
 #include "WindowsVersion.h"
 #include <windows.h>
@@ -34,103 +35,6 @@ std::vector<uint32_t> ParseVersionString(const std::string& version) {
   return parts;
 }
 
-// ── Process-loopback activation types (must match LoopbackCapture.cpp) ──
-
-enum class AudioClientActivationType : int32_t {
-    kDefault = 0,
-    kProcessLoopback = 1,
-};
-
-enum class ProcessLoopbackMode : int32_t {
-    kIncludeTargetProcessTree = 0,
-    kExcludeTargetProcessTree = 1,
-};
-
-struct AudioClientProcessLoopbackParams {
-    DWORD targetProcessId;
-    ProcessLoopbackMode processLoopbackMode;
-};
-
-struct AudioClientActivationParams {
-    AudioClientActivationType activationType;
-    AudioClientProcessLoopbackParams processLoopbackParams;
-};
-
-static_assert(sizeof(AudioClientActivationParams) == 12,
-              "AudioClientActivationParams must be exactly 12 bytes");
-
-static const wchar_t kVirtualAudioDeviceProcessLoopback[] = L"VAD\\Process_Loopback";
-
-// ── COM completion handler for async activation (probe-only) ──
-
-class ProbeActivationHandler : public IActivateAudioInterfaceCompletionHandler {
-public:
-    ProbeActivationHandler() : refCount_(1) {
-        event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    }
-
-    ~ProbeActivationHandler() {
-        if (event_) CloseHandle(event_);
-    }
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override {
-        if (!ppvObject) return E_POINTER;
-        *ppvObject = nullptr;
-        if (riid == __uuidof(IUnknown) ||
-            riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
-            *ppvObject = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
-            AddRef();
-            return S_OK;
-        }
-        return E_NOINTERFACE;
-    }
-
-    STDMETHODIMP_(ULONG) AddRef() override {
-        return InterlockedIncrement(&refCount_);
-    }
-
-    STDMETHODIMP_(ULONG) Release() override {
-        ULONG ref = InterlockedDecrement(&refCount_);
-        if (ref == 0) {
-            delete this;
-            return 0;
-        }
-        return ref;
-    }
-
-    STDMETHODIMP ActivateCompleted(
-        IActivateAudioInterfaceAsyncOperation* activateOperation) override
-    {
-        HRESULT hr = S_OK;
-        IUnknown* pAudioInterface = nullptr;
-
-        hr = activateOperation->GetActivateResult(&result_, &pAudioInterface);
-        if (SUCCEEDED(hr) && SUCCEEDED(result_) && pAudioInterface) {
-            hr = pAudioInterface->QueryInterface(__uuidof(IAudioClient),
-                                                   reinterpret_cast<void**>(&audioClient_));
-            if (FAILED(hr)) {
-                result_ = hr;
-            }
-        }
-
-        if (pAudioInterface) pAudioInterface->Release();
-        SetEvent(event_);
-        return S_OK;
-    }
-
-    bool Wait(DWORD timeoutMs) {
-        return WaitForSingleObject(event_, timeoutMs) == WAIT_OBJECT_0;
-    }
-
-    IAudioClient* GetAudioClient() const { return audioClient_; }
-    HRESULT GetResult() const { return result_; }
-
-private:
-    LONG refCount_;
-    HANDLE event_ = nullptr;
-    HRESULT result_ = E_FAIL;
-    IAudioClient* audioClient_ = nullptr;
-};
 
 template <typename T>
 void SafeRelease(T*& ptr) {
@@ -140,24 +44,6 @@ void SafeRelease(T*& ptr) {
     }
 }
 
-// ── Fixed capture format for probe: 48 kHz, stereo, IEEE float32 ──
-
-static constexpr uint32_t kProbeSampleRate = 48000;
-static constexpr uint16_t kProbeChannels = 2;
-static constexpr uint16_t kProbeBitsPerSample = 32;
-static constexpr uint16_t kProbeBlockAlign = kProbeChannels * (kProbeBitsPerSample / 8);
-
-static WAVEFORMATEX MakeProbeFormat() {
-    WAVEFORMATEX fmt = {};
-    fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-    fmt.nChannels = kProbeChannels;
-    fmt.nSamplesPerSec = kProbeSampleRate;
-    fmt.wBitsPerSample = kProbeBitsPerSample;
-    fmt.nBlockAlign = kProbeBlockAlign;
-    fmt.nAvgBytesPerSec = kProbeSampleRate * kProbeBlockAlign;
-    fmt.cbSize = 0;
-    return fmt;
-}
 
 #ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
 #define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
@@ -245,10 +131,6 @@ ProcessLoopbackProbeResult ProbeProcessLoopbackRuntime() {
   std::call_once(probeOnce, []() {
     ProcessLoopbackProbeResult result;
 
-    // Only probe on experimental candidate builds (19041–20347).
-    // On documented-supported builds (20348+), the probe is unnecessary —
-    // the API is guaranteed. On builds below 19041, the probe is
-    // extremely unlikely to succeed and would waste time.
     auto osInfo = DetectWindowsVersion();
     if (!osInfo.succeeded) {
       result.probed = false;
@@ -258,15 +140,13 @@ ProcessLoopbackProbeResult ProbeProcessLoopbackRuntime() {
     }
 
     if (osInfo.build >= kMinProcessLoopbackBuild) {
-      // Documented-supported — no probe needed, report success
-      result.probed = false;  // not actually probed
+      result.probed = false;
       result.succeeded = true;
       cachedResult = result;
       return;
     }
 
     if (osInfo.build < kExperimentalProcessLoopbackFloor) {
-      // Below experimental floor — don't bother probing
       result.probed = false;
       result.succeeded = false;
       result.failureReason = "Build " + std::to_string(osInfo.build)
@@ -278,7 +158,6 @@ ProcessLoopbackProbeResult ProbeProcessLoopbackRuntime() {
     // ── Experimental candidate build: perform real probe ──
     result.probed = true;
 
-    // Initialize COM for this thread
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
       result.failureReason = "CoInitializeEx failed: " + std::to_string(hr);
@@ -287,107 +166,53 @@ ProcessLoopbackProbeResult ProbeProcessLoopbackRuntime() {
       return;
     }
 
-    // Build activation params targeting our own PID
-    AudioClientActivationParams params{};
-    params.activationType = AudioClientActivationType::kProcessLoopback;
-    params.processLoopbackParams.targetProcessId = GetCurrentProcessId();
-    params.processLoopbackParams.processLoopbackMode = ProcessLoopbackMode::kIncludeTargetProcessTree;
+    // Use shared activation path (this also verifies GetService works)
+    auto ar = ActivateProcessLoopback(
+        GetCurrentProcessId(),
+        AcLoopbackMode::kIncludeTargetProcessTree,
+        5000);
 
-    PROPVARIANT variant;
-    PropVariantInit(&variant);
-    variant.vt = VT_BLOB;
-    variant.blob.cbSize = sizeof(params);
-    variant.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
-
-    ProbeActivationHandler* handler = new ProbeActivationHandler();
-
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    hr = ActivateAudioInterfaceAsync(
-        kVirtualAudioDeviceProcessLoopback,
-        __uuidof(IAudioClient),
-        &variant,
-        handler,
-        &asyncOp);
-
-    PropVariantClear(&variant);
-
-    if (FAILED(hr)) {
-      result.failureReason = "ActivateAudioInterfaceAsync failed";
-      result.lastHr = hr;
-      SafeRelease(handler);
+    if (!ar.succeeded) {
+      result.failureReason = ar.failureReason;
+      result.lastHr = E_FAIL;
       CoUninitialize();
       cachedResult = result;
       return;
     }
 
-    // Wait for activation (5 second timeout)
-    if (!handler->Wait(5000)) {
-      result.failureReason = "Audio interface activation timed out (5s)";
-      result.lastHr = HRESULT_FROM_WIN32(WAIT_TIMEOUT);
-      SafeRelease(asyncOp);
-      SafeRelease(handler);
-      CoUninitialize();
-      cachedResult = result;
-      return;
-    }
+    IAudioClient* audioClient = ar.audioClient;
+    IAudioCaptureClient* captureClient = ar.captureClient;
 
-    IAudioClient* audioClient = handler->GetAudioClient();
-    HRESULT activateResult = handler->GetResult();
-    if (FAILED(activateResult) || !audioClient) {
-      char buf[96] = {};
-      snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(activateResult));
-      result.failureReason = std::string("Audio client activation failed (HRESULT: ") + buf + ")";
-      result.lastHr = activateResult;
-      SafeRelease(asyncOp);
-      SafeRelease(handler);
-      CoUninitialize();
-      cachedResult = result;
-      return;
-    }
-
-    // Initialize audio client with fixed format
-    WAVEFORMATEX captureFormat = MakeProbeFormat();
-    REFERENCE_TIME bufferDuration = 100000; // 10 ms
-    hr = audioClient->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        bufferDuration,
-        0,
-        &captureFormat,
-        nullptr);
-
-    if (FAILED(hr)) {
-      result.failureReason = "IAudioClient::Initialize failed";
-      result.lastHr = hr;
-      SafeRelease(audioClient);
-      SafeRelease(asyncOp);
-      SafeRelease(handler);
-      CoUninitialize();
-      cachedResult = result;
-      return;
-    }
-
-    // Attempt Start() — this is the critical test
+    // Start the audio engine
     hr = audioClient->Start();
     if (FAILED(hr)) {
-      result.failureReason = "IAudioClient::Start failed";
+      result.failureReason = "IAudioClient::Start failed: " + std::to_string(hr);
       result.lastHr = hr;
+      SafeRelease(captureClient);
       SafeRelease(audioClient);
-      SafeRelease(asyncOp);
-      SafeRelease(handler);
       CoUninitialize();
       cachedResult = result;
       return;
     }
 
-    // Stop immediately — probe succeeded
-    audioClient->Stop();
-    result.succeeded = true;
-    result.lastHr = S_OK;
+    // Verify full pipeline: GetNextPacketSize on IAudioCaptureClient
+    UINT32 packetSize = 0;
+    hr = captureClient->GetNextPacketSize(&packetSize);
+    if (FAILED(hr)) {
+      result.failureReason = "IAudioCaptureClient::GetNextPacketSize failed: " + std::to_string(hr);
+      result.lastHr = hr;
+    }
 
+    // Stop the engine
+    audioClient->Stop();
+
+    if (SUCCEEDED(hr)) {
+      result.succeeded = true;
+      result.lastHr = S_OK;
+    }
+
+    SafeRelease(captureClient);
     SafeRelease(audioClient);
-    SafeRelease(asyncOp);
-    SafeRelease(handler);
     CoUninitialize();
     cachedResult = result;
   });

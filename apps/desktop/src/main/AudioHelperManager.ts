@@ -124,7 +124,11 @@ export class AudioHelperManager {
   private lastError_: string | null = null;
   private restartCount: number = 0;
   private readonly maxRestarts = 3;
-  private readonly restartCooldownMs = 5000;
+  private readonly baseRestartCooldownMs = 5000;
+  private get restartCooldownMs(): number {
+    // Exponential backoff: 5s, 10s, 20s
+    return this.baseRestartCooldownMs * Math.pow(2, Math.min(this.restartCount, 3));
+  }
 
   private onPacketCallback: ((packet: ParsedPcmPacket) => void) | null = null;
   private onStatsCallback: ((stats: AudioHelperStats) => void) | null = null;
@@ -494,6 +498,33 @@ export class AudioHelperManager {
       this.handleHelperError(err);
     });
 
+    // Consume stdout/stderr to prevent pipe backpressure from hanging the helper.
+    // Log stderr for crash diagnostics; discard stdout (helper uses control pipe for data).
+    if (this.helper.stdout) {
+      this.helper.stdout.on('data', () => {
+        // Drain stdout — helper shouldn't write here, but consume to prevent backpressure
+      });
+    }
+    if (this.helper.stderr) {
+      let stderrBuffer = '';
+      this.helper.stderr.on('data', (chunk: Buffer) => {
+        stderrBuffer += chunk.toString();
+        // Log each line as it arrives for real-time diagnostics
+        const lines = stderrBuffer.split('\n');
+        stderrBuffer = lines.pop() ?? ''; // Keep incomplete last line
+        for (const line of lines) {
+          if (line.trim()) {
+            diag(`[helper stderr] ${line}`);
+          }
+        }
+      });
+      this.helper.stderr.on('end', () => {
+        if (stderrBuffer.trim()) {
+          diag(`[helper stderr] ${stderrBuffer.trim()}`);
+        }
+      });
+    }
+
     // Wait briefly for the helper to start and create pipes
     await new Promise((r) => setTimeout(r, 500));
 
@@ -626,7 +657,19 @@ export class AudioHelperManager {
   private handleHelperExit(code: number | null, signal: string | null): void {
     const wasRunning = this.state !== 'disconnected';
     this.state = 'error';
-    this.lastError_ = `Helper exited with code=${code} signal=${signal}`;
+
+    // Decode common Windows exit codes for diagnostics
+    let exitDetail = `code=${code} signal=${signal}`;
+    if (code !== null) {
+      if (code === 0xC0000374) exitDetail += ' (HEAP_CORRUPTION)';
+      else if (code === 0xC0000005) exitDetail += ' (ACCESS_VIOLATION)';
+      else if (code === 0xC0000409) exitDetail += ' (STACK_BUFFER_OVERRUN)';
+      else if (code === 0x40010004) exitDetail += ' (DEBUG_ASSERTION_FAILURE)';
+      else if (code === 1) exitDetail += ' (GENERIC_FAILURE)';
+    }
+    this.lastError_ = `Helper exited: ${exitDetail}`;
+    diag(`Helper exit: ${exitDetail}`);
+    console.error(`[AudioHelper] ${this.lastError_}`);
 
     // Don't restart if we're shutting down
     if (this.shuttingDown_) return;
@@ -634,7 +677,11 @@ export class AudioHelperManager {
     if (wasRunning && this.restartCount < this.maxRestarts) {
       this.restartCount++;
       this.stats.helperRestarts = this.restartCount;
+      diag(`Scheduling restart attempt ${this.restartCount}/${this.maxRestarts} in ${this.restartCooldownMs}ms`);
       setTimeout(() => this.attemptRestart(), this.restartCooldownMs);
+    } else if (this.restartCount >= this.maxRestarts) {
+      diag(`Max restart attempts (${this.maxRestarts}) reached — giving up`);
+      this.onErrorCallback?.(`Helper crashed ${this.maxRestarts} times, not restarting: ${this.lastError_}`);
     }
   }
 

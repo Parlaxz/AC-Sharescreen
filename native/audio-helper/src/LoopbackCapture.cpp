@@ -1,5 +1,6 @@
 #include "LoopbackCapture.h"
 #include "AudioCapabilities.h"
+#include "ProcessLoopbackActivator.h"
 #include "WavWriter.h"
 #include "WindowsVersion.h"
 #include "Protocol.h"
@@ -30,109 +31,7 @@ namespace screenlink::audio {
 
 namespace {
 
-// ── Process-loopback activation types ──
-
-enum class AudioClientActivationType : int32_t {
-    kDefault = 0,
-    kProcessLoopback = 1,
-};
-
-enum class ProcessLoopbackMode : int32_t {
-    kIncludeTargetProcessTree = 0,
-    kExcludeTargetProcessTree = 1,
-};
-
-struct AudioClientProcessLoopbackParams {
-    DWORD targetProcessId;
-    ProcessLoopbackMode processLoopbackMode;
-};
-
-// Flat layout suitable for direct use as a PROPVARIANT blob.
-// ActivationType (int32) + targetProcessId (DWORD) + processLoopbackMode (int32) = 12 bytes.
-struct AudioClientActivationParams {
-    AudioClientActivationType activationType;
-    AudioClientProcessLoopbackParams processLoopbackParams;
-};
-
-static_assert(sizeof(AudioClientActivationParams) == 12,
-              "AudioClientActivationParams must be exactly 12 bytes");
-
-// Virtual audio device path for process-loopback capture.
-static const wchar_t kVirtualAudioDeviceProcessLoopback[] = L"VAD\\Process_Loopback";
-
-// ── COM completion handler for async activation ──
-
-class CaptureActivationHandler : public IActivateAudioInterfaceCompletionHandler {
-public:
-    CaptureActivationHandler() : refCount_(1) {
-        event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    }
-
-    ~CaptureActivationHandler() {
-        if (event_) CloseHandle(event_);
-    }
-
-    // IUnknown methods
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override {
-        if (!ppvObject) return E_POINTER;
-        *ppvObject = nullptr;
-        if (riid == __uuidof(IUnknown) ||
-            riid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
-            *ppvObject = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
-            AddRef();
-            return S_OK;
-        }
-        return E_NOINTERFACE;
-    }
-
-    STDMETHODIMP_(ULONG) AddRef() override {
-        return InterlockedIncrement(&refCount_);
-    }
-
-    STDMETHODIMP_(ULONG) Release() override {
-        ULONG ref = InterlockedDecrement(&refCount_);
-        if (ref == 0) {
-            delete this;
-            return 0;
-        }
-        return ref;
-    }
-
-    // IActivateAudioInterfaceCompletionHandler
-    STDMETHODIMP ActivateCompleted(
-        IActivateAudioInterfaceAsyncOperation* activateOperation) override
-    {
-        HRESULT hr = S_OK;
-        IUnknown* pAudioInterface = nullptr;
-
-        hr = activateOperation->GetActivateResult(&result_, &pAudioInterface);
-        if (SUCCEEDED(hr) && SUCCEEDED(result_) && pAudioInterface) {
-            hr = pAudioInterface->QueryInterface(__uuidof(IAudioClient),
-                                                   reinterpret_cast<void**>(&audioClient_));
-            if (FAILED(hr)) {
-                result_ = hr;
-            }
-        }
-
-        if (pAudioInterface) pAudioInterface->Release();
-
-        SetEvent(event_);
-        return S_OK;
-    }
-
-    bool Wait(DWORD timeoutMs) {
-        return WaitForSingleObject(event_, timeoutMs) == WAIT_OBJECT_0;
-    }
-
-    IAudioClient* GetAudioClient() const { return audioClient_; }
-    HRESULT GetResult() const { return result_; }
-
-private:
-    LONG refCount_;
-    HANDLE event_ = nullptr;
-    HRESULT result_ = E_FAIL;
-    IAudioClient* audioClient_ = nullptr;
-};
+// Activation types and shared activation logic now in ProcessLoopbackActivator.h
 
 // ── Helper: build a human-readable error string from HRESULT ──
 
@@ -204,123 +103,6 @@ static WAVEFORMATEX MakeCaptureFormat() {
     fmt.nAvgBytesPerSec = kCaptureAvgBytesPerSec;
     fmt.cbSize = 0;
     return fmt;
-}
-
-// ── Shared activation logic for all capture functions ──
-//
-// Activates the process-loopback virtual device and returns an initialized
-// IAudioClient and IAudioCaptureClient. Caller must CoUninitialize, release
-// all COM pointers, and free |out_handler| via SafeRelease.
-
-struct ActivationResult {
-    bool succeeded = false;
-    std::string failureReason;
-    IAudioClient* audioClient = nullptr;
-    IAudioCaptureClient* captureClient = nullptr;
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    CaptureActivationHandler* handler = nullptr;
-};
-
-ActivationResult ActivateProcessLoopback(const CaptureConfig& config) {
-    ActivationResult ar;
-
-    // Build activation params for process-loopback
-    AudioClientActivationParams params{};
-    params.activationType = AudioClientActivationType::kProcessLoopback;
-    params.processLoopbackParams.targetProcessId =
-        static_cast<DWORD>(config.targetPid);
-    params.processLoopbackParams.processLoopbackMode =
-        config.includeMode
-            ? ProcessLoopbackMode::kIncludeTargetProcessTree
-            : ProcessLoopbackMode::kExcludeTargetProcessTree;
-
-    PROPVARIANT variant;
-    PropVariantInit(&variant);
-    variant.vt = VT_BLOB;
-    variant.blob.cbSize = sizeof(params);
-    variant.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
-
-    // Create activation handler and begin async activation
-    ar.handler = new CaptureActivationHandler();
-
-    IActivateAudioInterfaceAsyncOperation* asyncOp = nullptr;
-    HRESULT hr = ActivateAudioInterfaceAsync(
-        kVirtualAudioDeviceProcessLoopback,
-        __uuidof(IAudioClient),
-        &variant,
-        ar.handler,
-        &asyncOp);
-
-    PropVariantClear(&variant);
-
-    if (FAILED(hr)) {
-        ar.failureReason = "ActivateAudioInterfaceAsync failed: "
-            + HresultToString(hr);
-        SafeRelease(asyncOp);
-        SafeRelease(ar.handler);
-        return ar;
-    }
-
-    ar.asyncOp = asyncOp;
-
-    // Wait for activation (up to 10 seconds)
-    if (!ar.handler->Wait(10000)) {
-        ar.failureReason = "Audio interface activation timed out";
-        SafeRelease(asyncOp);
-        SafeRelease(ar.handler);
-        return ar;
-    }
-
-    // Retrieve the activated IAudioClient
-    ar.audioClient = ar.handler->GetAudioClient();
-    HRESULT activateResult = ar.handler->GetResult();
-    if (FAILED(activateResult) || !ar.audioClient) {
-        ar.failureReason = "Audio client activation failed (HRESULT: "
-            + HresultToString(activateResult) + ")";
-        SafeRelease(asyncOp);
-        SafeRelease(ar.handler);
-        return ar;
-    }
-
-    // Initialize audio client with fixed format and autoconvert flags.
-    // Note: No AUDCLNT_STREAMFLAGS_LOOPBACK — process-loopback is implicit
-    // in the virtual device path.
-    WAVEFORMATEX captureFormat = MakeCaptureFormat();
-    REFERENCE_TIME bufferDuration = 100000; // 10 ms in 100-ns units
-    hr = ar.audioClient->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        bufferDuration,
-        0,
-        &captureFormat,
-        nullptr);
-
-    if (FAILED(hr)) {
-        ar.failureReason = "IAudioClient::Initialize failed: "
-            + HresultToString(hr);
-        SafeRelease(ar.audioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(ar.handler);
-        return ar;
-    }
-
-    // Get the capture client
-    hr = ar.audioClient->GetService(
-        __uuidof(IAudioCaptureClient),
-        reinterpret_cast<void**>(&ar.captureClient));
-
-    if (FAILED(hr) || !ar.captureClient) {
-        ar.failureReason = "GetService(IAudioCaptureClient) failed: "
-            + HresultToString(hr);
-        SafeRelease(ar.captureClient);
-        SafeRelease(ar.audioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(ar.handler);
-        return ar;
-    }
-
-    ar.succeeded = true;
-    return ar;
 }
 
 } // anonymous namespace
@@ -410,7 +192,10 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
     }
 
     // 5. Activate process-loopback virtual device
-    ActivationResult ar = ActivateProcessLoopback(config);
+    auto ar = ActivateProcessLoopback(
+        config.targetPid,
+        config.includeMode ? AcLoopbackMode::kIncludeTargetProcessTree : AcLoopbackMode::kExcludeTargetProcessTree,
+        5000);
     if (!ar.succeeded) {
         result.failureReason = std::move(ar.failureReason);
         CoUninitialize();
@@ -419,8 +204,6 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
 
     IAudioClient* pAudioClient = ar.audioClient;
     IAudioCaptureClient* pCaptureClient = ar.captureClient;
-    IActivateAudioInterfaceAsyncOperation* asyncOp = ar.asyncOp;
-    CaptureActivationHandler* handler = ar.handler;
 
     // 6. Start the audio engine
     hr = pAudioClient->Start();
@@ -429,8 +212,7 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
             + HresultToString(hr);
         SafeRelease(pCaptureClient);
         SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
+
         CoUninitialize();
         return result;
     }
@@ -444,14 +226,17 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
     uint64_t sequenceNumber = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::milliseconds(config.durationMs);
+    bool infiniteDuration = (config.durationMs == 0);
     bool running = true;
     std::vector<float> floatBuffer;
 
     while (running) {
-        // Check timeout
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (elapsed >= duration) {
-            break;
+        // Check timeout (durationMs==0 means infinite — no timeout)
+        if (!infiniteDuration) {
+            auto elapsed = std::chrono::steady_clock::now() - startTime;
+            if (elapsed >= duration) {
+                break;
+            }
         }
 
         // Get the next available packet
@@ -545,8 +330,6 @@ CaptureResult RunCaptureWithPacketCallback(const CaptureConfig& config, PacketCa
     // 10. Cleanup COM objects
     SafeRelease(pCaptureClient);
     SafeRelease(pAudioClient);
-    SafeRelease(asyncOp);
-    SafeRelease(handler); // may delete handler
     CoUninitialize();
 
     return result;
@@ -632,7 +415,10 @@ CaptureResult RunCapture(const CaptureConfig& config) {
     }
 
     // 5. Activate process-loopback virtual device
-    ActivationResult ar = ActivateProcessLoopback(config);
+    auto ar = ActivateProcessLoopback(
+        config.targetPid,
+        config.includeMode ? AcLoopbackMode::kIncludeTargetProcessTree : AcLoopbackMode::kExcludeTargetProcessTree,
+        5000);
     if (!ar.succeeded) {
         result.failureReason = std::move(ar.failureReason);
         CoUninitialize();
@@ -641,8 +427,6 @@ CaptureResult RunCapture(const CaptureConfig& config) {
 
     IAudioClient* pAudioClient = ar.audioClient;
     IAudioCaptureClient* pCaptureClient = ar.captureClient;
-    IActivateAudioInterfaceAsyncOperation* asyncOp = ar.asyncOp;
-    CaptureActivationHandler* handler = ar.handler;
 
     WAVEFORMATEX captureFormat = MakeCaptureFormat();
 
@@ -653,8 +437,7 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         result.failureReason = "Failed to open output WAV file: " + result.outputPath;
         SafeRelease(pCaptureClient);
         SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
+
         CoUninitialize();
         return result;
     }
@@ -667,8 +450,7 @@ CaptureResult RunCapture(const CaptureConfig& config) {
         writer.Close();
         SafeRelease(pCaptureClient);
         SafeRelease(pAudioClient);
-        SafeRelease(asyncOp);
-        SafeRelease(handler);
+
         CoUninitialize();
         return result;
     }
@@ -681,14 +463,17 @@ CaptureResult RunCapture(const CaptureConfig& config) {
     uint64_t framesCaptured = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::milliseconds(config.durationMs);
+    bool infiniteDuration = (config.durationMs == 0);
     bool running = true;
     std::vector<float> floatBuffer;
 
     while (running) {
-        // Check timeout
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (elapsed >= duration) {
-            break;
+        // Check timeout (durationMs==0 means infinite — no timeout)
+        if (!infiniteDuration) {
+            auto elapsed = std::chrono::steady_clock::now() - startTime;
+            if (elapsed >= duration) {
+                break;
+            }
         }
 
         UINT32 packetSize = 0;
@@ -763,8 +548,7 @@ CaptureResult RunCapture(const CaptureConfig& config) {
     // 11. Cleanup COM
     SafeRelease(pCaptureClient);
     SafeRelease(pAudioClient);
-    SafeRelease(asyncOp);
-    SafeRelease(handler);
+
     CoUninitialize();
 
     return result;

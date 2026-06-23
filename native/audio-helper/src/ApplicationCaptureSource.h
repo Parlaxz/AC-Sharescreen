@@ -3,12 +3,30 @@
 
 #include <atomic>
 #include <cstdint>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <thread>
 
 #include "LoopbackCapture.h" // AudioPacket, PacketCallback
 
 namespace screenlink::audio {
+
+/// Result of the application capture startup handshake.
+enum class AppCaptureStartResult {
+    Success,                // WASAPI fully initialized and capturing
+    AlreadyRunning,         // Start() called while already running
+    ThreadCreationFailed,    // std::thread creation failed
+    ActivationFailed,       // ActivateProcessLoopback failed
+    CaptureInitFailed,      // RunCaptureWithPacketCallback failed early
+    Cancelled,              // Stop() called during startup
+};
+
+/// Structured outcome of Start() — success/failure with reason.
+struct AppCaptureStartOutcome {
+    AppCaptureStartResult result = AppCaptureStartResult::Success;
+    std::string failureReason;  // Human-readable detail for diagnostics
+};
 
 /// Wraps one process-loopback capture instance running in its own thread.
 /// Each ApplicationCaptureSource captures audio from one specific process
@@ -23,20 +41,16 @@ public:
     ~ApplicationCaptureSource();
 
     /// Start capturing audio from the specified process.
+    /// Blocks until WASAPI initialization completes or fails (5s timeout).
     /// @param pid Target process ID
     /// @param creationTimeUtc100ns Validated creation time (0 = skip validation)
     /// @param onPacket Callback for captured AudioPackets
-    /// @return true if capture thread started successfully
-    ///
-    /// Note: Start() can fail (e.g., thread creation failure). The caller MUST
-    /// check the return value. Full activation acknowledgment (e.g., waiting for
-    /// the capture loop to begin processing) is not yet implemented; callers
-    /// should treat a return of true as "thread started" but not necessarily
-    /// "capture is actively producing packets."
-    bool Start(uint32_t pid, uint64_t creationTimeUtc100ns,
-               std::function<bool(const AudioPacket&)> onPacket);
+    /// @return Outcome with success/failure and reason
+    AppCaptureStartOutcome Start(uint32_t pid, uint64_t creationTimeUtc100ns,
+                                  std::function<bool(const AudioPacket&)> onPacket);
 
     /// Stop the capture and join the thread.
+    /// Safe to call while capture thread is blocked on WASAPI.
     void Stop();
 
     bool IsRunning() const { return running_.load(); }
@@ -46,10 +60,18 @@ private:
     void CaptureThread(uint32_t pid, uint64_t creationTimeUtc100ns,
                        std::function<bool(const AudioPacket&)> onPacket);
 
+    void SignalStartupComplete(AppCaptureStartResult result, std::string reason);
+
     uint32_t pid_ = 0;
     uint64_t creationTimeUtc100ns_ = 0;
     std::atomic<bool> running_{false};
     std::thread captureThread_;
+
+    // Readiness handshake
+    std::mutex startupMutex_;
+    std::condition_variable startupCv_;
+    AppCaptureStartOutcome startupOutcome_;
+    bool startupComplete_ = false;
 };
 
 } // namespace screenlink::audio

@@ -36,6 +36,7 @@ set(SOURCES
   src/ExclusionPolicy.cpp
   src/AudioSessionMonitor.cpp
   src/ApplicationCaptureSource.cpp
+  src/ProcessLoopbackActivator.cpp
   src/EndpointLoopbackSource.cpp
   src/MultiSourceMixer.cpp
 )

@@ -1319,6 +1319,8 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         return;
     }
 
+    state_.store(SessionState::kStarting);
+
     // Validate process exists and creation time matches
     uint64_t actualCreationTime = GetProcessCreationTime(static_cast<uint32_t>(targetPid));
     if (actualCreationTime == 0) {
@@ -1331,6 +1333,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("error", "process-not-found");
         resp.SetRaw("result", "{}");
         response = resp.Str();
+        state_.store(SessionState::kIdle);
         return;
     }
 
@@ -1344,6 +1347,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("error", "creation-time-mismatch");
         resp.SetRaw("result", "{}");
         response = resp.Str();
+        state_.store(SessionState::kIdle);
         return;
     }
 
@@ -1359,6 +1363,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("error", "process-resolution-failed");
         resp.SetRaw("result", "{}");
         response = resp.Str();
+        state_.store(SessionState::kIdle);
         return;
     }
 
@@ -1393,17 +1398,18 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("error", "process-loopback-unsupported");
         resp.SetRaw("result", result);
         response = resp.Str();
+        state_.store(SessionState::kIdle);
         return;
     }
 
     // Try to start the capture source FIRST, before creating mixer
     auto source = std::make_unique<ApplicationCaptureSource>();
-    bool started = source->Start(rootPid, actualCreationTime,
+    AppCaptureStartOutcome startOutcome = source->Start(rootPid, actualCreationTime,
         [](const AudioPacket&) -> bool {
             return true; // temporary — will be re-attached after mixer creation
         });
 
-    if (!started) {
+    if (startOutcome.result != AppCaptureStartResult::Success) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", static_cast<uint64_t>(0));
@@ -1413,6 +1419,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         resp.Set("error", "capture-start-failed");
         resp.SetRaw("result", "{}");
         response = resp.Str();
+        state_.store(SessionState::kIdle);
         return;
     }
 
@@ -1425,14 +1432,15 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     uint32_t sourceId = mixer_->AddSource(rootPid, actualCreationTime);
     source->Stop();
 
-    bool restarted = source->Start(rootPid, actualCreationTime,
+    AppCaptureStartOutcome restartOutcome = source->Start(rootPid, actualCreationTime,
         [this, sourceId](const AudioPacket& p) -> bool {
             mixer_->FeedPacket(sourceId, p);
             return true;
         });
 
-    if (!restarted) {
+    if (restartOutcome.result != AppCaptureStartResult::Success) {
         mixer_->RemoveSource(sourceId);
+        state_.store(SessionState::kIdle);
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", static_cast<uint64_t>(0));
@@ -1453,6 +1461,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     if (!mixResult.success) {
         source->Stop();
         mixer_->RemoveSource(sourceId);
+        state_.store(SessionState::kIdle);
 
         const char* errorCode = "mixer-start-failed";
         switch (mixResult.error) {
@@ -1483,6 +1492,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     }
 
     captureSources_.push_back(std::move(source));
+    state_.store(SessionState::kCapturing);
 
     std::string result = "{";
     result += "\"sourceId\":" + std::to_string(sourceId) + ",";
@@ -1712,14 +1722,14 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
         // re-attach if successful.
         //
         // Better approach: start capture first, then add to mixer.
-        bool started = source->Start(sel.rootPid, sel.rootCreationTime,
+        AppCaptureStartOutcome startOutcome = source->Start(sel.rootPid, sel.rootCreationTime,
             [](const AudioPacket&) -> bool {
                 // Temporary — the real callback will be set when the source
                 // is registered with the mixer after mixer creation.
                 return true;
             });
 
-        if (started) {
+        if (startOutcome.result == AppCaptureStartResult::Success) {
             std::cerr << "[filtered] source.start.result: started pid=" << sel.rootPid << std::endl;
             sourcesStarted++;
             startedSources.push_back({
@@ -1777,13 +1787,13 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
 
         // Replace the temporary callback with the real one that feeds the mixer
         ss.captureSource->Stop();  // Stop the temporary capture
-        bool restarted = ss.captureSource->Start(ss.rootPid, ss.rootCreationTime,
+        AppCaptureStartOutcome restartOutcome = ss.captureSource->Start(ss.rootPid, ss.rootCreationTime,
             [this, sourceId](const AudioPacket& p) -> bool {
                 mixer_->FeedPacket(sourceId, p);
                 return true;
             });
 
-        if (restarted) {
+        if (restartOutcome.result == AppCaptureStartResult::Success) {
             std::cerr << "[filtered] source registered: sourceId=" << sourceId
                       << " pid=" << ss.rootPid << std::endl;
         } else {
