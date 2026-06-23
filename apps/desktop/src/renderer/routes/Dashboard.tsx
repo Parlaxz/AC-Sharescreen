@@ -41,8 +41,8 @@ export function Dashboard() {
   const [remoteMuted, setRemoteMuted] = useState(false);
   const [remoteVolume, setRemoteVolume] = useState(1);
   const [showEnableAudioButton, setShowEnableAudioButton] = useState(false);
-  const [audioMode, setAudioMode] = useState<'none' | 'application' | 'monitor' | 'test-tone'>('none');
-  const [appliedAudioMode, setAppliedAudioMode] = useState<'none' | 'application' | 'monitor' | 'test-tone'>('none');
+  const [audioMode, setAudioMode] = useState<'none' | 'system' | 'application' | 'monitor' | 'test-tone'>('none');
+  const [appliedAudioMode, setAppliedAudioMode] = useState<'none' | 'system' | 'application' | 'monitor' | 'test-tone'>('none');
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioIsSynthetic, setAudioIsSynthetic] = useState(false);
   // local stats now flow through PublisherManager events
@@ -440,7 +440,7 @@ export function Dashboard() {
         }
       }
 
-      // ── Real capture modes: application or filtered monitor ──────────
+      // ── Real capture modes: system audio, application, or filtered monitor ──
       if (effectiveAudioMode !== 'none' && effectiveAudioMode !== 'test-tone') {
         let provisionalController: ProcessAudioController | null = null;
         setAudioEnabled(true);
@@ -458,9 +458,11 @@ export function Dashboard() {
           await provisionalController.initialize(port);
 
           // Start capture — check result BEFORE priming
-          let captureResult: { success: boolean; error?: string } | undefined;
+          let captureResult: { success: boolean; error?: string; streamGeneration?: number } | undefined;
 
-          if (effectiveAudioMode === 'application') {
+          if (effectiveAudioMode === 'system') {
+            captureResult = await api?.startSystemAudio() as { success: boolean; error?: string; streamGeneration?: number } | undefined;
+          } else if (effectiveAudioMode === 'application') {
             captureResult = await api?.startApplicationAudio({ sourceId }) as { success: boolean; error?: string } | undefined;
           } else {
             captureResult = await api?.startFilteredMonitorAudio({
@@ -628,6 +630,10 @@ export function Dashboard() {
                     onChange={() => setAudioMode('none')} /> No Audio
                 </label>
                 <label style={{ marginLeft: "1rem" }}>
+                  <input type="radio" name="audioMode" value="system" checked={audioMode === 'system'}
+                    onChange={() => setAudioMode('system')} /> System Audio
+                </label>
+                <label style={{ marginLeft: "1rem" }}>
                   <input type="radio" name="audioMode" value="application" checked={audioMode === 'application'}
                     onChange={() => setAudioMode('application')} /> App Audio (window only)
                 </label>
@@ -639,6 +645,11 @@ export function Dashboard() {
                   <input type="radio" name="audioMode" value="test-tone" checked={audioMode === 'test-tone'}
                     onChange={() => setAudioMode('test-tone')} /> Test Tone
                 </label>
+                {audioMode === 'system' && (
+                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+                    Shares all sound played through your default Windows output device. Works on all Windows 10+ builds.
+                  </p>
+                )}
                 {audioMode === 'application' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
                     Captures audio from the selected application process tree only.
