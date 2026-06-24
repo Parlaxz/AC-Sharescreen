@@ -60,3 +60,43 @@ export * from "./settings.js";
 export * from "./pairing.js";
 export * from "./audio-capabilities.js";
 export * from "./control-messages.js";
+
+// ── Phase 3: Group / Quality / Sync ────────────────────────────────────────
+
+// device-identity.js exports getDefaultDevDisplayName which conflicts with
+// pairing.js — omit it here (pairing.js re-export covers it).
+export {
+  DeviceIdentitySchema,
+  generateDeviceIdentity,
+  updateDeviceDisplayName,
+} from "./device-identity.js";
+export type {
+  DeviceIdentity,
+} from "./device-identity.js";
+
+export * from "./hybrid-logical-clock.js";
+export * from "./quality-settings.js";
+export * from "./group-link.js";
+export * from "./groups.js";
+export * from "./quality-presets.js";
+export * from "./group-sync.js";
+
+// group-control-messages.js uses selective re-exports to avoid name conflicts
+// with control-messages.js (DEDUP_WINDOW_MS, buildEnvelope).
+export {
+  GROUP_PROTOCOL_VERSION,
+  GROUP_CONTROL_MESSAGE_TYPES,
+  MAX_GROUP_CONTROL_PAYLOAD_BYTES,
+  GroupControlEnvelopeSchema,
+  MAC_KEY_BYTES,
+  deriveMacKey,
+  signEnvelope,
+  verifyEnvelope,
+  validateEnvelope,
+  DedupSet,
+} from "./group-control-messages.js";
+export type {
+  GroupControlMessageType,
+  GroupControlEnvelope,
+  GroupControlEnvelopeInput,
+} from "./group-control-messages.js";
