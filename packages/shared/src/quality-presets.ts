@@ -42,9 +42,10 @@ export function createQualityPreset(input: {
   idFactory?: () => string;
 }): QualityPreset {
   const now = input.now ?? Date.now();
+  const id = input.idFactory ? input.idFactory() : crypto.randomUUID();
   return {
     schemaVersion: 1,
-    id: (input.idFactory ?? crypto.randomUUID)(),
+    id,
     name: input.name,
     settings: input.settings,
     createdAt: now,
