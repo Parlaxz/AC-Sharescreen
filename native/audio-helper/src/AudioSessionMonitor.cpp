@@ -79,6 +79,134 @@ std::string GetNameForPid(uint32_t pid) {
     return path.substr(pos + 1);
 }
 
+// ── COM notification sink: IAudioSessionNotification ──
+
+/// Lightweight COM sink that receives IAudioSessionManager2 session-created
+/// notifications. Simply invokes the wake callback; does no heavy work.
+class SessionNotificationSink final : public IAudioSessionNotification {
+private:
+    std::atomic<ULONG> refCount_{1};
+    AudioSessionMonitor::AudioSessionChangedCallback callback_;
+
+public:
+    explicit SessionNotificationSink(AudioSessionMonitor::AudioSessionChangedCallback cb)
+        : callback_(std::move(cb)) {}
+
+    // ── IUnknown ──
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        *ppvObject = nullptr;
+
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioSessionNotification)) {
+            *ppvObject = static_cast<IAudioSessionNotification*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return refCount_.fetch_add(1) + 1;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG ref = refCount_.fetch_sub(1) - 1;
+        if (ref == 0) {
+            delete this;
+        }
+        return ref;
+    }
+
+    // ── IAudioSessionNotification ──
+
+    HRESULT STDMETHODCALLTYPE OnSessionCreated(IAudioSessionControl* /*newSession*/) override {
+        if (callback_) {
+            callback_();
+        }
+        return S_OK;
+    }
+};
+
+// ── COM notification sink: IMMNotificationClient ──
+
+/// Lightweight COM sink that receives MMDevice endpoint-change notifications.
+/// Only handles OnDefaultDeviceChanged for eRender+eConsole / eRender+eMultimedia,
+/// setting the reinitialize-requested flag and invoking the wake callback.
+class DeviceNotificationSink final : public IMMNotificationClient {
+private:
+    std::atomic<ULONG> refCount_{1};
+    std::atomic<bool>& reinitializeRequested_;
+    AudioSessionMonitor::AudioSessionChangedCallback callback_;
+
+public:
+    DeviceNotificationSink(std::atomic<bool>& reinitReq,
+                           AudioSessionMonitor::AudioSessionChangedCallback cb)
+        : reinitializeRequested_(reinitReq)
+        , callback_(std::move(cb)) {}
+
+    // ── IUnknown ──
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (!ppvObject) return E_POINTER;
+        *ppvObject = nullptr;
+
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient)) {
+            *ppvObject = static_cast<IMMNotificationClient*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+
+        AddRef();
+        return S_OK;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return refCount_.fetch_add(1) + 1;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG ref = refCount_.fetch_sub(1) - 1;
+        if (ref == 0) {
+            delete this;
+        }
+        return ref;
+    }
+
+    // ── IMMNotificationClient ──
+
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR /*deviceId*/, DWORD /*newState*/) override {
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR /*deviceId*/) override {
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR /*deviceId*/) override {
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role,
+                                                      LPCWSTR /*newDeviceId*/) override {
+        // Only react to render endpoint changes for console or multimedia roles
+        if (flow == eRender && (role == eConsole || role == eMultimedia)) {
+            reinitializeRequested_ = true;
+            if (callback_) {
+                callback_();
+            }
+        }
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR /*deviceId*/,
+                                                      const PROPERTYKEY /*key*/) override {
+        return S_OK;
+    }
+};
+
 } // anonymous namespace
 
 // ========================================================================
@@ -91,7 +219,10 @@ AudioSessionMonitor::~AudioSessionMonitor() {
     Stop();
 }
 
-bool AudioSessionMonitor::Initialize() {
+bool AudioSessionMonitor::Initialize(AudioSessionChangedCallback onChanged) {
+    // Store the callback
+    onChangeCallback_ = std::move(onChanged);
+
     // 1. Initialize COM
     lastErrorCode_ = 0;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -140,7 +271,28 @@ bool AudioSessionMonitor::Initialize() {
     }
     deviceEnumerator_ = enumerator;
 
-    // 3. Get default render endpoint
+    // 3. Create device notification sink (before registering it)
+    //    RefCount starts at 1; RegisterEndpointNotificationCallback will AddRef.
+    DeviceNotificationSink* deviceSink = nullptr;
+    if (onChangeCallback_) {
+        deviceSink = new DeviceNotificationSink(reinitializeRequested_, onChangeCallback_);
+        deviceNotificationSink_ = deviceSink;
+    }
+
+    // 4. Register device notification callback
+    if (deviceSink) {
+        hr = enumerator->RegisterEndpointNotificationCallback(
+            static_cast<IMMNotificationClient*>(deviceSink));
+        if (FAILED(hr)) {
+            std::cerr << "[AudioSessionMonitor] RegisterEndpointNotificationCallback failed: "
+                      << HresultToString(hr) << std::endl;
+            lastErrorCode_ = static_cast<long>(hr);
+            Stop();
+            return false;
+        }
+    }
+
+    // 5. Get default render endpoint
     IMMDevice* device = nullptr;
     hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
     if (FAILED(hr) || !device) {
@@ -150,7 +302,7 @@ bool AudioSessionMonitor::Initialize() {
         return false;
     }
 
-    // 4. Activate session manager using SDK __uuidof
+    // 6. Activate session manager using SDK __uuidof
     IAudioSessionManager2* sessionManager = nullptr;
     hr = device->Activate(__uuidof(IAudioSessionManager2),
                           CLSCTX_ALL, nullptr,
@@ -164,6 +316,26 @@ bool AudioSessionMonitor::Initialize() {
         return false;
     }
     audioSessionManager_ = sessionManager;
+
+    // 7. Create session notification sink (after session manager is available)
+    SessionNotificationSink* sessionSink = nullptr;
+    if (onChangeCallback_) {
+        sessionSink = new SessionNotificationSink(onChangeCallback_);
+        sessionNotificationSink_ = sessionSink;
+    }
+
+    // 8. Register session notification
+    if (sessionSink) {
+        hr = sessionManager->RegisterSessionNotification(
+            static_cast<IAudioSessionNotification*>(sessionSink));
+        if (FAILED(hr)) {
+            std::cerr << "[AudioSessionMonitor] RegisterSessionNotification failed: "
+                      << HresultToString(hr) << std::endl;
+            lastErrorCode_ = static_cast<long>(hr);
+            Stop();
+            return false;
+        }
+    }
 
     return true;
 }
@@ -196,6 +368,15 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
             continue;
         }
 
+        AudioSessionInfo info;
+
+        // Get session state from IAudioSessionControl
+        AudioSessionState state = AudioSessionStateInactive;
+        hr = sessionCtrl->GetState(&state);
+        if (SUCCEEDED(hr)) {
+            info.sessionState = static_cast<uint32_t>(state);
+        }
+
         // Get IAudioSessionControl2 for extended info
         IAudioSessionControl2* ctrl2 = nullptr;
         hr = sessionCtrl->QueryInterface(__uuidof(IAudioSessionControl2),
@@ -205,8 +386,6 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
             continue;
         }
 
-        AudioSessionInfo info;
-
         // Get process ID
         DWORD pid = 0;
         hr = ctrl2->GetProcessId(&pid);
@@ -214,40 +393,48 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
             info.errorReason = "GetProcessId failed: " + HresultToString(hr);
         }
 
-        if (pid == 0 ||
-            hr == AUDCLNT_E_DEVICE_INVALIDATED ||
-            hr == AUDCLNT_E_NOT_INITIALIZED) {
+        // Authoritative system-sounds check — do NOT rely on pid==0 heuristic alone.
+        // AUDCLNT_E_DEVICE_INVALIDATED etc. are NOT automatically system sounds.
+        HRESULT sysHr = ctrl2->IsSystemSoundsSession();
+        if (sysHr == S_OK) {
             info.systemSound = true;
             info.pid = 0;
             info.executableName = "System Sounds";
-            SafeRelease(ctrl2);
-            SafeRelease(sessionCtrl);
-            sessions.push_back(std::move(info));
-            continue;
         }
 
-        info.pid = static_cast<uint32_t>(pid);
-
-        // Get session identifier (for display, but we just verify it's accessible)
-        LPWSTR sessionIdStr = nullptr;
-        hr = ctrl2->GetSessionIdentifier(&sessionIdStr);
-        if (SUCCEEDED(hr) && sessionIdStr) {
-            CoTaskMemFree(sessionIdStr);
+        // Populate PID (skip if already marked as system sound)
+        if (!info.systemSound && SUCCEEDED(hr)) {
+            info.pid = static_cast<uint32_t>(pid);
         }
 
-        // Get process path and name
-        info.executablePath = GetProcessPathForPid(pid);
-        info.executableName = GetNameForPid(pid);
-
-        // Get creation time
-        uint64_t ct = GetProcessCreationTime(pid);
-        if (ct != 0) {
-            info.creationTimeUtc100ns = ct;
-            info.identityValidated = true;
+        // Get session identifier
+        LPWSTR str = nullptr;
+        hr = ctrl2->GetSessionIdentifier(&str);
+        if (SUCCEEDED(hr) && str) {
+            info.sessionId = WideToUtf8(str);
+            CoTaskMemFree(str);
+            str = nullptr;
         }
 
-        if (info.executableName.empty() && info.executablePath.empty()) {
-            info.systemSound = true;
+        // Get session instance identifier
+        hr = ctrl2->GetSessionInstanceIdentifier(&str);
+        if (SUCCEEDED(hr) && str) {
+            info.sessionInstanceId = WideToUtf8(str);
+            CoTaskMemFree(str);
+            str = nullptr;
+        }
+
+        // Get process path and name (only for non-system sessions with a valid PID)
+        if (!info.systemSound && info.pid != 0) {
+            info.executablePath = GetProcessPathForPid(static_cast<DWORD>(info.pid));
+            info.executableName = GetNameForPid(info.pid);
+
+            // Get creation time
+            uint64_t ct = GetProcessCreationTime(info.pid);
+            if (ct != 0) {
+                info.creationTimeUtc100ns = ct;
+                info.identityValidated = true;
+            }
         }
 
         SafeRelease(ctrl2);
@@ -260,14 +447,39 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
 }
 
 void AudioSessionMonitor::Stop() {
+    // 1. Unregister session notification BEFORE releasing session manager
+    if (audioSessionManager_ && sessionNotificationSink_) {
+        audioSessionManager_->UnregisterSessionNotification(
+            static_cast<IAudioSessionNotification*>(sessionNotificationSink_));
+    }
+    if (sessionNotificationSink_) {
+        sessionNotificationSink_->Release();
+        sessionNotificationSink_ = nullptr;
+    }
+
+    // 2. Release session manager
     if (audioSessionManager_) {
         audioSessionManager_->Release();
         audioSessionManager_ = nullptr;
     }
+
+    // 3. Unregister device notification BEFORE releasing device enumerator
+    if (deviceEnumerator_ && deviceNotificationSink_) {
+        deviceEnumerator_->UnregisterEndpointNotificationCallback(
+            static_cast<IMMNotificationClient*>(deviceNotificationSink_));
+    }
+    if (deviceNotificationSink_) {
+        deviceNotificationSink_->Release();
+        deviceNotificationSink_ = nullptr;
+    }
+
+    // 4. Release device enumerator
     if (deviceEnumerator_) {
         deviceEnumerator_->Release();
         deviceEnumerator_ = nullptr;
     }
+
+    // 5. CoUninitialize
     if (comInitialized_) {
         CoUninitialize();
         comInitialized_ = false;

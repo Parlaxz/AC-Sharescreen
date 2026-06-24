@@ -39,6 +39,9 @@ set(SOURCES
   src/ProcessLoopbackActivator.cpp
   src/EndpointLoopbackSource.cpp
   src/MultiSourceMixer.cpp
+  src/FilteredSourcePlanner.cpp
+  src/FilteredMonitorController.cpp
+  src/Phase2GSelfTest.cpp
 )
 
 # Executable
