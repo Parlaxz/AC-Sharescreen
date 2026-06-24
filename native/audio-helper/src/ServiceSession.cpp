@@ -1217,15 +1217,32 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
         auto monDiag = filteredMonitor_->GetDiagnostics();
         result += ",\"filteredMonitorDiagnostics\":{";
         result += "\"running\":" + std::string(monDiag.running ? "true" : "false") + ",";
+        result += "\"monitorInitialized\":" + std::string(monDiag.monitorInitialized ? "true" : "false") + ",";
         result += "\"activeCaptureSources\":" + std::to_string(monDiag.activeCaptureSources) + ",";
+        result += "\"totalSessionsLastScan\":" + std::to_string(monDiag.totalSessionsLastScan) + ",";
+        result += "\"desiredSourcesLastScan\":" + std::to_string(monDiag.desiredSourcesLastScan) + ",";
+        result += "\"sourcesAdded\":" + std::to_string(monDiag.sourcesAdded) + ",";
+        result += "\"sourcesRemoved\":" + std::to_string(monDiag.sourcesRemoved) + ",";
+        result += "\"sourceStartFailures\":" + std::to_string(monDiag.sourceStartFailures) + ",";
+        result += "\"sourceRetries\":" + std::to_string(monDiag.sourceRetries) + ",";
+        result += "\"duplicateRootsLastScan\":" + std::to_string(monDiag.duplicateRootsLastScan) + ",";
+        result += "\"duplicateRootSessionsLastScan\":" + std::to_string(monDiag.duplicateRootSessionsLastScan) + ",";
         result += "\"mixerInputPackets\":" + std::to_string(monDiag.mixerInputPackets) + ",";
         result += "\"mixerInputNonZeroPackets\":" + std::to_string(monDiag.mixerInputNonZeroPackets) + ",";
         result += "\"mixerInputZeroPackets\":" + std::to_string(monDiag.mixerInputZeroPackets) + ",";
+        result += "\"lastInputPeak\":" + std::to_string(static_cast<double>(monDiag.lastInputPeak)) + ",";
         result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumInputPeak)) + ",";
+        result += "\"lastInputRms\":" + std::to_string(monDiag.lastInputRms) + ",";
+        result += "\"maximumInputRms\":" + std::to_string(monDiag.maximumInputRms) + ",";
         result += "\"mixerOutputPackets\":" + std::to_string(monDiag.mixerOutputPackets) + ",";
         result += "\"mixerOutputNonZeroPackets\":" + std::to_string(monDiag.mixerOutputNonZeroPackets) + ",";
         result += "\"mixerOutputZeroPackets\":" + std::to_string(monDiag.mixerOutputZeroPackets) + ",";
-        result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumOutputPeak));
+        result += "\"lastOutputPeak\":" + std::to_string(static_cast<double>(monDiag.lastOutputPeak)) + ",";
+        result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumOutputPeak)) + ",";
+        result += "\"lastOutputRms\":" + std::to_string(monDiag.lastOutputRms) + ",";
+        result += "\"maximumOutputRms\":" + std::to_string(monDiag.maximumOutputRms) + ",";
+        result += "\"lastErrorCode\":\"" + monDiag.lastErrorCode + "\",";
+        result += "\"lastErrorMessage\":\"" + monDiag.lastErrorMessage + "\"";
         result += "}";
     }
 
@@ -1591,6 +1608,12 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
 
     // Set kCapturing before source Start so OnCapturePacket accepts output.
     state_.store(SessionState::kCapturing, std::memory_order_release);
+
+    std::cerr << "[ProcessLoopback] activate targetPid=" << rootPid
+              << " mode=include-tree source=application"
+              << " sessionPid=" << targetPid
+              << " executableName=" << treeResult.applicationRootName
+              << std::endl;
 
     auto source = std::make_unique<ApplicationCaptureSource>();
     auto startOutcome = source->Start(rootPid, actualCreationTime,
@@ -1969,6 +1992,8 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
         result += "\"systemSoundsSkippedLastScan\":" + std::to_string(diag.systemSoundsSkippedLastScan) + ",";
         result += "\"discordExcludedLastScan\":" + std::to_string(diag.discordExcludedLastScan) + ",";
         result += "\"screenLinkExcludedLastScan\":" + std::to_string(diag.screenLinkExcludedLastScan) + ",";
+        result += "\"duplicateRootsLastScan\":" + std::to_string(diag.duplicateRootsLastScan) + ",";
+        result += "\"duplicateRootSessionsLastScan\":" + std::to_string(diag.duplicateRootSessionsLastScan) + ",";
         result += "\"sourceStartAttempts\":" + std::to_string(diag.sourceStartAttempts) + ",";
         result += "\"sourceStartFailures\":" + std::to_string(diag.sourceStartFailures) + ",";
         result += "\"sourceRetries\":" + std::to_string(diag.sourceRetries) + ",";

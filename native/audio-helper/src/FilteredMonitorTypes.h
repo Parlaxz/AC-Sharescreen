@@ -106,6 +106,7 @@ struct FilteredMonitorDiagnostics {
     uint32_t discordExcludedLastScan = 0;
     uint32_t screenLinkExcludedLastScan = 0;
     uint32_t duplicateRootsLastScan = 0;
+    uint32_t duplicateRootSessionsLastScan = 0;
     uint32_t sourceLimitSkippedLastScan = 0;
     // Input energy diagnostics (measured from actual float samples)
     uint64_t mixerInputPackets = 0;

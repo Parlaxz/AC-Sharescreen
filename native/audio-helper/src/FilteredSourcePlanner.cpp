@@ -112,58 +112,69 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
 
         // --- Build candidate ---
         CandidateEntry entry;
-        entry.candidate.identity.pid = session.pid;
-        entry.candidate.identity.creationTimeUtc100ns = session.creationTimeUtc100ns;
+
+        // Step 5a: Set candidate identity to the AUTHORITATIVE application root
+        // from ProcessResolver, NOT tree.processes.back() or session.pid.
+        entry.candidate.identity.pid = tree.applicationRootPid;
+        entry.candidate.identity.creationTimeUtc100ns = tree.applicationRootCreationTimeUtc100ns;
         entry.candidate.sessionPid = session.pid;
         entry.candidate.executableName = session.executableName;
         entry.candidate.executablePath = session.executablePath;
         entry.candidate.activeSession = (session.sessionState == 1); // AudioSessionStateActive
+        entry.candidate.rootExecutableName = tree.applicationRootName;
+        entry.candidate.rootExecutablePath = tree.applicationRootPath;
 
-        // Extract root process info from the resolved tree (last element = root)
-        if (!tree.processes.empty()) {
-            const auto& rootProc = tree.processes.back();
-
-            entry.candidate.rootExecutableName =
-                rootProc.processName;
-
-            entry.candidate.rootExecutablePath =
-                rootProc.processPath;
-
-            entry.rootIdentity.pid =
-                rootProc.processId;
-
-            entry.rootIdentity.creationTimeUtc100ns =
-                rootProc.creationTimeUtc100ns;
-        } else {
-            entry.candidate.rootExecutableName =
-                tree.applicationRootName;
-
-            entry.rootIdentity.pid =
-                tree.applicationRootPid;
-
-            entry.rootIdentity.creationTimeUtc100ns =
-                GetProcessCreationTime(tree.applicationRootPid);
-        }
+        // rootIdentity is the same as candidate.identity (both are the
+        // authoritative application root from ProcessResolver).
+        entry.rootIdentity = entry.candidate.identity;
 
         if (!entry.rootIdentity.IsValid()) {
             plan.invalidSessions++;
             continue;
         }
 
-        // Capture the resolved application process tree, not the leaf
-        // process that happened to own this individual audio session.
-        entry.candidate.identity = entry.rootIdentity;
-
-        // --- Step 6: Apply Discord exclusion ---
-        if (options.excludeDiscord && IsDiscordSession(session)) {
-            plan.discordExcluded++;
-            continue;
+        // --- Step 6: Apply Discord exclusion (check both session AND root level) ---
+        if (options.excludeDiscord) {
+            bool discordExcluded = false;
+            // Session-level check
+            if (IsDiscordSession(session)) {
+                discordExcluded = true;
+            }
+            // Root-level check
+            if (!discordExcluded && IsDiscordProcess(tree.applicationRootName)) {
+                discordExcluded = true;
+            }
+            // Root-level Update.exe + Discord path check
+            if (!discordExcluded) {
+                std::string rootNameLower = ToLower(tree.applicationRootName);
+                if (rootNameLower == "update.exe") {
+                    std::string rootPathLower = ToLower(tree.applicationRootPath);
+                    if (rootPathLower.find("discord") != std::string::npos) {
+                        discordExcluded = true;
+                    }
+                }
+            }
+            if (discordExcluded) {
+                plan.discordExcluded++;
+                continue;
+            }
         }
 
-        // --- Step 7: Apply ScreenLink exclusion ---
-        if (options.excludeScreenLink && IsScreenLinkSession(session, options)) {
-            plan.screenLinkExcluded++;
-            continue;
+        // --- Step 7: Apply ScreenLink exclusion (check both session AND root level) ---
+        if (options.excludeScreenLink) {
+            bool slExcluded = false;
+            // Session-level check
+            if (IsScreenLinkSession(session, options)) {
+                slExcluded = true;
+            }
+            // Root-level check
+            if (!slExcluded && IsScreenLinkProcess(tree.applicationRootName, tree.applicationRootPath)) {
+                slExcluded = true;
+            }
+            if (slExcluded) {
+                plan.screenLinkExcluded++;
+                continue;
+            }
         }
 
         entries.push_back(std::move(entry));

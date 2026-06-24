@@ -426,6 +426,7 @@ bool FilteredMonitorController::ReconcileOnce() {
         diag_.discordExcludedLastScan = plan.discordExcluded;
         diag_.screenLinkExcludedLastScan = plan.screenLinkExcluded;
         diag_.duplicateRootsLastScan = plan.duplicateRoots;
+        diag_.duplicateRootSessionsLastScan = plan.duplicateRoots;
         diag_.sourceLimitSkippedLastScan = plan.sourceLimitSkipped;
         diag_.desiredSourcesLastScan = static_cast<uint32_t>(plan.desiredSources.size());
         diag_.lastSuccessfulInventoryTimestamp = static_cast<uint64_t>(

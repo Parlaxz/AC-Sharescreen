@@ -20,7 +20,20 @@ interface FilteredMonitorDiagnostics {
   sourcesAdded: number;
   sourcesRemoved: number;
   totalSessionsLastScan: number;
+  activeSessionsLastScan: number;
+  inactiveSessionsLastScan: number;
   desiredSourcesLastScan: number;
+  invalidSessionsLastScan: number;
+  expiredSessionsLastScan: number;
+  systemSoundsSkippedLastScan: number;
+  discordExcludedLastScan: number;
+  screenLinkExcludedLastScan: number;
+  duplicateRootsLastScan: number;
+  duplicateRootSessionsLastScan: number;
+  sourceStartAttempts: number;
+  sourceStartFailures: number;
+  sourceRetries: number;
+  sourceUnexpectedStops: number;
   mixerInputPackets: number;
   mixerInputNonZeroPackets: number;
   mixerInputZeroPackets: number;
@@ -114,6 +127,9 @@ function isValidFilteredMonitorDiagnostics(obj: unknown): obj is FilteredMonitor
     typeof d.sourcesRemoved === "number" &&
     typeof d.totalSessionsLastScan === "number" &&
     typeof d.desiredSourcesLastScan === "number" &&
+    typeof d.duplicateRootsLastScan === "number" &&
+    typeof d.duplicateRootSessionsLastScan === "number" &&
+    typeof d.sourceStartFailures === "number" &&
     typeof d.mixerInputPackets === "number" &&
     typeof d.mixerInputNonZeroPackets === "number" &&
     typeof d.mixerInputZeroPackets === "number" &&
@@ -468,7 +484,20 @@ describe("Phase 2G — diagnostics typing", () => {
       sourcesAdded: 10,
       sourcesRemoved: 2,
       totalSessionsLastScan: 15,
+      activeSessionsLastScan: 5,
+      inactiveSessionsLastScan: 10,
       desiredSourcesLastScan: 3,
+      invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0,
+      systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0,
+      screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      duplicateRootSessionsLastScan: 0,
+      sourceStartAttempts: 10,
+      sourceStartFailures: 0,
+      sourceRetries: 0,
+      sourceUnexpectedStops: 0,
       mixerInputPackets: 500,
       mixerInputNonZeroPackets: 300,
       mixerInputZeroPackets: 200,
@@ -530,7 +559,20 @@ describe("Phase 2G — diagnostics typing", () => {
       sourcesAdded: 0,
       sourcesRemoved: 0,
       totalSessionsLastScan: 0,
+      activeSessionsLastScan: 0,
+      inactiveSessionsLastScan: 0,
       desiredSourcesLastScan: 0,
+      invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0,
+      systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0,
+      screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      duplicateRootSessionsLastScan: 0,
+      sourceStartAttempts: 0,
+      sourceStartFailures: 0,
+      sourceRetries: 0,
+      sourceUnexpectedStops: 0,
       mixerInputPackets: 0,
       mixerInputNonZeroPackets: 0,
       mixerInputZeroPackets: 0,
@@ -571,7 +613,20 @@ describe("Phase 2G — diagnostics typing", () => {
       sourcesAdded: 1,
       sourcesRemoved: 0,
       totalSessionsLastScan: 5,
+      activeSessionsLastScan: 3,
+      inactiveSessionsLastScan: 2,
       desiredSourcesLastScan: 1,
+      invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0,
+      systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0,
+      screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      duplicateRootSessionsLastScan: 0,
+      sourceStartAttempts: 1,
+      sourceStartFailures: 0,
+      sourceRetries: 0,
+      sourceUnexpectedStops: 0,
       mixerInputPackets: 100,
       mixerInputNonZeroPackets: 80,
       mixerInputZeroPackets: 20,
@@ -599,6 +654,82 @@ describe("Phase 2G — diagnostics typing", () => {
 });
 
 // Phase 2G — FIFO timestamp regression and root identity
+describe("Phase 2G — duplicate root and PID tracking fields", () => {
+  it("duplicateRootsLastScan is a number", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true, monitorInitialized: true, mixerRunning: true,
+      totalReconciliations: 0, activeCaptureSources: 1, sourcesAdded: 1,
+      sourcesRemoved: 0, totalSessionsLastScan: 5,
+      activeSessionsLastScan: 3, inactiveSessionsLastScan: 2,
+      desiredSourcesLastScan: 1, invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 3, duplicateRootSessionsLastScan: 3,
+      sourceStartAttempts: 1, sourceStartFailures: 0, sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 10, mixerInputNonZeroPackets: 5, mixerInputZeroPackets: 5,
+      lastInputPeak: 0, maximumInputPeak: 0, lastInputRms: 0, maximumInputRms: 0,
+      mixerOutputPackets: 10, mixerOutputNonZeroPackets: 5, mixerOutputZeroPackets: 5,
+      lastOutputPeak: 0, maximumOutputPeak: 0, lastOutputRms: 0, maximumOutputRms: 0,
+      lastErrorCode: "", lastErrorMessage: "",
+    };
+    expect(typeof diag.duplicateRootsLastScan).toBe("number");
+    expect(diag.duplicateRootsLastScan).toBe(3);
+  });
+
+  it("duplicateRootSessionsLastScan is a number", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true, monitorInitialized: true, mixerRunning: true,
+      totalReconciliations: 0, activeCaptureSources: 1, sourcesAdded: 1,
+      sourcesRemoved: 0, totalSessionsLastScan: 5,
+      activeSessionsLastScan: 3, inactiveSessionsLastScan: 2,
+      desiredSourcesLastScan: 1, invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 1, duplicateRootSessionsLastScan: 2,
+      sourceStartAttempts: 1, sourceStartFailures: 0, sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 10, mixerInputNonZeroPackets: 5, mixerInputZeroPackets: 5,
+      lastInputPeak: 0, maximumInputPeak: 0, lastInputRms: 0, maximumInputRms: 0,
+      mixerOutputPackets: 10, mixerOutputNonZeroPackets: 5, mixerOutputZeroPackets: 5,
+      lastOutputPeak: 0, maximumOutputPeak: 0, lastOutputRms: 0, maximumOutputRms: 0,
+      lastErrorCode: "", lastErrorMessage: "",
+    };
+    expect(typeof diag.duplicateRootSessionsLastScan).toBe("number");
+    expect(diag.duplicateRootSessionsLastScan).toBe(2);
+  });
+
+  it("RMS fields are typed as numbers (not undefined)", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true, monitorInitialized: true, mixerRunning: true,
+      totalReconciliations: 10, activeCaptureSources: 2, sourcesAdded: 3,
+      sourcesRemoved: 1, totalSessionsLastScan: 10,
+      activeSessionsLastScan: 5, inactiveSessionsLastScan: 5,
+      desiredSourcesLastScan: 2, invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0, duplicateRootSessionsLastScan: 0,
+      sourceStartAttempts: 3, sourceStartFailures: 0, sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 500, mixerInputNonZeroPackets: 400, mixerInputZeroPackets: 100,
+      lastInputPeak: 0.9, maximumInputPeak: 0.95, lastInputRms: 0.45, maximumInputRms: 0.55,
+      mixerOutputPackets: 500, mixerOutputNonZeroPackets: 400, mixerOutputZeroPackets: 100,
+      lastOutputPeak: 0.85, maximumOutputPeak: 0.92, lastOutputRms: 0.40, maximumOutputRms: 0.50,
+      lastErrorCode: "", lastErrorMessage: "",
+    };
+    expect(diag.lastInputRms).toBeDefined();
+    expect(diag.maximumInputRms).toBeDefined();
+    expect(diag.lastOutputRms).toBeDefined();
+    expect(diag.maximumOutputRms).toBeDefined();
+    expect(typeof diag.lastInputRms).toBe("number");
+    expect(typeof diag.maximumInputRms).toBe("number");
+    expect(typeof diag.lastOutputRms).toBe("number");
+    expect(typeof diag.maximumOutputRms).toBe("number");
+    expect(diag.maximumInputRms).toBeGreaterThan(0);
+    expect(diag.maximumOutputRms).toBeGreaterThan(0);
+  });
+});
+
 describe("Phase 2G — FIFO queue and identity architecture", () => {
   // ── FIFO queue consumption replaces strict timestamp windowing ──
   it("strict windowStart100ns/deadline100ns selection is absent from MultiSourceMixer", () => {

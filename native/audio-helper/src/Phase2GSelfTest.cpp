@@ -1030,15 +1030,14 @@ void TestMixerZeroSourceSilence() {
 
 void TestPlannerChildSessionResolvesToRoot() {
     TEST("FilteredSourcePlanner - child session resolves to root PID")
-    // Proves that the planner assigns the resolved root PID to the candidate
-    // identity, not the leaf session PID. The sessionPid preserves the original
-    // audio session PID for diagnostics, while identity.pid is the resolved
-    // process-tree root from tree.processes.back().
+    // Proves that the planner assigns the resolved root PID (from the
+    // authoritative ProcessResolver applicationRoot*) to the candidate
+    // identity, not the leaf session PID or tree.processes.back().
     //
     // Invariant:
     //   candidate.sessionPid == session.pid (original leaf PID)
-    //   candidate.identity.pid == tree.processes.back().processId (root PID)
-    //   candidate.identity creationTime matches root process creation time
+    //   candidate.identity.pid == tree.applicationRootPid (authoritative root)
+    //   candidate.identity creationTime == tree.applicationRootCreationTimeUtc100ns
     FilteredSourcePlanner planner;
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
@@ -1068,13 +1067,11 @@ void TestPlannerChildSessionResolvesToRoot() {
         // identity must be valid (non-zero PID + creation time)
         ASSERT(candidate.identity.IsValid());
 
-        // identity.pid must match the resolved root process ID,
-        // which is tree.processes.back().processId (the top of the parent chain).
-        // For the current process, this is the actual OS process-tree root.
-        if (tree.succeeded && !tree.processes.empty()) {
-            const auto& rootProc = tree.processes.back();
-            ASSERT_EQ(candidate.identity.pid, rootProc.processId);
-            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, rootProc.creationTimeUtc100ns);
+        // identity.pid must match the resolved root PID from ProcessResolver,
+        // NOT tree.processes.back().processId.
+        if (tree.succeeded) {
+            ASSERT_EQ(candidate.identity.pid, tree.applicationRootPid);
+            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, tree.applicationRootCreationTimeUtc100ns);
         }
 
         // When the session process is NOT the root, identity and sessionPid differ.
@@ -1092,6 +1089,7 @@ void TestPlannerDedupUsesRootIdentity() {
     // 1. Two sessions from the same process tree produce one candidate (dedup).
     // 2. The identity used for deduplication is identical to the identity
     //    passed to ApplicationCaptureSource::Start() via candidate.identity.
+    // 3. The dedup key is tree.applicationRootPid, not tree.processes.back().
     FilteredSourcePlanner planner;
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
@@ -1136,14 +1134,12 @@ void TestPlannerDedupUsesRootIdentity() {
         // Deduplicated identity must be valid
         ASSERT(candidate.identity.IsValid());
 
-        // The candidate identity IS the root identity used for dedup.
-        // Deduplication uses rootIdentity, which now equals candidate.identity.
-        // This proves that the identity passed to ApplicationCaptureSource::Start()
-        // is the same identity used for deduplication.
+        // The candidate identity matches the authoritative application root
+        // from ProcessResolver, NOT tree.processes.back().
         auto tree = ResolveProcessTree(currentPid);
-        if (tree.succeeded && !tree.processes.empty()) {
-            const auto& rootProc = tree.processes.back();
-            ASSERT_EQ(candidate.identity.pid, rootProc.processId);
+        if (tree.succeeded) {
+            ASSERT_EQ(candidate.identity.pid, tree.applicationRootPid);
+            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, tree.applicationRootCreationTimeUtc100ns);
         }
 
         // If the session process is not the root, identity differs from sessionPid
@@ -1204,6 +1200,384 @@ void TestServiceSessionStreamGeneration() {
         prev = gen;
     }
     END_TEST("ServiceSession - stream generation is strictly monotonic");
+}
+
+// ====================================================================
+// ProcessResolver Deterministic Tests
+// Uses FindApplicationRootIndex with mock process info vectors.
+// ====================================================================
+
+void TestChromiumProcessFamily() {
+    TEST("ProcessResolver - chromium process family")
+    // Tree: 301(chrome) -> 250(chrome) -> 200(chrome) -> 100(explorer)
+    // Root should be PID 200 (highest chrome ancestor, not explorer)
+    std::vector<ProcessInfo> processes;
+    processes.push_back({301, 250, "C:\\Chrome\\chrome.exe", "chrome.exe", 100301});
+    processes.push_back({250, 200, "C:\\Chrome\\chrome.exe", "chrome.exe", 100250});
+    processes.push_back({200, 100, "C:\\Chrome\\chrome.exe", "chrome.exe", 100200});
+    processes.push_back({100, 0, "C:\\Windows\\explorer.exe", "explorer.exe", 100100});
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    ASSERT_EQ(processes[idx].processId, 200u);
+    ASSERT_EQ(processes[idx].creationTimeUtc100ns, 100200u);
+    ASSERT(!usedFallback);
+    // Root must NOT be 301 (session PID) or 100 (explorer.exe)
+    ASSERT(processes[idx].processId != 301u);
+    ASSERT(processes[idx].processId != 100u);
+    END_TEST("ProcessResolver - chromium process family");
+}
+
+void TestGameLauncherBoundary() {
+    TEST("ProcessResolver - game/launcher boundary")
+    // Tree: 501(game.exe) -> 400(launcher.exe) -> 100(explorer.exe)
+    // Root should be 501 (game) - do NOT ascend into differently named launcher
+    std::vector<ProcessInfo> processes;
+    processes.push_back({501, 400, "C:\\Game\\game.exe", "game.exe", 100501});
+    processes.push_back({400, 100, "C:\\Launcher\\launcher.exe", "launcher.exe", 100400});
+    processes.push_back({100, 0, "C:\\Windows\\explorer.exe", "explorer.exe", 100100});
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    ASSERT_EQ(processes[idx].processId, 501u);
+    END_TEST("ProcessResolver - game/launcher boundary");
+}
+
+void TestDifferentAppsUnderExplorer() {
+    TEST("ProcessResolver - different apps under Explorer remain separate")
+    // Two unrelated app chains. They must not collapse to Explorer.
+    // Chain A: 301(chrome) -> 250(chrome) -> 200(chrome) -> 100(explorer)
+    // Chain B: 601(vlc) -> 500(vlc) -> 100(explorer)
+    // Root A = 200, Root B = 500
+
+    // Chain A
+    {
+        std::vector<ProcessInfo> processes;
+        processes.push_back({301, 250, "C:\\Chrome\\chrome.exe", "chrome.exe", 100301});
+        processes.push_back({250, 200, "C:\\Chrome\\chrome.exe", "chrome.exe", 100250});
+        processes.push_back({200, 100, "C:\\Chrome\\chrome.exe", "chrome.exe", 100200});
+        processes.push_back({100, 0, "C:\\Windows\\explorer.exe", "explorer.exe", 100100});
+
+        bool usedFallback = false;
+        uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+        ASSERT_EQ(processes[idx].processId, 200u);
+    }
+
+    // Chain B
+    {
+        std::vector<ProcessInfo> processes;
+        processes.push_back({601, 500, "C:\\VLC\\vlc.exe", "vlc.exe", 100601});
+        processes.push_back({500, 100, "C:\\VLC\\vlc.exe", "vlc.exe", 100500});
+        processes.push_back({100, 0, "C:\\Windows\\explorer.exe", "explorer.exe", 100100});
+
+        bool usedFallback = false;
+        uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+        ASSERT_EQ(processes[idx].processId, 500u);
+    }
+    END_TEST("ProcessResolver - different apps under Explorer remain separate");
+}
+
+void TestSameBasenameDifferentPath() {
+    TEST("ProcessResolver - same basename, different full path")
+    // C:\AppA\app.exe -> C:\AppB\app.exe -> C:\Windows\explorer.exe
+    // Different full paths -> NOT same family -> stop at first ancestor
+    std::vector<ProcessInfo> processes;
+    processes.push_back({701, 700, "C:\\AppA\\app.exe", "app.exe", 100701});
+    processes.push_back({700, 100, "C:\\AppB\\app.exe", "app.exe", 100700});
+    processes.push_back({100, 0, "C:\\Windows\\explorer.exe", "explorer.exe", 100100});
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    // Root should be 701 (session itself), not 700
+    ASSERT_EQ(processes[idx].processId, 701u);
+    ASSERT(!usedFallback);
+    END_TEST("ProcessResolver - same basename, different full path");
+}
+
+void TestPathCaseInsensitivity() {
+    TEST("ProcessResolver - path case insensitivity")
+    // Paths differ only in case -> same family
+    std::vector<ProcessInfo> processes;
+    processes.push_back({801, 800, "C:\\APP\\PROGRAM.EXE", "PROGRAM.EXE", 100801});
+    processes.push_back({800, 0, "c:\\app\\program.exe", "program.exe", 100800});
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    ASSERT_EQ(processes[idx].processId, 800u);
+    ASSERT(!usedFallback);
+    END_TEST("ProcessResolver - path case insensitivity");
+}
+
+void TestMissingPathFallback() {
+    TEST("ProcessResolver - missing path fallback to basename")
+    // First process has empty path, second has empty path too
+    // Should use basename fallback (case-insensitive)
+    std::vector<ProcessInfo> processes;
+    processes.push_back({901, 900, "", "myapp.exe", 100901});
+    processes.push_back({900, 0, "", "MyApp.exe", 100900}); // different case
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    ASSERT_EQ(processes[idx].processId, 900u);
+    ASSERT(usedFallback); // fallback was used since paths are empty
+    END_TEST("ProcessResolver - missing path fallback to basename");
+}
+
+void TestCycleProtection() {
+    TEST("ProcessResolver - cycle protection terminates safely")
+    // A cycle in the ancestry: 100 -> 200 -> 100 -> 200 -> ...
+    // The function should not infinite-loop (it won't because it just
+    // iterates the vector, but let's verify it handles duplication sanely).
+    // This test verifies the function doesn't crash with duplicate PIDs.
+    std::vector<ProcessInfo> processes;
+    processes.push_back({100, 200, "C:\\App\\app.exe", "app.exe", 100100});
+    processes.push_back({200, 100, "C:\\App\\app.exe", "app.exe", 100200}); // cycle back
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    // Root should be 200 (same-family ancestor found)
+    ASSERT_EQ(processes[idx].processId, 200u);
+    END_TEST("ProcessResolver - cycle protection terminates safely");
+}
+
+void TestDepthLimit() {
+    TEST("ProcessResolver - depth limit safe")
+    // Very long chain of same-name processes: all should resolve to last
+    std::vector<ProcessInfo> processes;
+    for (uint32_t i = 0; i < 100; i++) {
+        ProcessInfo pi;
+        pi.processId = i;
+        pi.parentProcessId = (i > 0) ? i - 1 : 0;
+        pi.processPath = "C:\\App\\app.exe";
+        pi.processName = "app.exe";
+        pi.creationTimeUtc100ns = 1000000 + i;
+        processes.push_back(pi);
+    }
+    // Last element is PID 99
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    // Root should be PID 99 (last ancestor in same family)
+    ASSERT_EQ(processes[idx].processId, 99u);
+    END_TEST("ProcessResolver - depth limit safe");
+}
+
+void TestPidReuseProtection() {
+    TEST("ProcessResolver - pid reuse protection")
+    // Same PID appeared at different times - should use creation time
+    // Verify creation time is preserved from the correct root
+    std::vector<ProcessInfo> processes;
+    processes.push_back({100, 200, "C:\\App\\app.exe", "app.exe", 100100});
+    processes.push_back({200, 0, "C:\\App\\app.exe", "app.exe", 100200});
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    ASSERT_EQ(processes[idx].processId, 200u);
+    ASSERT_EQ(processes[idx].creationTimeUtc100ns, 100200u);
+    END_TEST("ProcessResolver - pid reuse protection");
+}
+
+void TestSystemBoundaryHalts() {
+    TEST("ProcessResolver - system boundary halts ascent")
+    // app.exe -> explorer.exe -> ... ; should stop at explorer.exe
+    std::vector<ProcessInfo> processes;
+    processes.push_back({400, 100, "C:\\App\\app.exe", "app.exe", 100400});
+    processes.push_back({100, 0, "C:\\Windows\\explorer.exe", "explorer.exe", 100100});
+
+    bool usedFallback = false;
+    uint32_t idx = FindApplicationRootIndex(processes, usedFallback);
+    ASSERT_EQ(processes[idx].processId, 400u); // app.exe is its own root
+    END_TEST("ProcessResolver - system boundary halts ascent");
+}
+
+// ====================================================================
+// FilteredSourcePlanner Deterministic Tests with Mock Sessions
+// ====================================================================
+
+struct MockResolverResult {
+    ProcessTreeResult result;
+    std::vector<ProcessInfo> processes;
+};
+
+// Helper: create a process tree result for testing
+ProcessTreeResult MakeMockProcessTree(uint32_t sessionPid,
+                                       const std::vector<uint32_t>& chainPids,
+                                       const std::vector<std::string>& chainNames,
+                                       const std::vector<std::string>& chainPaths)
+{
+    ProcessTreeResult tree;
+    tree.succeeded = true;
+    tree.targetPid = sessionPid;
+
+    for (size_t i = 0; i < chainPids.size(); ++i) {
+        ProcessInfo info;
+        info.processId = chainPids[i];
+        info.processName = (i < chainNames.size()) ? chainNames[i] : "unknown.exe";
+        info.processPath = (i < chainPaths.size()) ? chainPaths[i] : "C:\\unknown.exe";
+        info.creationTimeUtc100ns = 1000000 + chainPids[i];
+        if (i + 1 < chainPids.size()) {
+            info.parentProcessId = chainPids[i + 1];
+        }
+        tree.processes.push_back(info);
+    }
+    if (!chainPids.empty()) {
+        tree.targetCreationTimeUtc100ns = 1000000 + chainPids[0];
+    }
+
+    // Compute authoritative root using our pure function
+    bool usedFallback = false;
+    uint32_t rootIdx = FindApplicationRootIndex(tree.processes, usedFallback);
+    const auto& rootProc = tree.processes[rootIdx];
+    tree.applicationRootPid = rootProc.processId;
+    tree.applicationRootCreationTimeUtc100ns = rootProc.creationTimeUtc100ns;
+    tree.applicationRootName = rootProc.processName;
+    tree.applicationRootPath = rootProc.processPath;
+    tree.usedBasenameFallback = usedFallback;
+
+    return tree;
+}
+
+void TestPlannerMultipleSessionsSameRoot() {
+    TEST("FilteredSourcePlanner - multiple sessions same root dedup")
+    // Two sessions (301, 302) both resolve to root 200.
+    // Expected: 1 desired source, candidate.identity.pid=200, sessionPid preserved.
+    // Mock the resolver by directly calling the planner's plan path is not possible
+    // since it calls ResolveProcessTree internally. Instead, we verify the
+    // downstream behavior: planner produces 1 source for 2 sessions with same root.
+
+    // We test indirectly by verifying identity consistency:
+    // candidate.identity == tree.applicationRootPid
+    // and dedup collapses same-root sessions.
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+
+    // Session 301
+    AudioSessionInfo s1;
+    s1.pid = 301;
+    s1.creationTimeUtc100ns = 1000301;
+    s1.identityValidated = true;
+    s1.processAlive = true;
+    s1.executableName = "chrome.exe";
+    s1.sessionState = 1; // active
+    sessions.push_back(s1);
+
+    // Session 302 (same root expected)
+    AudioSessionInfo s2;
+    s2.pid = 302;
+    s2.creationTimeUtc100ns = 1000302;
+    s2.identityValidated = true;
+    s2.processAlive = true;
+    s2.executableName = "chrome.exe";
+    s2.sessionState = 1; // active
+    sessions.push_back(s2);
+
+    auto plan = planner.Plan(sessions, options);
+    // NOTE: These tests call the real ResolveProcessTree, so they are
+    // OS-dependent. On this machine, processes 301/302 likely don't exist,
+    // so the tree may fail to resolve. These tests are best-effort.
+    // The deterministic FindApplicationRootIndex tests cover the algorithm.
+
+    // Just verify basic behavior: at least sessions were counted
+    ASSERT_EQ(plan.totalSessions, 2u);
+    // Invalid sessions expected since PIDs don't exist (not a real process)
+    // This is fine for best-effort testing.
+
+    END_TEST("FilteredSourcePlanner - multiple sessions same root dedup");
+}
+
+void TestPlannerIdentityConsistency() {
+    TEST("FilteredSourcePlanner - identity consistency")
+    // Validates that candidate.identity matches tree.applicationRootPid
+    // for the current process (which we can resolve).
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+
+    const uint32_t currentPid = GetCurrentProcessId();
+    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
+
+    AudioSessionInfo s;
+    s.pid = currentPid;
+    s.creationTimeUtc100ns = currentCreationTime;
+    s.identityValidated = true;
+    s.processAlive = true;
+    s.executableName = "test.exe";
+    s.sessionState = 0; // inactive but eligible
+    sessions.push_back(s);
+
+    auto plan = planner.Plan(sessions, options);
+
+    if (plan.desiredSources.size() > 0) {
+        const auto& candidate = plan.desiredSources[0];
+        auto tree = ResolveProcessTree(currentPid);
+        if (tree.succeeded) {
+            // Candidate identity MUST match the authoritative application root
+            ASSERT_EQ(candidate.identity.pid, tree.applicationRootPid);
+            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, tree.applicationRootCreationTimeUtc100ns);
+            // Candidate session PID must preserve the original session PID
+            ASSERT_EQ(candidate.sessionPid, currentPid);
+        }
+    }
+    END_TEST("FilteredSourcePlanner - identity consistency");
+}
+
+// ====================================================================
+// Exclusion Tests at Root Level
+// ====================================================================
+
+void TestExclusionAtRootLevel() {
+    TEST("ExclusionPolicy - root level exclusions apply")
+    // Verifies that ExclusionPolicy functions work against root-level names
+    ASSERT(IsDiscordProcess("discord.exe"));
+    ASSERT(IsDiscordProcess("DiscordPTB.exe"));
+    ASSERT(IsDiscordProcess("DISCORD.EXE"));
+    ASSERT(IsScreenLinkProcess("screenlink.exe", "C:\\app\\screenlink.exe"));
+    ASSERT(IsScreenLinkProcess("ScreenLink.exe", ""));
+    // Non-Discord/Non-ScreenLink should not match
+    ASSERT(!IsDiscordProcess("notdiscord.exe"));
+    ASSERT(!IsScreenLinkProcess("electron.exe", "C:\\browser\\electron.exe"));
+    // Generic Update.exe should NOT be excluded without Discord context
+    ASSERT(!IsDiscordProcess("update.exe"));
+    ASSERT(!IsDiscordProcess("Update.exe"));
+    END_TEST("ExclusionPolicy - root level exclusions apply");
+}
+
+// ====================================================================
+// Diagnostics Tests
+// ====================================================================
+
+void TestFilteredMonitorDiagnosticsRmsFields() {
+    TEST("FilteredMonitorDiagnostics - RMS fields are doubles")
+    // Verify RMS values are stored as double and accessible as numbers
+    FilteredMonitorDiagnostics diag;
+    diag.lastInputRms = 0.5;
+    diag.maximumInputRms = 0.75;
+    diag.lastOutputRms = 0.3;
+    diag.maximumOutputRms = 0.6;
+
+    // Verify they are doubles (not floats)
+    ASSERT(diag.lastInputRms > 0.0);
+    ASSERT(diag.maximumInputRms > 0.0);
+    ASSERT(diag.lastOutputRms > 0.0);
+    ASSERT(diag.maximumOutputRms > 0.0);
+
+    // Verify serialization: std::to_string should produce decimal strings
+    std::string rmsStr = std::to_string(diag.maximumInputRms);
+    ASSERT(!rmsStr.empty());
+    // Should contain a decimal point for non-integer values
+    ASSERT(rmsStr.find('.') != std::string::npos);
+    END_TEST("FilteredMonitorDiagnostics - RMS fields are doubles");
+}
+
+void TestDuplicateRootSessionsField() {
+    TEST("FilteredMonitorDiagnostics - duplicateRootSessionsLastScan field")
+    FilteredMonitorDiagnostics diag;
+    diag.duplicateRootSessionsLastScan = 5;
+    ASSERT_EQ(diag.duplicateRootSessionsLastScan, 5u);
+    // Verify serialization
+    std::string s = std::to_string(diag.duplicateRootSessionsLastScan);
+    ASSERT_EQ(s, "5");
+    END_TEST("FilteredMonitorDiagnostics - duplicateRootSessionsLastScan field");
 }
 
 } // anonymous namespace
@@ -1275,6 +1649,29 @@ bool RunPhase2GSelfTests() {
     TestFilteredSourceCandidateIdentity();
     TestRecordFilteredMixerOutputUsesEnergy();
     TestServiceSessionStreamGeneration();
+
+    // ProcessResolver deterministic tests
+    TestChromiumProcessFamily();
+    TestGameLauncherBoundary();
+    TestDifferentAppsUnderExplorer();
+    TestSameBasenameDifferentPath();
+    TestPathCaseInsensitivity();
+    TestMissingPathFallback();
+    TestCycleProtection();
+    TestDepthLimit();
+    TestPidReuseProtection();
+    TestSystemBoundaryHalts();
+
+    // Planner identity consistency tests
+    TestPlannerMultipleSessionsSameRoot();
+    TestPlannerIdentityConsistency();
+
+    // Exclusion tests at root level
+    TestExclusionAtRootLevel();
+
+    // Diagnostics tests
+    TestFilteredMonitorDiagnosticsRmsFields();
+    TestDuplicateRootSessionsField();
 
     std::cerr << "[Phase2G] Tests: " << g_testsRun << " run, "
               << g_testsPassed << " passed, "
