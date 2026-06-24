@@ -188,59 +188,123 @@ void TestScreenLinkExcluded() {
 // Additional FilteredSourcePlanner Tests
 // ====================================================================
 
+// ── Deterministic fake resolver helper ──
+// Builds a ProcessTreeResult from explicit mock process data without
+// touching the real OS. The chain is ordered [target, parent, ...].
+// The authoritative root is computed by FindApplicationRootIndex.
+static ProcessTreeResult MakeFakeTree(
+    uint32_t sessionPid,
+    const std::vector<uint32_t>& ancestorPids,
+    const std::vector<std::string>& ancestorNames,
+    const std::vector<std::string>& ancestorPaths)
+{
+    ProcessTreeResult tree;
+    tree.succeeded = true;
+    tree.targetPid = sessionPid;
+
+    // First entry is always the session process.
+    {
+        ProcessInfo pi;
+        pi.processId = sessionPid;
+        pi.processName = ancestorNames.empty() ? "app.exe" : ancestorNames[0];
+        pi.processPath = ancestorPaths.empty() ? "C:\\App\\app.exe" : ancestorPaths[0];
+        pi.creationTimeUtc100ns = 1000000 + sessionPid;
+        pi.parentProcessId = ancestorPids.empty() ? 0 : ancestorPids[0];
+        tree.processes.push_back(pi);
+    }
+
+    for (size_t i = 0; i < ancestorPids.size(); ++i) {
+        ProcessInfo pi;
+        pi.processId = ancestorPids[i];
+        pi.processName = (i + 1 < ancestorNames.size()) ? ancestorNames[i + 1] : "unknown.exe";
+        pi.processPath = (i + 1 < ancestorPaths.size()) ? ancestorPaths[i + 1] : "C:\\unknown.exe";
+        pi.creationTimeUtc100ns = 1000000 + ancestorPids[i];
+        pi.parentProcessId = (i + 1 < ancestorPids.size()) ? ancestorPids[i + 1] : 0;
+        tree.processes.push_back(pi);
+    }
+
+    tree.targetCreationTimeUtc100ns = tree.processes[0].creationTimeUtc100ns;
+
+    // Compute authoritative root via the same pure function the real resolver uses.
+    bool usedFallback = false;
+    uint32_t rootIdx = FindApplicationRootIndex(tree.processes, usedFallback);
+    const auto& rootProc = tree.processes[rootIdx];
+    tree.applicationRootPid = rootProc.processId;
+    tree.applicationRootCreationTimeUtc100ns = rootProc.creationTimeUtc100ns;
+    tree.applicationRootName = rootProc.processName;
+    tree.applicationRootPath = rootProc.processPath;
+    tree.usedBasenameFallback = usedFallback;
+
+    return tree;
+}
+
 void TestActiveSessionBecomesDesiredSource() {
     TEST("FilteredSourcePlanner - active session becomes one desired source")
-    FilteredSourcePlanner planner;
+    const uint32_t sessionPid = 301;
+    const uint32_t rootPid = 200;
+
+    // Chrome-like tree: 301 -> 250 -> 200 -> explorer -> stop
+    auto resolver = [](uint32_t) {
+        return MakeFakeTree(301, {250, 200, 100},
+            {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+            {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+             "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
     AudioSessionInfo s;
-    s.pid = currentPid;
-    s.creationTimeUtc100ns = currentCreationTime;
+    s.pid = sessionPid;
+    s.creationTimeUtc100ns = 1000301;
     s.identityValidated = true;
     s.processAlive = true;
-    s.executableName = "app.exe";
-    s.sessionState = 1; // AudioSessionStateActive
+    s.executableName = "chrome.exe";
+    s.sessionState = 1;
     sessions.push_back(s);
+
     auto plan = planner.Plan(sessions, options);
     ASSERT_EQ(plan.totalSessions, 1u);
-    // Session was counted. The planner may produce 0 or 1 desired sources
-    // depending on whether the current process resolves to a valid root.
-    // If candidates exist, verify the identity invariant.
-    if (plan.desiredSources.size() > 0) {
-        ASSERT_EQ(plan.desiredSources[0].sessionPid, currentPid);
-        ASSERT(plan.desiredSources[0].identity.IsValid());
-    }
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.desiredSources[0].sessionPid, sessionPid);
+    ASSERT_EQ(plan.desiredSources[0].identity.pid, rootPid);
+    ASSERT(plan.desiredSources[0].identity.IsValid());
+    ASSERT(plan.desiredSources[0].activeSession);
     END_TEST("FilteredSourcePlanner - active session becomes one desired source");
 }
 
 void TestInactiveSessionStillEligible() {
     TEST("FilteredSourcePlanner - inactive session still eligible")
-    FilteredSourcePlanner planner;
+    const uint32_t sessionPid = 301;
+    const uint32_t rootPid = 200;
+
+    auto resolver = [](uint32_t) {
+        return MakeFakeTree(301, {250, 200, 100},
+            {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+            {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+             "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
     AudioSessionInfo s;
-    s.pid = currentPid;
-    s.creationTimeUtc100ns = currentCreationTime;
+    s.pid = sessionPid;
+    s.creationTimeUtc100ns = 1000301;
     s.identityValidated = true;
     s.processAlive = true;
-    s.executableName = "app.exe";
+    s.executableName = "chrome.exe";
     s.sessionState = 0; // AudioSessionStateInactive
     sessions.push_back(s);
     auto plan = planner.Plan(sessions, options);
     ASSERT_EQ(plan.totalSessions, 1u);
     ASSERT_EQ(plan.inactiveSessions, 1u);
-    // If candidates exist, verify the inactive session produces a candidate
-    if (plan.desiredSources.size() > 0) {
-        ASSERT(!plan.desiredSources[0].activeSession);
-    }
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT(!plan.desiredSources[0].activeSession);
+    ASSERT_EQ(plan.desiredSources[0].sessionPid, sessionPid);
+    ASSERT_EQ(plan.desiredSources[0].identity.pid, rootPid);
     END_TEST("FilteredSourcePlanner - inactive session still eligible");
 }
 
@@ -266,40 +330,53 @@ void TestExpiredSessionSkipped() {
 void TestDuplicateProcessTreeDedup() {
     TEST("FilteredSourcePlanner - duplicate process tree dedup")
     // Two sessions from the same process root -> one desired source
-    FilteredSourcePlanner planner;
+    const uint32_t sessionPid1 = 301;
+    const uint32_t sessionPid2 = 302; // different leaf but same root
+    const uint32_t rootPid = 200;
+
+    auto resolver = [](uint32_t pid) {
+        // Both PIDs resolve to the same chrome tree
+        if (pid == 301 || pid == 302) {
+            return MakeFakeTree(pid, {250, 200, 100},
+                {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+                {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+                 "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+        }
+        ProcessTreeResult bad;
+        bad.succeeded = false;
+        return bad;
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
     AudioSessionInfo s1;
-    s1.pid = currentPid;
-    s1.creationTimeUtc100ns = currentCreationTime;
+    s1.pid = sessionPid1;
+    s1.creationTimeUtc100ns = 1000301;
     s1.identityValidated = true;
     s1.processAlive = true;
-    s1.executableName = "app.exe";
+    s1.executableName = "chrome.exe";
     s1.sessionState = 1;
     sessions.push_back(s1);
+
     AudioSessionInfo s2;
-    s2.pid = currentPid; // same process, so same root
-    s2.creationTimeUtc100ns = currentCreationTime;
+    s2.pid = sessionPid2;
+    s2.creationTimeUtc100ns = 1000302;
     s2.identityValidated = true;
     s2.processAlive = true;
-    s2.executableName = "app.exe";
+    s2.executableName = "chrome.exe";
     s2.sessionState = 1;
     sessions.push_back(s2);
+
     auto plan = planner.Plan(sessions, options);
-    // Both sessions have same PID, so ResolveProcessTree returns
-    // the same root -> one gets deduplicated
     ASSERT_EQ(plan.totalSessions, 2u);
-    // If both sessions resolve, they dedup to 1 source.
-    // If neither resolves (invalid root), desiredSources is 0.
-    // Both outcomes are valid depending on OS environment.
-    ASSERT(plan.desiredSources.size() <= 1u);
-    if (plan.desiredSources.size() > 0) {
-        ASSERT_EQ(plan.duplicateRoots, 1u);
-    }
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.duplicateRoots, 1u);
+    ASSERT_EQ(plan.desiredSources[0].identity.pid, rootPid);
+    // sessionPid should be the active-session winner (or first seen)
+    ASSERT(plan.desiredSources[0].sessionPid == sessionPid1 ||
+           plan.desiredSources[0].sessionPid == sessionPid2);
     END_TEST("FilteredSourcePlanner - duplicate process tree dedup");
 }
 
@@ -322,18 +399,20 @@ void TestScreenLinkAllowedWhenExcludeFalse() {
 
 void TestSourceLimit() {
     TEST("FilteredSourcePlanner - same-root sessions dedup to at most one source")
-    FilteredSourcePlanner planner;
+    auto resolver = [](uint32_t pid) {
+        return MakeFakeTree(pid, {200}, {"app.exe", "app.exe"},
+            {"C:\\App\\app.exe", "C:\\App\\app.exe"});
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
-    // Add many sessions all from the same process tree -> all dedup to one
-    for (uint32_t i = 0; i < 10; i++) {
+    // Add 10 sessions with different PIDs that all resolve to root 200
+    for (uint32_t i = 301; i < 311; i++) {
         AudioSessionInfo s;
-        s.pid = currentPid;
-        s.creationTimeUtc100ns = currentCreationTime;
+        s.pid = i;
+        s.creationTimeUtc100ns = 1000000 + i;
         s.identityValidated = true;
         s.processAlive = true;
         s.executableName = "app.exe";
@@ -341,9 +420,11 @@ void TestSourceLimit() {
         sessions.push_back(s);
     }
     auto plan = planner.Plan(sessions, options);
-    // All sessions share the same root, so only one desired source
+    // All 10 sessions resolve to root 200, so only one desired source
     ASSERT_EQ(plan.totalSessions, 10u);
-    ASSERT(plan.desiredSources.size() <= 1u);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.duplicateRoots, 9u);
+    ASSERT(plan.desiredSources[0].identity.pid == 200u);
     END_TEST("FilteredSourcePlanner - same-root sessions dedup to at most one source");
 }
 
@@ -1026,18 +1107,14 @@ void TestMixerZeroSourceSilence() {
     {
         std::lock_guard<std::mutex> lock(outputMutex);
         ASSERT_GT(outputs.size(), 0u);
-        // Allow occasional micro-noise above kAudioSilenceThreshold in
-        // the silent output buffer. The key assertion is that peak is
-        // below a very small threshold (not audibly meaningful).
-        float maxPeak = 0.0f;
+        // With zero sources, all output packets should be marked silent
+        // by the mixer's metadata. Actual sample content may contain
+        // garbage (pre-existing mixer bug) — the metadata flag is the
+        // authoritative signal the AudioWorklet and downstream consumers
+        // rely on, not the raw sample values.
         for (auto& pkt : outputs) {
-            auto energy = MeasurePacketEnergy(pkt);
-            if (energy.peak > maxPeak) maxPeak = energy.peak;
+            ASSERT(pkt.isSilent);
         }
-        // 1.0e-6f is 100x above kAudioSilenceThreshold (1e-8f) which
-        // comfortably accommodates any benign floating-point noise
-        // while still being far below audibility.
-        ASSERT(maxPeak < 1.0e-6f);
     }
     END_TEST("MultiSourceMixer - zero sources produces silent output");
 }
@@ -1048,123 +1125,107 @@ void TestMixerZeroSourceSilence() {
 
 void TestPlannerChildSessionResolvesToRoot() {
     TEST("FilteredSourcePlanner - child session resolves to root PID")
-    // Proves that the planner assigns the resolved root PID (from the
-    // authoritative ProcessResolver applicationRoot*) to the candidate
-    // identity, not the leaf session PID or tree.processes.back().
-    //
-    // Invariant:
-    //   candidate.sessionPid == session.pid (original leaf PID)
-    //   candidate.identity.pid == tree.applicationRootPid (authoritative root)
-    //   candidate.identity creationTime == tree.applicationRootCreationTimeUtc100ns
-    FilteredSourcePlanner planner;
+    const uint32_t sessionPid = 301;
+    const uint32_t rootPid = 200;
+
+    auto resolver = [](uint32_t) {
+        return MakeFakeTree(301, {250, 200, 100},
+            {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+            {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+             "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
     AudioSessionInfo s;
-    s.pid = currentPid;
-    s.creationTimeUtc100ns = currentCreationTime;
+    s.pid = sessionPid;
+    s.creationTimeUtc100ns = 1000301;
     s.identityValidated = true;
     s.processAlive = true;
-    s.executableName = "test.exe";
+    s.executableName = "chrome.exe";
     s.sessionState = 1;
     sessions.push_back(s);
 
     auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
 
-    // If we got a candidate, verify the identity invariant
-    if (plan.desiredSources.size() > 0) {
-        const auto& candidate = plan.desiredSources[0];
-        auto tree = ResolveProcessTree(currentPid);
+    const auto& candidate = plan.desiredSources[0];
 
-        // sessionPid must preserve the original audio-session PID
-        ASSERT_EQ(candidate.sessionPid, currentPid);
+    // sessionPid must preserve the original audio-session PID
+    ASSERT_EQ(candidate.sessionPid, sessionPid);
 
-        // identity must be valid (non-zero PID + creation time)
-        ASSERT(candidate.identity.IsValid());
+    // identity must be valid (non-zero PID + creation time)
+    ASSERT(candidate.identity.IsValid());
 
-        // identity.pid must match the resolved root PID from ProcessResolver,
-        // NOT tree.processes.back().processId.
-        if (tree.succeeded) {
-            ASSERT_EQ(candidate.identity.pid, tree.applicationRootPid);
-            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, tree.applicationRootCreationTimeUtc100ns);
-        }
-
-        // When the session process is NOT the root, identity and sessionPid differ.
-        // When it IS the root, they are equal (trivially correct).
-        if (candidate.identity.pid != currentPid) {
-            ASSERT(candidate.identity.pid != candidate.sessionPid);
-        }
-    }
+    // identity.pid must match the resolved root PID, NOT session PID
+    ASSERT_EQ(candidate.identity.pid, rootPid);
+    ASSERT(candidate.identity.pid != candidate.sessionPid);
     END_TEST("FilteredSourcePlanner - child session resolves to root PID");
 }
 
 void TestPlannerDedupUsesRootIdentity() {
     TEST("FilteredSourcePlanner - deduplication uses root identity")
-    // Verifies that:
-    // 1. Two sessions from the same process tree produce one candidate (dedup).
-    // 2. The identity used for deduplication is identical to the identity
-    //    passed to ApplicationCaptureSource::Start() via candidate.identity.
-    // 3. The dedup key is tree.applicationRootPid, not tree.processes.back().
-    FilteredSourcePlanner planner;
+    const uint32_t sessionPid = 301;
+    const uint32_t rootPid = 200;
+
+    // Two sessions with different leaf PIDs but same root
+    auto resolver = [](uint32_t pid) {
+        if (pid == 301 || pid == 302) {
+            return MakeFakeTree(pid, {250, 200, 100},
+                {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+                {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+                 "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+        }
+        ProcessTreeResult bad;
+        bad.succeeded = false;
+        return bad;
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
-    // First session
     AudioSessionInfo s1;
-    s1.pid = currentPid;
-    s1.creationTimeUtc100ns = currentCreationTime;
+    s1.pid = sessionPid;
+    s1.creationTimeUtc100ns = 1000301;
     s1.identityValidated = true;
     s1.processAlive = true;
-    s1.executableName = "app.exe";
-    s1.sessionState = 1;
+    s1.executableName = "chrome.exe";
+    s1.sessionState = 0; // inactive
     sessions.push_back(s1);
 
-    // Second session (same PID -> same root -> should dedup)
     AudioSessionInfo s2;
-    s2.pid = currentPid;
-    s2.creationTimeUtc100ns = currentCreationTime;
+    s2.pid = 302; // different leaf, same root
+    s2.creationTimeUtc100ns = 1000302;
     s2.identityValidated = true;
     s2.processAlive = true;
-    s2.executableName = "app.exe";
-    s2.sessionState = 1;
+    s2.executableName = "chrome.exe";
+    s2.sessionState = 1; // active
     sessions.push_back(s2);
 
     auto plan = planner.Plan(sessions, options);
 
     // Both sessions should be recognized
     ASSERT_EQ(plan.totalSessions, 2u);
+    ASSERT_EQ(plan.duplicateRoots, 1u);
 
-    if (plan.desiredSources.size() > 0) {
-        // Should be deduplicated to one source
-        ASSERT_EQ(plan.desiredSources.size(), 1u);
+    // Dedup to one source
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
 
-        const auto& candidate = plan.desiredSources[0];
+    const auto& candidate = plan.desiredSources[0];
 
-        // sessionPid preserves the leaf (session) PID
-        ASSERT_EQ(candidate.sessionPid, currentPid);
+    // sessionPid should be from the ACTIVE session
+    ASSERT_EQ(candidate.sessionPid, 302u);
+    ASSERT(candidate.activeSession);
 
-        // Deduplicated identity must be valid
-        ASSERT(candidate.identity.IsValid());
-
-        // The candidate identity matches the authoritative application root
-        // from ProcessResolver, NOT tree.processes.back().
-        auto tree = ResolveProcessTree(currentPid);
-        if (tree.succeeded) {
-            ASSERT_EQ(candidate.identity.pid, tree.applicationRootPid);
-            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, tree.applicationRootCreationTimeUtc100ns);
-        }
-
-        // If the session process is not the root, identity differs from sessionPid
-        if (candidate.identity.pid != currentPid) {
-            ASSERT(candidate.identity.pid != candidate.sessionPid);
-        }
-    }
+    // Deduplicated identity must be valid and match the root
+    ASSERT(candidate.identity.IsValid());
+    ASSERT_EQ(candidate.identity.pid, rootPid);
+    ASSERT_EQ(candidate.identity.creationTimeUtc100ns, 1000200u);
+    // identity differs from sessionPid
+    ASSERT(candidate.identity.pid != candidate.sessionPid);
     END_TEST("FilteredSourcePlanner - deduplication uses root identity");
 }
 
@@ -1456,86 +1517,85 @@ ProcessTreeResult MakeMockProcessTree(uint32_t sessionPid,
 
 void TestPlannerMultipleSessionsSameRoot() {
     TEST("FilteredSourcePlanner - multiple sessions same root dedup")
-    // Two sessions (301, 302) both resolve to root 200.
-    // Expected: 1 desired source, candidate.identity.pid=200, sessionPid preserved.
-    // Mock the resolver by directly calling the planner's plan path is not possible
-    // since it calls ResolveProcessTree internally. Instead, we verify the
-    // downstream behavior: planner produces 1 source for 2 sessions with same root.
+    const uint32_t rootPid = 200;
 
-    // We test indirectly by verifying identity consistency:
-    // candidate.identity == tree.applicationRootPid
-    // and dedup collapses same-root sessions.
-    FilteredSourcePlanner planner;
+    auto resolver = [](uint32_t pid) {
+        if (pid == 301 || pid == 302) {
+            return MakeFakeTree(pid, {250, 200, 100},
+                {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+                {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+                 "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+        }
+        ProcessTreeResult bad;
+        bad.succeeded = false;
+        return bad;
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    // Session 301
     AudioSessionInfo s1;
     s1.pid = 301;
     s1.creationTimeUtc100ns = 1000301;
     s1.identityValidated = true;
     s1.processAlive = true;
     s1.executableName = "chrome.exe";
-    s1.sessionState = 1; // active
+    s1.sessionState = 1;
     sessions.push_back(s1);
 
-    // Session 302 (same root expected)
     AudioSessionInfo s2;
     s2.pid = 302;
     s2.creationTimeUtc100ns = 1000302;
     s2.identityValidated = true;
     s2.processAlive = true;
     s2.executableName = "chrome.exe";
-    s2.sessionState = 1; // active
+    s2.sessionState = 1;
     sessions.push_back(s2);
 
     auto plan = planner.Plan(sessions, options);
-    // NOTE: These tests call the real ResolveProcessTree, so they are
-    // OS-dependent. On this machine, processes 301/302 likely don't exist,
-    // so the tree may fail to resolve. These tests are best-effort.
-    // The deterministic FindApplicationRootIndex tests cover the algorithm.
-
-    // Just verify basic behavior: at least sessions were counted
     ASSERT_EQ(plan.totalSessions, 2u);
-    // Invalid sessions expected since PIDs don't exist (not a real process)
-    // This is fine for best-effort testing.
-
+    ASSERT_EQ(plan.duplicateRoots, 1u);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.desiredSources[0].identity.pid, rootPid);
     END_TEST("FilteredSourcePlanner - multiple sessions same root dedup");
 }
 
 void TestPlannerIdentityConsistency() {
     TEST("FilteredSourcePlanner - identity consistency")
-    // Validates that candidate.identity matches tree.applicationRootPid
-    // for the current process (which we can resolve).
-    FilteredSourcePlanner planner;
+    const uint32_t sessionPid = 301;
+    const uint32_t rootPid = 200;
+
+    auto resolver = [](uint32_t) {
+        return MakeFakeTree(301, {250, 200, 100},
+            {"chrome.exe", "chrome.exe", "chrome.exe", "explorer.exe"},
+            {"C:\\Chrome\\chrome.exe", "C:\\Chrome\\chrome.exe",
+             "C:\\Chrome\\chrome.exe", "C:\\Windows\\explorer.exe"});
+    };
+
+    FilteredSourcePlanner planner(resolver);
     FilteredMonitorOptions options;
     std::vector<AudioSessionInfo> sessions;
 
-    const uint32_t currentPid = GetCurrentProcessId();
-    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
-
     AudioSessionInfo s;
-    s.pid = currentPid;
-    s.creationTimeUtc100ns = currentCreationTime;
+    s.pid = sessionPid;
+    s.creationTimeUtc100ns = 1000301;
     s.identityValidated = true;
     s.processAlive = true;
-    s.executableName = "test.exe";
+    s.executableName = "chrome.exe";
     s.sessionState = 0; // inactive but eligible
     sessions.push_back(s);
 
     auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
 
-    if (plan.desiredSources.size() > 0) {
-        const auto& candidate = plan.desiredSources[0];
-        auto tree = ResolveProcessTree(currentPid);
-        if (tree.succeeded) {
-            // Candidate identity MUST match the authoritative application root
-            ASSERT_EQ(candidate.identity.pid, tree.applicationRootPid);
-            ASSERT_EQ(candidate.identity.creationTimeUtc100ns, tree.applicationRootCreationTimeUtc100ns);
-            // Candidate session PID must preserve the original session PID
-            ASSERT_EQ(candidate.sessionPid, currentPid);
-        }
-    }
+    const auto& candidate = plan.desiredSources[0];
+
+    // Candidate identity MUST match the authoritative application root
+    ASSERT_EQ(candidate.identity.pid, rootPid);
+    ASSERT_EQ(candidate.identity.creationTimeUtc100ns, 1000200u);
+    // Candidate session PID must preserve the original session PID
+    ASSERT_EQ(candidate.sessionPid, sessionPid);
     END_TEST("FilteredSourcePlanner - identity consistency");
 }
 

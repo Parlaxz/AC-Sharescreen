@@ -613,6 +613,9 @@ bool FilteredMonitorController::ReconcileOnce() {
         diag_.activeCaptureSources = sourceCount;
     }
 
+    // Snapshot per-active-source diagnostics
+    SnapshotActiveSourceDiagnostics();
+
     return true;
 }
 
@@ -848,6 +851,27 @@ void FilteredMonitorController::RecordFilteredMixerOutput(const AudioPacket& pac
     diag_.lastOutputRms = energy.Rms();
     if (energy.Rms() > diag_.maximumOutputRms) {
         diag_.maximumOutputRms = energy.Rms();
+    }
+}
+
+void FilteredMonitorController::SnapshotActiveSourceDiagnostics() {
+    std::vector<ActiveSourceDiagnostics> sources;
+    {
+        std::lock_guard<std::mutex> lock(activeCapturesMutex_);
+        sources.reserve(activeCaptures_.size());
+        for (const auto& [identity, cap] : activeCaptures_) {
+            if (!cap.source) continue;
+            ActiveSourceDiagnostics as;
+            as.logicalRootPid = identity.pid;
+            as.physicalCaptureTargetPid = cap.candidate.identity.pid;
+            as.sessionPid = cap.candidate.sessionPid;
+            as.executableName = cap.candidate.rootExecutableName;
+            sources.push_back(std::move(as));
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(diagMutex_);
+        diag_.activeSources = std::move(sources);
     }
 }
 

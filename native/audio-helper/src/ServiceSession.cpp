@@ -1241,7 +1241,25 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
         result += "\"lastOutputRms\":" + std::to_string(monDiag.lastOutputRms) + ",";
         result += "\"maximumOutputRms\":" + std::to_string(monDiag.maximumOutputRms) + ",";
         result += "\"lastErrorCode\":\"" + monDiag.lastErrorCode + "\",";
-        result += "\"lastErrorMessage\":\"" + monDiag.lastErrorMessage + "\"";
+        result += "\"lastErrorMessage\":\"" + monDiag.lastErrorMessage + "\",";
+
+        // Serialize active sources
+        result += "\"activeSources\":[";
+        for (size_t i = 0; i < monDiag.activeSources.size(); ++i) {
+            if (i > 0) result += ",";
+            const auto& src = monDiag.activeSources[i];
+            result += "{";
+            result += "\"sessionPid\":" + std::to_string(src.sessionPid) + ",";
+            result += "\"logicalRootPid\":" + std::to_string(src.logicalRootPid) + ",";
+            result += "\"physicalCaptureTargetPid\":" + std::to_string(src.physicalCaptureTargetPid) + ",";
+            result += "\"executableName\":\"" + src.executableName + "\",";
+            result += "\"inputPackets\":" + std::to_string(src.inputPackets) + ",";
+            result += "\"inputNonZeroPackets\":" + std::to_string(src.inputNonZeroPackets) + ",";
+            result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(src.maximumInputPeak));
+            result += "}";
+        }
+        result += "]";
+
         result += "}";
     }
 
@@ -2011,7 +2029,25 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
         result += "\"lastOutputRms\":" + std::to_string(diag.lastOutputRms) + ",";
         result += "\"maximumOutputRms\":" + std::to_string(diag.maximumOutputRms) + ",";
         result += "\"lastErrorCode\":\"" + diag.lastErrorCode + "\",";
-        result += "\"lastErrorMessage\":\"" + diag.lastErrorMessage + "\"";
+        result += "\"lastErrorMessage\":\"" + diag.lastErrorMessage + "\",";
+
+        // Serialize active sources
+        result += "\"activeSources\":[";
+        for (size_t i = 0; i < diag.activeSources.size(); ++i) {
+            if (i > 0) result += ",";
+            const auto& src = diag.activeSources[i];
+            result += "{";
+            result += "\"sessionPid\":" + std::to_string(src.sessionPid) + ",";
+            result += "\"logicalRootPid\":" + std::to_string(src.logicalRootPid) + ",";
+            result += "\"physicalCaptureTargetPid\":" + std::to_string(src.physicalCaptureTargetPid) + ",";
+            result += "\"executableName\":\"" + src.executableName + "\",";
+            result += "\"inputPackets\":" + std::to_string(src.inputPackets) + ",";
+            result += "\"inputNonZeroPackets\":" + std::to_string(src.inputNonZeroPackets) + ",";
+            result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(src.maximumInputPeak));
+            result += "}";
+        }
+        result += "]";
+
         result += "}";
     } else if (activeSrc == "application" && applicationSource_) {
         result = "{";

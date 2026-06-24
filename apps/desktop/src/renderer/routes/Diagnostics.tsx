@@ -1,6 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
-import type { ScreenLinkAPI } from "../../preload/api-types.js";
+import type {
+  ScreenLinkAPI,
+  FilteredMonitorDiagnostics,
+  PipelineSnapshotWithDiagnostics,
+  ActiveSourceDiagnostics,
+} from "../../preload/api-types.js";
 
 interface AppInfo {
   version: string;
@@ -9,13 +14,22 @@ interface AppInfo {
   nodeVersion: string;
 }
 
+interface HelperProvenance {
+  state: string;
+  uptimeMs: number;
+  generation: number;
+  helperBinaryPath?: string;
+  helperBinarySize?: number;
+  helperBinaryMtime?: string;
+}
+
 export function Diagnostics() {
   const { navigate } = useStore();
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const [audioDiag, setAudioDiag] = useState<any>(null);
-  const [mixerDiag, setMixerDiag] = useState<any>(null);
-  const [pipelineSnapshot, setPipelineSnapshot] = useState<any>(null);
+  const [audioDiag, setAudioDiag] = useState<unknown>(null);
+  const [mixerDiag, setMixerDiag] = useState<FilteredMonitorDiagnostics | null>(null);
+  const [pipelineSnapshot, setPipelineSnapshot] = useState<PipelineSnapshotWithDiagnostics | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -47,7 +61,7 @@ export function Diagnostics() {
   }, []);
 
   // Browser feature detection (renderer-side only)
-  const [helperProvenance, setHelperProvenance] = useState<any>(null);
+  const [helperProvenance, setHelperProvenance] = useState<HelperProvenance | null>(null);
 
   useEffect(() => {
     // Read the audio-diag.log for helper provenance
@@ -62,6 +76,9 @@ export function Diagnostics() {
             state: snap.helperState,
             uptimeMs: snap.helperUptimeMs,
             generation: snap.streamGeneration,
+            helperBinaryPath: snap.helperBinaryPath,
+            helperBinarySize: snap.helperBinarySize,
+            helperBinaryMtime: snap.helperBinaryMtime,
           });
         }
       }
@@ -125,11 +142,11 @@ export function Diagnostics() {
               <tr><td>Helper State</td><td className="mono">{helperProvenance.state}</td></tr>
               <tr><td>Uptime</td><td className="mono">{helperProvenance.uptimeMs ? `${(helperProvenance.uptimeMs / 1000).toFixed(1)}s` : '—'}</td></tr>
               <tr><td>Stream Generation</td><td className="mono">{helperProvenance.generation}</td></tr>
+              <tr><td>Binary Path</td><td className="mono small">{helperProvenance.helperBinaryPath ?? '—'}</td></tr>
+              <tr><td>Binary Size</td><td className="mono">{helperProvenance.helperBinarySize ? `${(helperProvenance.helperBinarySize / 1024).toFixed(0)} KB` : '—'}</td></tr>
+              <tr><td>Binary Modified</td><td className="mono small">{helperProvenance.helperBinaryMtime ?? '—'}</td></tr>
             </tbody>
           </table>
-          <p className="dim" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
-            Full binary path and size are logged to the console by AudioHelperManager at startup.
-          </p>
         </div>
       )}
 
@@ -239,18 +256,39 @@ export function Diagnostics() {
               <tr><td>Capture Accepted</td><td className="mono">{pipelineSnapshot.onCaptureAccepted === undefined ? '—' : pipelineSnapshot.onCaptureAccepted ? 'Yes' : 'No'}</td></tr>
               <tr><td>Capture Rejected State</td><td className="mono">{pipelineSnapshot.onCaptureRejectedState ?? '—'}</td></tr>
               <tr><td>Active Capture Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.activeCaptureSources ?? '—'}</td></tr>
-              <tr><td>Sessions (last scan)</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sessionsInLastScan ?? '—'}</td></tr>
-              <tr><td>Desired Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.desiredSources ?? '—'}</td></tr>
+              <tr><td>Sessions (last scan)</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.totalSessionsLastScan ?? '—'}</td></tr>
+              <tr><td>Desired Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.desiredSourcesLastScan ?? '—'}</td></tr>
               <tr><td>Sources Added</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sourcesAdded ?? '—'}</td></tr>
               <tr><td>Sources Removed</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sourcesRemoved ?? '—'}</td></tr>
-              <tr><td>Start Failures</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.startFailures ?? '—'}</td></tr>
-              <tr><td>Retries</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.retryCount ?? '—'}</td></tr>
-              <tr><td>Exclude Discord</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.excludeDiscord === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.excludeDiscord ? 'Yes' : 'No'}</td></tr>
-              <tr><td>Exclude ScreenLink</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.excludeScreenLink === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.excludeScreenLink ? 'Yes' : 'No'}</td></tr>
-              <tr><td>System Sounds Skipped</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.systemSoundsSkipped ?? '—'}</td></tr>
+              <tr><td>Start Failures</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sourceStartFailures ?? '—'}</td></tr>
+              <tr><td>Retries</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sourceRetries ?? '—'}</td></tr>
+              <tr><td>Exclude Discord</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.discordExcludedLastScan === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.discordExcludedLastScan > 0 ? 'Yes' : 'No'}</td></tr>
+              <tr><td>Exclude ScreenLink</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.screenLinkExcludedLastScan === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.screenLinkExcludedLastScan > 0 ? 'Yes' : 'No'}</td></tr>
+              <tr><td>System Sounds Skipped</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.systemSoundsSkippedLastScan ?? '—'}</td></tr>
               <tr><td>Duplicate Roots</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.duplicateRootsLastScan ?? '—'}</td></tr>
             </tbody>
           </table>
+
+          {/* Active Sources PID tracking */}
+          {pipelineSnapshot.filteredMonitorDiagnostics?.activeSources &&
+           pipelineSnapshot.filteredMonitorDiagnostics.activeSources.length > 0 && (
+            <>
+              <h4 style={{ marginTop: "0.5rem" }}>Active Capture Sources</h4>
+              {pipelineSnapshot.filteredMonitorDiagnostics.activeSources.map((src, i) => (
+                <table key={i} className="info-table" style={{ marginBottom: "0.25rem" }}>
+                  <tbody>
+                    <tr><td>Source #{i + 1}</td><td className="mono">{src.executableName}</td></tr>
+                    <tr><td>Logical Root PID</td><td className="mono">{src.logicalRootPid}</td></tr>
+                    <tr><td>Physical Capture PID</td><td className="mono">{src.physicalCaptureTargetPid}</td></tr>
+                    <tr><td>Session PID</td><td className="mono">{src.sessionPid}</td></tr>
+                    <tr><td>Input Packets</td><td className="mono">{src.inputPackets.toLocaleString()}</td></tr>
+                    <tr><td>Nonzero Packets</td><td className="mono">{src.inputNonZeroPackets.toLocaleString()}</td></tr>
+                    <tr><td>Max Peak</td><td className="mono">{src.maximumInputPeak.toExponential(4)}</td></tr>
+                  </tbody>
+                </table>
+              ))}
+            </>
+          )}
 
           {/* Input Energy Diagnostics */}
           {(pipelineSnapshot.filteredMonitorDiagnostics?.mixerInputPackets !== undefined ||

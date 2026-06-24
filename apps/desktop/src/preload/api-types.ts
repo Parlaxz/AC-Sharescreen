@@ -96,7 +96,7 @@ export interface ScreenLinkAPI {
   startFilteredMonitorAudio: (options?: { excludeDiscord?: boolean; excludeScreenLink?: boolean }) => Promise<any>;
   startSystemAudio: () => Promise<{ success: boolean; streamGeneration?: number; error?: string }>;
   getMixerState: () => Promise<any>;
-  getMixerDiagnostics: () => Promise<FilteredMonitorDiagnostics>;
+  getMixerDiagnostics: () => Promise<HelperResponse<FilteredMonitorDiagnostics>>;
   /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
   getPipelineSnapshot: () => Promise<PipelineSnapshotWithDiagnostics>;
 }
@@ -143,6 +143,28 @@ export interface PersistedSettings {
   lastAudioMode?: AudioMode;
 }
 
+/** Protocol response envelope for helper IPC calls */
+export interface HelperResponse<T> {
+  protocolVersion: string;
+  requestId: number;
+  sessionId: string;
+  success: boolean;
+  state: string;
+  result?: T;
+  error?: string | null;
+}
+
+/** Diagnostics for one active capture source in filtered monitor mode */
+export interface ActiveSourceDiagnostics {
+  sessionPid: number;
+  logicalRootPid: number;
+  physicalCaptureTargetPid: number;
+  executableName: string;
+  inputPackets: number;
+  inputNonZeroPackets: number;
+  maximumInputPeak: number;
+}
+
 /** Filtered Monitor diagnostics returned by getMixerDiagnostics */
 export interface FilteredMonitorDiagnostics {
   sourceType: string;
@@ -183,6 +205,8 @@ export interface FilteredMonitorDiagnostics {
   maximumOutputRms: number;
   lastErrorCode: string;
   lastErrorMessage: string;
+  /** Per-active-source diagnostics */
+  activeSources?: ActiveSourceDiagnostics[];
 }
 
 /** Pipeline snapshot with inline filtered monitor diagnostics */
@@ -190,35 +214,14 @@ export interface PipelineSnapshotWithDiagnostics {
   mixerFeedPackets?: number;
   mixerOutputPackets?: number;
   mixerNonZeroOutputPackets?: number;
-  filteredMonitorDiagnostics?: {
-    running: boolean;
-    activeCaptureSources: number;
-    totalSessionsLastScan: number;
-    desiredSourcesLastScan: number;
-    sourcesAdded: number;
-    sourcesRemoved: number;
-    sourceStartFailures: number;
-    sourceRetries: number;
-    duplicateRootsLastScan: number;
-    mixerInputPackets: number;
-    mixerInputNonZeroPackets: number;
-    mixerInputZeroPackets: number;
-    lastInputPeak: number;
-    maximumInputPeak: number;
-    lastInputRms: number;
-    maximumInputRms: number;
-    mixerOutputPackets: number;
-    mixerOutputNonZeroPackets: number;
-    mixerOutputZeroPackets: number;
-    lastOutputPeak: number;
-    maximumOutputPeak: number;
-    lastOutputRms: number;
-    maximumOutputRms: number;
-    lastErrorCode: string;
-    lastErrorMessage: string;
-  };
+  filteredMonitorDiagnostics?: FilteredMonitorDiagnostics;
+  endpointDiagnostics?: Record<string, unknown>;
   bridge: Record<string, unknown>;
   helperState: string;
   helperUptimeMs: number;
   streamGeneration: number;
+  /** Helper binary provenance (populated by AudioHelperManager) */
+  helperBinaryPath?: string;
+  helperBinarySize?: number;
+  helperBinaryMtime?: string;
 }

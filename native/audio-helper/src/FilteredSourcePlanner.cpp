@@ -11,6 +11,12 @@
 
 namespace screenlink::audio {
 
+FilteredSourcePlanner::FilteredSourcePlanner(
+    ResolveProcessTreeFn resolver)
+    : resolveProcessTree_(std::move(resolver))
+{
+}
+
 namespace {
 
 /// Case-insensitive string lowercase conversion.
@@ -104,7 +110,7 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
         }
 
         // --- Step 5: Resolve process tree ---
-        ProcessTreeResult tree = ResolveProcessTree(session.pid);
+        ProcessTreeResult tree = resolveProcessTree_(session.pid);
         if (!tree.succeeded || tree.applicationRootPid == 0) {
             plan.invalidSessions++;
             continue;

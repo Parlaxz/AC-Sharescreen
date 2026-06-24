@@ -79,6 +79,17 @@ struct FilteredSourcePlan {
     uint32_t sourceLimitSkipped = 0;
 };
 
+/// Diagnostics for one active capture source in filtered monitor mode.
+struct ActiveSourceDiagnostics {
+    uint32_t sessionPid = 0;
+    uint32_t logicalRootPid = 0;
+    uint32_t physicalCaptureTargetPid = 0;
+    std::string executableName;
+    uint64_t inputPackets = 0;
+    uint64_t inputNonZeroPackets = 0;
+    float maximumInputPeak = 0.0f;
+};
+
 /// Thread-safe diagnostics snapshot for FilteredMonitorController.
 struct FilteredMonitorDiagnostics {
     bool running = false;
@@ -129,6 +140,9 @@ struct FilteredMonitorDiagnostics {
     uint64_t lastSuccessfulInventoryTimestamp = 0;
     std::string lastErrorCode;
     std::string lastErrorMessage;
+
+    // Per-active-source diagnostics (updated each reconciliation)
+    std::vector<ActiveSourceDiagnostics> activeSources;
 };
 
 } // namespace screenlink::audio
