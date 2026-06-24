@@ -60,6 +60,15 @@ export interface HelperState {
   totalPackets: number;
 }
 
+export interface StartApplicationAudioResult {
+  streamGeneration: number;
+  sourceId: number;
+  rootPid: number;
+  rootName: string;
+  sourceType: string;
+  mixerReady: boolean;
+}
+
 export interface HelperDiagnostics {
   totalPackets: number;
   totalPayloadBytes: number;
@@ -323,10 +332,19 @@ export class ControlClient {
     return (resp.result ?? { found: false, error: 'empty result' }) as Record<string, unknown>;
   }
 
-  async startApplicationAudio(payload: { targetPid: number; expectedCreationTimeUtc100ns?: string }): Promise<Record<string, unknown>> {
+  async startApplicationAudio(payload: { targetPid: number; expectedCreationTimeUtc100ns?: string }): Promise<StartApplicationAudioResult> {
     const resp = await this.sendRequest('startApplicationAudio', payload as Record<string, unknown>);
     if (!resp.success || !resp.result) throw new Error(`startApplicationAudio failed: ${resp.error ?? 'unknown'}`);
-    return resp.result as Record<string, unknown>;
+
+    const result = resp.result as unknown as Partial<StartApplicationAudioResult>;
+
+    if (!Number.isSafeInteger(result.streamGeneration) || Number(result.streamGeneration) <= 0) {
+      throw new Error(
+        `startApplicationAudio returned invalid result: ` + JSON.stringify(resp.result),
+      );
+    }
+
+    return result as StartApplicationAudioResult;
   }
 
   async startEndpointLoopback(): Promise<{ streamGeneration: number }> {

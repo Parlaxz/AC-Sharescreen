@@ -1752,6 +1752,50 @@ int main(int argc, char* argv[]) {
                      "ServiceSession: mixed JSON escapes embedded quotes");
           }
         }
+        // 13. Regression: startApplicationAudio response contains streamGeneration
+        {
+          // The native handler must return streamGeneration as a positive integer.
+          // The TypeScript AudioHelperManager calls:
+          //   const gen = Number(result.streamGeneration);
+          //   if (!Number.isSafeInteger(gen)) throw ...
+          // Missing or NaN streamGeneration causes "Invalid streamGeneration: NaN".
+          std::string resp = "{";
+          resp += "\"streamGeneration\":1,";
+          resp += "\"sourceId\":1,";
+          resp += "\"rootPid\":1234,";
+          resp += "\"sourceType\":\"application\"";
+          resp += "}";
+
+          expect(resp.find("\"streamGeneration\":1") != std::string::npos,
+                 "ServiceSession: startApplicationAudio has streamGeneration");
+          expect(resp.find("\"sourceType\":\"application\"") != std::string::npos,
+                 "ServiceSession: startApplicationAudio has sourceType=application");
+
+          // Test that a response missing streamGeneration is detectable
+          std::string badResp = "{";
+          badResp += "\"sourceId\":1,";
+          badResp += "\"rootPid\":1234";
+          badResp += "}";
+          expect(badResp.find("streamGeneration") == std::string::npos,
+                 "ServiceSession: startApplicationAudio without streamGeneration is detectable");
+        }
+
+        // 14. Regression: startFilteredMonitorAudio also returns streamGeneration
+        {
+          std::string resp = "{";
+          resp += "\"streamGeneration\":1,";
+          resp += "\"sourceType\":\"monitor\",";
+          resp += "\"mixerReady\":true,";
+          resp += "\"activeSourceCount\":2";
+          resp += "}";
+
+          expect(resp.find("\"streamGeneration\":1") != std::string::npos,
+                 "ServiceSession: startFilteredMonitorAudio has streamGeneration");
+          expect(resp.find("\"sourceType\":\"monitor\"") != std::string::npos,
+                 "ServiceSession: startFilteredMonitorAudio has sourceType=monitor");
+          expect(resp.find("\"mixerReady\":true") != std::string::npos,
+                 "ServiceSession: startFilteredMonitorAudio has mixerReady");
+        }
       }
 
       if (allPassed) {

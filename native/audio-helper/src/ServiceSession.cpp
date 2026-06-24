@@ -1617,15 +1617,30 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
         return;
     }
 
-    // Now start the mixer
+    // Allocate stream generation BEFORE starting the mixer.
+    // This generation is stamped into every PCM packet header.
+    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSourceType_ = "application";
+    }
+
+    // Set kCapturing BEFORE mixer_->Start so OnCapturePacket accepts output.
+    state_.store(SessionState::kCapturing, std::memory_order_release);
+
     auto mixResult = mixer_->Start([this](const AudioPacket& p) -> bool {
         return OnCapturePacket(p);
     });
 
     if (!mixResult.success) {
+        state_.store(SessionState::kIdle, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            activeSourceType_.clear();
+        }
         source->Stop();
         mixer_->RemoveSource(sourceId);
-        state_.store(SessionState::kIdle);
 
         const char* errorCode = "mixer-start-failed";
         switch (mixResult.error) {
@@ -1648,7 +1663,7 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
         resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("state", "idle");
         resp.Set("error", errorCode);
         resp.SetRaw("result", "{}");
         response = resp.Str();
@@ -1656,22 +1671,16 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     }
 
     captureSources_.push_back(std::move(source));
-    state_.store(SessionState::kCapturing);
 
-    std::string result = "{";
-    result += "\"sourceId\":" + std::to_string(sourceId) + ",";
-    result += "\"rootPid\":" + std::to_string(rootPid) + ",";
-    // Escape rootName for JSON safety
-    {
-        std::string safeName = treeResult.applicationRootName;
-        size_t pos = 0;
-        while ((pos = safeName.find('"', pos)) != std::string::npos) {
-            safeName.replace(pos, 1, "\\\"");
-            pos += 2;
-        }
-        result += "\"rootName\":\"" + safeName + "\"";
-    }
-    result += "}";
+    // Use SimpleJson for the result — rootName is user-controlled and must
+    // be properly escaped (SimpleJson::Set escapes quotes, backslashes, etc.).
+    SimpleJson result;
+    result.Set("streamGeneration", static_cast<uint64_t>(gen));
+    result.Set("sourceId", static_cast<uint64_t>(sourceId));
+    result.Set("rootPid", static_cast<uint64_t>(rootPid));
+    result.Set("rootName", treeResult.applicationRootName);
+    result.Set("sourceType", "application");
+    result.Set("mixerReady", true);
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1679,7 +1688,7 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.SetRaw("result", result);
+    resp.SetRaw("result", result.Str());
     resp.Set("error", "null");
     response = resp.Str();
 }
@@ -1983,7 +1992,18 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
         return;
     }
 
-    // ── 6. Start mixer (now with sources registered) ──
+    // ── 6. Allocate generation and set state BEFORE mixer start ──
+    state_.store(SessionState::kStarting);
+    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSourceType_ = "monitor";
+    }
+
+    // Set kCapturing before mixer_->Start so OnCapturePacket accepts output.
+    state_.store(SessionState::kCapturing, std::memory_order_release);
+
     std::cerr << "[filtered] mixer.start.enter: sources=" << mixer_->SourceCount() << std::endl;
     auto mixResult = mixer_->Start([this](const AudioPacket& p) -> bool {
         return OnCapturePacket(p);
@@ -1992,6 +2012,12 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
               << " error=" << static_cast<int>(mixResult.error) << std::endl;
 
     if (!mixResult.success) {
+        state_.store(SessionState::kIdle, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            activeSourceType_.clear();
+        }
+
         // Clean up sources
         for (auto& ss : startedSources) {
             ss.captureSource->Stop();
@@ -2007,7 +2033,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
         resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.Set("state", "idle");
 
         // Map mixer error to a diagnostics string
         const char* errorCode = "mixer-start-failed";
@@ -2045,25 +2071,28 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     uint32_t activeSourceCount = mixer_->SourceCount();
     std::cerr << "[filtered] start.result: success activeSources=" << activeSourceCount << std::endl;
 
-    std::string result = "{";
-    result += "\"totalSessions\":" + std::to_string(sessions.size()) + ",";
-    result += "\"eligibleCount\":" + std::to_string(eligibleCount) + ",";
-    result += "\"excludedDiscordCount\":" + std::to_string(excludedDiscordCount) + ",";
-    result += "\"excludedScreenLinkCount\":" + std::to_string(excludedScreenLinkCount) + ",";
-    result += "\"duplicateRootCount\":" + std::to_string(duplicateRootCount) + ",";
-    result += "\"invalidSessionCount\":" + std::to_string(invalidSessionCount) + ",";
-    result += "\"sourcesAttempted\":" + std::to_string(sourcesAttempted) + ",";
-    result += "\"sourcesStarted\":" + std::to_string(sourcesStarted) + ",";
-    result += "\"activeSourceCount\":" + std::to_string(activeSourceCount);
-    result += "}";
+    // Use SimpleJson for result — all strings are properly escaped.
+    SimpleJson result;
+    result.Set("streamGeneration", static_cast<uint64_t>(gen));
+    result.Set("sourceType", "monitor");
+    result.Set("mixerReady", true);
+    result.Set("totalSessions", static_cast<uint64_t>(sessions.size()));
+    result.Set("eligibleCount", static_cast<uint64_t>(eligibleCount));
+    result.Set("excludedDiscordCount", static_cast<uint64_t>(excludedDiscordCount));
+    result.Set("excludedScreenLinkCount", static_cast<uint64_t>(excludedScreenLinkCount));
+    result.Set("duplicateRootCount", static_cast<uint64_t>(duplicateRootCount));
+    result.Set("invalidSessionCount", static_cast<uint64_t>(invalidSessionCount));
+    result.Set("sourcesAttempted", static_cast<uint64_t>(sourcesAttempted));
+    result.Set("sourcesStarted", static_cast<uint64_t>(sourcesStarted));
+    result.Set("activeSourceCount", static_cast<uint64_t>(activeSourceCount));
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
     resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
-    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.SetRaw("result", result);
+    resp.Set("state", "capturing");
+    resp.SetRaw("result", result.Str());
     resp.Set("error", "null");
     response = resp.Str();
 }
