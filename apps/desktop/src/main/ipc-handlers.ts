@@ -36,6 +36,23 @@ export function setCurrentAudioState(state: string): void {
   currentAudioState = state;
 }
 
+/**
+ * Shut down the active audio helper cleanly. Safe to call even when no
+ * helper is running. Exported so the update-manager can shut down the
+ * helper before quitAndInstall().
+ */
+export async function stopCurrentAudioHelper(): Promise<void> {
+  if (!currentAudioHelper) return;
+  setCurrentAudioState("stopping");
+  try {
+    await currentAudioHelper.shutdown();
+  } catch (err) {
+    console.error("[ipc] Audio helper shutdown error:", err);
+  }
+  setCurrentAudioHelper(null);
+  setCurrentAudioState("disabled");
+}
+
 async function ensureAudioHelper(): Promise<AudioHelperManager> {
   if (currentAudioHelper) return currentAudioHelper;
 

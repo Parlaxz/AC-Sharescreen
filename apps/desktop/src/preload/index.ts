@@ -57,6 +57,18 @@ const api: ScreenLinkAPI = {
   getMixerState: () => ipcRenderer.invoke("get-mixer-state"),
   getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
   getPipelineSnapshot: () => ipcRenderer.invoke("get-pipeline-snapshot"),
+
+  // ── Updates ─────────────────────────────────────────────────────────
+  getUpdateStatus: () => ipcRenderer.invoke("updates:get-status"),
+  checkForUpdates: () => ipcRenderer.invoke("updates:check"),
+  downloadUpdate: () => ipcRenderer.invoke("updates:download"),
+  restartAndInstallUpdate: () => ipcRenderer.invoke("updates:install"),
+
+  onUpdateStatusChanged: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: any) => callback(status);
+    ipcRenderer.on("updates:status-changed", handler);
+    return () => { ipcRenderer.removeListener("updates:status-changed", handler); };
+  },
 };
 
 contextBridge.exposeInMainWorld("screenlink", api);

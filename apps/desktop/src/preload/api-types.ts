@@ -99,7 +99,56 @@ export interface ScreenLinkAPI {
   getMixerDiagnostics: () => Promise<any>;
   /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
   getPipelineSnapshot: () => Promise<any>;
+
+  // ── Updates ─────────────────────────────────────────────────────────
+  /** Get the current authoritative update status from the main process. */
+  getUpdateStatus: () => Promise<UpdateStatusDTO>;
+  /** Manually check for an update. */
+  checkForUpdates: () => Promise<UpdateStatusDTO>;
+  /** Download the available update. */
+  downloadUpdate: () => Promise<UpdateStatusDTO>;
+  /** Restart and install the downloaded update. */
+  restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
+  /**
+   * Subscribe to update status changes.
+   * Returns an unsubscribe function.
+   */
+  onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
+
+// ─── Update types ─────────────────────────────────────────────────────────
+
+export type UpdatePhase =
+  | "unsupported"
+  | "idle"
+  | "checking"
+  | "up-to-date"
+  | "update-available"
+  | "downloading"
+  | "downloaded"
+  | "installing"
+  | "error";
+
+export interface UpdateStatusDTO {
+  phase: UpdatePhase;
+  currentVersion: string;
+  availableVersion?: string;
+  downloadedVersion?: string;
+  checkStartedAt?: number;
+  lastCheckedAt?: number;
+  downloadPercent?: number;
+  transferredBytes?: number;
+  totalBytes?: number;
+  bytesPerSecond?: number;
+  userMessage: string;
+  errorCode?: string;
+  errorMessage?: string;
+  isPackaged: boolean;
+  isPortable: boolean;
+  updaterSupported: boolean;
+}
+
+// ─── Existing types ────────────────────────────────────────────────────────
 
 export type AudioStateDTO =
   | "disabled"
