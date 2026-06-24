@@ -26,13 +26,6 @@ inline constexpr std::string_view kBuildConfig = "@BUILD_CONFIG@";
 /// Compiler identity.
 inline constexpr std::string_view kCompilerId = "@COMPILER_ID@";
 
-/// Protocol version (from Protocol.h, referenced at build time).
-/// Included here so diagnostics consumers can read it alongside provenance.
-inline constexpr std::string_view kProtocolVersion = "0.2.0";
-
-/// Service protocol version.
-inline constexpr std::string_view kServiceProtocolVersion = "0.3.0";
-
 } // namespace screenlink::audio::build
 
 #endif // SCREENLINK_BUILD_INFO_H

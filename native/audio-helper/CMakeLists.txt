@@ -20,7 +20,7 @@ else()
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
-# Generate build provenance header
+# Generate build provenance header at configure time
 include(cmake/GenerateBuildInfo.cmake)
 
 # Source files
@@ -49,6 +49,23 @@ set(SOURCES
 
 # Executable
 add_executable(${PROJECT_NAME} ${SOURCES})
+
+# Regenerate build provenance at every build (not just configure)
+# Uses AHC_SOURCE_DIR/AHC_BINARY_DIR to avoid CMAKE_SOURCE_DIR confusion in -P mode.
+# Pass compiler info from configure time since CMAKE_CXX_COMPILER_VERSION is not
+# available in cmake -P script mode.
+set(AHC_COMPILER_ID "MSVC ${CMAKE_CXX_COMPILER_VERSION}")
+add_custom_command(
+  TARGET ${PROJECT_NAME} PRE_BUILD
+  COMMAND ${CMAKE_COMMAND} -D AHC_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+                           -D AHC_BINARY_DIR="${CMAKE_BINARY_DIR}"
+                           -D GIT_EXECUTABLE="${GIT_EXECUTABLE}"
+                           -D AHC_COMPILER_ID="${AHC_COMPILER_ID}"
+                           -D CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+                           -D CMAKE_SIZEOF_VOID_P=${CMAKE_SIZEOF_VOID_P}
+                           -P "${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake"
+  COMMENT "Regenerating build provenance header..."
+)
 
 # Link dwmapi.lib for DwmGetWindowAttribute,
 # ole32.lib for COM, avrt.lib for Pro Audio thread priority
