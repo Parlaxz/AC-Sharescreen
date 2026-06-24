@@ -29,6 +29,12 @@ struct ServiceConfig {
     uint32_t parentPid = 0;
 };
 
+/// Request context passed to all command handlers.
+struct CommandContext {
+    uint64_t requestId = 0;
+    std::string sessionId;
+};
+
 /// Persistent service daemon that creates two named pipes (control + PCM),
 /// accepts connections from Electron, processes JSON control commands,
 /// and streams PCM audio packets.
@@ -51,31 +57,32 @@ private:
     void RunProcessCapture(CaptureConfig cfg);
 
     // Control command handlers
-    void HandleHello(const std::string& payload, std::string& response);
-    void HandleGetVersion(const std::string& payload, std::string& response);
-    void HandleGetCapabilities(const std::string& payload, std::string& response);
-    void HandleGetState(const std::string& payload, std::string& response);
-    void HandleStartSynthetic(const std::string& payload, std::string& response);
-    void HandleStartProcessCapture(const std::string& payload, std::string& response);
-    void HandleStopCapture(const std::string& payload, std::string& response);
-    void HandleGetDiagnostics(const std::string& payload, std::string& response);
-    void HandlePing(const std::string& payload, std::string& response);
-    void HandleShutdown(const std::string& payload, std::string& response);
+    void HandleHello(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetVersion(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetCapabilities(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetState(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleStartSynthetic(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleStartProcessCapture(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleStopCapture(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetDiagnostics(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandlePing(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleShutdown(const CommandContext& ctx, const std::string& payload, std::string& response);
 
     // Source resolution (shared with CLI --resolve-source)
-    void HandleResolveSource(const std::string& payload, std::string& response);
+    void HandleResolveSource(const CommandContext& ctx, const std::string& payload, std::string& response);
 
     // Phase 2E: Multi-source audio mixer handlers
-    void HandleEnumerateAudioSessions(const std::string& payload, std::string& response);
-    void HandleStartApplicationAudio(const std::string& payload, std::string& response);
-    void HandleStartFilteredMonitorAudio(const std::string& payload, std::string& response);
-    void HandleStartEndpointLoopback(const std::string& payload, std::string& response);
-    void HandleGetMixerState(const std::string& payload, std::string& response);
-    void HandleGetMixerDiagnostics(const std::string& payload, std::string& response);
+    void HandleEnumerateAudioSessions(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleStartApplicationAudio(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleStartFilteredMonitorAudio(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleStartEndpointLoopback(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetMixerState(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetMixerDiagnostics(const CommandContext& ctx, const std::string& payload, std::string& response);
 
     /// Dispatch a parsed control request to the appropriate handler.
     /// Returns true if the command was recognised, false otherwise.
-    bool DispatchCommand(const std::string& command,
+    bool DispatchCommand(const CommandContext& ctx,
+                         const std::string& command,
                          const std::string& payload,
                          std::string& response);
 

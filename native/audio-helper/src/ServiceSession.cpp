@@ -569,8 +569,11 @@ void ServiceSession::ControlThread() {
                 }
 
                 // Dispatch command
+                CommandContext ctx;
+                ctx.requestId = requestId;
+                ctx.sessionId = sessionId;
                 std::string response;
-                bool recognised = DispatchCommand(command, payload, response);
+                bool recognised = DispatchCommand(ctx, command, payload, response);
 
                 if (!recognised) {
                     failedControlRequests_.fetch_add(1, std::memory_order_relaxed);
@@ -626,67 +629,68 @@ void ServiceSession::ControlThread() {
 // DispatchCommand
 // ========================================================================
 
-bool ServiceSession::DispatchCommand(const std::string& command,
+bool ServiceSession::DispatchCommand(const CommandContext& ctx,
+                                      const std::string& command,
                                       const std::string& payload,
                                       std::string& response) {
     if (command == "hello") {
-        HandleHello(payload, response);
+        HandleHello(ctx, payload, response);
         return true;
     } else if (command == "getVersion" || command == "getversion") {
-        HandleGetVersion(payload, response);
+        HandleGetVersion(ctx, payload, response);
         return true;
     } else if (command == "getCapabilities" || command == "getcapabilities") {
-        HandleGetCapabilities(payload, response);
+        HandleGetCapabilities(ctx, payload, response);
         return true;
     } else if (command == "getState" || command == "getstate") {
-        HandleGetState(payload, response);
+        HandleGetState(ctx, payload, response);
         return true;
     } else if (command == "startSynthetic" || command == "startsynthetic") {
-        HandleStartSynthetic(payload, response);
+        HandleStartSynthetic(ctx, payload, response);
         return true;
     } else if (command == "startProcessCapture" ||
                command == "startprocesscapture") {
-        HandleStartProcessCapture(payload, response);
+        HandleStartProcessCapture(ctx, payload, response);
         return true;
     } else if (command == "stopCapture" || command == "stopcapture") {
-        HandleStopCapture(payload, response);
+        HandleStopCapture(ctx, payload, response);
         return true;
     } else if (command == "getDiagnostics" || command == "getdiagnostics") {
-        HandleGetDiagnostics(payload, response);
+        HandleGetDiagnostics(ctx, payload, response);
         return true;
     } else if (command == "ping") {
-        HandlePing(payload, response);
+        HandlePing(ctx, payload, response);
         return true;
     } else if (command == "shutdown") {
-        HandleShutdown(payload, response);
+        HandleShutdown(ctx, payload, response);
         return true;
     } else if (command == "resolveSource" ||
                command == "resolvesource") {
-        HandleResolveSource(payload, response);
+        HandleResolveSource(ctx, payload, response);
         return true;
     } else if (command == "enumerateAudioSessions" ||
                command == "enumerateaudiosessions") {
-        HandleEnumerateAudioSessions(payload, response);
+        HandleEnumerateAudioSessions(ctx, payload, response);
         return true;
     } else if (command == "startApplicationAudio" ||
                command == "startapplicationaudio") {
-        HandleStartApplicationAudio(payload, response);
+        HandleStartApplicationAudio(ctx, payload, response);
         return true;
     } else if (command == "startFilteredMonitorAudio" ||
                command == "startfilteredmonitoraudio") {
-        HandleStartFilteredMonitorAudio(payload, response);
+        HandleStartFilteredMonitorAudio(ctx, payload, response);
         return true;
     } else if (command == "getMixerState" ||
                command == "getmixerstate") {
-        HandleGetMixerState(payload, response);
+        HandleGetMixerState(ctx, payload, response);
         return true;
     } else if (command == "getMixerDiagnostics" ||
                command == "getmixerdiagnostics") {
-        HandleGetMixerDiagnostics(payload, response);
+        HandleGetMixerDiagnostics(ctx, payload, response);
         return true;
     } else if (command == "startEndpointLoopback" ||
                command == "startendpointloopback") {
-        HandleStartEndpointLoopback(payload, response);
+        HandleStartEndpointLoopback(ctx, payload, response);
         return true;
     }
     return false;
@@ -723,8 +727,9 @@ std::string ServiceSession::MakeErrorResponse(const std::string& errorCode) {
 // Command Handlers
 // ========================================================================
 
-void ServiceSession::HandleHello(const std::string& /*payload*/,
-                                  std::string& response) {
+void ServiceSession::HandleHello(const CommandContext& ctx,
+                                   const std::string& /*payload*/,
+                                   std::string& response) {
     std::string result = "{";
     result += "\"helperVersion\":\"" + std::string(kHelperVersion) + "\",";
     result += "\"protocolVersion\":\"" + std::string(kServiceProtocolVersion) + "\",";
@@ -734,7 +739,7 @@ void ServiceSession::HandleHello(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -743,8 +748,9 @@ void ServiceSession::HandleHello(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleGetVersion(const std::string& /*payload*/,
-                                       std::string& response) {
+void ServiceSession::HandleGetVersion(const CommandContext& ctx,
+                                        const std::string& /*payload*/,
+                                        std::string& response) {
     std::string result = "{";
     result += "\"helperVersion\":\"" + std::string(kHelperVersion) + "\",";
     result += "\"protocolVersion\":\"" + std::string(kServiceProtocolVersion) + "\"";
@@ -752,7 +758,7 @@ void ServiceSession::HandleGetVersion(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -761,8 +767,9 @@ void ServiceSession::HandleGetVersion(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
-                                            std::string& response) {
+void ServiceSession::HandleGetCapabilities(const CommandContext& ctx,
+                                             const std::string& /*payload*/,
+                                             std::string& response) {
     auto osInfo = DetectWindowsVersion();
     auto compileTime = DetectCompileTimeSupport();
     auto runtime = DetectRuntimeSupport(osInfo);
@@ -807,7 +814,7 @@ void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -816,8 +823,9 @@ void ServiceSession::HandleGetCapabilities(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleGetState(const std::string& /*payload*/,
-                                     std::string& response) {
+void ServiceSession::HandleGetState(const CommandContext& ctx,
+                                      const std::string& /*payload*/,
+                                      std::string& response) {
     auto uptime = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - startTime_).count();
 
@@ -845,7 +853,7 @@ void ServiceSession::HandleGetState(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(currentState));
@@ -854,8 +862,9 @@ void ServiceSession::HandleGetState(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleStartSynthetic(const std::string& payload,
-                                           std::string& response) {
+void ServiceSession::HandleStartSynthetic(const CommandContext& ctx,
+                                            const std::string& payload,
+                                            std::string& response) {
     // Parse payload
     int64_t mode = SimpleJson::GetInt(payload, "mode", 0);
     int64_t totalPackets = SimpleJson::GetInt(payload, "totalPackets", 0);
@@ -866,7 +875,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
     if (state_.load() != static_cast<SessionState>(expected)) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -880,7 +889,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
     if (mode < 0 || mode > 5) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", "idle");
@@ -930,7 +939,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
             streamGeneration_.fetch_sub(1);
             SimpleJson resp;
             resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-            resp.Set("requestId", static_cast<uint64_t>(0));
+            resp.Set("requestId", ctx.requestId);
             resp.Set("sessionId", config_.sessionId);
             resp.Set("success", false);
             resp.Set("state", "idle");
@@ -952,7 +961,7 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "capturing");
@@ -961,8 +970,9 @@ void ServiceSession::HandleStartSynthetic(const std::string& payload,
     response = resp.Str();
 }
 
-void ServiceSession::HandleStartProcessCapture(const std::string& payload,
-                                                 std::string& response) {
+void ServiceSession::HandleStartProcessCapture(const CommandContext& ctx,
+                                                  const std::string& payload,
+                                                  std::string& response) {
     // Parse payload
     int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
     uint64_t expectedCreationTime =
@@ -973,7 +983,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
     if (targetPid <= 0) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1006,7 +1016,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1020,7 +1030,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
     if (state_.load() != static_cast<SessionState>(0)) { // kIdle
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1057,7 +1067,7 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "capturing");
@@ -1066,14 +1076,15 @@ void ServiceSession::HandleStartProcessCapture(const std::string& payload,
     response = resp.Str();
 }
 
-void ServiceSession::HandleStopCapture(const std::string& /*payload*/,
-                                        std::string& response) {
+void ServiceSession::HandleStopCapture(const CommandContext& ctx,
+                                         const std::string& /*payload*/,
+                                         std::string& response) {
     int previousState = static_cast<int>(state_.load());
 
     if (previousState != 2 && previousState != 1) { // kCapturing, kStarting
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(previousState));
@@ -1110,7 +1121,7 @@ void ServiceSession::HandleStopCapture(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "idle");
@@ -1119,8 +1130,9 @@ void ServiceSession::HandleStopCapture(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleGetDiagnostics(const std::string& /*payload*/,
-                                           std::string& response) {
+void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
+                                            const std::string& /*payload*/,
+                                            std::string& response) {
     auto uptime = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - startTime_).count();
 
@@ -1172,7 +1184,7 @@ void ServiceSession::HandleGetDiagnostics(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(currentState));
@@ -1181,8 +1193,9 @@ void ServiceSession::HandleGetDiagnostics(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandlePing(const std::string& /*payload*/,
-                                 std::string& response) {
+void ServiceSession::HandlePing(const CommandContext& ctx,
+                                  const std::string& /*payload*/,
+                                  std::string& response) {
     auto uptime = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - startTime_).count();
 
@@ -1192,7 +1205,7 @@ void ServiceSession::HandlePing(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1201,8 +1214,9 @@ void ServiceSession::HandlePing(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleShutdown(const std::string& /*payload*/,
-                                     std::string& response) {
+void ServiceSession::HandleShutdown(const CommandContext& ctx,
+                                      const std::string& /*payload*/,
+                                      std::string& response) {
     // If capturing, stop first
     if (state_.load() == static_cast<SessionState>(2)) { // kCapturing
         state_.store(static_cast<SessionState>(3)); // kStopping
@@ -1221,7 +1235,7 @@ void ServiceSession::HandleShutdown(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "idle");
@@ -1234,8 +1248,9 @@ void ServiceSession::HandleShutdown(const std::string& /*payload*/,
 // HandleResolveSource — resolve a desktop-capture source ID
 // ========================================================================
 
-void ServiceSession::HandleResolveSource(const std::string& payload,
-                                          std::string& response) {
+void ServiceSession::HandleResolveSource(const CommandContext& ctx,
+                                           const std::string& payload,
+                                           std::string& response) {
     // 1. Parse sourceId from payload
     std::string sourceId = SimpleJson::GetString(payload, "sourceId");
 
@@ -1247,7 +1262,7 @@ void ServiceSession::HandleResolveSource(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", true);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1268,7 +1283,7 @@ void ServiceSession::HandleResolveSource(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", true);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1344,7 +1359,7 @@ void ServiceSession::HandleResolveSource(const std::string& payload,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1357,8 +1372,9 @@ void ServiceSession::HandleResolveSource(const std::string& payload,
 // Phase 2E — Multi-source audio mixer handlers
 // ========================================================================
 
-void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/,
-                                                    std::string& response) {
+void ServiceSession::HandleEnumerateAudioSessions(const CommandContext& ctx,
+                                                     const std::string& /*payload*/,
+                                                     std::string& response) {
     // Create session monitor
     auto monitor = std::make_unique<AudioSessionMonitor>();
     if (!monitor->Initialize()) {
@@ -1368,7 +1384,7 @@ void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/
                  "session-enumeration-failed (HRESULT=0x%08lx)", hresult);
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1419,7 +1435,7 @@ void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1428,8 +1444,9 @@ void ServiceSession::HandleEnumerateAudioSessions(const std::string& /*payload*/
     response = resp.Str();
 }
 
-void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
-                                                   std::string& response) {
+void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
+                                                    const std::string& payload,
+                                                    std::string& response) {
     // Parse payload
     int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
     uint64_t expectedCreationTime = SimpleJson::GetUint(payload, "expectedCreationTimeUtc100ns", 0);
@@ -1437,7 +1454,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     if (targetPid <= 0) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1454,7 +1471,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     if (actualCreationTime == 0) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1468,7 +1485,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     if (expectedCreationTime != 0 && actualCreationTime != expectedCreationTime) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1484,7 +1501,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     if (!treeResult.succeeded) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1519,7 +1536,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1540,7 +1557,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     if (startOutcome.result != AppCaptureStartResult::Success) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1571,7 +1588,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         state_.store(SessionState::kIdle);
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1609,7 +1626,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
         }
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1639,7 +1656,7 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1648,8 +1665,9 @@ void ServiceSession::HandleStartApplicationAudio(const std::string& payload,
     response = resp.Str();
 }
 
-void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
-                                                       std::string& response) {
+void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
+                                                        const std::string& payload,
+                                                        std::string& response) {
     bool excludeDiscord = SimpleJson::GetBool(payload, "excludeDiscord", true);
     bool excludeScreenLink = SimpleJson::GetBool(payload, "excludeScreenLink", true);
     uint32_t screenLinkPid = static_cast<uint32_t>(
@@ -1679,7 +1697,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1698,7 +1716,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
                  "session-enumeration-failed (HRESULT=0x%08lx)", hresult);
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1817,7 +1835,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1893,7 +1911,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1936,7 +1954,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
         // All sources failed on the re-attach — unusual but handle it
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -1967,7 +1985,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -2022,7 +2040,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -2031,8 +2049,9 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const std::string& payload,
     response = resp.Str();
 }
 
-void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
-                                                  std::string& response) {
+void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
+                                                   const std::string& /*payload*/,
+                                                   std::string& response) {
     // Parse payload (if any) — currently no options needed.
     // Future: could add eMultimedia/eCommunications/eConsole routing.
 
@@ -2040,7 +2059,7 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
     if (state_.load() != static_cast<SessionState>(0)) { // kIdle
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -2076,7 +2095,7 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
             streamGeneration_.fetch_sub(1);
             SimpleJson resp;
             resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-            resp.Set("requestId", static_cast<uint64_t>(0));
+            resp.Set("requestId", ctx.requestId);
             resp.Set("sessionId", config_.sessionId);
             resp.Set("success", false);
             resp.Set("state", "idle");
@@ -2171,7 +2190,7 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", "idle");
@@ -2219,7 +2238,7 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
         }
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", "idle");
@@ -2245,7 +2264,7 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", "idle");
@@ -2265,7 +2284,7 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "capturing");
@@ -2274,8 +2293,9 @@ void ServiceSession::HandleStartEndpointLoopback(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleGetMixerState(const std::string& /*payload*/,
-                                          std::string& response) {
+void ServiceSession::HandleGetMixerState(const CommandContext& ctx,
+                                           const std::string& /*payload*/,
+                                           std::string& response) {
     bool mixerRunning = mixer_ && mixer_->IsRunning();
     uint32_t sourceCount = mixer_ ? mixer_->SourceCount() : 0;
 
@@ -2286,7 +2306,7 @@ void ServiceSession::HandleGetMixerState(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -2295,12 +2315,13 @@ void ServiceSession::HandleGetMixerState(const std::string& /*payload*/,
     response = resp.Str();
 }
 
-void ServiceSession::HandleGetMixerDiagnostics(const std::string& /*payload*/,
-                                                 std::string& response) {
+void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
+                                                  const std::string& /*payload*/,
+                                                  std::string& response) {
     if (!mixer_) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -2358,7 +2379,7 @@ void ServiceSession::HandleGetMixerDiagnostics(const std::string& /*payload*/,
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
