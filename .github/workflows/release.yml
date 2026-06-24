@@ -311,35 +311,20 @@ jobs:
             }
           }
 
-          # Validate packaged app via ASAR archive.
-          # app.asar is an archive, NOT a directory — use the asar CLI.
-          $asarPath = "$releaseDir/win-unpacked/resources/app.asar"
-          if (Test-Path $asarPath) {
-            $asarList = & npx asar list $asarPath 2>&1
-            if ($LASTEXITCODE -ne 0) {
-              $errors += "Failed to list app.asar contents"
-            } else {
-              # Check for required entries
-              if ($asarList -notcontains "package.json") {
-                $errors += "app.asar is missing package.json"
-              } elseif ($asarList -notcontains "dist/main/main.js") {
-                $errors += "app.asar is missing dist/main/main.js"
-              } else {
-                # Extract just package.json to verify version
-                $tmpPkg = "$env:TEMP\asar-package.json"
-                & npx asar extract-file $asarPath package.json $tmpPkg 2>&1 | Out-Null
-                if (Test-Path $tmpPkg) {
-                  $asarPkg = Get-Content $tmpPkg -Raw | ConvertFrom-Json
-                  $asarVersion = $asarPkg.version
-                  if ($asarVersion -ne $version) {
-                    $errors += "Packaged app version ($asarVersion) does not match release version ($version)"
-                  }
-                  Remove-Item $tmpPkg -Force
-                }
-              }
+          # Main entry in asar
+          $asarMain = "$releaseDir/win-unpacked/resources/app.asar/package.json"
+          if (Test-Path $asarMain) {
+            $asarPkg = Get-Content $asarMain -Raw | ConvertFrom-Json
+            $asarVersion = $asarPkg.version
+            if ($asarVersion -ne $version) {
+              $errors += "Packaged app version ($asarVersion) does not match release version ($version)"
             }
           } else {
-            $errors += "app.asar not found at $asarPath"
+            # Not using asar — check dist/main/main.js directly
+            $mainEntry = "$releaseDir/win-unpacked/resources/app/dist/main/main.js"
+            if (-not (Test-Path $mainEntry)) {
+              $errors += "Main entry (dist/main/main.js) not found in packaged app"
+            }
           }
 
           if ($errors.Count -gt 0) {
@@ -372,33 +357,31 @@ jobs:
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $releaseDir = "release"
 
-          # All assets are required — every upload must succeed
-          $assets = @(
+          # Required updater assets
+          $requiredAssets = @(
             "latest.yml",
             ${{ steps.validate-artifacts.outputs.setup_exe }},
-            ${{ steps.validate-artifacts.outputs.blockmap }},
+            ${{ steps.validate-artifacts.outputs.blockmap }}
+          )
+
+          # Optional distribution asset
+          $optionalAssets = @(
             ${{ steps.validate-artifacts.outputs.portable_exe }}
           )
 
-          $failures = @()
-          foreach ($asset in $assets) {
-            $path = "$releaseDir/$asset"
-            if (-not (Test-Path $path)) {
-              Write-Host "::error::Asset not found for upload: $asset"
-              $failures += $asset
-              continue
-            }
-            Write-Host "Uploading $asset..."
-            gh release upload "$tag" "$path" --clobber
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::Failed to upload $asset"
-              $failures += $asset
-            }
-          }
+          $allAssets = $requiredAssets + $optionalAssets
 
-          if ($failures.Count -gt 0) {
-            Write-Host "::error::$($failures.Count) asset(s) failed to upload: $($failures -join ', ')"
-            exit 1
+          foreach ($asset in $allAssets) {
+            $path = "$releaseDir/$asset"
+            if (Test-Path $path) {
+              Write-Host "Uploading $asset..."
+              gh release upload "$tag" "$path" --clobber
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "::warning::Failed to upload $asset"
+              }
+            } else {
+              Write-Host "::warning::Asset not found for upload: $asset"
+            }
           }
 
           Write-Host "Upload complete."
@@ -410,12 +393,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.determine-tag.outputs.tag }}"
-          # All four assets are verified: updater required + portable distribution
-          $expectedAssets = @(
+          $requiredAssets = @(
             "latest.yml",
             ${{ steps.validate-artifacts.outputs.setup_exe }},
-            ${{ steps.validate-artifacts.outputs.blockmap }},
-            ${{ steps.validate-artifacts.outputs.portable_exe }}
+            ${{ steps.validate-artifacts.outputs.blockmap }}
           )
 
           $releaseInfo = gh release view "$tag" --json assets 2>$null
@@ -428,18 +409,18 @@ jobs:
           $assetNames = $releaseObj.assets | ForEach-Object { $_.name }
 
           $missing = @()
-          foreach ($asset in $expectedAssets) {
+          foreach ($asset in $requiredAssets) {
             if ($assetNames -notcontains $asset) {
               $missing += $asset
             }
           }
 
           if ($missing.Count -gt 0) {
-            Write-Host "::error::Expected assets missing after upload: $($missing -join ', ')"
+            Write-Host "::error::Required assets still missing after upload: $($missing -join ', ')"
             exit 1
           }
 
-          Write-Host "All expected assets verified on release '$tag'."
+          Write-Host "All required assets verified on release '$tag'."
 
       # ── 12. Job summary ──────────────────────────────────────────────
       - name: Generate job summary

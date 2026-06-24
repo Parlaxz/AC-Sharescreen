@@ -8,7 +8,9 @@ import { WindowManager } from "./window-manager.js";
 import { TrayManager } from "./tray-manager.js";
 import type { TrayMenuActions } from "./tray-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
-import { registerIpcHandlers, stopCurrentAudioHelper } from "./ipc-handlers.js";
+import { registerIpcHandlers } from "./ipc-handlers.js";
+// Audio helper lifecycle is managed by IPC handlers via ensureAudioHelper()
+// in ipc-handlers.ts — no direct imports needed here
 import { registerPermissionHandler } from "./permissions.js";
 import { SettingsStore } from "./settings-store.js";
 import { SecureStore } from "./secure-store.js";
@@ -204,29 +206,12 @@ app.whenReady().then(() => {
     // Create the broadcast callback that sends status to the renderer
     const broadcast = createStatusBroadcast(mainWindow);
 
-    // Create the prepare-for-quit callback for orderly installation.
-    // Must stop the native audio helper, close connections, destroy tray,
-    // and flush logs before quitAndInstall() so NSIS can replace files.
-    let prepareForQuitRan = false;
+    // Create the prepare-for-quit callback for orderly installation
     const prepareForQuit = (): void => {
-      if (prepareForQuitRan) return;
-      prepareForQuitRan = true;
-
       loggerAdapter.log("info", "updater", "preparing_for_quit", {});
       windowManager.setQuitting(true);
-
-      // Destroy tray so it doesn't intercept the close
+      // Destroy tray so it doesn't prevent quit
       trayManager.destroy();
-
-      // Stop the native audio helper (holds pipes, threads, process-loopback)
-      stopCurrentAudioHelper().catch((err: unknown) => {
-        loggerAdapter.log("warn", "updater", "audio_helper_stop_error", {
-          errorDetail: String(err),
-        });
-      });
-
-      // Flush diagnostics logs
-      logManager.log("info", "app", "upgrade_shutdown", { version: app.getVersion() });
     };
 
     if (autoUpdaterInstance) {

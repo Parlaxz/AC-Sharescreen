@@ -51,8 +51,6 @@ export type ErrorCode =
   | "updater-unsupported"
   | "unknown-updater-failure";
 
-export type CheckOrigin = "automatic" | "manual";
-
 // ─── Adapter interfaces (for DI / testing) ────────────────────────────────
 
 export interface UpdaterAdapter {
@@ -127,14 +125,8 @@ function getErrorCode(err: unknown): { code: ErrorCode; safeMessage: string } {
     return { code: "invalid-update-metadata", safeMessage: "No update information available at this time." };
   }
 
-  // blockmap error = differential download failure (recoverable, may fall back to full)
-  if (msg.includes("blockmap")) {
+  if (msg.includes("blockmap") || msg.includes("checksum") || msg.includes("integrity")) {
     return { code: "checksum-failure", safeMessage: "Update verification failed. Please try again." };
-  }
-
-  // checksum or integrity failure = final installer verification failure (NOT recoverable)
-  if (msg.includes("checksum") || msg.includes("integrity")) {
-    return { code: "checksum-failure", safeMessage: "Update verification failed. The downloaded file may be corrupted. Please try again." };
   }
 
   if (msg.includes("download") || msg.includes("404") || msg.includes("not found")) {
@@ -152,12 +144,6 @@ export class UpdateManager {
   private isDestroyed = false;
   private isDownloading = false;
   private isInstalling = false;
-  /** Snapshot of state before an automatic check began, so we can restore
-   *  on transient network failures instead of showing a disruptive error. */
-  private previousState: UpdateStatus | null = null;
-  /** Serializes manual checks: if one is in flight, subsequent callers
-   *  receive the same promise instead of starting a second check. */
-  private checkPromise: Promise<UpdateStatus> | null = null;
 
   constructor(
     private updater: UpdaterAdapter,
@@ -210,8 +196,8 @@ export class UpdateManager {
   }
 
   /**
-   * Manually check for an update. Uses an in-flight promise mutex so
-   * duplicate calls during an ongoing check receive the same result.
+   * Manually check for an update. Returns the current status.
+   * If already checking or downloading, returns status without starting a new check.
    */
   async checkForUpdates(): Promise<UpdateStatus> {
     if (this.isDestroyed) return this.getStatus();
@@ -220,33 +206,44 @@ export class UpdateManager {
       return this.getStatus();
     }
 
-    // Deduplicate: return in-flight promise if one exists
-    if (this.checkPromise) {
-      return this.checkPromise;
-    }
-
-    // Blocked states
-    const phase = this.state.phase as string;
-    if (
-      phase === "checking" ||
-      phase === "downloading" ||
-      phase === "installing" ||
-      phase === "update-available" ||
-      phase === "downloaded"
-    ) {
+    if (this.state.phase === "downloading" || this.state.phase === "installing") {
       this.logger.log("info", "updater", "check_skipped", {
-        reason: `phase is ${phase}`,
+        reason: `phase is ${this.state.phase}`,
       });
       return this.getStatus();
     }
 
-    const promise = this.runCheck("manual");
-    this.checkPromise = promise;
+    // Don't let background errors disrupt a useful existing state
+    if (this.state.phase === "update-available" || this.state.phase === "downloaded") {
+      return this.getStatus();
+    }
+
+    this.setState({
+      phase: "checking",
+      checkStartedAt: Date.now(),
+      errorCode: undefined,
+      errorMessage: undefined,
+    });
 
     try {
-      return await promise;
-    } finally {
-      this.checkPromise = null;
+      this.logger.log("info", "updater", "check_started", { manual: true });
+      await this.updater.checkForUpdates();
+      // Note: events from electron-updater will handle state transitions.
+      return this.getStatus();
+    } catch (err: unknown) {
+      const { code, safeMessage } = getErrorCode(err);
+      this.logger.log("error", "updater", "check_failed", {
+        errorCode: code,
+        errorDetail: String(err),
+      });
+      this.setState({
+        phase: "error",
+        errorCode: code,
+        errorMessage: this.state.phase === "error" && this.state.errorMessage
+          ? this.state.errorMessage
+          : safeMessage,
+      });
+      return this.getStatus();
     }
   }
 
@@ -390,7 +387,6 @@ export class UpdateManager {
     this.updater.on("update-available", (info: any) => {
       const version = info?.version ?? "unknown";
       this.logger.log("info", "updater", "update_available", { version });
-      this.previousState = null;
       this.setState({
         phase: "update-available",
         availableVersion: version,
@@ -403,7 +399,6 @@ export class UpdateManager {
     this.updater.on("update-not-available", (info: any) => {
       const version = info?.version ?? this.state.currentVersion;
       this.logger.log("info", "updater", "update_not_available", { latestVersion: version });
-      this.previousState = null;
       this.setState({
         phase: "up-to-date",
         lastCheckedAt: Date.now(),
@@ -442,7 +437,6 @@ export class UpdateManager {
     this.updater.on("update-downloaded", (info: any) => {
       const version = info?.version ?? this.state.availableVersion ?? "unknown";
       this.logger.log("info", "updater", "update_downloaded", { version });
-      this.previousState = null;
       this.setState({
         phase: "downloaded",
         downloadedVersion: version,
@@ -460,7 +454,8 @@ export class UpdateManager {
         errorDetail: String(err),
       });
 
-      // If the user already has a useful state, don't overwrite it
+      // If the user already has a useful state (update available or downloaded),
+      // don't overwrite it with an automatic error
       if (this.state.phase === "update-available" || this.state.phase === "downloaded") {
         this.logger.log("info", "updater", "error_suppressed", {
           currentPhase: this.state.phase,
@@ -468,9 +463,9 @@ export class UpdateManager {
         return;
       }
 
-      // Blockmap errors during download = differential fallback is happening.
-      // electron-updater will retry with a full download, so don't surface this.
-      if (this.state.phase === "downloading" && code === "checksum-failure" && String(err).includes("blockmap")) {
+      // If we're downloading and the error is about blockmap/checksum,
+      // electron-updater may fall back to full download — don't show error
+      if (this.state.phase === "downloading" && code === "checksum-failure") {
         this.logger.log("info", "updater", "differential_fallback", {});
         return;
       }
@@ -503,11 +498,9 @@ export class UpdateManager {
     // Skip auto-check if we're in a state that shouldn't be disrupted
     const phase = this.state.phase as string;
     if (
-      phase === "checking" ||
-      phase === "update-available" ||
       phase === "downloading" ||
-      phase === "downloaded" ||
-      phase === "installing"
+      phase === "installing" ||
+      phase === "downloaded"
     ) {
       this.logger.log("info", "updater", "auto_check_skipped", {
         reason: `phase is ${phase}`,
@@ -515,9 +508,6 @@ export class UpdateManager {
       this.scheduleAutoCheck(6 * 60 * 60 * 1000);
       return;
     }
-
-    // Save previous state so we can restore on transient errors
-    this.previousState = { ...this.state };
 
     this.logger.log("info", "updater", "auto_check_started", {});
     this.setState({
@@ -528,74 +518,28 @@ export class UpdateManager {
     try {
       await this.updater.checkForUpdates();
     } catch (err: unknown) {
-      const { code } = getErrorCode(err);
+      const { code, safeMessage } = getErrorCode(err);
       this.logger.log("warn", "updater", "auto_check_failed", {
         errorCode: code,
         errorDetail: String(err),
       });
 
-      // For automatic checks, restore the previous stable state instead of
-      // surfacing a transient network error to the user.
-      if (this.previousState) {
-        // Only restore if still in checking or error (not if events already
-        // transitioned to a useful state)
-        if (this.state.phase === "checking" || this.state.phase === "error") {
-          this.state = { ...this.previousState };
-          this.broadcast(this.getStatus());
-        }
-        this.previousState = null;
-      }
-    }
-
-    // Schedule the next check
-    if (!this.isDestroyed) {
-      this.scheduleAutoCheck(6 * 60 * 60 * 1000);
-    }
-  }
-
-  /** Shared check logic used by both manual and automatic origins. */
-  private async runCheck(origin: CheckOrigin): Promise<UpdateStatus> {
-    if (this.isDestroyed) return this.getStatus();
-
-    this.setState({
-      phase: "checking",
-      checkStartedAt: Date.now(),
-      errorCode: undefined,
-      errorMessage: undefined,
-    });
-
-    try {
-      this.logger.log("info", "updater", "check_started", { [origin]: true });
-      await this.updater.checkForUpdates();
-      // Events from electron-updater will handle state transitions
-      return this.getStatus();
-    } catch (err: unknown) {
-      const { code, safeMessage } = getErrorCode(err);
-      this.logger.log("error", "updater", "check_failed", {
-        errorCode: code,
-        errorDetail: String(err),
-      });
-
-      if (origin === "automatic") {
-        // Restore previous state for automatic checks
-        if (this.previousState) {
-          if (this.state.phase === "checking" || this.state.phase === "error") {
-            this.state = { ...this.previousState };
-            this.broadcast(this.getStatus());
-          }
-          this.previousState = null;
-        }
-      } else {
-        // Show error for manual checks
+      // Don't replace a useful state with a network error
+      if (
+        this.state.phase !== "update-available" &&
+        this.state.phase !== "downloaded" &&
+        this.state.phase !== "downloading"
+      ) {
         this.setState({
           phase: "error",
           errorCode: code,
           errorMessage: safeMessage,
         });
       }
-
-      return this.getStatus();
     }
+
+    // Schedule the next check
+    this.scheduleAutoCheck(6 * 60 * 60 * 1000);
   }
 
   private clearAutoCheckTimer(): void {
