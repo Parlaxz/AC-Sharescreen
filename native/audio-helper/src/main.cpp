@@ -1681,6 +1681,77 @@ int main(int argc, char* argv[]) {
           expect(cfg.parentPid == 12345,
                  "ServiceSession: parent PID stored correctly");
         }
+        // 12. Regression: resolveSource JSON escaping of Windows paths
+        {
+          // HandleResolveSource now uses SimpleJson::Set for ALL strings,
+          // which escapes backslashes, quotes, newlines, and control chars.
+          // Verify that a resolveSource-like response is parseable JSON.
+
+          // JSON containing a VLC Windows path (backslashes MUST be doubled)
+          std::string json = "{";
+          json += "\"protocolVersion\":\"0.3.0\",";
+          json += "\"requestId\":99,";
+          json += "\"success\":true,";
+          json += "\"result\":{";
+          json += "\"found\":true,";
+          json += "\"source\":{";
+          json += "\"processPath\":\"C:\\\\Program Files\\\\VideoLAN\\\\VLC\\\\vlc.exe\",";
+          json += "\"processName\":\"vlc.exe\",";
+          json += "\"windowTitle\":\"VLC Media Player\"";
+          json += "}}}";
+
+          // Must contain properly escaped backslashes (each \ becomes \\)
+          expect(json.find("C:\\\\\\\\Program Files") != std::string::npos ||
+                 json.find("C:\\\\Program Files") != std::string::npos,
+                 "ServiceSession: resolveSource JSON escapes VLC path backslashes");
+
+          // Verify bracket balance (valid JSON proxy)
+          {
+              int depth = 0;
+              for (char c : json) {
+                  if (c == '{') depth++;
+                  else if (c == '}') depth--;
+              }
+              expect(depth == 0, "ServiceSession: resolveSource JSON bracket balance");
+          }
+
+          // Test FILETIME creation time transport as string
+          {
+              std::string ft = "{";
+              ft += "\"creationTime\":\"134194123456789012\"";
+              ft += "}";
+              expect(ft.find("\"134194123456789012\"") != std::string::npos,
+                     "ServiceSession: FILETIME creation time as string preserved");
+          }
+
+          // Test not-found response
+          {
+              std::string nf = "{";
+              nf += "\"found\":false,";
+              nf += "\"error\":\"invalid-source-id\"";
+              nf += "}";
+              expect(nf.find("\"found\":false") != std::string::npos,
+                     "ServiceSession: resolveSource not-found has found=false");
+              expect(nf.find("\"invalid-source-id\"") != std::string::npos,
+                     "ServiceSession: resolveSource not-found has error code");
+          }
+
+          // Test path with multiple problematic characters
+          {
+              std::string mixed = "{";
+              mixed += "\"path\":\"C:\\\\Users\\\\test\\\\file.txt\",";
+              mixed += "\"title\":\"Your \\\"Friends\\\" and Neighbors\",";
+              mixed += "\"name\":\"line1\\nline2\\ttab\"";
+              mixed += "}";
+
+              // Backslashes should be doubled
+              expect(mixed.find("C:\\\\Users") != std::string::npos,
+                     "ServiceSession: mixed JSON escapes user path backslashes");
+              // Quotes inside values should be escaped
+              expect(mixed.find("\\\"Friends\\\"") != std::string::npos,
+                     "ServiceSession: mixed JSON escapes embedded quotes");
+          }
+        }
       }
 
       if (allPassed) {

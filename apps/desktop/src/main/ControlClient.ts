@@ -221,8 +221,12 @@ export class ControlClient {
       } else {
         ccTrace(`[${this.id}] UNMATCHED response reqId=${response.requestId} (pending keys=[${[...this.pendingRequests.keys()].join(',')}])`);
       }
-    } catch {
-      // Not JSON yet
+    } catch (error) {
+      ccTrace(
+        `[${this.id}] JSON PARSE FAILURE: ` +
+        `${error instanceof Error ? error.message : String(error)} ` +
+        `raw=${JSON.stringify(text.slice(0, 1000))}`,
+      );
     }
     return false;
   }

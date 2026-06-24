@@ -308,6 +308,41 @@ uint64_t GetQpcTimestamp100ns() {
         static_cast<double>(freq.QuadPart));
 }
 
+/// Strictly parse a decimal string as uint64_t. Returns true on success.
+/// Rejects empty strings, non-digit characters, overflow, and partial consumption.
+static bool ParseUint64DecimalString(
+    const std::string& json,
+    const char* key,
+    uint64_t& value)
+{
+    const std::string text = SimpleJson::GetString(json, key);
+    if (text.empty()) {
+        value = 0;
+        return false;
+    }
+
+    for (unsigned char c : text) {
+        if (c < '0' || c > '9') {
+            value = 0;
+            return false;
+        }
+    }
+
+    try {
+        size_t consumed = 0;
+        unsigned long long parsed = std::stoull(text, &consumed, 10);
+        if (consumed != text.size()) {
+            value = 0;
+            return false;
+        }
+        value = static_cast<uint64_t>(parsed);
+        return true;
+    } catch (...) {
+        value = 0;
+        return false;
+    }
+}
+
 // ── Phase 2F: Wide-to-UTF8 helper for path logging ──
 
 std::string WideToUtf8(PCWSTR wideStr, int length = -1) {
@@ -976,18 +1011,9 @@ void ServiceSession::HandleStartProcessCapture(const CommandContext& ctx,
     // Parse payload
     int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
 
-    // Parse creation time as string to preserve 64-bit FILETIME precision
+    // Parse creation time with strict uint64 decimal string helper
     uint64_t expectedCreationTime = 0;
-    {
-        std::string timeStr = SimpleJson::GetString(payload, "expectedCreationTimeUtc100ns");
-        if (!timeStr.empty()) {
-            try {
-                expectedCreationTime = std::stoull(timeStr);
-            } catch (const std::exception&) {
-                expectedCreationTime = 0;
-            }
-        }
-    }
+    ParseUint64DecimalString(payload, "expectedCreationTimeUtc100ns", expectedCreationTime);
 
     std::string mode = SimpleJson::GetString(payload, "mode");
     bool includeMode = (mode != "exclude");
@@ -1258,19 +1284,23 @@ void ServiceSession::HandleShutdown(const CommandContext& ctx,
 
 // ========================================================================
 // HandleResolveSource — resolve a desktop-capture source ID
+//
+// IMPORTANT: Every untrusted or Windows-derived string MUST go through
+// SimpleJson::Set which escapes quotes, backslashes, newlines, tabs,
+// and control characters. Do NOT manually concatenate JSON strings with
+// Windows paths — backslashes like \P and \V produce invalid JSON.
+// SetRaw is only for JSON objects already produced by a JSON builder.
 // ========================================================================
 
 void ServiceSession::HandleResolveSource(const CommandContext& ctx,
                                            const std::string& payload,
                                            std::string& response) {
-    // 1. Parse sourceId from payload
-    std::string sourceId = SimpleJson::GetString(payload, "sourceId");
+    const std::string sourceId = SimpleJson::GetString(payload, "sourceId");
 
     if (sourceId.empty()) {
-        std::string result = "{";
-        result += "\"found\":false,";
-        result += "\"error\":\"invalid-source-id\"";
-        result += "}";
+        SimpleJson result;
+        result.Set("found", false);
+        result.Set("error", "invalid-source-id");
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1278,20 +1308,18 @@ void ServiceSession::HandleResolveSource(const CommandContext& ctx,
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", true);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.SetRaw("result", result);
+        resp.SetRaw("result", result.Str());
         resp.Set("error", "null");
         response = resp.Str();
         return;
     }
 
-    // 2. Resolve the desktop-capture source (reuses CLI --resolve-source logic)
-    auto resolveResult = ResolveDesktopCapturerSource(sourceId);
+    const auto resolved = ResolveDesktopCapturerSource(sourceId);
 
-    if (!resolveResult.found) {
-        std::string result = "{";
-        result += "\"found\":false,";
-        result += "\"error\":\"" + resolveResult.error + "\"";
-        result += "}";
+    if (!resolved.found) {
+        SimpleJson result;
+        result.Set("found", false);
+        result.Set("error", resolved.error);
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1299,75 +1327,50 @@ void ServiceSession::HandleResolveSource(const CommandContext& ctx,
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", true);
         resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.SetRaw("result", result);
+        resp.SetRaw("result", result.Str());
         resp.Set("error", "null");
         response = resp.Str();
         return;
     }
 
-    // 3. Resolve application root for capture PID
-    uint32_t capturePid = resolveResult.source.processId;
-    uint64_t captureCreationTime = resolveResult.source.processCreationTimeUtc100ns;
+    uint32_t capturePid = resolved.source.processId;
+    uint64_t captureCreationTime = resolved.source.processCreationTimeUtc100ns;
 
-    auto treeResult = ResolveProcessTree(resolveResult.source.processId);
-    if (treeResult.succeeded && treeResult.applicationRootPid != 0) {
-        capturePid = treeResult.applicationRootPid;
-        captureCreationTime = treeResult.targetCreationTimeUtc100ns;
+    const auto tree = ResolveProcessTree(resolved.source.processId);
+    if (tree.succeeded && tree.applicationRootPid != 0) {
+        capturePid = tree.applicationRootPid;
+        // Use GetProcessCreationTime for the resolved root PID rather
+        // than reusing the target's time (they may differ).
+        captureCreationTime = GetProcessCreationTime(capturePid);
     }
 
-    // 4. Build success result
-    std::string result = "{";
-    result += "\"found\":true,";
-    result += "\"source\":{";
-    result += "\"sourceId\":\"" + resolveResult.source.sourceId + "\",";
-    result += "\"pid\":" + std::to_string(resolveResult.source.processId) + ",";
-    result += "\"capturePid\":" + std::to_string(capturePid) + ",";
-    result += "\"processCreationTimeUtc100ns\":\""
-        + std::to_string(resolveResult.source.processCreationTimeUtc100ns) + "\",";
-    result += "\"captureCreationTimeUtc100ns\":\""
-        + std::to_string(captureCreationTime) + "\",";
-    result += "\"applicationRootPid\":" + std::to_string(capturePid) + ",";
-    result += "\"applicationRootCreationTimeUtc100ns\":\""
-        + std::to_string(captureCreationTime) + "\",";
+    // Use SimpleJson builders throughout — avoids manual JSON concatenation
+    // that would not properly escape Windows paths, newlines, or control chars.
+    SimpleJson source;
+    source.Set("sourceId", resolved.source.sourceId);
+    source.Set("pid", static_cast<uint64_t>(resolved.source.processId));
+    source.Set("capturePid", static_cast<uint64_t>(capturePid));
 
-    // Escape strings for JSON safety
-    {
-        std::string safeName = resolveResult.source.processName;
-        size_t pos = 0;
-        while ((pos = safeName.find('"', pos)) != std::string::npos) {
-            safeName.replace(pos, 1, "\\\"");
-            pos += 2;
-        }
-        result += "\"processName\":\"" + safeName + "\",";
-    }
-    {
-        std::string safePath = resolveResult.source.processPath;
-        size_t pos = 0;
-        while ((pos = safePath.find('"', pos)) != std::string::npos) {
-            safePath.replace(pos, 1, "\\\"");
-            pos += 2;
-        }
-        result += "\"processPath\":\"" + safePath + "\",";
-    }
-    {
-        std::string safeTitle = resolveResult.source.windowTitle;
-        size_t pos = 0;
-        while ((pos = safeTitle.find('"', pos)) != std::string::npos) {
-            safeTitle.replace(pos, 1, "\\\"");
-            pos += 2;
-        }
-        result += "\"windowTitle\":\"" + safeTitle + "\",";
-    }
+    // Transport FILETIME values as decimal strings (exceed Number.MAX_SAFE_INTEGER)
+    source.Set("processCreationTimeUtc100ns",
+               std::to_string(resolved.source.processCreationTimeUtc100ns));
+    source.Set("captureCreationTimeUtc100ns",
+               std::to_string(captureCreationTime));
+    source.Set("applicationRootPid", static_cast<uint64_t>(capturePid));
+    source.Set("applicationRootCreationTimeUtc100ns",
+               std::to_string(captureCreationTime));
 
-    result += "\"hwnd\":" + std::to_string(resolveResult.source.hwnd) + ",";
-    result += "\"displayName\":\""
-        + resolveResult.source.displayName + "\",";
-    result += "\"isElectron\":";
-    result += (resolveResult.source.isElectron ? "true" : "false");
-    result += ",";
-    result += "\"hasAudio\":";
-    result += (resolveResult.source.hasAudio ? "true" : "false");
-    result += "}}";
+    source.Set("processName", resolved.source.processName);
+    source.Set("processPath", resolved.source.processPath);
+    source.Set("windowTitle", resolved.source.windowTitle);
+    source.Set("displayName", resolved.source.displayName);
+    source.Set("hwnd", resolved.source.hwnd);
+    source.Set("isElectron", resolved.source.isElectron);
+    source.Set("hasAudio", resolved.source.hasAudio);
+
+    SimpleJson result;
+    result.Set("found", true);
+    result.SetRaw("source", source.Str());
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1375,8 +1378,9 @@ void ServiceSession::HandleResolveSource(const CommandContext& ctx,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-    resp.SetRaw("result", result);
+    resp.SetRaw("result", result.Str());
     resp.Set("error", "null");
+
     response = resp.Str();
 }
 
@@ -1462,18 +1466,9 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     // Parse payload
     int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
 
-    // Parse creation time as string to preserve 64-bit FILETIME precision
+    // Parse creation time with strict uint64 decimal string helper
     uint64_t expectedCreationTime = 0;
-    {
-        std::string timeStr = SimpleJson::GetString(payload, "expectedCreationTimeUtc100ns");
-        if (!timeStr.empty()) {
-            try {
-                expectedCreationTime = std::stoull(timeStr);
-            } catch (const std::exception&) {
-                expectedCreationTime = 0;
-            }
-        }
-    }
+    ParseUint64DecimalString(payload, "expectedCreationTimeUtc100ns", expectedCreationTime);
 
     if (targetPid <= 0) {
         SimpleJson resp;
