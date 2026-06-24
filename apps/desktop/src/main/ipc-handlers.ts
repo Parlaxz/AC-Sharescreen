@@ -426,9 +426,24 @@ export function registerIpcHandlers(
     try {
       const src = await currentAudioHelper.resolveSource(options.sourceId);
       if (!src.found) return { success: false, error: `Source not found: ${src.error}` };
+
+      // Use capturePid (application root) if available, fall back to window-owning pid
+      const targetPid = Number(src.source.capturePid ?? src.source.pid);
+      const expectedCreationTimeUtc100ns = Number(
+        src.source.captureCreationTimeUtc100ns ??
+        src.source.processCreationTimeUtc100ns,
+      );
+
+      if (!Number.isSafeInteger(targetPid) || targetPid <= 0) {
+        return { success: false, error: 'invalid-resolved-capture-pid' };
+      }
+      if (!Number.isSafeInteger(expectedCreationTimeUtc100ns) || expectedCreationTimeUtc100ns <= 0) {
+        return { success: false, error: 'invalid-resolved-capture-creation-time' };
+      }
+
       const { streamGeneration } = await currentAudioHelper.startApplicationCapture({
-        targetPid: src.source.pid,
-        expectedCreationTimeUtc100ns: src.source.processCreationTimeUtc100ns,
+        targetPid,
+        expectedCreationTimeUtc100ns,
       });
       setCurrentAudioState('active');
       return { success: true, streamGeneration };
