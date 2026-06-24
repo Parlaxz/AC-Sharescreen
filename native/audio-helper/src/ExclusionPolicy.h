@@ -25,14 +25,28 @@ struct ScreenLinkIdentity {
     // Normalized development Electron entrypoint or launch identity
     std::string normalizedDevEntrypoint;
 
+    // Whether the desktop process is running in packaged (Electron) mode
+    bool isPackaged = false;
+
     // Product/application identifier
     std::string productIdentifier;
 
     // Helper executable identity (always the helper's own path)
     std::string helperExePath;
 
-    bool IsValid() const noexcept {
+    /// Check if current-process identity (PID + creation time) is present.
+    bool HasCurrentProcessIdentity() const noexcept {
         return rootPid != 0 && rootCreationTimeUtc100ns != 0;
+    }
+
+    /// Check if packaged identity (normalizedPackagedPath) is present.
+    bool HasPackagedIdentity() const noexcept {
+        return !normalizedPackagedPath.empty();
+    }
+
+    /// Check if development identity (dev app root or entrypoint) is present.
+    bool HasDevelopmentIdentity() const noexcept {
+        return !normalizedDevAppRoot.empty() || !normalizedDevEntrypoint.empty();
     }
 
     /// Normalize a Windows path for comparison: absolute, case-insensitive,
@@ -55,6 +69,10 @@ struct ScreenLinkIdentity {
 
     /// Check if path matches the helper executable.
     bool IsHelperExecutable(const std::string& path) const;
+
+    /// Check if a path belongs to a ScreenLink sibling process using packaged
+    /// or development identity WITHOUT requiring current-process identity.
+    bool IsScreenLinkSibling(const std::string& path) const;
 };
 
 /// Result of an exclusion policy check.

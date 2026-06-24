@@ -51,44 +51,49 @@ bool FilteredSourcePlanner::IsScreenLinkSession(
     const AudioSessionInfo& session,
     const FilteredMonitorOptions& options) const
 {
-    // Check via ExclusionPolicy name/path matching (basename fallback)
-    if (IsScreenLinkProcess(session.executableName, session.executablePath)) {
-        return true;
-    }
-
-    // Check against structured ScreenLinkIdentity (preferred method)
     const auto& identity = options.screenLinkIdentity;
-    if (identity.IsValid()) {
-        // Check by current root PID + creation time (BOTH must match)
+
+    // 1. Current-process identity check (PID + creation time)
+    if (identity.HasCurrentProcessIdentity()) {
+        // Check by exact PID + creation time match
         if (identity.IsCurrentRoot(session.pid, session.creationTimeUtc100ns)) {
             return true;
         }
-        // Check if resolved root identity matches (BOTH PID + creationTimeUtc100ns)
         if (session.rootPid != 0 &&
             identity.IsCurrentRoot(session.rootPid, session.rootCreationTimeUtc100ns)) {
             return true;
         }
-        // Check application identity via session executable path
-        if (!session.executablePath.empty() &&
-            identity.IsScreenLinkApplication(session.executablePath)) {
-            return true;
-        }
     }
-    // When structured identity is NOT valid (identity.IsValid() false), we fall
-    // back to the legacy single-PID check below. This handles cases where the
-    // desktop-side identity build failed or identity hasn't been provided yet.
-    // Both PID and creation time must match in the structured branch above;
-    // the legacy branch below uses only PID (backward compatibility).
 
-    // Fallback: legacy single-PID check (maintains backward compat)
-    if (options.screenLinkPid != 0) {
-        if (session.pid == options.screenLinkPid) {
-            return true;
-        }
-        if (session.rootPid != 0 && session.rootPid == options.screenLinkPid) {
-            return true;
+    // 2. Packaged or development sibling identity check
+    // Only applies when current-process identity is absent or the session
+    // doesn't match by PID. Uses application identity paths (packaged path,
+    // installation root, dev app root, dev entrypoint).
+    if (!session.executablePath.empty() &&
+        identity.IsScreenLinkApplication(session.executablePath)) {
+        return true;
+    }
+
+    // 3. Basename fallback (last resort)
+    if (IsScreenLinkProcess(session.executableName, session.executablePath)) {
+        return true;
+    }
+
+    // 4. Legacy single-PID fallback: only used when no structured identity
+    // is present at all (backward compatibility)
+    if (!identity.HasCurrentProcessIdentity() &&
+        !identity.HasPackagedIdentity() &&
+        !identity.HasDevelopmentIdentity()) {
+        if (options.screenLinkPid != 0) {
+            if (session.pid == options.screenLinkPid) {
+                return true;
+            }
+            if (session.rootPid != 0 && session.rootPid == options.screenLinkPid) {
+                return true;
+            }
         }
     }
+
     return false;
 }
 

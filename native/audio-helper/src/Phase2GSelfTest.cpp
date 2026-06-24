@@ -2196,6 +2196,105 @@ void TestAggregateCounters() {
     END_TEST("Aggregate counters - mixed session scan");
 }
 
+// ====================================================================
+// TASK 1 — Fix Packaged ScreenLink Identity Scope Tests
+// ====================================================================
+
+void TestPackagedScreenLinkExactMatch() {
+    TEST("PackagedScreenLink - exact path match against normalizedPackagedPath")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 100;
+    identity.rootCreationTimeUtc100ns = 1000;
+    identity.normalizedPackagedPath = "C:\\Program Files\\ScreenLink\\ScreenLink.exe";
+    identity.isPackaged = true;
+
+    ASSERT(identity.IsScreenLinkApplication(
+        "C:\\Program Files\\ScreenLink\\ScreenLink.exe"));
+    END_TEST("PackagedScreenLink - exact path match against normalizedPackagedPath");
+}
+
+void TestUnrelatedProgramFilesRemainsEligible() {
+    TEST("PackagedScreenLink - unrelated Program Files app returns false")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 100;
+    identity.rootCreationTimeUtc100ns = 1000;
+    identity.normalizedPackagedPath = "C:\\Program Files\\ScreenLink\\ScreenLink.exe";
+    identity.normalizedInstallationRoot = "C:\\Program Files\\ScreenLink";
+    identity.isPackaged = true;
+
+    ASSERT(!identity.IsScreenLinkApplication(
+        "C:\\Program Files\\AnotherApp\\another.exe"));
+    END_TEST("PackagedScreenLink - unrelated Program Files app returns false");
+}
+
+void TestScreenLinkEvilDirectory() {
+    TEST("PackagedScreenLink - ScreenLink-Evil directory rejected")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 100;
+    identity.rootCreationTimeUtc100ns = 1000;
+    identity.normalizedPackagedPath = "C:\\Program Files\\ScreenLink\\ScreenLink.exe";
+    identity.normalizedInstallationRoot = "C:\\Program Files\\ScreenLink";
+    identity.isPackaged = true;
+
+    ASSERT(!identity.IsScreenLinkApplication(
+        "C:\\Program Files\\ScreenLink-Evil\\app.exe"));
+    END_TEST("PackagedScreenLink - ScreenLink-Evil directory rejected");
+}
+
+void TestMissingCreationTimeStillMatchesPackaged() {
+    TEST("ScreenLinkIdentity - missing creation time still matches packaged")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 0;
+    identity.rootCreationTimeUtc100ns = 0;
+    identity.normalizedPackagedPath = "C:\\ScreenLink\\app.exe";
+
+    ASSERT(identity.HasPackagedIdentity());
+    ASSERT(!identity.HasCurrentProcessIdentity());
+    ASSERT(identity.IsScreenLinkApplication("C:\\ScreenLink\\app.exe"));
+    END_TEST("ScreenLinkIdentity - missing creation time still matches packaged");
+}
+
+void TestMissingCreationTimeStillMatchesDev() {
+    TEST("ScreenLinkIdentity - missing creation time still matches dev")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 0;
+    identity.rootCreationTimeUtc100ns = 0;
+    identity.normalizedDevAppRoot = "C:\\dev\\screenlink-app";
+
+    ASSERT(identity.HasDevelopmentIdentity());
+    ASSERT(!identity.HasCurrentProcessIdentity());
+    // Directory containment check
+    ASSERT(identity.IsScreenLinkApplication(
+        "C:\\dev\\screenlink-app\\resources\\app.exe"));
+    END_TEST("ScreenLinkIdentity - missing creation time still matches dev");
+}
+
+void TestNoGenericElectronExclusion() {
+    TEST("ScreenLinkIdentity - no generic Electron exclusion")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 100;
+    identity.rootCreationTimeUtc100ns = 1000;
+    identity.normalizedDevAppRoot = "C:\\dev\\screenlink-app";
+
+    ASSERT(!identity.IsScreenLinkApplication(
+        "C:\\unrelated\\electron.exe"));
+    END_TEST("ScreenLinkIdentity - no generic Electron exclusion");
+}
+
+void TestNoBasenameSubstringInStructured() {
+    TEST("ScreenLinkIdentity - no basename substring in structured matching")
+    ScreenLinkIdentity identity;
+    identity.rootPid = 100;
+    identity.rootCreationTimeUtc100ns = 1000;
+    identity.normalizedPackagedPath = "C:\\ScreenLink\\app.exe";
+
+    // Path with "screenlink" in name but NOT matching normalizedPackagedPath
+    // The structured IsScreenLinkApplication must NOT fall back to basename substring.
+    ASSERT(!identity.IsScreenLinkApplication(
+        "C:\\random\\screenlink_app.exe"));
+    END_TEST("ScreenLinkIdentity - no basename substring in structured matching");
+}
+
 } // anonymous namespace
 
 bool RunPhase2GSelfTests() {
@@ -2320,6 +2419,15 @@ bool RunPhase2GSelfTests() {
     // Planner acceptance via helper
     TestPlannerAcceptsHelperProducedValid();
     TestPlannerRejectsHelperProducedInvalid();
+
+    // Task 1 — Fix Packaged ScreenLink Identity Scope tests
+    TestPackagedScreenLinkExactMatch();
+    TestUnrelatedProgramFilesRemainsEligible();
+    TestScreenLinkEvilDirectory();
+    TestMissingCreationTimeStillMatchesPackaged();
+    TestMissingCreationTimeStillMatchesDev();
+    TestNoGenericElectronExclusion();
+    TestNoBasenameSubstringInStructured();
 
     // System sounds + aggregate counter tests
     TestSystemSoundsNotCountedAsLookupFailure();

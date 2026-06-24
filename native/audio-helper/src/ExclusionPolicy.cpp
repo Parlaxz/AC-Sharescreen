@@ -104,6 +104,20 @@ bool ScreenLinkIdentity::IsPathContainedIn(const std::string& child, const std::
 
     if (normalizedChild.empty() || normalizedParent.empty()) return false;
 
+    // Reject drive roots as parents (e.g., "c:\") — they would match everything.
+    if (normalizedParent.size() == 3 && normalizedParent[1] == ':' && normalizedParent[2] == '\\') {
+        return false;
+    }
+
+    // Reject "Program Files" as a parent — too broad a scope.
+    // After normalization: "c:\program files" ends with "\program files".
+    const std::string kProgramFilesSuffix = "\\program files";
+    if (normalizedParent.size() >= kProgramFilesSuffix.size() &&
+        normalizedParent.compare(normalizedParent.size() - kProgramFilesSuffix.size(),
+                                  kProgramFilesSuffix.size(), kProgramFilesSuffix) == 0) {
+        return false;
+    }
+
     // Build parent-with-trailing-backslash for the boundary check.
     // NormalizePath strips trailing backslash, so we add it back here.
     std::string parentBoundary = normalizedParent;
@@ -127,23 +141,24 @@ bool ScreenLinkIdentity::IsScreenLinkApplication(const std::string& path) const 
     std::string normalized = NormalizePath(path);
     if (normalized.empty()) return false;
 
-    // Check against normalized packaged path
-    if (!normalizedPackagedPath.empty()) {
+    // 1. Packaged identity: exact match against packaged executable path
+    if (HasPackagedIdentity()) {
         if (IEquals(normalized, normalizedPackagedPath)) return true;
     }
 
-    // Check against installation root (directory-boundary aware)
-    if (!normalizedInstallationRoot.empty()) {
+    // 2. Packaged identity + isPackaged: directory containment against
+    //    installation root (NARROW scope — never broad like "Program Files")
+    if (isPackaged && HasPackagedIdentity() && !normalizedInstallationRoot.empty()) {
         if (IsPathContainedIn(normalized, normalizedInstallationRoot)) return true;
     }
 
-    // Check against development app root (directory-boundary aware)
-    if (!normalizedDevAppRoot.empty()) {
+    // 3. Development identity: directory containment against dev app root
+    if (HasDevelopmentIdentity() && !normalizedDevAppRoot.empty()) {
         if (IsPathContainedIn(normalized, normalizedDevAppRoot)) return true;
     }
 
-    // Check against development entrypoint
-    if (!normalizedDevEntrypoint.empty()) {
+    // 4. Development identity: exact match against entrypoint
+    if (HasDevelopmentIdentity() && !normalizedDevEntrypoint.empty()) {
         if (IEquals(normalized, normalizedDevEntrypoint)) return true;
     }
 
@@ -152,6 +167,13 @@ bool ScreenLinkIdentity::IsScreenLinkApplication(const std::string& path) const 
     // in CheckExclusionV2, not in structured identity matching.
 
     return false;
+}
+
+bool ScreenLinkIdentity::IsScreenLinkSibling(const std::string& path) const {
+    // Sibling identity check uses only packaged and development identity fields.
+    // Does NOT require current-process identity (PID + creation time).
+    // Delegates to IsScreenLinkApplication which uses the same field checks.
+    return IsScreenLinkApplication(path);
 }
 
 bool ScreenLinkIdentity::IsHelperExecutable(const std::string& path) const {
@@ -216,7 +238,7 @@ ExclusionMatch CheckExclusionV2(
         return match;
     }
 
-    // 2. Helper executable exclusion
+    // 2. Helper executable exclusion (no identity required)
     if (!processPath.empty() && screenLinkIdentity.IsHelperExecutable(processPath)) {
         match.isScreenLink = true;
         match.matchedName = Basename(processPath);
@@ -224,12 +246,11 @@ ExclusionMatch CheckExclusionV2(
         return match;
     }
 
-    // 3. Current root exclusion (exact PID + creation time)
-    // This is already handled by the PID check in IsScreenLinkSession,
-    // but we also check at root level for completeness.
-    // (The PID match is done in FilteredSourcePlanner)
-
-    // 4. ScreenLink application identity check
+    // 3. ScreenLink application identity check (packaged + development identity)
+    // Covers both:
+    //   - Packaged sibling identity (uses normalizedPackagedPath + isPackaged + installationRoot)
+    //   - Development sibling identity (uses normalizedDevAppRoot + normalizedDevEntrypoint)
+    // Does NOT require current-process identity (PID + creation time).
     if (!processPath.empty() && screenLinkIdentity.IsScreenLinkApplication(processPath)) {
         match.isScreenLink = true;
         match.matchedName = Basename(processPath);
@@ -237,7 +258,7 @@ ExclusionMatch CheckExclusionV2(
         return match;
     }
 
-    // 5. Basename fallback: existing IsScreenLinkProcess check
+    // 4. Basename fallback: only when structured identity found nothing
     if (IsScreenLinkProcess(processName, processPath)) {
         match.isScreenLink = true;
         match.matchedName = Basename(processName.empty() ? processPath : processName);

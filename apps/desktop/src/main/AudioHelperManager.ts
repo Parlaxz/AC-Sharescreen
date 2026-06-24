@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+import { app } from 'electron';
 import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser.js';
 import { PcmBridge, PcmBridgeDiagnostics } from './PcmBridge.js';
 import {
@@ -27,6 +28,24 @@ function diag(msg: string): void {
 // ── Types ──
 
 type CleanupIntent = 'restart' | 'startup-failure' | 'normal-stop' | 'permanent-shutdown';
+
+type HelperOwnershipState =
+  | 'none'           // no helper process
+  | 'starting'       // spawned, waiting for handshake
+  | 'running'        // handshake complete, PCM connected
+  | 'stopping'       // stop requested, waiting for native stop or exit
+  | 'exit-unconfirmed' // process handle alive but can't confirm exit
+  | 'exited';        // confirmed exit (exit/close event received)
+
+interface ExitResult {
+  success: boolean;
+  graceful: boolean;
+  forced: boolean;
+  alreadyExited: boolean;
+  unresolved: boolean;
+  exitCode: number | null;
+  signal: string | null;
+}
 
 export interface AudioHelperConfig {
   helperPath: string;
@@ -161,8 +180,11 @@ export class AudioHelperManager {
   private connectionRetryTimer: NodeJS.Timeout | null = null;
   private pendingCleanup: CleanupIntent | null = null;
   private lifecycleGen: number = 0;
-  private cleanupPromise: Promise<void> | null = null;
+  private cleanupPromise: Promise<ExitResult | null> | null = null;
   private captureLifecycleGen: number = -1;
+
+  // Ownership tracking for the helper process handle
+  private helperOwnership: HelperOwnershipState = 'none';
 
   readonly pcmBridge: PcmBridge = new PcmBridge();
   private diagSocketChunks = 0;
@@ -221,6 +243,11 @@ export class AudioHelperManager {
   // ── Lifecycle ──
 
   async start(): Promise<void> {
+    // Guard: cannot start while a previous helper exit is unconfirmed
+    if (this.helperOwnership === 'exit-unconfirmed') {
+      throw new Error('Cannot start: a previous helper process may still be running (exit-unconfirmed)');
+    }
+
     if (this.state !== 'disconnected') {
       throw new Error(`Cannot start: state is ${this.state}`);
     }
@@ -253,6 +280,9 @@ export class AudioHelperManager {
       diag(`Helper spawned, PID=${this.helper?.pid}`);
       console.log(`[AudioHelper] Helper spawned, PID: ${this.helper?.pid}`);
 
+      // After spawn, set ownership to 'starting'
+      this.helperOwnership = 'starting';
+
       // 2. Connect to control named pipe
       diag(`Connecting to control pipe...`);
       console.log(`[AudioHelper] Connecting to control pipe: ${this.ctrlPipeName}`);
@@ -279,15 +309,19 @@ export class AudioHelperManager {
       diag(`PCM pipe connected`);
       console.log(`[AudioHelper] PCM pipe connected`);
 
-      // 5. Start diagnostics polling
+      // 5. Start diagnostics polling — full handshake + PCM + diagnostics = 'running'
       this.state = 'ready';
+      this.helperOwnership = 'running';
       this.startDiagnostics();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       diag(`FAIL: ${msg}`);
       this.state = 'error';
       this.lastError_ = msg;
-      await this.cleanup();
+      // Clean up partial spawn with 'startup-failure' intent
+      await this.cleanup('startup-failure');
+      // cleanup() sets helperOwnership to 'none' on success for startup-failure,
+      // or 'exit-unconfirmed' if unresolved
       throw err;
     }
   }
@@ -384,31 +418,53 @@ export class AudioHelperManager {
       identity.rootCreationTimeUtc100ns = String(
         BigInt(Math.floor(creationMs * 10000)) + BigInt(116444736000000000)
       );
-    } else {
-      identity.rootCreationTimeUtc100ns = '0';
     }
 
-    // Determine if packaged or development
-    const isPackaged = !process.env.VITE_DEV_SERVER_URL && !process.env.ELECTRON_RUN_AS_NODE;
-    const appPath = process.env.APP_PATH || process.cwd();
+    // Determine packaged state using Electron's app.isPackaged
+    const isPackaged = app?.isPackaged ?? false;
+    identity.isPackaged = isPackaged;
 
     if (isPackaged) {
-      // Packaged: use resources/app path and app executable path
+      // Packaged: use the directory containing the executable as the installation root
+      // This is NARROW scope — never traverse to Program Files or higher.
       identity.normalizedPackagedPath = process.execPath;
-      try {
-        const resourcesPath = path.resolve(process.execPath, '..', '..');
-        identity.normalizedInstallationRoot = resourcesPath;
-      } catch { /* best effort */ }
+      const exeDir = path.dirname(process.execPath);
+      identity.normalizedInstallationRoot = exeDir;
     } else {
-      // Development: use the app root directory
-      identity.normalizedDevAppRoot = appPath;
+      // Development: use app.getAppPath() as the primary canonical development root
+      let devAppRoot: string;
+      let devAppRootSource: string;
+
+      try {
+        devAppRoot = app?.getAppPath() ?? '';
+        if (devAppRoot) {
+          devAppRootSource = 'app.getAppPath()';
+        } else {
+          // Fallback: APP_PATH env var
+          devAppRoot = process.env.APP_PATH ?? '';
+          if (devAppRoot) {
+            devAppRootSource = 'APP_PATH env';
+          } else {
+            // Last-resort fallback: cwd (diagnostic only)
+            devAppRoot = process.cwd();
+            devAppRootSource = 'cwd fallback';
+          }
+        }
+      } catch {
+        // app.getAppPath() may throw in certain contexts
+        devAppRoot = process.env.APP_PATH ?? process.cwd();
+        devAppRootSource = process.env.APP_PATH ? 'APP_PATH env' : 'cwd fallback';
+      }
+
+      identity.normalizedDevAppRoot = devAppRoot;
+      identity.devAppRootSource = devAppRootSource;
       // Entrypoint is the main script path using ESM-compatible _dirname
       identity.normalizedDevEntrypoint = path.resolve(_dirname, 'main.js');
-      // Throw descriptive error if a required development identity field is missing
-      if (!appPath) {
+
+      if (!identity.normalizedDevAppRoot) {
         throw new Error(
           'buildScreenLinkIdentity: missing required development identity field normalizedDevAppRoot ' +
-          `(APP_PATH env not set, cwd=${process.cwd()})`
+          `(devAppRootSource=${devAppRootSource}, APP_PATH env not set, cwd=${process.cwd()})`
         );
       }
     }
@@ -463,18 +519,35 @@ export class AudioHelperManager {
     try {
       await this.control!.stopCapture();
     } catch (err) {
-      // Native stop failed — terminate helper and go to error
+      // Native stop failed — attempt to terminate the helper and track ownership
       const msg = err instanceof Error ? err.message : String(err);
       this.lastError_ = `stopCapture failed: ${msg}`;
       this.state = 'error';
-      this.helper?.kill();
+
+      // Attempt to terminate the helper process
+      const exitResult = await this.awaitHelperExit(5000);
+      if (exitResult.success) {
+        // Termination confirmed — safe to null the handle
+        this.helperOwnership = 'exited';
+        this.helper = null;
+      } else if (exitResult.unresolved) {
+        // Cannot confirm exit — preserve handle, stay in error
+        this.helperOwnership = 'exit-unconfirmed';
+        // Do NOT set this.helper = null
+      }
+
       this.onErrorCallback?.(this.lastError_);
       throw err; // Surface the failure
     }
 
-    // Native stop succeeded — transition to ready, clear source type
-    this.state = 'ready';
-    this.currentSourceType = null;
+    // Native stop succeeded — check ownership before transitioning to ready
+    if (this.helperOwnership === 'exit-unconfirmed') {
+      // Do NOT transition to 'ready' while ownership is exit-unconfirmed
+      this.state = 'error';
+    } else {
+      this.state = 'ready';
+      this.currentSourceType = null;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -513,8 +586,17 @@ export class AudioHelperManager {
       // Surface but don't block shutdown
       this.lastError_ = err instanceof Error ? err.message : String(err);
     }
-    await this.cleanup();
-    this.state = 'disconnected';
+
+    const exitResult = await this.cleanup('permanent-shutdown');
+
+    // If termination is unresolved, record failure and do NOT transition to 'disconnected'
+    if (exitResult && exitResult.unresolved) {
+      this.lastError_ = (this.lastError_ ?? '') + '; shutdown incomplete: helper process may still be running';
+      this.state = 'error';
+      // cleanup() already set helperOwnership to 'exit-unconfirmed'
+    } else {
+      this.state = 'disconnected';
+    }
     // Keep shuttingDown_ = true permanently to prevent unintended restarts
   }
 
@@ -868,6 +950,10 @@ export class AudioHelperManager {
   }
 
   private handleHelperExit(code: number | null, signal: string | null): void {
+    // Save previous ownership before updating — used to decide restart logic
+    const prevOwnership = this.helperOwnership;
+    this.helperOwnership = 'exited';
+
     const wasRunning = this.state !== 'disconnected';
     this.state = 'error';
 
@@ -884,8 +970,10 @@ export class AudioHelperManager {
     diag(`Helper exit: ${exitDetail}`);
     console.error(`[AudioHelper] ${this.lastError_}`);
 
-    // Don't restart if we're shutting down or permanent shutdown
-    if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown') return;
+    // Don't restart if we're shutting down, permanent shutdown, or exit was already unconfirmed
+    if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown' || prevOwnership === 'exit-unconfirmed') {
+      return;
+    }
 
     if (wasRunning && this.restartCount < this.maxRestarts) {
       this.restartCount++;
@@ -928,7 +1016,16 @@ export class AudioHelperManager {
     }
 
     // Clean up without setting shuttingDown_ (restart is intentional, not permanent shutdown)
-    await this.cleanup(false);
+    const exitResult = await this.cleanup('restart');
+
+    // If termination is unresolved, DO NOT attempt restart — old helper may still be alive
+    if (exitResult && exitResult.unresolved) {
+      diag('Restart cancelled — helper exit not confirmed, may still be running');
+      this.state = 'error';
+      // cleanup() already set helperOwnership to 'exit-unconfirmed' and preserved this.helper
+      this.pendingCleanup = null;
+      return;
+    }
 
     // Re-check lifecycleGen after async cleanup — abort if superseded
     if (this.lifecycleGen !== gen) {
@@ -955,13 +1052,17 @@ export class AudioHelperManager {
     try {
       await this.spawnHelper();
 
+      // Set ownership to 'starting' after successful spawn
+      this.helperOwnership = 'starting';
+
       // Re-check lifecycleGen immediately before proceeding after spawn
       if (this.lifecycleGen !== gen) {
         diag('Restart cancelled — lifecycleGen changed after spawn');
         if (this.helper) {
           this.helper.kill();
-          this.helper = null;
         }
+        this.helper = null;
+        this.helperOwnership = 'none';
         this.state = 'disconnected';
         this.pendingCleanup = null;
         return;
@@ -973,6 +1074,9 @@ export class AudioHelperManager {
       await this.connectPcmPipe();
       this.startDiagnostics();
 
+      // After full handshake + PCM + diagnostics, set ownership to 'running'
+      this.helperOwnership = 'running';
+
       // Reset retry count only after handshake, PCM connection, AND diagnostics all succeed
       this.state = 'ready';
       this.restartCount = 0;
@@ -981,6 +1085,8 @@ export class AudioHelperManager {
     } catch (err) {
       this.state = 'error';
       this.lastError_ = err instanceof Error ? err.message : String(err);
+      // Clean up partial spawn in attemptRestart
+      await this.cleanup('startup-failure').catch(() => {});
       this.pendingCleanup = null; // Allow future restart attempts
     }
   }
@@ -988,31 +1094,42 @@ export class AudioHelperManager {
   /**
    * Wait for the helper process to exit with a deadline.
    * Falls back to force kill if the process doesn't exit within the timeout.
-   * Resolves only from observed exit event — does not treat helper.killed as proof of exit.
+   * Resolves only from observed exit/close event — does not treat helper.killed as proof of exit.
    * Does NOT null helper ownership — caller is responsible for that.
+   * Does NOT modify this.helperOwnership — caller manages ownership.
    */
-  private async awaitHelperExit(deadlineMs: number = 5000): Promise<{success: boolean; exitCode: number | null; signal: string | null}> {
+  private async awaitHelperExit(deadlineMs: number = 5000): Promise<ExitResult> {
     if (!this.helper) {
-      return { success: true, exitCode: null, signal: null };
+      return { success: true, graceful: true, forced: false, alreadyExited: true, unresolved: false, exitCode: null, signal: null };
     }
 
     const helper = this.helper;
 
     // If helper already exited before we set up the listener, return immediately
     if (helper.exitCode !== null) {
-      return { success: true, exitCode: helper.exitCode, signal: helper.signalCode };
+      return { success: true, graceful: true, forced: false, alreadyExited: true, unresolved: false, exitCode: helper.exitCode, signal: helper.signalCode };
     }
 
     let timeoutHandle: NodeJS.Timeout | null = null;
     let sigkillTimeoutHandle: NodeJS.Timeout | null = null;
+    let settled = false;
 
     const exitPromise = new Promise<{code: number | null; signal: string | null}>((resolve) => {
-      helper.once('exit', (code, signal) => {
-        // Clear any pending timeout handles in every path
-        if (timeoutHandle !== null) clearTimeout(timeoutHandle);
-        if (sigkillTimeoutHandle !== null) clearTimeout(sigkillTimeoutHandle);
+      const onExitOrClose = (code: number | null, signal: string | null) => {
+        if (settled) return;
+        settled = true;
+        // Clean up timeout handles
+        if (timeoutHandle !== null) { clearTimeout(timeoutHandle); timeoutHandle = null; }
+        if (sigkillTimeoutHandle !== null) { clearTimeout(sigkillTimeoutHandle); sigkillTimeoutHandle = null; }
+        // Remove listeners to prevent leaks
+        helper.removeListener('exit', onExitOrClose);
+        helper.removeListener('close', onExitOrClose);
         resolve({ code, signal });
-      });
+      };
+
+      // Subscribe to BOTH exit and close events BEFORE sending termination signal
+      helper.once('exit', onExitOrClose);
+      helper.once('close', onExitOrClose);
     });
 
     try {
@@ -1023,13 +1140,16 @@ export class AudioHelperManager {
         helper.kill();
       }
 
-      const timeoutPromise = new Promise<{code: number | null; signal: string | null}>((_, reject) => {
+      const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(() => reject(new Error('Helper exit timeout')), deadlineMs);
       });
 
       const result = await Promise.race([exitPromise, timeoutPromise]);
+      // Clear the timeout handle since exit won
+      if (timeoutHandle !== null) { clearTimeout(timeoutHandle); timeoutHandle = null; }
+      if (sigkillTimeoutHandle !== null) { clearTimeout(sigkillTimeoutHandle); sigkillTimeoutHandle = null; }
       diag('Helper exited gracefully');
-      return { success: true, exitCode: result.code, signal: result.signal };
+      return { success: true, graceful: true, forced: false, alreadyExited: false, unresolved: false, exitCode: result.code, signal: result.signal };
     } catch {
       // Timeout — force kill with SIGKILL
       diag('Helper exit timeout — sending SIGKILL');
@@ -1045,25 +1165,37 @@ export class AudioHelperManager {
 
       try {
         const result = await Promise.race([exitPromise, sigkillTimeoutPromise]);
-        if (sigkillTimeoutHandle !== null) clearTimeout(sigkillTimeoutHandle);
+        if (sigkillTimeoutHandle !== null) { clearTimeout(sigkillTimeoutHandle); sigkillTimeoutHandle = null; }
+        if (timeoutHandle !== null) { clearTimeout(timeoutHandle); timeoutHandle = null; }
         diag('Helper exited after SIGKILL');
-        return { success: true, exitCode: result.code, signal: result.signal };
+        return { success: true, graceful: false, forced: true, alreadyExited: false, unresolved: false, exitCode: result.code, signal: result.signal };
       } catch {
+        // Both SIGTERM and SIGKILL timed out — process handle may still be alive
+        if (sigkillTimeoutHandle !== null) { clearTimeout(sigkillTimeoutHandle); sigkillTimeoutHandle = null; }
+        if (timeoutHandle !== null) { clearTimeout(timeoutHandle); timeoutHandle = null; }
         diag('WARNING: helper may still be running after SIGKILL timeout');
-        return { success: false, exitCode: null, signal: 'SIGKILL' };
+        return { success: false, graceful: false, forced: false, alreadyExited: false, unresolved: true, exitCode: null, signal: null };
       }
     }
   }
 
-  private async cleanup(setShuttingDown: boolean = true): Promise<void> {
+  /**
+   * Clean up all helper resources (PCM socket, control client, helper process).
+   * Returns the ExitResult if termination was attempted, or null if no termination was needed.
+   *
+   * Ownership management:
+   * - On confirmed exit: helperOwnership = 'exited' (or 'none' for startup-failure), helper = null
+   * - On unresolved exit: helperOwnership = 'exit-unconfirmed', helper is NOT null
+   * - If helper already null or ownership 'exited': skip termination, return null
+   */
+  private async cleanup(intent: CleanupIntent): Promise<ExitResult | null> {
     // Serialize cleanup — if one is already in progress, await it
     if (this.cleanupPromise !== null) {
       diag('cleanup already in progress — awaiting');
-      await this.cleanupPromise;
-      return;
+      return await this.cleanupPromise;
     }
 
-    const run = async (): Promise<void> => {
+    const run = async (): Promise<ExitResult | null> => {
       this.pcmBridge.detach();
 
       if (this.diagnosticsInterval !== null) {
@@ -1083,7 +1215,7 @@ export class AudioHelperManager {
         this.connectionRetryTimer = null;
       }
 
-      if (setShuttingDown) {
+      if (intent === 'permanent-shutdown') {
         this.restartCount = this.maxRestarts; // Prevent further automatic restarts
         this.shuttingDown_ = true;
       }
@@ -1101,16 +1233,28 @@ export class AudioHelperManager {
       this.control = null;
       this.parser = null;
 
-      // Await helper exit with deadline (resolve only from observed exit event)
-      if (this.helper) {
-        await this.awaitHelperExit(5000);
+      // Await helper exit with deadline — only if helper exists and isn't already confirmed exited
+      if (this.helper && this.helperOwnership !== 'exited') {
+        const result = await this.awaitHelperExit(5000);
+        if (result.success) {
+          // Confirmed exit — safe to null the handle
+          this.helperOwnership = intent === 'startup-failure' ? 'none' : 'exited';
+          this.helper = null;
+        } else if (result.unresolved) {
+          // Cannot confirm exit — preserve the handle
+          this.helperOwnership = 'exit-unconfirmed';
+          // Do NOT set this.helper = null
+        }
+        return result;
       }
-      this.helper = null;
+
+      // No termination needed
+      return null;
     };
 
     this.cleanupPromise = run();
     try {
-      await this.cleanupPromise;
+      return await this.cleanupPromise;
     } finally {
       this.cleanupPromise = null;
     }

@@ -1739,15 +1739,25 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     }
 
     // ── C: Native PID validation for screenLinkIdentity ──
-    if (screenLinkIdentity.IsValid()) {
+    // Independently resolve the creation time from the provided PID.
+    // If creation time cannot be resolved (process gone), we log the event
+    // but do NOT invalidate the entire identity — packaged and development
+    // sibling identity checks remain valid.
+    if (screenLinkIdentity.rootPid != 0) {
         uint64_t actualCreationTime = GetProcessCreationTime(screenLinkIdentity.rootPid);
         if (actualCreationTime == 0) {
             // Process not found (gone already)
             std::cerr << "[helper] screenLinkIdentity root PID not found: "
-                      << screenLinkIdentity.rootPid << std::endl;
+                      << screenLinkIdentity.rootPid
+                      << " — sibling identity (packaged/dev) still valid" << std::endl;
             screenLinkIdentity.rootPid = 0;
             screenLinkIdentity.rootCreationTimeUtc100ns = 0;
             screenLinkIdentityLookupFailures_.fetch_add(1, std::memory_order_relaxed);
+        } else if (screenLinkIdentity.rootCreationTimeUtc100ns == 0) {
+            // Desktop didn't provide creation time — use the natively resolved one
+            screenLinkIdentity.rootCreationTimeUtc100ns = actualCreationTime;
+            std::cerr << "[helper] screenLinkIdentity creation time resolved natively: "
+                      << actualCreationTime << std::endl;
         } else if (actualCreationTime != screenLinkIdentity.rootCreationTimeUtc100ns) {
             // Creation time mismatch (PID reused or spoofed)
             std::cerr << "[helper] screenLinkIdentity root PID creation time mismatch: expected="
