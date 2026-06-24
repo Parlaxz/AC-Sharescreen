@@ -99,8 +99,13 @@ private:
     ///        Rejected if zero or != active generation.
     bool OnCapturePacket(uint32_t expectedGeneration, const AudioPacket& packet);
 
+    /// Allocate a monotonically increasing stream generation that is never zero.
+    /// Handles uint32 wrap by skipping zero.
+    uint32_t AllocateNextGeneration();
+
     /// Invalidate the active stream generation (called at start of stop).
     /// Future packets with this generation will be rejected.
+    /// Does not affect the next allocatable generation.
     void InvalidateGeneration();
 
     /// Build a JSON error response.
@@ -132,7 +137,13 @@ private:
 
     // State
     std::atomic<SessionState> state_{SessionState::kIdle};
-    std::atomic<uint32_t> streamGeneration_{0};
+
+    // Generation management: separated allocator and active generation
+    // nextGeneration_ is monotonically increasing, never returns 0, survives stops
+    // activeGeneration_ is the generation the current capture accepts, 0 = none active
+    std::atomic<uint32_t> nextGeneration_{1};  // starts at 1 so first alloc returns 1
+    std::atomic<uint32_t> activeGeneration_{0}; // 0 = no active capture
+
     std::string activeSourceType_;  // "synthetic", "process", "application", "monitor", "endpoint-loopback", or ""
     std::mutex stateMutex_;         // protects activeSourceType_
 
@@ -159,7 +170,6 @@ private:
     std::atomic<uint64_t> onCaptureAccepted_{0};
     std::atomic<uint64_t> onCaptureRejectedState_{0};
     std::atomic<uint64_t> onCaptureRejectedGeneration_{0};
-    std::atomic<uint64_t> onCaptureExpectedGeneration_{0}; // set at each start
 
     // Application Audio source diagnostics (energy, packet health)
     struct ApplicationAudioDiagnostics {

@@ -1282,6 +1282,185 @@ void TestServiceSessionStreamGeneration() {
 }
 
 // ====================================================================
+// Generation Allocation Tests (Priority 1 — P0 regression)
+// Tests AllocateNextGeneration semantics: monotonic, never-zero, wrap-safe.
+// ====================================================================
+
+// Simulate AllocateNextGeneration logic with a local atomic.
+uint32_t TestAllocateNextGeneration(std::atomic<uint32_t>& nextGen) {
+    uint32_t gen;
+    do {
+        gen = nextGen.fetch_add(1, std::memory_order_acq_rel);
+    } while (gen == 0);
+    return gen;
+}
+
+void TestGenerationAllocStartStopStart() {
+    TEST("Generation - start(gen1) stop start(gen2)")
+    std::atomic<uint32_t> nextGen{1}; // starts at 1
+    uint32_t activeGen = 0;
+
+    // Simulate start #1
+    uint32_t gen1 = TestAllocateNextGeneration(nextGen);
+    ASSERT_GT(gen1, 0u);
+    activeGen = gen1;
+    ASSERT_EQ(activeGen, 1u);
+    ASSERT_EQ(gen1, 1u);
+
+    // Simulate stop: set active to 0, don't touch nextGen
+    activeGen = 0;
+    ASSERT_EQ(activeGen, 0u);
+
+    // Simulate start #2
+    uint32_t gen2 = TestAllocateNextGeneration(nextGen);
+    ASSERT_GT(gen2, 0u);
+    activeGen = gen2;
+    ASSERT_EQ(gen2, 2u);
+
+    // gen2 must be different from gen1 and monotonic
+    ASSERT_GT(gen2, gen1);
+    // activeGen must not be zero
+    ASSERT(activeGen != 0u);
+    END_TEST("Generation - start(gen1) stop start(gen2)");
+}
+
+void TestGenerationAllocNeverZero() {
+    TEST("Generation - no allocated generation is zero")
+    std::atomic<uint32_t> nextGen{1};
+    for (int i = 0; i < 10000; ++i) {
+        uint32_t gen = TestAllocateNextGeneration(nextGen);
+        ASSERT(gen != 0u);
+    }
+    END_TEST("Generation - no allocated generation is zero");
+}
+
+void TestGenerationAllocMonotonic() {
+    TEST("Generation - allocated generations are monotonic")
+    std::atomic<uint32_t> nextGen{1};
+    uint32_t prev = 0;
+    for (int i = 0; i < 10000; ++i) {
+        uint32_t gen = TestAllocateNextGeneration(nextGen);
+        ASSERT_GT(gen, prev);
+        prev = gen;
+    }
+    END_TEST("Generation - allocated generations are monotonic");
+}
+
+void TestGenerationAllocWrapSkipsZero() {
+    TEST("Generation - uint32 wrap skips zero")
+    std::atomic<uint32_t> nextGen{0xFFFFFFFE};
+
+    // Allocate around the wrap boundary
+    uint32_t gen1 = TestAllocateNextGeneration(nextGen);
+    ASSERT(gen1 != 0u);
+    ASSERT_EQ(gen1, 0xFFFFFFFEu);
+
+    uint32_t gen2 = TestAllocateNextGeneration(nextGen);
+    ASSERT(gen2 != 0u);
+    // nextGen wrapped to 0xFFFFFFFF, returned 0xFFFFFFFF
+    ASSERT_EQ(gen2, 0xFFFFFFFFu);
+
+    uint32_t gen3 = TestAllocateNextGeneration(nextGen);
+    ASSERT(gen3 != 0u);
+    // nextGen wrapped to 0x00000000, returned 0x00000000 which is skipped,
+    // then fetch_add(1) returns 0x00000001 which is returned as gen3=1.
+    // gen3 (1) may not be > gen2 (0xFFFFFFFF) in unsigned arithmetic,
+    // but it's non-zero and unique (non-duplicate check across the full set).
+    ASSERT(gen3 != 0u);
+    ASSERT(gen1 != gen3);
+    ASSERT(gen2 != gen3);
+    END_TEST("Generation - uint32 wrap skips zero");
+}
+
+void TestGenerationActiveSetAfterAlloc() {
+    TEST("Generation - active generation only set after successful alloc")
+    std::atomic<uint32_t> nextGen{1};
+    uint32_t activeGen = 0;
+
+    uint32_t gen = TestAllocateNextGeneration(nextGen);
+    ASSERT(gen != 0u);
+
+    // Before setting activeGen, it must be 0 (no active capture)
+    ASSERT_EQ(activeGen, 0u);
+
+    activeGen = gen;
+    ASSERT_EQ(activeGen, gen);
+
+    // Simulate stop
+    activeGen = 0;
+    ASSERT_EQ(activeGen, 0u);
+
+    // New gen must differ from old gen
+    uint32_t gen2 = TestAllocateNextGeneration(nextGen);
+    ASSERT(gen2 != gen);
+    ASSERT_GT(gen2, gen);
+    END_TEST("Generation - active generation only set after successful alloc");
+}
+
+void TestGenerationOneHundredStartStop() {
+    TEST("Generation - 100 consecutive start/stop cycles")
+    std::atomic<uint32_t> nextGen{1};
+    uint32_t prevGen = 0;
+
+    for (int i = 0; i < 100; ++i) {
+        // Start
+        uint32_t gen = TestAllocateNextGeneration(nextGen);
+        ASSERT(gen != 0u);
+        ASSERT_GT(gen, prevGen);
+        prevGen = gen;
+
+        // Stop clears active generation
+        uint32_t activeGen = gen;
+        activeGen = 0;
+        ASSERT_EQ(activeGen, 0u);
+    }
+    // Verify we used 100 unique generations
+    ASSERT_EQ(prevGen, 100u);
+    END_TEST("Generation - 100 consecutive start/stop cycles");
+}
+
+void TestGenerationAllocNeverRollback() {
+    TEST("Generation - allocator never rolls back")
+    std::atomic<uint32_t> nextGen{1};
+    uint32_t generations[1000];
+
+    for (int i = 0; i < 1000; ++i) {
+        generations[i] = TestAllocateNextGeneration(nextGen);
+    }
+
+    // Verify all values are strictly increasing
+    for (int i = 1; i < 1000; ++i) {
+        ASSERT_GT(generations[i], generations[i - 1]);
+    }
+    END_TEST("Generation - allocator never rolls back");
+}
+
+void TestGenerationStopPoisoning() {
+    TEST("Generation - stop cannot poison allocator")
+    std::atomic<uint32_t> nextGen{1};
+    uint32_t activeGen = 0;
+
+    // Start
+    uint32_t gen1 = TestAllocateNextGeneration(nextGen);
+    activeGen = gen1;
+    ASSERT_EQ(activeGen, 1u);
+
+    // Stop — sets active to 0, does not touch nextGen
+    uint32_t savedNextGen = nextGen.load();
+    activeGen = 0;
+    ASSERT_EQ(activeGen, 0u);
+
+    // nextGen must not be affected by stop
+    ASSERT_EQ(nextGen.load(), savedNextGen);
+
+    // Next alloc must work correctly
+    uint32_t gen2 = TestAllocateNextGeneration(nextGen);
+    ASSERT(gen2 != 0u);
+    ASSERT_GT(gen2, gen1);
+    END_TEST("Generation - stop cannot poison allocator");
+}
+
+// ====================================================================
 // ProcessResolver Deterministic Tests
 // Uses FindApplicationRootIndex with mock process info vectors.
 // ====================================================================
@@ -1987,6 +2166,16 @@ bool RunPhase2GSelfTests() {
     TestFilteredSourceCandidateIdentity();
     TestRecordFilteredMixerOutputUsesEnergy();
     TestServiceSessionStreamGeneration();
+
+    // Generation allocation tests (Priority 1 — P0 regression)
+    TestGenerationAllocStartStopStart();
+    TestGenerationAllocNeverZero();
+    TestGenerationAllocMonotonic();
+    TestGenerationAllocWrapSkipsZero();
+    TestGenerationActiveSetAfterAlloc();
+    TestGenerationOneHundredStartStop();
+    TestGenerationAllocNeverRollback();
+    TestGenerationStopPoisoning();
 
     // ProcessResolver deterministic tests
     TestChromiumProcessFamily();

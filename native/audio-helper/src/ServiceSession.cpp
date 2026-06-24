@@ -877,7 +877,7 @@ void ServiceSession::HandleGetState(const CommandContext& ctx,
     result += "\"controlConnected\":true,";
     result += "\"pcmConnected\":true,";
     result += "\"streamGeneration\":" +
-              std::to_string(streamGeneration_.load()) + ",";
+              std::to_string(activeGeneration_.load()) + ",";
     result += "\"totalPackets\":" +
               std::to_string(totalPackets_.load());
     result += "}";
@@ -931,7 +931,8 @@ void ServiceSession::HandleStartSynthetic(const CommandContext& ctx,
     }
 
     state_.store(static_cast<SessionState>(1)); // kStarting
-    uint32_t gen = streamGeneration_.fetch_add(1) + 1;
+    uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1074,7 +1075,8 @@ void ServiceSession::HandleStartProcessCapture(const CommandContext& ctx,
     }
 
     state_.store(static_cast<SessionState>(1)); // kStarting
-    uint32_t gen = streamGeneration_.fetch_add(1) + 1;
+    uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1177,7 +1179,7 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     size_t queueSize = pcmWriter_.Queue().Size();
     size_t written = pcmWriter_.PacketsWritten();
     size_t writeErrors = pcmWriter_.WriteErrors();
-    uint32_t streamGen = streamGeneration_.load();
+    uint32_t streamGen = activeGeneration_.load();
     int currentState = static_cast<int>(state_.load());
 
     std::string activeSrc;
@@ -1231,7 +1233,7 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     result += "\"onCaptureAccepted\":" + std::to_string(onCaptureAccepted_.load()) + ",";
     result += "\"onCaptureRejectedState\":" + std::to_string(onCaptureRejectedState_.load()) + ",";
     result += "\"onCaptureRejectedGeneration\":" + std::to_string(onCaptureRejectedGeneration_.load()) + ",";
-    result += "\"onCaptureExpectedGeneration\":" + std::to_string(onCaptureExpectedGeneration_.load());
+    result += "\"activeGeneration\":" + std::to_string(activeGeneration_.load());
 
     // Include filtered monitor diagnostics inline when active
     if (activeSrc == "monitor" && filteredMonitor_) {
@@ -1640,7 +1642,8 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     // Bypassing the mixer avoids its 10ms fixed-timestamp-window alignment,
     // which can discard WASAPI packets with different timing.
 
-    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1649,8 +1652,6 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
 
     // Set kCapturing before source Start so OnCapturePacket accepts output.
     state_.store(SessionState::kCapturing, std::memory_order_release);
-
-    onCaptureExpectedGeneration_.store(gen, std::memory_order_release);
 
     std::cerr << "[ProcessLoopback] activate targetPid=" << rootPid
               << " mode=include-tree source=application"
@@ -1759,7 +1760,8 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
 
     // Set state to kStarting and allocate stream generation
     state_.store(SessionState::kStarting);
-    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex_);
@@ -1771,8 +1773,6 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
 
     // Set state to kCapturing before native callbacks may begin
     state_.store(SessionState::kCapturing, std::memory_order_release);
-
-    onCaptureExpectedGeneration_.store(gen, std::memory_order_release);
 
     // Configure options
     FilteredMonitorOptions options;
@@ -1874,7 +1874,8 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
 
     // Set state to kStarting and allocate stream generation
     state_.store(SessionState::kStarting);
-    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex_);
@@ -1886,8 +1887,6 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
 
     // Set state to kCapturing before source Start so OnCapturePacket accepts output
     state_.store(SessionState::kCapturing, std::memory_order_release);
-
-    onCaptureExpectedGeneration_.store(gen, std::memory_order_release);
 
     // Start with direct OnCapturePacket callback (no mixer, captures gen by value)
     auto startOutcome = source->Start(
@@ -2224,7 +2223,7 @@ void ServiceSession::RunSyntheticCapture(SyntheticConfig cfg) {
 void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-    uint32_t captureGen = streamGeneration_.load();
+    uint32_t captureGen = activeGeneration_.load(std::memory_order_acquire);
     RunCaptureWithPacketCallback(cfg, [this, captureGen](const AudioPacket& p) -> bool {
         return OnCapturePacket(captureGen, p);
     });
@@ -2277,11 +2276,20 @@ void ServiceSession::StopAudioResources() {
 // ========================================================================
 
 void ServiceSession::InvalidateGeneration() {
-    // Set a distinctive "invalidated" sentinel so packets in flight
-    // from the previous generation cannot be accepted.
-    // We use 0xFFFFFFFF as the invalid sentinel — it's not reachable
-    // via normal fetch_add increments.
-    streamGeneration_.store(0xFFFFFFFF, std::memory_order_release);
+    // Set activeGeneration to zero so any in-flight callbacks are rejected.
+    // Does NOT modify nextGeneration_ — the allocator remains monotonically
+    // increasing across stops.
+    activeGeneration_.store(0, std::memory_order_release);
+}
+
+uint32_t ServiceSession::AllocateNextGeneration() {
+    // Monotonically increasing allocator that never returns zero.
+    // Handles uint32 wrap by skipping zero.
+    uint32_t gen;
+    do {
+        gen = nextGeneration_.fetch_add(1, std::memory_order_acq_rel);
+    } while (gen == 0);
+    return gen;
 }
 
 bool ServiceSession::OnCapturePacket(uint32_t expectedGeneration, const AudioPacket& packet) {
@@ -2292,7 +2300,7 @@ bool ServiceSession::OnCapturePacket(uint32_t expectedGeneration, const AudioPac
     }
 
     // Check 2: expectedGeneration must match the active generation
-    uint32_t activeGen = streamGeneration_.load(std::memory_order_acquire);
+    uint32_t activeGen = activeGeneration_.load(std::memory_order_acquire);
     if (expectedGeneration != activeGen) {
         onCaptureRejectedGeneration_.fetch_add(1, std::memory_order_relaxed);
         return false;
