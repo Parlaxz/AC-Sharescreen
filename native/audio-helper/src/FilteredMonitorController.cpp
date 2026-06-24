@@ -1,4 +1,5 @@
 #include "FilteredMonitorController.h"
+#include "AudioPacketAnalysis.h"
 #include "FilteredSourcePlanner.h"
 
 #include <algorithm>
@@ -682,8 +683,13 @@ bool FilteredMonitorController::AddSource(const FilteredSourceCandidate& candida
         capture.consecutiveStartFailures = 0;
         capture.nextRetryAt = {};
 
-        std::cerr << "[FilteredMonitorController] Source PID="
-                  << candidate.identity.pid << " started successfully" << std::endl;
+        std::cerr << "[FilteredMonitor] source-added sessionPid="
+                  << candidate.sessionPid
+                  << " captureRootPid=" << candidate.identity.pid
+                  << " root=" << candidate.rootExecutableName
+                  << " active=" << (candidate.activeSession ? "1" : "0")
+                  << " sourceId=" << sourceId
+                  << std::endl;
 
         {
             std::lock_guard<std::mutex> lock(diagMutex_);
@@ -691,9 +697,11 @@ bool FilteredMonitorController::AddSource(const FilteredSourceCandidate& candida
         }
     } else {
         // Start failed - cleanup the mixer slot
-        std::cerr << "[FilteredMonitorController] Source PID="
-                  << candidate.identity.pid << " failed to start: "
-                  << outcome.failureReason << std::endl;
+        std::cerr << "[FilteredMonitor] source-failed captureRootPid="
+                  << candidate.identity.pid
+                  << " root=" << candidate.rootExecutableName
+                  << " error=" << outcome.failureReason
+                  << std::endl;
 
         // Remove the mixer source since we won't use it
         if (mixer_) {
@@ -732,8 +740,15 @@ void FilteredMonitorController::RemoveSource(const ProcessIdentity& identity) {
     activeCaptures_.erase(it);
     lock.unlock();
 
-    std::cerr << "[FilteredMonitorController] RemoveSource PID="
-              << identity.pid << std::endl;
+    {
+        std::string removalReason = (capture.source && capture.source->IsRunning())
+            ? "grace-expired" : "stopped";
+        std::cerr << "[FilteredMonitor] source-removed captureRootPid="
+                  << identity.pid
+                  << " reason=" << removalReason
+                  << " sourceId=" << capture.mixerSourceId
+                  << std::endl;
+    }
 
     if (capture.source) {
         capture.source->Stop();
@@ -798,16 +813,41 @@ void FilteredMonitorController::WakeReconciliation() {
 // Diagnostics Recording
 // ============================================================================
 
-void FilteredMonitorController::RecordFilteredInputPacket(const AudioPacket& /*packet*/) {
+void FilteredMonitorController::RecordFilteredInputPacket(const AudioPacket& packet) {
+    auto energy = MeasurePacketEnergy(packet);
     std::lock_guard<std::mutex> lock(diagMutex_);
     diag_.mixerInputPackets++;
+    if (energy.HasAudibleSamples()) {
+        diag_.mixerInputNonZeroPackets++;
+    } else {
+        diag_.mixerInputZeroPackets++;
+    }
+    diag_.lastInputPeak = energy.peak;
+    if (energy.peak > diag_.maximumInputPeak) {
+        diag_.maximumInputPeak = energy.peak;
+    }
+    diag_.lastInputRms = energy.Rms();
+    if (energy.Rms() > diag_.maximumInputRms) {
+        diag_.maximumInputRms = energy.Rms();
+    }
 }
 
 void FilteredMonitorController::RecordFilteredMixerOutput(const AudioPacket& packet) {
+    auto energy = MeasurePacketEnergy(packet);
     std::lock_guard<std::mutex> lock(diagMutex_);
     diag_.mixerOutputPackets++;
-    if (!packet.isSilent) {
-        diag_.mixerNonZeroOutputPackets++;
+    if (energy.HasAudibleSamples()) {
+        diag_.mixerOutputNonZeroPackets++;
+    } else {
+        diag_.mixerOutputZeroPackets++;
+    }
+    diag_.lastOutputPeak = energy.peak;
+    if (energy.peak > diag_.maximumOutputPeak) {
+        diag_.maximumOutputPeak = energy.peak;
+    }
+    diag_.lastOutputRms = energy.Rms();
+    if (energy.Rms() > diag_.maximumOutputRms) {
+        diag_.maximumOutputRms = energy.Rms();
     }
 }
 

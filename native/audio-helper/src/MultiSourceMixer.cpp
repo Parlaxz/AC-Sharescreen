@@ -1,4 +1,5 @@
 #include "MultiSourceMixer.h"
+#include "AudioPacketAnalysis.h"
 #include "SyntheticSource.h" // for GetQpcFrequency
 
 #define NOMINMAX
@@ -7,6 +8,7 @@
 #include <mmsystem.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -95,10 +97,11 @@ void MultiSourceMixer::FeedPacket(uint32_t sourceId, const AudioPacket& packet) 
 
     if (!source) return; // Source was removed (and no shared owners remain)
 
-    // Build a queued packet with owned frame data
+    // Build a queued packet with owned frame data and steady_clock enqueue time
     QueuedPacket qp;
     qp.header = packet;
     qp.header.frames = nullptr; // invalidate the pointer
+    qp.enqueuedAt = std::chrono::steady_clock::now();
 
     // Copy frame data
     if (packet.frames && packet.frameCount > 0) {
@@ -120,30 +123,7 @@ void MultiSourceMixer::FeedPacket(uint32_t sourceId, const AudioPacket& packet) 
     {
         std::lock_guard<std::mutex> qlock(source->queueMutex_);
 
-        // Check age limit: drop packets that are too old
-        uint64_t now100ns = 0;
-        {
-            LARGE_INTEGER qpc;
-            QueryPerformanceCounter(&qpc);
-            uint64_t freq = SyntheticSource::GetQpcFrequency();
-            now100ns = static_cast<uint64_t>(
-                (static_cast<double>(qpc.QuadPart) * 10000000.0) /
-                static_cast<double>(freq));
-        }
-
-        // Drop oldest packets that exceed max age
-        while (!source->queue_.empty()) {
-            auto& oldest = source->queue_.front();
-            if (oldest.header.qpcPosition100ns + source->maxQueueAge100ns_ < now100ns) {
-                source->droppedPackets_++;
-                source->droppedFrames_ += oldest.header.frameCount;
-                source->queue_.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Drop oldest if queue is full
+        // Drop oldest if queue is full (keep queue depth bounded)
         if (source->queue_.size() >= source->maxQueuePackets_) {
             auto& oldest = source->queue_.front();
             source->droppedPackets_++;
@@ -374,13 +354,17 @@ void MultiSourceMixer::MixerThread() {
             bool hasData = false;
         };
 
-        // ── Timestamp-aligned source collection ──
-        // Convert the current deadline (QPC ticks) to 100ns units for
-        // comparison against qpcPosition100ns in each queued packet.
-        uint64_t deadline100ns = static_cast<uint64_t>(
-            (static_cast<double>(deadline.QuadPart) * 10000000.0) / hostFreq);
-        uint64_t windowStart100ns = deadline100ns - static_cast<uint64_t>(
-            (static_cast<double>(packetIntervalQpc) * 10000000.0) / hostFreq);
+        // ── FIFO source collection ──
+        // Each source owns a bounded FIFO queue. On every output interval we
+        // consume the oldest packet from each source that has one available.
+        // Strict per-QPC-timestamp windowing is removed because WASAPI
+        // process-loopback sources are asynchronous — their capture timestamps
+        // may fall outside our exact 10 ms wall-clock window.
+        //
+        // Age management uses steady_clock enqueue time rather than the
+        // WASAPI QPC clock domain, avoiding clock-domain mismatch issues.
+        const auto mixNow = std::chrono::steady_clock::now();
+        constexpr auto kMaxPacketAge = std::chrono::milliseconds(500);
 
         std::vector<SourceContribution> contributions;
 
@@ -393,86 +377,54 @@ void MultiSourceMixer::MixerThread() {
 
                 std::lock_guard<std::mutex> qlock(source->queueMutex_);
 
+                // Drop stale packets from the front (enqueued > 500 ms ago)
+                while (!source->queue_.empty()) {
+                    const auto& front = source->queue_.front();
+                    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        mixNow - front.enqueuedAt);
+                    if (age > kMaxPacketAge) {
+                        source->droppedPackets_++;
+                        source->droppedFrames_ += front.header.frameCount;
+                        source->queue_.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
                 if (source->queue_.empty()) {
                     // No packet available — output silence
                     source->missingPackets_++;
                     contrib.isSilent = true;
                     contrib.hasData = false;
                 } else {
-                    // Find a packet matching the current deadline window
-                    bool found = false;
-                    while (!source->queue_.empty()) {
-                        auto& front = source->queue_.front();
+                    // Consume the oldest available packet (FIFO)
+                    auto qp = std::move(source->queue_.front());
+                    source->queue_.pop_front();
 
-                        // If timestamp is 0 (not set), use the packet immediately.
-                        // This handles legacy tests and callers that don't set
-                        // qpcPosition100ns.
-                        if (front.header.qpcPosition100ns == 0) {
-                            // Fall through to the "use it" path below
-                            // by setting qpcPosition100ns to the window start
-                            // (just need it to pass the >= check below).
-                            // We don't modify the packet; we just let it through.
-                        }
-                        // If front packet is for a future window, keep it
-                        else if (front.header.qpcPosition100ns > deadline100ns) {
-                            // Packet is ahead of this block — leave in queue,
-                            // output silence for this block
-                            break;
-                        }
+                    contrib.frameData = std::move(qp.frameData);
+                    contrib.frameCount = qp.header.frameCount;
+                    contrib.channels = qp.header.channels;
+                    contrib.isDiscontinuous = qp.header.isDiscontinuous;
 
-                        // If front packet is within the current window (or timestamp
-                        // was 0 / not set), use it
-                        if (front.header.qpcPosition100ns == 0 ||
-                            front.header.qpcPosition100ns >= windowStart100ns) {
-                            auto qp = std::move(source->queue_.front());
-                            source->queue_.pop_front();
-
-                            contrib.frameData = std::move(qp.frameData);
-                            contrib.frameCount = qp.header.frameCount;
-                            contrib.channels = qp.header.channels;
-                            contrib.isSilent = qp.header.isSilent;
-                            contrib.isDiscontinuous = qp.header.isDiscontinuous;
-
-                            if (qp.header.isSilent) {
-                                source->silentPackets_++;
-                            }
-
-                            if (qp.header.isDiscontinuous) {
-                                source->discontinuities_++;
-                            }
-
-                            contrib.hasData = true;
-
-                            if (!qp.header.isSilent) {
-                                // Check if frames are actually non-zero
-                                bool nonZero = false;
-                                for (size_t i = 0; i < contrib.frameData.size(); ++i) {
-                                    if (contrib.frameData[i] != 0.0f) {
-                                        nonZero = true;
-                                        break;
-                                    }
-                                }
-                                if (nonZero) {
-                                    activeNonSilentSources++;
-                                }
-                            }
-
-                            found = true;
-                            break;
-                        }
-
-                        // Front packet is for a past window — discard it (too late)
-                        source->latePackets_++;
-                        source->droppedPackets_++;
-                        source->droppedFrames_ += front.header.frameCount;
-                        source->queue_.pop_front();
+                    if (qp.header.isSilent) {
+                        source->silentPackets_++;
                     }
 
-                    if (!found) {
-                        // No matching packet in the current window
-                        source->missingPackets_++;
-                        contrib.isSilent = true;
-                        contrib.hasData = false;
+                    if (qp.header.isDiscontinuous) {
+                        source->discontinuities_++;
+                    }
+
+                    contrib.hasData = true;
+
+                    // Measure actual sample energy (not metadata).
+                    // This determines both the mix inclusion and the
+                    // activeNonSilentSources count for headroom.
+                    auto energy = MeasurePacketEnergy(
+                        contrib.frameData.data(),
+                        contrib.frameData.size());
+                    contrib.isSilent = !energy.HasAudibleSamples();
+                    if (energy.HasAudibleSamples()) {
+                        activeNonSilentSources++;
                     }
                 }
 
@@ -528,12 +480,11 @@ void MultiSourceMixer::MixerThread() {
             }
         }
 
-        // Compute peak level in this block
-        float peak = 0.0f;
-        for (size_t i = 0; i < outputSamples; ++i) {
-            float absVal = std::abs(outputBuffer[i]);
-            if (absVal > peak) peak = absVal;
-        }
+        // Measure actual output energy — silence is derived from float samples,
+        // NOT from metadata flags. This is the authoritative check.
+        auto outputEnergy = MeasurePacketEnergy(
+            outputBuffer.data(), outputSamples);
+        const bool outputHasAudibleSamples = outputEnergy.HasAudibleSamples();
 
         // Build output AudioPacket
         AudioPacket output;
@@ -541,7 +492,7 @@ void MultiSourceMixer::MixerThread() {
         output.frameCount = framesPerPacket_;
         output.channels = channels_;
         output.sequenceNumber = outputSequence;
-        output.isSilent = allSilent;
+        output.isSilent = !outputHasAudibleSamples;
         output.isDiscontinuous = anyDiscontinuous;
         output.isEndOfStream = false;
         output.sourceId = 0; // mixed output
@@ -554,14 +505,14 @@ void MultiSourceMixer::MixerThread() {
                 (static_cast<double>(now.QuadPart) * 10000000.0) / hostFreq);
         }
 
-        // Update diagnostics
+        // Update diagnostics (use actual energy, not metadata)
         {
             std::lock_guard<std::mutex> dlock(diagMutex_);
             diag_.outputPackets++;
             diag_.outputFrames += framesPerPacket_;
-            if (allSilent) diag_.silentOutputPackets++;
+            if (!outputHasAudibleSamples) diag_.silentOutputPackets++;
             if (anyDiscontinuous) diag_.discontinuities++;
-            if (peak > diag_.peakMixLevel) diag_.peakMixLevel = peak;
+            if (outputEnergy.peak > diag_.peakMixLevel) diag_.peakMixLevel = outputEnergy.peak;
             diag_.appliedHeadroomDb = headroomDb;
             diag_.clippedSamples += clippedSamplesThisBlock;
             if (clippedSamplesThisBlock > 0) diag_.limitedBlocks++;

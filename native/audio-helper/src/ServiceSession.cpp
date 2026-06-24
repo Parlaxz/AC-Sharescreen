@@ -1198,11 +1198,37 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     result += "\"endpointPacketsCaptured\":" + std::to_string(endpointPacketsCaptured_.load()) + ",";
     result += "\"endpointNonZeroPackets\":" + std::to_string(endpointNonZeroPackets_.load()) + ",";
     result += "\"endpointSilentPackets\":" + std::to_string(endpointSilentPackets_.load()) + ",";
-    result += "\"mixerFeedPackets\":" + std::to_string(mixerFeedPackets_.load()) + ",";
-    result += "\"mixerOutputPackets\":" + std::to_string(mixerOutputPackets_.load()) + ",";
-    result += "\"mixerNonZeroOutputPackets\":" + std::to_string(mixerNonZeroOutputPackets_.load()) + ",";
+    // Bridge filtered monitor controller diagnostics when active
+    if (activeSrc == "monitor" && filteredMonitor_) {
+        auto monDiag = filteredMonitor_->GetDiagnostics();
+        result += "\"mixerFeedPackets\":" + std::to_string(monDiag.mixerInputPackets) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(monDiag.mixerOutputPackets) + ",";
+        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(monDiag.mixerOutputNonZeroPackets) + ",";
+    } else {
+        result += "\"mixerFeedPackets\":" + std::to_string(mixerFeedPackets_.load()) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(mixerOutputPackets_.load()) + ",";
+        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(mixerNonZeroOutputPackets_.load()) + ",";
+    }
     result += "\"onCaptureAccepted\":" + std::to_string(onCaptureAccepted_.load()) + ",";
     result += "\"onCaptureRejectedState\":" + std::to_string(onCaptureRejectedState_.load());
+
+    // Include filtered monitor diagnostics inline when active
+    if (activeSrc == "monitor" && filteredMonitor_) {
+        auto monDiag = filteredMonitor_->GetDiagnostics();
+        result += ",\"filteredMonitorDiagnostics\":{";
+        result += "\"running\":" + std::string(monDiag.running ? "true" : "false") + ",";
+        result += "\"activeCaptureSources\":" + std::to_string(monDiag.activeCaptureSources) + ",";
+        result += "\"mixerInputPackets\":" + std::to_string(monDiag.mixerInputPackets) + ",";
+        result += "\"mixerInputNonZeroPackets\":" + std::to_string(monDiag.mixerInputNonZeroPackets) + ",";
+        result += "\"mixerInputZeroPackets\":" + std::to_string(monDiag.mixerInputZeroPackets) + ",";
+        result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumInputPeak)) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(monDiag.mixerOutputPackets) + ",";
+        result += "\"mixerOutputNonZeroPackets\":" + std::to_string(monDiag.mixerOutputNonZeroPackets) + ",";
+        result += "\"mixerOutputZeroPackets\":" + std::to_string(monDiag.mixerOutputZeroPackets) + ",";
+        result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumOutputPeak));
+        result += "}";
+    }
+
     result += "}";
 
     SimpleJson resp;
@@ -1927,14 +1953,42 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
 
         result = "{";
         result += "\"sourceType\":\"monitor\",";
+        result += "\"pipeline\":\"dynamic-process-mix\",";
         result += "\"running\":" + std::string(diag.running ? "true" : "false") + ",";
         result += "\"mixerRunning\":" + std::string(diag.mixerRunning ? "true" : "false") + ",";
         result += "\"totalReconciliations\":" + std::to_string(diag.totalReconciliations) + ",";
         result += "\"activeCaptureSources\":" + std::to_string(diag.activeCaptureSources) + ",";
         result += "\"sourcesAdded\":" + std::to_string(diag.sourcesAdded) + ",";
         result += "\"sourcesRemoved\":" + std::to_string(diag.sourcesRemoved) + ",";
+        result += "\"totalSessionsLastScan\":" + std::to_string(diag.totalSessionsLastScan) + ",";
+        result += "\"activeSessionsLastScan\":" + std::to_string(diag.activeSessionsLastScan) + ",";
+        result += "\"inactiveSessionsLastScan\":" + std::to_string(diag.inactiveSessionsLastScan) + ",";
+        result += "\"desiredSourcesLastScan\":" + std::to_string(diag.desiredSourcesLastScan) + ",";
+        result += "\"invalidSessionsLastScan\":" + std::to_string(diag.invalidSessionsLastScan) + ",";
+        result += "\"expiredSessionsLastScan\":" + std::to_string(diag.expiredSessionsLastScan) + ",";
+        result += "\"systemSoundsSkippedLastScan\":" + std::to_string(diag.systemSoundsSkippedLastScan) + ",";
+        result += "\"discordExcludedLastScan\":" + std::to_string(diag.discordExcludedLastScan) + ",";
+        result += "\"screenLinkExcludedLastScan\":" + std::to_string(diag.screenLinkExcludedLastScan) + ",";
+        result += "\"sourceStartAttempts\":" + std::to_string(diag.sourceStartAttempts) + ",";
+        result += "\"sourceStartFailures\":" + std::to_string(diag.sourceStartFailures) + ",";
+        result += "\"sourceRetries\":" + std::to_string(diag.sourceRetries) + ",";
+        result += "\"sourceUnexpectedStops\":" + std::to_string(diag.sourceUnexpectedStops) + ",";
+        result += "\"mixerInputPackets\":" + std::to_string(diag.mixerInputPackets) + ",";
+        result += "\"mixerInputNonZeroPackets\":" + std::to_string(diag.mixerInputNonZeroPackets) + ",";
+        result += "\"mixerInputZeroPackets\":" + std::to_string(diag.mixerInputZeroPackets) + ",";
+        result += "\"lastInputPeak\":" + std::to_string(static_cast<double>(diag.lastInputPeak)) + ",";
+        result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(diag.maximumInputPeak)) + ",";
+        result += "\"lastInputRms\":" + std::to_string(diag.lastInputRms) + ",";
+        result += "\"maximumInputRms\":" + std::to_string(diag.maximumInputRms) + ",";
         result += "\"mixerOutputPackets\":" + std::to_string(diag.mixerOutputPackets) + ",";
-        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(diag.mixerNonZeroOutputPackets);
+        result += "\"mixerOutputNonZeroPackets\":" + std::to_string(diag.mixerOutputNonZeroPackets) + ",";
+        result += "\"mixerOutputZeroPackets\":" + std::to_string(diag.mixerOutputZeroPackets) + ",";
+        result += "\"lastOutputPeak\":" + std::to_string(static_cast<double>(diag.lastOutputPeak)) + ",";
+        result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(diag.maximumOutputPeak)) + ",";
+        result += "\"lastOutputRms\":" + std::to_string(diag.lastOutputRms) + ",";
+        result += "\"maximumOutputRms\":" + std::to_string(diag.maximumOutputRms) + ",";
+        result += "\"lastErrorCode\":\"" + diag.lastErrorCode + "\",";
+        result += "\"lastErrorMessage\":\"" + diag.lastErrorMessage + "\"";
         result += "}";
     } else if (activeSrc == "application" && applicationSource_) {
         result = "{";

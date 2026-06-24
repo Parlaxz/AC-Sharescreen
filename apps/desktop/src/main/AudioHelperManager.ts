@@ -206,10 +206,18 @@ export class AudioHelperManager {
     this.lastError_ = null;
 
     try {
-      // 1. Spawn the helper process
+      // 1. Spawn the helper process — verify binary provenance
       const helperPath = this.config.helperPath;
       diag(`Spawning helper: ${helperPath}`);
       console.log(`[AudioHelper] Spawning helper: ${helperPath}`);
+      try {
+        const stats = fs.statSync(helperPath);
+        console.log(`[AudioHelper] helper-binary path="${helperPath}" size=${stats.size} mtime=${stats.mtime.toISOString()}`);
+        diag(`helper-binary size=${stats.size} mtime=${stats.mtime.toISOString()}`);
+      } catch (e) {
+        console.warn(`[AudioHelper] Cannot stat helper binary: ${e}`);
+        diag(`Cannot stat helper binary: ${e}`);
+      }
       await this.spawnHelper();
 
       // Verify helper is alive
@@ -459,6 +467,12 @@ export class AudioHelperManager {
       helperState: this.state,
       helperUptimeMs: this.stats.helperUptimeMs,
       streamGeneration: this.streamGeneration,
+      filteredMonitorDiagnostics: helperDiag
+        ? (helperDiag as any).filteredMonitorDiagnostics ?? undefined
+        : undefined,
+      endpointDiagnostics: helperDiag
+        ? (helperDiag as any).endpointDiagnostics ?? undefined
+        : undefined,
     };
   }
 

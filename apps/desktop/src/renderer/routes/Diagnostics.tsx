@@ -211,10 +211,42 @@ export function Diagnostics() {
               <tr><td>System Sounds Skipped</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.systemSoundsSkipped ?? '—'}</td></tr>
             </tbody>
           </table>
-          {pipelineSnapshot.filteredMonitorDiagnostics?.mixerStats && (
+
+          {/* Input Energy Diagnostics */}
+          {(pipelineSnapshot.filteredMonitorDiagnostics?.mixerInputPackets !== undefined ||
+            pipelineSnapshot.filteredMonitorDiagnostics?.maximumInputPeak !== undefined) && (
             <>
-              <h4 style={{ marginTop: "0.5rem" }}>Mixer Stats</h4>
-              <pre className="log-box" style={{ fontSize: "0.7rem" }}>{JSON.stringify(pipelineSnapshot.filteredMonitorDiagnostics.mixerStats, null, 2)}</pre>
+              <h4 style={{ marginTop: "0.5rem" }}>Input Energy</h4>
+              <table className="info-table">
+                <tbody>
+                  <tr><td>Input Packets</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.mixerInputPackets?.toLocaleString() ?? '—'}</td></tr>
+                  <tr><td>Input Nonzero Packets</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.mixerInputNonZeroPackets?.toLocaleString() ?? '—'}</td></tr>
+                  <tr><td>Input Zero Packets</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.mixerInputZeroPackets?.toLocaleString() ?? '—'}</td></tr>
+                  <tr><td>Last Input Peak</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.lastInputPeak !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.lastInputPeak.toExponential(4) : '—'}</td></tr>
+                  <tr><td>Maximum Input Peak</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.maximumInputPeak !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.maximumInputPeak.toExponential(4) : '—'}</td></tr>
+                  <tr><td>Last Input RMS</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.lastInputRms !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.lastInputRms.toExponential(4) : '—'}</td></tr>
+                  <tr><td>Maximum Input RMS</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.maximumInputRms !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.maximumInputRms.toExponential(4) : '—'}</td></tr>
+                </tbody>
+              </table>
+            </>
+          )}
+
+          {/* Output Energy Diagnostics */}
+          {(pipelineSnapshot.filteredMonitorDiagnostics?.mixerOutputPackets !== undefined ||
+            pipelineSnapshot.filteredMonitorDiagnostics?.maximumOutputPeak !== undefined) && (
+            <>
+              <h4 style={{ marginTop: "0.5rem" }}>Output Energy</h4>
+              <table className="info-table">
+                <tbody>
+                  <tr><td>Output Packets</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.mixerOutputPackets?.toLocaleString() ?? '—'}</td></tr>
+                  <tr><td>Output Nonzero Packets</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.mixerOutputNonZeroPackets?.toLocaleString() ?? '—'}</td></tr>
+                  <tr><td>Output Zero Packets</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.mixerOutputZeroPackets?.toLocaleString() ?? '—'}</td></tr>
+                  <tr><td>Last Output Peak</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.lastOutputPeak !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.lastOutputPeak.toExponential(4) : '—'}</td></tr>
+                  <tr><td>Maximum Output Peak</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.maximumOutputPeak !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.maximumOutputPeak.toExponential(4) : '—'}</td></tr>
+                  <tr><td>Last Output RMS</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.lastOutputRms !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.lastOutputRms.toExponential(4) : '—'}</td></tr>
+                  <tr><td>Maximum Output RMS</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.maximumOutputRms !== undefined ? pipelineSnapshot.filteredMonitorDiagnostics.maximumOutputRms.toExponential(4) : '—'}</td></tr>
+                </tbody>
+              </table>
             </>
           )}
         </div>

@@ -119,19 +119,36 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
         entry.candidate.executablePath = session.executablePath;
         entry.candidate.activeSession = (session.sessionState == 1); // AudioSessionStateActive
 
-        // Extract root process info from the resolved tree (last element = root)
+        // Determine root process identity:
+        // The applicationRootPid is the highest non-system ancestor in the process tree.
+        // This is the correct root for both capture and deduplication.
+        // We do NOT use tree.processes.back() because that is the top of the entire
+        // parent chain (may be a system process like explorer.exe), not the application root.
+        const uint32_t rootPid = tree.applicationRootPid;
+        const uint64_t rootCreationTime = GetProcessCreationTime(rootPid);
+        entry.candidate.rootExecutableName = tree.applicationRootName;
+
+        // Find the root process info in the tree for full path and name
         if (!tree.processes.empty()) {
-            const auto& rootProc = tree.processes.back();
-            entry.candidate.rootExecutableName = rootProc.processName;
-            entry.candidate.rootExecutablePath = rootProc.processPath;
-            entry.rootIdentity.pid = rootProc.processId;
-            entry.rootIdentity.creationTimeUtc100ns = rootProc.creationTimeUtc100ns;
-        } else {
-            // Fallback: tree succeeded but processes vector is empty – use fields directly
-            entry.candidate.rootExecutableName = tree.applicationRootName;
-            entry.rootIdentity.pid = tree.applicationRootPid;
-            entry.rootIdentity.creationTimeUtc100ns = GetProcessCreationTime(tree.applicationRootPid);
+            for (const auto& proc : tree.processes) {
+                if (proc.processId == rootPid) {
+                    entry.candidate.rootExecutablePath = proc.processPath;
+                    if (!proc.processName.empty()) {
+                        entry.candidate.rootExecutableName = proc.processName;
+                    }
+                    break;
+                }
+            }
         }
+
+        entry.rootIdentity.pid = rootPid;
+        entry.rootIdentity.creationTimeUtc100ns = rootCreationTime;
+
+        // CRITICAL: Assign the resolved root identity to the candidate's capture identity.
+        // The candidate must capture the root process tree, not merely a leaf session PID.
+        // Deduplication (step 8) uses rootIdentity, so the candidate identity must match
+        // to ensure AddSource and dedup agree on the same ProcessIdentity.
+        entry.candidate.identity = entry.rootIdentity;
 
         // --- Step 6: Apply Discord exclusion ---
         if (options.excludeDiscord && IsDiscordSession(session)) {

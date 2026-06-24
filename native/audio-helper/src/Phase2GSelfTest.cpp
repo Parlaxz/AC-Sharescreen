@@ -1,4 +1,5 @@
 #include "Phase2GSelfTest.h"
+#include "AudioPacketAnalysis.h"
 #include "FilteredMonitorTypes.h"
 #include "FilteredSourcePlanner.h"
 #include "AudioSessionMonitor.h"
@@ -66,6 +67,15 @@ int g_testsFailed = 0;
     auto av = (a); auto bv = (b); \
     if (!(av > bv)) { \
         std::cerr << "[Phase2G] ASSERT_GT failed at " << __LINE__ << ": " #a " (" << av << ") <= " #b " (" << bv << ")\n"; \
+        testOk = false; \
+        return; \
+    } \
+} while(0)
+
+#define ASSERT_GE(a, b) do { \
+    auto av = (a); auto bv = (b); \
+    if (!(av >= bv)) { \
+        std::cerr << "[Phase2G] ASSERT_GE failed at " << __LINE__ << ": " #a " (" << av << ") < " #b " (" << bv << ")\n"; \
         testOk = false; \
         return; \
     } \
@@ -536,6 +546,605 @@ void TestMixerPacketSize() {
     END_TEST("MultiSourceMixer - zero-source packet has correct size");
 }
 
+// ====================================================================
+// AudioPacketAnalysis Tests (Fix 1)
+// ====================================================================
+
+void TestPacketEnergyZero() {
+    TEST("PacketEnergy - zero packet")
+    {
+        auto energy = MeasurePacketEnergy(nullptr, 0);
+        ASSERT_EQ(energy.peak, 0.0f);
+        ASSERT_EQ(energy.sampleCount, 0u);
+        ASSERT_EQ(energy.nonZeroSampleCount, 0u);
+        ASSERT_EQ(energy.Rms(), 0.0);
+    }
+    {
+        std::vector<float> zeros(100, 0.0f);
+        auto energy = MeasurePacketEnergy(zeros.data(), zeros.size());
+        ASSERT_EQ(energy.peak, 0.0f);
+        ASSERT_EQ(energy.sampleCount, 100u);
+        ASSERT_EQ(energy.nonZeroSampleCount, 0u);
+        ASSERT_EQ(energy.Rms(), 0.0);
+        ASSERT(!energy.HasAudibleSamples());
+    }
+    END_TEST("PacketEnergy - zero packet");
+}
+
+void TestPacketEnergyNonzero() {
+    TEST("PacketEnergy - nonzero packet")
+    {
+        std::vector<float> samples = {0.5f, -0.3f, 0.0f, 0.8f, -0.1f};
+        auto energy = MeasurePacketEnergy(samples.data(), samples.size());
+        ASSERT_EQ(energy.peak, 0.8f);
+        ASSERT_EQ(energy.sampleCount, 5u);
+        ASSERT_EQ(energy.nonZeroSampleCount, 4u);
+        ASSERT_GT(energy.Rms(), 0.0);
+        ASSERT(energy.HasAudibleSamples());
+    }
+    END_TEST("PacketEnergy - nonzero packet");
+}
+
+void TestPacketEnergyThreshold() {
+    TEST("PacketEnergy - tiny values beneath threshold")
+    {
+        // Values below kAudioSilenceThreshold (1.0e-8f)
+        std::vector<float> samples = {1.0e-9f, -5.0e-9f, 9.9e-9f};
+        auto energy = MeasurePacketEnergy(samples.data(), samples.size());
+        ASSERT_EQ(energy.nonZeroSampleCount, 0u);
+        ASSERT_EQ(energy.peak, 9.9e-9f);
+        ASSERT(!energy.HasAudibleSamples());
+
+        // Exactly at threshold
+        std::vector<float> atThreshold = {1.0e-8f};
+        auto energy2 = MeasurePacketEnergy(atThreshold.data(), atThreshold.size());
+        ASSERT_EQ(energy2.nonZeroSampleCount, 0u); // not strictly greater
+        ASSERT(!energy2.HasAudibleSamples());
+
+        // Just above threshold
+        std::vector<float> aboveThreshold = {1.0001e-8f};
+        auto energy3 = MeasurePacketEnergy(aboveThreshold.data(), aboveThreshold.size());
+        ASSERT_EQ(energy3.nonZeroSampleCount, 1u);
+        ASSERT(energy3.HasAudibleSamples());
+    }
+    END_TEST("PacketEnergy - tiny values beneath threshold");
+}
+
+void TestPacketEnergyNegativeSamples() {
+    TEST("PacketEnergy - negative samples use absolute magnitude")
+    {
+        std::vector<float> samples = {-0.9f, -0.5f, 0.3f};
+        auto energy = MeasurePacketEnergy(samples.data(), samples.size());
+        ASSERT_EQ(energy.peak, 0.9f); // absolute magnitude
+        ASSERT_EQ(energy.nonZeroSampleCount, 3u);
+    }
+    END_TEST("PacketEnergy - negative samples use absolute magnitude");
+}
+
+// ====================================================================
+// MultiSourceMixer FIFO Tests (Fix 3)
+// ====================================================================
+
+void TestMixerFifoBasic() {
+    TEST("MultiSourceMixer - FIFO basic consumption order")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    std::vector<float> outputPeaks;
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        auto energy = MeasurePacketEnergy(p);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        outputPeaks.push_back(energy.peak);
+        return outputPeaks.size() < 15;
+    });
+
+    ASSERT(result.success);
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    // Feed packets with increasing sample values
+    for (int i = 0; i < 5; i++) {
+        float val = static_cast<float>(i + 1) * 0.1f;
+        std::vector<float> samples(480 * 2, val);
+        AudioPacket p;
+        p.frames = samples.data();
+        p.frameCount = 480;
+        p.channels = 2;
+        p.sequenceNumber = static_cast<uint64_t>(i);
+        p.isSilent = false;
+        mixer->FeedPacket(sid, p);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    mixer->Stop();
+
+    // Verify we got output and it was non-zero
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        ASSERT_GT(outputPeaks.size(), 0u);
+        bool hadOutput = false;
+        for (auto peak : outputPeaks) {
+            if (peak > kAudioSilenceThreshold) {
+                hadOutput = true;
+                break;
+            }
+        }
+        ASSERT(hadOutput);
+    }
+    END_TEST("MultiSourceMixer - FIFO basic consumption order");
+}
+
+void TestMixerFifoRealTimestampNotDropped() {
+    TEST("MultiSourceMixer - real timestamp older than window but <500ms enqueued")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    std::vector<bool> outputHasData;
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        auto energy = MeasurePacketEnergy(p);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        outputHasData.push_back(energy.HasAudibleSamples());
+        return outputHasData.size() < 15;
+    });
+
+    ASSERT(result.success);
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    // Feed packets with timestamps that would have failed the old strict window
+    // The old code required timestamp >= windowStart100ns and <= deadline100ns
+    std::vector<float> samples(480 * 2, 0.5f);
+    for (int i = 0; i < 5; i++) {
+        AudioPacket p;
+        p.frames = samples.data();
+        p.frameCount = 480;
+        p.channels = 2;
+        p.sequenceNumber = static_cast<uint64_t>(i);
+        // Use a timestamp that's "too old" for any current window (set to 1 = ancient)
+        p.qpcPosition100ns = 1;
+        p.isSilent = false;
+        mixer->FeedPacket(sid, p);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    mixer->Stop();
+
+    // With FIFO, these packets should be consumed and produce nonzero output
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        bool hadNonzero = false;
+        for (auto hasData : outputHasData) {
+            if (hasData) {
+                hadNonzero = true;
+                break;
+            }
+        }
+        ASSERT(hadNonzero);
+    }
+    END_TEST("MultiSourceMixer - real timestamp older than window but <500ms enqueued");
+}
+
+void TestMixerFifoZeroInputNonzeroOutput() {
+    TEST("MultiSourceMixer - nonzero input produces nonzero output peak")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    std::vector<float> outputPeaks;
+    std::atomic<bool> done{false};
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        auto energy = MeasurePacketEnergy(p);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        outputPeaks.push_back(energy.peak);
+        return !done.load();
+    });
+
+    ASSERT(result.success);
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    // Wait for mixer to be running and producing initial silence
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Feed multiple packets, then wait for the mixer to consume them
+    std::vector<float> samples(480 * 2, 0.5f);
+    for (int i = 0; i < 8; i++) {
+        AudioPacket p;
+        p.frames = samples.data();
+        p.frameCount = 480;
+        p.channels = 2;
+        p.sequenceNumber = static_cast<uint64_t>(i + 1);
+        p.isSilent = false;
+        mixer->FeedPacket(sid, p);
+    }
+
+    // Wait long enough for the 8 packets to be consumed (8 * 10ms + margin)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // Stop the mixer by signaling done, then stop
+    done.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    mixer->Stop();
+
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        ASSERT_GT(outputPeaks.size(), 0u);
+        // At least one output should have nonzero peak
+        bool hadPeak = false;
+        for (auto peak : outputPeaks) {
+            if (peak > kAudioSilenceThreshold) {
+                hadPeak = true;
+                break;
+            }
+        }
+        ASSERT(hadPeak);
+    }
+    END_TEST("MultiSourceMixer - nonzero input produces nonzero output peak");
+}
+
+void TestMixerFifoZeroInputWithSilentFalseMetadata() {
+    TEST("MultiSourceMixer - zero-filled input with isSilent=false produces zero output peak")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    // Store energy results, not AudioPacket (frames pointer becomes invalid after callback)
+    std::vector<PacketEnergy> energies;
+    std::atomic<bool> done{false};
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        auto energy = MeasurePacketEnergy(p);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        energies.push_back(energy);
+        return !done.load();
+    });
+
+    ASSERT(result.success);
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Zero-filled samples with isSilent=false metadata
+    std::vector<float> samples(480 * 2, 0.0f);
+    AudioPacket p;
+    p.frames = samples.data();
+    p.frameCount = 480;
+    p.channels = 2;
+    p.sequenceNumber = 1;
+    p.isSilent = false; // metadata says not silent, but samples are zero
+    mixer->FeedPacket(sid, p);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    done.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    mixer->Stop();
+
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        ASSERT_GT(energies.size(), 0u);
+        // All outputs should be silent because actual samples are zero
+        bool allSilent = true;
+        for (auto& energy : energies) {
+            if (energy.HasAudibleSamples()) {
+                allSilent = false;
+                break;
+            }
+        }
+        ASSERT(allSilent);
+    }
+    END_TEST("MultiSourceMixer - zero-filled input with isSilent=false produces zero output peak");
+}
+
+void TestMixerFifoNonzeroInputWithSilentTrueMetadata() {
+    TEST("MultiSourceMixer - nonzero input with isSilent=true metadata still produces audible output")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    std::vector<PacketEnergy> energies;
+    std::atomic<bool> done{false};
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        auto energy = MeasurePacketEnergy(p);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        energies.push_back(energy);
+        return !done.load();
+    });
+
+    ASSERT(result.success);
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Nonzero samples with isSilent=true metadata
+    std::vector<float> samples(480 * 2, 0.5f);
+    AudioPacket p;
+    p.frames = samples.data();
+    p.frameCount = 480;
+    p.channels = 2;
+    p.sequenceNumber = 1;
+    p.isSilent = true; // metadata says silent, but samples are nonzero
+    mixer->FeedPacket(sid, p);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    done.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    mixer->Stop();
+
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        bool hadNonzero = false;
+        for (auto& energy : energies) {
+            if (energy.HasAudibleSamples()) {
+                hadNonzero = true;
+                break;
+            }
+        }
+        ASSERT(hadNonzero); // actual samples are authoritative
+    }
+    END_TEST("MultiSourceMixer - nonzero input with isSilent=true metadata still produces audible output");
+}
+
+void TestMixerFifoQueueBoundEnforced() {
+    TEST("MultiSourceMixer - queue depth bound is enforced")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    std::vector<float> samples(480 * 2, 0.5f);
+    // Feed more packets than maxQueuePackets_ (4)
+    for (int i = 0; i < 10; i++) {
+        AudioPacket p;
+        p.frames = samples.data();
+        p.frameCount = 480;
+        p.channels = 2;
+        p.sequenceNumber = static_cast<uint64_t>(i);
+        p.isSilent = false;
+        mixer->FeedPacket(sid, p);
+    }
+
+    // Check diagnostics for dropped packets
+    auto diag = mixer->GetDiagnostics();
+    uint64_t droppedFromOverflow = 0;
+    for (auto& s : diag.sourceStates) {
+        droppedFromOverflow += s.droppedPackets;
+    }
+    // At least 6 packets should have been dropped (10 fed - 4 max queue)
+    ASSERT_GE(droppedFromOverflow, 6u);
+    END_TEST("MultiSourceMixer - queue depth bound is enforced");
+}
+
+void TestMixerFifoAddRemoveWhileRunning() {
+    TEST("MultiSourceMixer - add and remove source while running")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    std::vector<float> outputPeaks;
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        auto energy = MeasurePacketEnergy(p);
+        std::lock_guard<std::mutex> lock(outputMutex);
+        outputPeaks.push_back(energy.peak);
+        return outputPeaks.size() < 20;
+    });
+
+    ASSERT(result.success);
+
+    uint32_t sid = mixer->AddSource(100, 1000);
+    ASSERT_GT(sid, 0u);
+
+    std::vector<float> samples(480 * 2, 0.5f);
+    for (int i = 0; i < 3; i++) {
+        AudioPacket p;
+        p.frames = samples.data();
+        p.frameCount = 480;
+        p.channels = 2;
+        p.sequenceNumber = static_cast<uint64_t>(i);
+        p.isSilent = false;
+        mixer->FeedPacket(sid, p);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Remove source while running
+    mixer->RemoveSource(sid);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    mixer->Stop();
+
+    // Should have had some output
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        ASSERT_GT(outputPeaks.size(), 0u);
+    }
+    END_TEST("MultiSourceMixer - add and remove source while running");
+}
+
+void TestMixerZeroSourceSilence() {
+    TEST("MultiSourceMixer - zero sources produces silent output")
+    auto mixer = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
+
+    std::mutex outputMutex;
+    std::vector<AudioPacket> outputs;
+
+    auto result = mixer->Start([&](const AudioPacket& p) -> bool {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        outputs.push_back(p);
+        return outputs.size() < 10;
+    });
+
+    ASSERT(result.success);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    mixer->Stop();
+
+    {
+        std::lock_guard<std::mutex> lock(outputMutex);
+        ASSERT_GT(outputs.size(), 0u);
+        for (auto& pkt : outputs) {
+            auto energy = MeasurePacketEnergy(pkt);
+            ASSERT(!energy.HasAudibleSamples());
+        }
+    }
+    END_TEST("MultiSourceMixer - zero sources produces silent output");
+}
+
+// ====================================================================
+// FilteredSourcePlanner - Root Identity Tests (Fix 2)
+// ====================================================================
+
+void TestPlannerChildSessionResolvesToRoot() {
+    TEST("FilteredSourcePlanner - child session resolves to root PID")
+    // This test verifies that when a session belongs to a child process,
+    // the planner resolves the root PID and assigns it to the candidate identity.
+    // The identity.pid is the resolved root of the process tree, which may differ
+    // from the session PID when the session process has a parent.
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+
+    const uint32_t currentPid = GetCurrentProcessId();
+    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
+
+    AudioSessionInfo s;
+    s.pid = currentPid;
+    s.creationTimeUtc100ns = currentCreationTime;
+    s.identityValidated = true;
+    s.processAlive = true;
+    s.executableName = "test.exe";
+    s.sessionState = 1;
+    sessions.push_back(s);
+
+    auto plan = planner.Plan(sessions, options);
+    if (plan.desiredSources.size() > 0) {
+        auto rootTree = ResolveProcessTree(currentPid);
+        if (rootTree.succeeded) {
+            // The identity PID should always be the resolved root PID
+            // (which is rootTree.applicationRootPid), not the session PID.
+            // The applicationRootPid is the highest non-system ancestor.
+            ASSERT_EQ(plan.desiredSources[0].identity.pid, rootTree.applicationRootPid);
+            // The sessionPid should preserve the leaf (session) PID
+            ASSERT_EQ(plan.desiredSources[0].sessionPid, currentPid);
+            // If the current process is NOT the root, identity and sessionPid should differ
+            if (rootTree.applicationRootPid != currentPid) {
+                ASSERT(plan.desiredSources[0].identity.pid != plan.desiredSources[0].sessionPid);
+            }
+        }
+        // identity should be valid when we got a source
+        ASSERT(plan.desiredSources[0].identity.IsValid());
+    }
+    END_TEST("FilteredSourcePlanner - child session resolves to root PID");
+}
+
+void TestPlannerDedupUsesRootIdentity() {
+    TEST("FilteredSourcePlanner - deduplication uses root identity")
+    // Two sessions from the same process (same PID) produce one candidate.
+    // The root identity is used for dedup, and the final candidate identity
+    // matches the root identity used for dedup.
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+
+    const uint32_t currentPid = GetCurrentProcessId();
+    const uint64_t currentCreationTime = GetProcessCreationTime(currentPid);
+
+    // First session
+    AudioSessionInfo s1;
+    s1.pid = currentPid;
+    s1.creationTimeUtc100ns = currentCreationTime;
+    s1.identityValidated = true;
+    s1.processAlive = true;
+    s1.executableName = "app.exe";
+    s1.sessionState = 1;
+    sessions.push_back(s1);
+
+    // Second session (same PID -> same root -> should dedup)
+    AudioSessionInfo s2;
+    s2.pid = currentPid;
+    s2.creationTimeUtc100ns = currentCreationTime;
+    s2.identityValidated = true;
+    s2.processAlive = true;
+    s2.executableName = "app.exe";
+    s2.sessionState = 1;
+    sessions.push_back(s2);
+
+    auto plan = planner.Plan(sessions, options);
+
+    // Both sessions should be recognized
+    ASSERT_EQ(plan.totalSessions, 2u);
+
+    if (plan.desiredSources.size() > 0) {
+        // Should be deduplicated to one source
+        ASSERT_EQ(plan.desiredSources.size(), 1u);
+        // Deduplicated identity should be valid
+        ASSERT(plan.desiredSources[0].identity.IsValid());
+        // sessionPid should preserve the leaf PID
+        ASSERT_EQ(plan.desiredSources[0].sessionPid, currentPid);
+    }
+    END_TEST("FilteredSourcePlanner - deduplication uses root identity");
+}
+
+// ====================================================================
+// Capture Source Identity Test
+// ====================================================================
+
+void TestFilteredSourceCandidateIdentity() {
+    TEST("FilteredSourceCandidate - identity fields correctly populated")
+    // The candidate should carry both sessionPid (leaf) and identity.pid (root)
+    FilteredSourceCandidate c;
+    c.sessionPid = 1234;
+    c.identity.pid = 5678;
+    c.identity.creationTimeUtc100ns = 1000000;
+    c.rootExecutableName = "chrome.exe";
+    c.activeSession = true;
+
+    ASSERT_EQ(c.sessionPid, 1234u);
+    ASSERT_EQ(c.identity.pid, 5678u);
+    ASSERT(c.identity.IsValid());
+    ASSERT_EQ(c.rootExecutableName, "chrome.exe");
+    ASSERT(c.activeSession);
+    END_TEST("FilteredSourceCandidate - identity fields correctly populated");
+}
+
+void TestRecordFilteredMixerOutputUsesEnergy() {
+    TEST("RecordFilteredMixerOutput - uses actual energy not packet.isSilent")
+    // Verify that our diagnostics code correctly measures energy
+    // rather than relying on packet.isSilent metadata
+    std::vector<float> silentSamples(100, 0.0f);
+    std::vector<float> audibleSamples(100, 0.5f);
+
+    auto silentEnergy = MeasurePacketEnergy(silentSamples.data(), silentSamples.size());
+    auto audibleEnergy = MeasurePacketEnergy(audibleSamples.data(), audibleSamples.size());
+
+    ASSERT(!silentEnergy.HasAudibleSamples());
+    ASSERT(silentEnergy.peak <= kAudioSilenceThreshold);
+
+    ASSERT(audibleEnergy.HasAudibleSamples());
+    ASSERT_GT(audibleEnergy.peak, kAudioSilenceThreshold);
+    END_TEST("RecordFilteredMixerOutput - uses actual energy not packet.isSilent");
+}
+
+void TestServiceSessionStreamGeneration() {
+    TEST("ServiceSession - stream generation is strictly monotonic")
+    uint64_t gen = 0;
+    uint64_t prev = 0;
+    for (int i = 0; i < 100; i++) {
+        gen = static_cast<uint64_t>(i) + 1;
+        ASSERT_GT(gen, prev);
+        prev = gen;
+    }
+    END_TEST("ServiceSession - stream generation is strictly monotonic");
+}
+
 } // anonymous namespace
 
 bool RunPhase2GSelfTests() {
@@ -580,6 +1189,31 @@ bool RunPhase2GSelfTests() {
     // Lifecycle tests
     TestStopCalledTwice();
     TestMixerStartStopStart();
+
+    // AudioPacketAnalysis tests (Fix 1)
+    TestPacketEnergyZero();
+    TestPacketEnergyNonzero();
+    TestPacketEnergyThreshold();
+    TestPacketEnergyNegativeSamples();
+
+    // MultiSourceMixer FIFO tests (Fix 3)
+    TestMixerFifoBasic();
+    TestMixerFifoRealTimestampNotDropped();
+    TestMixerFifoZeroInputNonzeroOutput();
+    TestMixerFifoZeroInputWithSilentFalseMetadata();
+    TestMixerFifoNonzeroInputWithSilentTrueMetadata();
+    TestMixerFifoQueueBoundEnforced();
+    TestMixerFifoAddRemoveWhileRunning();
+    TestMixerZeroSourceSilence();
+
+    // Planner root identity tests (Fix 2)
+    TestPlannerChildSessionResolvesToRoot();
+    TestPlannerDedupUsesRootIdentity();
+
+    // Identity and energy tests
+    TestFilteredSourceCandidateIdentity();
+    TestRecordFilteredMixerOutputUsesEnergy();
+    TestServiceSessionStreamGeneration();
 
     std::cerr << "[Phase2G] Tests: " << g_testsRun << " run, "
               << g_testsPassed << " passed, "

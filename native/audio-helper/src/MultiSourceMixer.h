@@ -2,6 +2,7 @@
 #define SCREENLINK_MULTI_SOURCE_MIXER_H
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -60,9 +61,12 @@ struct MixerDiagnostics {
 };
 
 /// A queued audio packet with owned frame data (copy of AudioPacket.frames).
+/// Also tracks when the packet was enqueued using steady_clock for age-based
+/// expiry without depending on QPC timestamp clock domain matching.
 struct QueuedPacket {
     AudioPacket header;           // metadata (frames pointer is invalid)
     std::vector<float> frameData; // owned copy of interleaved float32 samples
+    std::chrono::steady_clock::time_point enqueuedAt; // steady_clock time when queued
 };
 
 /// Multi-source mixer that receives timestamped AudioPackets from
