@@ -429,15 +429,19 @@ export function registerIpcHandlers(
 
       // Use capturePid (application root) if available, fall back to window-owning pid
       const targetPid = Number(src.source.capturePid ?? src.source.pid);
-      const expectedCreationTimeUtc100ns = Number(
+
+      // Creation time is a 64-bit FILETIME value that exceeds Number.MAX_SAFE_INTEGER.
+      // Keep as string throughout TypeScript; parse with std::stoull on native.
+      const expectedCreationTimeUtc100ns = String(
         src.source.captureCreationTimeUtc100ns ??
-        src.source.processCreationTimeUtc100ns,
+        src.source.processCreationTimeUtc100ns ??
+        '',
       );
 
       if (!Number.isSafeInteger(targetPid) || targetPid <= 0) {
         return { success: false, error: 'invalid-resolved-capture-pid' };
       }
-      if (!Number.isSafeInteger(expectedCreationTimeUtc100ns) || expectedCreationTimeUtc100ns <= 0) {
+      if (!/^[1-9]\d*$/.test(expectedCreationTimeUtc100ns)) {
         return { success: false, error: 'invalid-resolved-capture-creation-time' };
       }
 

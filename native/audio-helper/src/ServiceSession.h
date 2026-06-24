@@ -96,7 +96,7 @@ private:
     bool OnCapturePacket(const AudioPacket& packet);
 
     /// Build a JSON error response.
-    std::string MakeErrorResponse(const std::string& errorCode);
+    std::string MakeErrorResponse(const CommandContext& ctx, const std::string& errorCode);
 
     /// Session state string conversion.
     static const char* StateToString();

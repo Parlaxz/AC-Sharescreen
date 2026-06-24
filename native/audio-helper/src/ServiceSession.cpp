@@ -711,10 +711,10 @@ bool ServiceSession::ValidateRequest(const std::string& authToken,
 // MakeErrorResponse
 // ========================================================================
 
-std::string ServiceSession::MakeErrorResponse(const std::string& errorCode) {
+std::string ServiceSession::MakeErrorResponse(const CommandContext& ctx, const std::string& errorCode) {
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", false);
     resp.Set("state", StateToStr(static_cast<int>(state_.load())));
@@ -975,8 +975,20 @@ void ServiceSession::HandleStartProcessCapture(const CommandContext& ctx,
                                                   std::string& response) {
     // Parse payload
     int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
-    uint64_t expectedCreationTime =
-        SimpleJson::GetUint(payload, "expectedCreationTimeUtc100ns", 0);
+
+    // Parse creation time as string to preserve 64-bit FILETIME precision
+    uint64_t expectedCreationTime = 0;
+    {
+        std::string timeStr = SimpleJson::GetString(payload, "expectedCreationTimeUtc100ns");
+        if (!timeStr.empty()) {
+            try {
+                expectedCreationTime = std::stoull(timeStr);
+            } catch (const std::exception&) {
+                expectedCreationTime = 0;
+            }
+        }
+    }
+
     std::string mode = SimpleJson::GetString(payload, "mode");
     bool includeMode = (mode != "exclude");
 
@@ -1310,13 +1322,13 @@ void ServiceSession::HandleResolveSource(const CommandContext& ctx,
     result += "\"sourceId\":\"" + resolveResult.source.sourceId + "\",";
     result += "\"pid\":" + std::to_string(resolveResult.source.processId) + ",";
     result += "\"capturePid\":" + std::to_string(capturePid) + ",";
-    result += "\"processCreationTimeUtc100ns\":"
-        + std::to_string(resolveResult.source.processCreationTimeUtc100ns) + ",";
-    result += "\"captureCreationTimeUtc100ns\":"
-        + std::to_string(captureCreationTime) + ",";
+    result += "\"processCreationTimeUtc100ns\":\""
+        + std::to_string(resolveResult.source.processCreationTimeUtc100ns) + "\",";
+    result += "\"captureCreationTimeUtc100ns\":\""
+        + std::to_string(captureCreationTime) + "\",";
     result += "\"applicationRootPid\":" + std::to_string(capturePid) + ",";
-    result += "\"applicationRootCreationTimeUtc100ns\":"
-        + std::to_string(captureCreationTime) + ",";
+    result += "\"applicationRootCreationTimeUtc100ns\":\""
+        + std::to_string(captureCreationTime) + "\",";
 
     // Escape strings for JSON safety
     {
@@ -1449,7 +1461,19 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
                                                     std::string& response) {
     // Parse payload
     int64_t targetPid = SimpleJson::GetInt(payload, "targetPid", 0);
-    uint64_t expectedCreationTime = SimpleJson::GetUint(payload, "expectedCreationTimeUtc100ns", 0);
+
+    // Parse creation time as string to preserve 64-bit FILETIME precision
+    uint64_t expectedCreationTime = 0;
+    {
+        std::string timeStr = SimpleJson::GetString(payload, "expectedCreationTimeUtc100ns");
+        if (!timeStr.empty()) {
+            try {
+                expectedCreationTime = std::stoull(timeStr);
+            } catch (const std::exception&) {
+                expectedCreationTime = 0;
+            }
+        }
+    }
 
     if (targetPid <= 0) {
         SimpleJson resp;

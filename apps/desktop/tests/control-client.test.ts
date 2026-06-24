@@ -96,12 +96,13 @@ describe('Control protocol JSON structure', () => {
       command: 'startProcessCapture',
       payload: {
         targetPid: 5678,
-        expectedCreationTimeUtc100ns: 1337000000000000000,
+        // Creation time is a 64-bit FILETIME; transport as string to preserve precision
+        expectedCreationTimeUtc100ns: '1337000000000000000',
       },
     };
     const json = JSON.stringify(request);
     const parsed = JSON.parse(json);
-    expect(parsed.payload.expectedCreationTimeUtc100ns).toBe(1337000000000000000);
+    expect(parsed.payload.expectedCreationTimeUtc100ns).toBe('1337000000000000000');
   });
 });
 

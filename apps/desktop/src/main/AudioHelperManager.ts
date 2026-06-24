@@ -277,7 +277,7 @@ export class AudioHelperManager {
 
   async startProcessCapture(options: {
     targetPid: number;
-    expectedCreationTimeUtc100ns?: number;
+    expectedCreationTimeUtc100ns?: string;
     mode?: 'include' | 'exclude';
   }): Promise<number> {
     this.ensureReady();
@@ -320,7 +320,7 @@ export class AudioHelperManager {
 
   async startApplicationCapture(options: {
     targetPid: number;
-    expectedCreationTimeUtc100ns: number;
+    expectedCreationTimeUtc100ns: string;
   }): Promise<{ success: boolean; streamGeneration?: number; error?: string }> {
     this.ensureReady();
     const result = await this.control!.startApplicationAudio(options);

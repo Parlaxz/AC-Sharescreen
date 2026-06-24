@@ -307,7 +307,7 @@ export class ControlClient {
     return { streamGeneration: resp.result.streamGeneration as number };
   }
 
-  async startProcessCapture(payload: { targetPid: number; expectedCreationTimeUtc100ns?: number; mode?: 'include' | 'exclude' }): Promise<{ streamGeneration: number }> {
+  async startProcessCapture(payload: { targetPid: number; expectedCreationTimeUtc100ns?: string; mode?: 'include' | 'exclude' }): Promise<{ streamGeneration: number }> {
     const resp = await this.sendRequest('startProcessCapture', payload as Record<string, unknown>);
     if (!resp.success || !resp.result) throw new Error(`startProcessCapture failed: ${resp.error ?? 'unknown'}`);
     return { streamGeneration: resp.result.streamGeneration as number };
@@ -319,7 +319,7 @@ export class ControlClient {
     return (resp.result ?? { found: false, error: 'empty result' }) as Record<string, unknown>;
   }
 
-  async startApplicationAudio(payload: { targetPid: number; expectedCreationTimeUtc100ns?: number }): Promise<Record<string, unknown>> {
+  async startApplicationAudio(payload: { targetPid: number; expectedCreationTimeUtc100ns?: string }): Promise<Record<string, unknown>> {
     const resp = await this.sendRequest('startApplicationAudio', payload as Record<string, unknown>);
     if (!resp.success || !resp.result) throw new Error(`startApplicationAudio failed: ${resp.error ?? 'unknown'}`);
     return resp.result as Record<string, unknown>;
