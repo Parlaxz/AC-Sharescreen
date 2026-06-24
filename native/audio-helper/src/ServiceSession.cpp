@@ -2,6 +2,7 @@
 #include "AudioCapabilities.h"
 #include "WindowsVersion.h"
 #include "Protocol.h"
+#include "BuildInfo.h"
 #include "ExclusionPolicy.h"
 #include "ProcessResolver.h"
 #include "SourceMapper.h"
@@ -755,7 +756,16 @@ void ServiceSession::HandleHello(const CommandContext& ctx,
     result += "\"helperVersion\":\"" + std::string(kHelperVersion) + "\",";
     result += "\"protocolVersion\":\"" + std::string(kServiceProtocolVersion) + "\",";
     result += "\"sessionId\":\"" + config_.sessionId + "\",";
-    result += "\"pid\":" + std::to_string(static_cast<uint64_t>(GetCurrentProcessId()));
+    result += "\"pid\":" + std::to_string(static_cast<uint64_t>(GetCurrentProcessId())) + ",";
+    result += "\"buildInfo\":{";
+    result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
+    result += "\"gitDirty\":" + std::string(build::kGitDirty) + ",";
+    result += "\"gitBranch\":\"" + std::string(build::kGitBranch) + "\",";
+    result += "\"buildTimestamp\":\"" + std::string(build::kBuildTimestamp) + "\",";
+    result += "\"architecture\":\"" + std::string(build::kArchitecture) + "\",";
+    result += "\"buildConfig\":\"" + std::string(build::kBuildConfig) + "\",";
+    result += "\"compilerId\":\"" + std::string(build::kCompilerId) + "\"";
+    result += "}";
     result += "}";
 
     SimpleJson resp;
@@ -1193,6 +1203,15 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     result += "\"streamGeneration\":" + std::to_string(streamGen) + ",";
     result += "\"helperStartCount\":" + std::to_string(helperStartCount_) + ",";
     result += "\"lastErrorTimestamp\":" + std::to_string(lastErrorTimestamp_) + ",";
+    result += "\"buildInfo\":{";
+    result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
+    result += "\"gitDirty\":" + std::string(build::kGitDirty) + ",";
+    result += "\"gitBranch\":\"" + std::string(build::kGitBranch) + "\",";
+    result += "\"buildTimestamp\":\"" + std::string(build::kBuildTimestamp) + "\",";
+    result += "\"architecture\":\"" + std::string(build::kArchitecture) + "\",";
+    result += "\"buildConfig\":\"" + std::string(build::kBuildConfig) + "\",";
+    result += "\"compilerId\":\"" + std::string(build::kCompilerId) + "\"";
+    result += "},";
     result += "\"capturePacketsProduced\":" + std::to_string(capturePacketsProduced_.load()) + ",";
     result += "\"captureBytesProduced\":" + std::to_string(captureBytesProduced_.load()) + ",";
     result += "\"endpointPacketsCaptured\":" + std::to_string(endpointPacketsCaptured_.load()) + ",";
@@ -1210,7 +1229,9 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
         result += "\"mixerNonZeroOutputPackets\":" + std::to_string(mixerNonZeroOutputPackets_.load()) + ",";
     }
     result += "\"onCaptureAccepted\":" + std::to_string(onCaptureAccepted_.load()) + ",";
-    result += "\"onCaptureRejectedState\":" + std::to_string(onCaptureRejectedState_.load());
+    result += "\"onCaptureRejectedState\":" + std::to_string(onCaptureRejectedState_.load()) + ",";
+    result += "\"onCaptureRejectedGeneration\":" + std::to_string(onCaptureRejectedGeneration_.load()) + ",";
+    result += "\"onCaptureExpectedGeneration\":" + std::to_string(onCaptureExpectedGeneration_.load());
 
     // Include filtered monitor diagnostics inline when active
     if (activeSrc == "monitor" && filteredMonitor_) {
@@ -1629,16 +1650,19 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     // Set kCapturing before source Start so OnCapturePacket accepts output.
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
+    onCaptureExpectedGeneration_.store(gen, std::memory_order_release);
+
     std::cerr << "[ProcessLoopback] activate targetPid=" << rootPid
               << " mode=include-tree source=application"
               << " sessionPid=" << targetPid
               << " executableName=" << treeResult.applicationRootName
+              << " gen=" << gen
               << std::endl;
 
     auto source = std::make_unique<ApplicationCaptureSource>();
     auto startOutcome = source->Start(rootPid, actualCreationTime,
-        [this](const AudioPacket& packet) -> bool {
-            return OnCapturePacket(packet);
+        [this, gen](const AudioPacket& packet) -> bool {
+            return OnCapturePacket(gen, packet);
         });
 
     if (startOutcome.result != AppCaptureStartResult::Success) {
@@ -1689,6 +1713,28 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     uint32_t screenLinkPid = static_cast<uint32_t>(
         SimpleJson::GetUint(payload, "screenLinkPid", 0));
 
+    // Parse structured ScreenLink identity from payload
+    ScreenLinkIdentity screenLinkIdentity;
+    std::string identityJson = SimpleJson::GetObject(payload, "screenLinkIdentity");
+    if (!identityJson.empty()) {
+        screenLinkIdentity.rootPid = static_cast<uint32_t>(
+            SimpleJson::GetUint(identityJson, "rootPid", 0));
+        screenLinkIdentity.rootCreationTimeUtc100ns =
+            SimpleJson::GetUint(identityJson, "rootCreationTimeUtc100ns", 0);
+        screenLinkIdentity.normalizedPackagedPath =
+            SimpleJson::GetString(identityJson, "normalizedPackagedPath");
+        screenLinkIdentity.normalizedInstallationRoot =
+            SimpleJson::GetString(identityJson, "normalizedInstallationRoot");
+        screenLinkIdentity.normalizedDevAppRoot =
+            SimpleJson::GetString(identityJson, "normalizedDevAppRoot");
+        screenLinkIdentity.normalizedDevEntrypoint =
+            SimpleJson::GetString(identityJson, "normalizedDevEntrypoint");
+        screenLinkIdentity.productIdentifier =
+            SimpleJson::GetString(identityJson, "productIdentifier");
+        screenLinkIdentity.helperExePath =
+            SimpleJson::GetString(identityJson, "helperExePath");
+    }
+
     // Lock audio lifecycle mutex to serialize start/stop transitions
     std::lock_guard<std::mutex> lock(audioLifecycleMutex_);
 
@@ -1726,16 +1772,19 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     // Set state to kCapturing before native callbacks may begin
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
+    onCaptureExpectedGeneration_.store(gen, std::memory_order_release);
+
     // Configure options
     FilteredMonitorOptions options;
     options.excludeDiscord = excludeDiscord;
     options.excludeScreenLink = excludeScreenLink;
     options.screenLinkPid = screenLinkPid;
+    options.screenLinkIdentity = screenLinkIdentity;
 
-    // Start controller with OnCapturePacket callback
+    // Start controller with OnCapturePacket callback (captures gen by value)
     auto outcome = controller->Start(options,
-        [this](const AudioPacket& packet) -> bool {
-            return OnCapturePacket(packet);
+        [this, gen](const AudioPacket& packet) -> bool {
+            return OnCapturePacket(gen, packet);
         });
 
     if (!outcome.success) {
@@ -1838,9 +1887,11 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
     // Set state to kCapturing before source Start so OnCapturePacket accepts output
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
-    // Start with direct OnCapturePacket callback (no mixer)
+    onCaptureExpectedGeneration_.store(gen, std::memory_order_release);
+
+    // Start with direct OnCapturePacket callback (no mixer, captures gen by value)
     auto startOutcome = source->Start(
-        [this](const AudioPacket& p) -> bool {
+        [this, gen](const AudioPacket& p) -> bool {
             // Track endpoint diagnostics
             endpointPacketsCaptured_.fetch_add(1, std::memory_order_relaxed);
 
@@ -1862,7 +1913,7 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
             }
 
             // Directly call OnCapturePacket — no mixer
-            return OnCapturePacket(p);
+            return OnCapturePacket(gen, p);
         });
 
     if (startOutcome.result != EndpointStartResult::Success) {
@@ -2155,8 +2206,9 @@ void ServiceSession::RunSyntheticCapture(SyntheticConfig cfg) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
     SyntheticSource source;
-    source.Run(cfg, [this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
+    uint32_t captureGen = cfg.streamGeneration;
+    source.Run(cfg, [this, captureGen](const AudioPacket& p) -> bool {
+        return OnCapturePacket(captureGen, p);
     });
 
     // Capture finished — reset state back to idle if we were capturing
@@ -2172,8 +2224,9 @@ void ServiceSession::RunSyntheticCapture(SyntheticConfig cfg) {
 void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-    RunCaptureWithPacketCallback(cfg, [this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
+    uint32_t captureGen = streamGeneration_.load();
+    RunCaptureWithPacketCallback(cfg, [this, captureGen](const AudioPacket& p) -> bool {
+        return OnCapturePacket(captureGen, p);
     });
 
     // Capture finished — reset state back to idle
@@ -2191,6 +2244,9 @@ void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
 // ========================================================================
 
 void ServiceSession::StopAudioResources() {
+    // Invalidate the generation FIRST so any in-flight callbacks are rejected
+    InvalidateGeneration();
+
     // Stop filtered monitor first (owns its own captures, mixer, and threads)
     if (filteredMonitor_) {
         filteredMonitor_->Stop();
@@ -2217,10 +2273,32 @@ void ServiceSession::StopAudioResources() {
 }
 
 // ========================================================================
-// OnCapturePacket
+// OnCapturePacket — Generation-safe capture callback
 // ========================================================================
 
-bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
+void ServiceSession::InvalidateGeneration() {
+    // Set a distinctive "invalidated" sentinel so packets in flight
+    // from the previous generation cannot be accepted.
+    // We use 0xFFFFFFFF as the invalid sentinel — it's not reachable
+    // via normal fetch_add increments.
+    streamGeneration_.store(0xFFFFFFFF, std::memory_order_release);
+}
+
+bool ServiceSession::OnCapturePacket(uint32_t expectedGeneration, const AudioPacket& packet) {
+    // Check 1: expectedGeneration must be non-zero
+    if (expectedGeneration == 0) {
+        onCaptureRejectedGeneration_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Check 2: expectedGeneration must match the active generation
+    uint32_t activeGen = streamGeneration_.load(std::memory_order_acquire);
+    if (expectedGeneration != activeGen) {
+        onCaptureRejectedGeneration_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Check 3: lifecycle state must be kCapturing
     if (state_.load() != static_cast<SessionState>(2)) { // not kCapturing
         onCaptureRejectedState_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -2248,7 +2326,8 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
     hdr.frameCount = packet.frameCount;
     hdr.payloadBytes = packet.frameCount * packet.channels *
                        static_cast<uint32_t>(sizeof(float));
-    hdr.streamGeneration = streamGeneration_.load();
+    // Stamp the expected generation (not current, to avoid TOCTOU)
+    hdr.streamGeneration = expectedGeneration;
 
     // Copy frame data and compute energy diagnostics
     if (packet.frames && packet.frameCount > 0) {

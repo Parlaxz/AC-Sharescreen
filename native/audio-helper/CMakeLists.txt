@@ -20,6 +20,9 @@ else()
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
+# Generate build provenance header
+include(cmake/GenerateBuildInfo.cmake)
+
 # Source files
 set(SOURCES
   src/main.cpp
@@ -62,6 +65,9 @@ endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
 )
+
+# Include generated build-info header directory
+target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/generated")
 
 # Install (not for production installer yet, just for development)
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)

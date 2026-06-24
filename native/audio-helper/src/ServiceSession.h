@@ -95,7 +95,13 @@ private:
     void StopAudioResources();
 
     /// Capture callback — converts AudioPacket to PcmPacket and enqueues.
-    bool OnCapturePacket(const AudioPacket& packet);
+    /// @param expectedGeneration The stream generation this source was started with.
+    ///        Rejected if zero or != active generation.
+    bool OnCapturePacket(uint32_t expectedGeneration, const AudioPacket& packet);
+
+    /// Invalidate the active stream generation (called at start of stop).
+    /// Future packets with this generation will be rejected.
+    void InvalidateGeneration();
 
     /// Build a JSON error response.
     std::string MakeErrorResponse(const CommandContext& ctx, const std::string& errorCode);
@@ -152,6 +158,8 @@ private:
     std::atomic<uint64_t> mixerNonZeroOutputPackets_{0};
     std::atomic<uint64_t> onCaptureAccepted_{0};
     std::atomic<uint64_t> onCaptureRejectedState_{0};
+    std::atomic<uint64_t> onCaptureRejectedGeneration_{0};
+    std::atomic<uint64_t> onCaptureExpectedGeneration_{0}; // set at each start
 
     // Application Audio source diagnostics (energy, packet health)
     struct ApplicationAudioDiagnostics {
