@@ -1566,59 +1566,11 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
         return;
     }
 
-    // Try to start the capture source FIRST, before creating mixer
-    auto source = std::make_unique<ApplicationCaptureSource>();
-    AppCaptureStartOutcome startOutcome = source->Start(rootPid, actualCreationTime,
-        [](const AudioPacket&) -> bool {
-            return true; // temporary — will be re-attached after mixer creation
-        });
+    // Application Audio has exactly one source — no MultiSourceMixer needed.
+    // Start the ApplicationCaptureSource directly with OnCapturePacket.
+    // Bypassing the mixer avoids its 10ms fixed-timestamp-window alignment,
+    // which can discard WASAPI packets with different timing.
 
-    if (startOutcome.result != AppCaptureStartResult::Success) {
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "capture-start-failed");
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        state_.store(SessionState::kIdle);
-        return;
-    }
-
-    // Source started — now create mixer and register
-    if (!mixer_) {
-        mixer_ = std::make_unique<MultiSourceMixer>(48000, static_cast<uint16_t>(2));
-    }
-
-    // Stop the temporary capture, add to mixer, restart with real callback
-    uint32_t sourceId = mixer_->AddSource(rootPid, actualCreationTime);
-    source->Stop();
-
-    AppCaptureStartOutcome restartOutcome = source->Start(rootPid, actualCreationTime,
-        [this, sourceId](const AudioPacket& p) -> bool {
-            mixer_->FeedPacket(sourceId, p);
-            return true;
-        });
-
-    if (restartOutcome.result != AppCaptureStartResult::Success) {
-        mixer_->RemoveSource(sourceId);
-        state_.store(SessionState::kIdle);
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "capture-start-failed");
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        return;
-    }
-
-    // Allocate stream generation BEFORE starting the mixer.
-    // This generation is stamped into every PCM packet header.
     const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
 
     {
@@ -1626,45 +1578,29 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
         activeSourceType_ = "application";
     }
 
-    // Set kCapturing BEFORE mixer_->Start so OnCapturePacket accepts output.
+    // Set kCapturing before source Start so OnCapturePacket accepts output.
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
-    auto mixResult = mixer_->Start([this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
-    });
+    auto source = std::make_unique<ApplicationCaptureSource>();
+    auto startOutcome = source->Start(rootPid, actualCreationTime,
+        [this](const AudioPacket& packet) -> bool {
+            return OnCapturePacket(packet);
+        });
 
-    if (!mixResult.success) {
-        state_.store(SessionState::kIdle, std::memory_order_release);
+    if (startOutcome.result != AppCaptureStartResult::Success) {
         {
             std::lock_guard<std::mutex> lock(stateMutex_);
             activeSourceType_.clear();
         }
-        source->Stop();
-        mixer_->RemoveSource(sourceId);
+        state_.store(SessionState::kIdle, std::memory_order_release);
 
-        const char* errorCode = "mixer-start-failed";
-        switch (mixResult.error) {
-            case MultiSourceMixer::StartError::AlreadyRunning:
-                errorCode = "mixer-already-running";
-                break;
-            case MultiSourceMixer::StartError::NoOutputCallback:
-                errorCode = "mixer-no-output-callback";
-                break;
-            case MultiSourceMixer::StartError::ThreadCreationFailed:
-                errorCode = "mixer-thread-creation-failed";
-                break;
-            case MultiSourceMixer::StartError::StaleThreadNotJoined:
-                errorCode = "mixer-stale-thread";
-                break;
-            default: break;
-        }
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", ctx.requestId);
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", "idle");
-        resp.Set("error", errorCode);
+        resp.Set("error", "capture-start-failed");
         resp.SetRaw("result", "{}");
         response = resp.Str();
         return;
@@ -1672,22 +1608,19 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
 
     captureSources_.push_back(std::move(source));
 
-    // Use SimpleJson for the result — rootName is user-controlled and must
-    // be properly escaped (SimpleJson::Set escapes quotes, backslashes, etc.).
     SimpleJson result;
     result.Set("streamGeneration", static_cast<uint64_t>(gen));
-    result.Set("sourceId", static_cast<uint64_t>(sourceId));
     result.Set("rootPid", static_cast<uint64_t>(rootPid));
     result.Set("rootName", treeResult.applicationRootName);
     result.Set("sourceType", "application");
-    result.Set("mixerReady", true);
+    result.Set("directSource", true);
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
     resp.Set("requestId", ctx.requestId);
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
-    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.Set("state", "capturing");
     resp.SetRaw("result", result.Str());
     resp.Set("error", "null");
     response = resp.Str();
@@ -2537,12 +2470,46 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
                        static_cast<uint32_t>(sizeof(float));
     hdr.streamGeneration = streamGeneration_.load();
 
-    // Copy frame data
+    // Copy frame data and compute energy diagnostics
     if (packet.frames && packet.frameCount > 0) {
         size_t sampleCount = static_cast<size_t>(packet.frameCount) *
                              packet.channels;
         pcmPacket.payload.assign(packet.frames,
                                  packet.frames + sampleCount);
+
+        // Energy diagnostics for Application Audio
+        appAudioDiag_.packets.fetch_add(1, std::memory_order_relaxed);
+        appAudioDiag_.frames.fetch_add(packet.frameCount, std::memory_order_relaxed);
+
+        if (packet.isSilent) {
+            appAudioDiag_.silentFlagPackets.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        float localPeak = 0.0f;
+        uint64_t localNonZeroSamples = 0;
+
+        for (size_t i = 0; i < sampleCount; ++i) {
+            float sample = packet.frames[i];
+            localPeak = (std::max)(localPeak, std::abs(sample));
+            if (sample != 0.0f) {
+                ++localNonZeroSamples;
+            }
+        }
+
+        if (localNonZeroSamples == 0) {
+            appAudioDiag_.zeroDataPackets.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            appAudioDiag_.nonZeroPackets.fetch_add(1, std::memory_order_relaxed);
+            appAudioDiag_.nonZeroSamples.fetch_add(localNonZeroSamples, std::memory_order_relaxed);
+        }
+
+        // Running peak (atomic max)
+        float expected = appAudioDiag_.peak.load(std::memory_order_relaxed);
+        while (localPeak > expected &&
+               !appAudioDiag_.peak.compare_exchange_weak(expected, localPeak,
+                   std::memory_order_relaxed)) {
+            expected = appAudioDiag_.peak.load(std::memory_order_relaxed);
+        }
     }
 
     totalPackets_.fetch_add(1, std::memory_order_relaxed);

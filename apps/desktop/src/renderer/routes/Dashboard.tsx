@@ -611,7 +611,24 @@ export function Dashboard() {
           const port = await portPromise;
 
           provisionalController = new ProcessAudioController();
-          await provisionalController.initialize(port);
+          await provisionalController.initialize(port, {
+            onStateChange: (state) => {
+              console.log('[ApplicationAudio/worklet-state]', state);
+            },
+            onStats: (stats) => {
+              console.log('[ApplicationAudio/worklet-stats]', {
+                framesReceived: stats.framesReceived,
+                framesRendered: stats.framesRendered,
+                silentFrames: stats.silentFrames,
+                underrunFrames: stats.underrunFrames,
+                peak: stats.peak,
+                rms: stats.rms,
+                nonZeroSamples: stats.nonZeroSamples,
+              });
+            },
+          });
+          // Sample energy immediately after init
+          provisionalController.sampleAnalyser('application-post-init');
 
           // Start capture — check result BEFORE priming
           console.log(`[Audio] requestedMode=${effectiveAudioMode}`);

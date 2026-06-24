@@ -151,6 +151,18 @@ private:
     std::atomic<uint64_t> onCaptureAccepted_{0};
     std::atomic<uint64_t> onCaptureRejectedState_{0};
 
+    // Application Audio source diagnostics (energy, packet health)
+    struct ApplicationAudioDiagnostics {
+        std::atomic<uint64_t> packets{0};
+        std::atomic<uint64_t> frames{0};
+        std::atomic<uint64_t> silentFlagPackets{0};
+        std::atomic<uint64_t> zeroDataPackets{0};
+        std::atomic<uint64_t> nonZeroPackets{0};
+        std::atomic<uint64_t> nonZeroSamples{0};
+        std::atomic<float> peak{0.0f};
+    };
+    ApplicationAudioDiagnostics appAudioDiag_;
+
     // Phase 2F: Production diagnostics
     uint32_t helperStartCount_ = 0;
     uint64_t lastErrorTimestamp_ = 0; // 100ns QPC timestamp of last error
