@@ -2,21 +2,18 @@ import React, { useEffect } from "react";
 import { useStore, type Page } from "./stores/main-store.js";
 import { Dashboard } from "./routes/Dashboard.js";
 import { SourcePicker } from "./routes/SourcePicker.js";
-import { Quality } from "./routes/Quality.js";
-import { Viewers } from "./routes/Viewers.js";
-import { Friends } from "./routes/Friends.js";
+import { Groups } from "./routes/Groups.js";
+import { QualityPresets } from "./routes/QualityPresets.js";
 import { Settings } from "./routes/Settings.js";
 import { Diagnostics } from "./routes/Diagnostics.js";
 import { About } from "./routes/About.js";
-import { getControlConnection, destroyControlConnection } from "./services/control-connection.js";
-import { startNotificationWatcher } from "./services/notification-watcher.js";
 
+// Phase 3: removed Friends, Viewers, Source, Quality (legacy) tabs.
+// Source picker is now an internal page invoked from the Dashboard.
 const NAV_ITEMS: { page: Page; label: string }[] = [
   { page: "dashboard", label: "Dashboard" },
-  { page: "source-picker", label: "Source" },
-  { page: "quality", label: "Quality" },
-  { page: "viewers", label: "Viewers" },
-  { page: "friends", label: "Friends" },
+  { page: "groups", label: "Groups" },
+  { page: "quality-presets", label: "Quality Presets" },
   { page: "settings", label: "Settings" },
   { page: "diagnostics", label: "Diagnostics" },
   { page: "about", label: "About" },
@@ -32,12 +29,10 @@ export function App() {
         return <Dashboard />;
       case "source-picker":
         return <SourcePicker />;
-      case "quality":
-        return <Quality />;
-      case "viewers":
-        return <Viewers />;
-      case "friends":
-        return <Friends />;
+      case "groups":
+        return <Groups />;
+      case "quality-presets":
+        return <QualityPresets />;
       case "settings":
         return <Settings />;
       case "diagnostics":
@@ -49,22 +44,13 @@ export function App() {
     }
   };
 
-  // Start control connection on mount
+  // Source picker is internal-only — when navigated to via legacy state
+  // we still render it, but it is not in the sidebar.
   useEffect(() => {
-    const ctrl = getControlConnection();
-    ctrl.start();
-    return () => {
-      destroyControlConnection();
-    };
-  }, []);
-
-  // Start notification watcher on mount
-  useEffect(() => {
-    const unsubscribe = startNotificationWatcher();
-    return () => {
-      unsubscribe();
-    };
-  }, []);
+    if (currentPage === "source-picker") {
+      // Stay on source-picker; user must press Change Source from Dashboard
+    }
+  }, [currentPage]);
 
   return (
     <div className="app-container">

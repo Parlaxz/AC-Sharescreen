@@ -19,16 +19,28 @@ const api: ScreenLinkAPI = {
   minimizeToTray: () => ipcRenderer.invoke("minimize-to-tray"),
 
   safeStorageAvailable: () => ipcRenderer.invoke("safe-storage-available"),
-  createPairing: (displayName) => ipcRenderer.invoke("create-pairing", displayName),
-  getPairingLink: () => ipcRenderer.invoke("get-pairing-link"),
-  importPairing: (pairingCode) => ipcRenderer.invoke("import-pairing", pairingCode),
-  getPairingConfig: () => ipcRenderer.invoke("get-pairing-config"),
-  getPairSecret: () => ipcRenderer.invoke("get-pair-secret"),
-  updatePairingConfig: (partial) => ipcRenderer.invoke("update-pairing-config", partial),
-  updateRemoteIdentity: (deviceId, displayName) => ipcRenderer.invoke("update-remote-identity", deviceId, displayName),
-  setPairingLifecycle: (lifecycle) => ipcRenderer.invoke("set-pairing-lifecycle", lifecycle),
-  clearPairing: () => ipcRenderer.invoke("clear-pairing"),
-  exportCurrentPairing: () => ipcRenderer.invoke("export-current-pairing"),
+  getDeviceIdentity: () => ipcRenderer.invoke("get-device-identity"),
+  updateDisplayName: (displayName) => ipcRenderer.invoke("update-display-name", displayName),
+
+  listGroups: () => ipcRenderer.invoke("list-groups"),
+  getGroup: (groupId) => ipcRenderer.invoke("get-group", groupId),
+  createGroup: (input) => ipcRenderer.invoke("create-group", input),
+  joinGroup: (input) => ipcRenderer.invoke("join-group", input),
+  getGroupInvite: (groupId) => ipcRenderer.invoke("get-group-invite", groupId),
+  updateGroupSharedState: (groupId, state) => ipcRenderer.invoke("update-group-shared-state", groupId, state),
+  updateGroupClock: (groupId, stamp) => ipcRenderer.invoke("update-group-clock", groupId, stamp),
+  setGroupNotifications: (groupId, enabled) => ipcRenderer.invoke("set-group-notifications", groupId, enabled),
+  leaveGroup: (groupId) => ipcRenderer.invoke("leave-group", groupId),
+  getGroupConnectionConfig: (groupId) => ipcRenderer.invoke("get-group-connection-config", groupId),
+
+  listQualityPresets: () => ipcRenderer.invoke("list-quality-presets"),
+  getQualityPreset: (id) => ipcRenderer.invoke("get-quality-preset", id),
+  createQualityPreset: (input) => ipcRenderer.invoke("create-quality-preset", input),
+  updateQualityPreset: (id, input) => ipcRenderer.invoke("update-quality-preset", id, input),
+  duplicateQualityPreset: (id, newName) => ipcRenderer.invoke("duplicate-quality-preset", id, newName),
+  deleteQualityPreset: (id) => ipcRenderer.invoke("delete-quality-preset", id),
+  exportQualityPreset: (id) => ipcRenderer.invoke("export-quality-preset", id),
+  importQualityPreset: (exportString) => ipcRenderer.invoke("import-quality-preset", exportString),
 
   toggleFullscreen: () => ipcRenderer.invoke("toggle-fullscreen"),
   onFullscreenChanged: (callback) => {
@@ -39,8 +51,6 @@ const api: ScreenLinkAPI = {
 
   traySetSharing: (sharing) => ipcRenderer.send("tray-set-sharing", sharing),
   traySetViewing: (viewing) => ipcRenderer.send("tray-set-viewing", viewing),
-  traySetFriendName: (name) => ipcRenderer.send("tray-set-friend-name", name),
-  traySetFriendSharing: (sharing) => ipcRenderer.send("tray-set-friend-sharing", sharing),
 
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
   getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
@@ -61,10 +71,6 @@ const api: ScreenLinkAPI = {
 
 contextBridge.exposeInMainWorld("screenlink", api);
 
-// Forward the PCM MessagePort from main process to renderer.
-// Main sends via webContents.postMessage('pcm:port', data, [port]).
-// The port arrives here as ipcRenderer event with event.ports[0].
-// Re-dispatch to renderer via window.postMessage.
 ipcRenderer.on('pcm:port', (_event: Electron.IpcRendererEvent) => {
   const evt = _event as unknown as { ports?: MessagePort[] };
   const port = evt.ports?.[0];

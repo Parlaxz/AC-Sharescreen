@@ -1,4 +1,4 @@
-import type { Friend, AudioMode } from "@screenlink/shared";
+import type { AudioMode } from "@screenlink/shared";
 
 export interface ScreenLinkAPI {
   // Sources
@@ -21,52 +21,39 @@ export interface ScreenLinkAPI {
   // Window
   minimizeToTray: () => Promise<void>;
 
-  // Pairing
+  // Device identity
+  getDeviceIdentity: () => Promise<{ deviceId: string; displayName: string; createdAt: number }>;
+  updateDisplayName: (displayName: string) => Promise<{ deviceId: string; displayName: string; createdAt: number }>;
   safeStorageAvailable: () => Promise<boolean>;
-  createPairing: (displayName: string) => Promise<{
-    pairingCode: string;
-    pairingLink: string;
-    pairId: string;
-    deviceId: string;
-    displayName: string;
-    exportData: Record<string, unknown>;
-  }>;
-  /** Get the pending pairing link while in PAIR_CREATED_WAITING_FOR_IMPORT state */
-  getPairingLink: () => Promise<string | null>;
-  importPairing: (pairingCode: string) => Promise<{ deviceId: string; remoteName: string }>;
-  getPairingConfig: () => Promise<Record<string, unknown> | null>;
-  getPairSecret: () => Promise<string | null>;
-  updatePairingConfig: (partial: Record<string, unknown>) => Promise<void>;
-  /**
-   * Persist the remote identity (device ID + display name) after a peer.hello
-   * handshake and transition lifecycle accordingly.
-   * Returns the authoritative acceptance result with current lifecycle state.
-   */
-  updateRemoteIdentity: (remoteDeviceId: string, remoteDisplayName: string) => Promise<{
-    accepted: boolean;
-    pairingLifecycle?: string;
-    remoteDeviceId?: string;
-    remoteDisplayName?: string;
-    reason?: string;
-  }>;
-  /** Set the pairing lifecycle in persisted config (e.g. "PAIRED_OFFLINE"). */
-  setPairingLifecycle: (lifecycle: string) => Promise<void>;
-  clearPairing: () => Promise<void>;
-  /** Export the current pairing as a PairingExport object, or null if not available */
-  exportCurrentPairing: () => Promise<Record<string, unknown> | null>;
+
+  // Groups
+  listGroups: () => Promise<unknown[]>;
+  getGroup: (groupId: string) => Promise<unknown | null>;
+  createGroup: (input: { groupName: string }) => Promise<unknown>;
+  joinGroup: (input: { link: string }) => Promise<unknown>;
+  getGroupInvite: (groupId: string) => Promise<{ invite: unknown; link: string } | null>;
+  updateGroupSharedState: (groupId: string, state: unknown) => Promise<unknown | null>;
+  updateGroupClock: (groupId: string, stamp: unknown) => Promise<void>;
+  setGroupNotifications: (groupId: string, enabled: boolean) => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  getGroupConnectionConfig: (groupId: string) => Promise<unknown | null>;
+
+  // Quality presets
+  listQualityPresets: () => Promise<unknown[]>;
+  getQualityPreset: (id: string) => Promise<unknown | null>;
+  createQualityPreset: (input: { name: string; settings: unknown }) => Promise<unknown>;
+  updateQualityPreset: (id: string, input: { name?: string; settings?: unknown }) => Promise<unknown | null>;
+  duplicateQualityPreset: (id: string, newName: string) => Promise<unknown | null>;
+  deleteQualityPreset: (id: string) => Promise<boolean>;
+  exportQualityPreset: (id: string) => Promise<string | null>;
+  importQualityPreset: (exportString: string) => Promise<unknown>;
 
   // Tray
   traySetSharing: (sharing: boolean) => void;
   traySetViewing: (viewing: boolean) => void;
-  traySetFriendName: (name: string) => void;
-  traySetFriendSharing: (sharing: boolean) => void;
 
   // Fullscreen (native Electron)
   toggleFullscreen: () => Promise<boolean>;
-  /**
-   * Register a callback for native fullscreen state changes.
-   * Returns a cleanup function to remove the listener.
-   */
   onFullscreenChanged: (callback: (isFullscreen: boolean) => void) => () => void;
 
   // App info
@@ -74,7 +61,6 @@ export interface ScreenLinkAPI {
     version: string;
     electronVersion: string;
     chromeVersion: string;
-    nodeVersion: string;
   }>;
 
   // Audio capabilities
@@ -97,7 +83,6 @@ export interface ScreenLinkAPI {
   startSystemAudio: () => Promise<{ success: boolean; streamGeneration?: number; error?: string }>;
   getMixerState: () => Promise<any>;
   getMixerDiagnostics: () => Promise<HelperResponse<FilteredMonitorDiagnostics>>;
-  /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
   getPipelineSnapshot: () => Promise<PipelineSnapshotWithDiagnostics>;
 }
 
@@ -125,21 +110,42 @@ export interface CaptureSourceDTO {
 
 export interface PersistedSettings {
   version: number;
-  shareId: string;
-  hostTokenEncrypted: string;
-  viewerToken: string;
-  viewerBaseUrl: string;
-  workerBaseUrl: string;
+  deviceIdentity: { deviceId: string; displayName: string; createdAt: number };
   hostDisplayName: string;
   launchAtLogin: boolean;
   autoResumeLastMonitor: boolean;
-  lastPresetId: string;
-  lastSourceFingerprint: string;
   previewEnabled: boolean;
-  allowRemoteQualityRequests: boolean;
-  autoWatchFriend: boolean;
-  friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
+  monitorFingerprint: {
+    displayId: string;
+    label: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    size: { width: number; height: number };
+    scaleFactor: number;
+    internal: boolean;
+  } | null;
+  lastSourceId: string | null;
+  lastSourceName: string | null;
+  lastSourceFingerprint: string | null;
+  developerMode: boolean;
+  hostQualityLimits: {
+    maxVideoBitrateKbps: number;
+    maxWidth: number;
+    maxHeight: number;
+    maxFps: number;
+    allowViewerQualityRequests: boolean;
+  };
+  globalQualityDefaults: {
+    videoBitrateKbps: number;
+    maxWidth: number;
+    maxHeight: number;
+    maxFps: number;
+    degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
+    contentHint: "detail" | "motion" | "auto" | "text";
+    audioEnabled: boolean;
+  };
+  notificationsEnabled: boolean;
+  localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
 }
 
@@ -208,11 +214,9 @@ export interface FilteredMonitorDiagnostics {
   maximumOutputRms: number;
   lastErrorCode: string;
   lastErrorMessage: string;
-  /** Per-active-source diagnostics */
   activeSources?: ActiveSourceDiagnostics[];
 }
 
-/** Pipeline snapshot with inline filtered monitor diagnostics */
 export interface PipelineSnapshotWithDiagnostics {
   mixerFeedPackets?: number;
   mixerOutputPackets?: number;
@@ -223,7 +227,6 @@ export interface PipelineSnapshotWithDiagnostics {
   helperState: string;
   helperUptimeMs: number;
   streamGeneration: number;
-  /** Helper binary provenance (populated by AudioHelperManager) */
   helperBinaryPath?: string;
   helperBinarySize?: number;
   helperBinaryMtime?: string;

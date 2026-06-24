@@ -4,10 +4,9 @@ import { create } from "zustand";
 
 export type Page =
   | "dashboard"
+  | "groups"
+  | "quality-presets"
   | "source-picker"
-  | "quality"
-  | "viewers"
-  | "friends"
   | "settings"
   | "diagnostics"
   | "about";
@@ -39,6 +38,9 @@ export interface AppState {
   isDegraded: boolean;
   sourceId: string | null;
   sourceName: string;
+  sourceKind: "screen" | "window" | null;
+  sourceDisplayId: string | null;
+  sourceFingerprint: string | null;
 
   // Capture settings
   captureWidth: number;
@@ -50,16 +52,6 @@ export interface AppState {
   viewerCount: number;
   viewers: ViewerInfo[];
 
-  // Share configuration
-  shareId: string;
-  viewerToken: string;
-  hostToken: string;
-  workerBaseUrl: string;
-  viewerBaseUrl: string;
-
-  // Link (computed)
-  viewerUrl: string;
-
   // Session stats (aggregate)
   sessionDuration: number;
   totalBytesSent: number;
@@ -70,45 +62,70 @@ export interface AppState {
   viewStatus: string;
   viewStreamHostName: string;
 
-  // Independent state machines (P2P migration)
+  // Groups / state
+  selectedGroupId: string | null;
+
+  // Phase 2G / Phase 3 independent state machines
   localShareState: LocalShareState;
   remoteShareState: RemoteShareState;
-  pairingState: PairingState;
+
+  // Per-viewer observed stats (replaces per-stream stats with per-stream-per-viewer keys)
+  localStreamSession: { sessionId: string; streamId: string; password: string } | null;
+  watchedStreamsBySessionId: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>;
+  qualityPresets: unknown[];
+
+  // ── Phase 2G legacy fields kept temporarily for Dashboard source compatibility.
+  // These are no longer wired to pairing IPCs; they are no-op shims and will be
+  // removed in Phase 3.1 once the Dashboard is fully refactored to use Groups.
+  // DO NOT add new consumers of these fields.
+  /** @deprecated Phase 3: pairing removed. */
+  pairingState: "unpaired" | "PAIRED_ONLINE" | "PAIRED_OFFLINE" | "error";
+  /** @deprecated Phase 3: friend model removed. */
   friendDisplayName: string;
+  /** @deprecated Phase 3: friend model removed. */
   friendDeviceId: string;
+  /** @deprecated Phase 3: friend model removed. */
   friendIsSharing: boolean;
+  /** @deprecated Phase 3: media credentials moved to per-group sessions. */
   remoteStreamId: string;
+  /** @deprecated Phase 3: media credentials moved to per-group sessions. */
   remoteMediaPassword: string;
+  /** @deprecated Phase 3: media credentials moved to per-group sessions. */
   remoteMediaSessionId: string;
+  /** @deprecated Phase 3: media credentials moved to per-group sessions. */
   localMediaSessionId: string;
+  /** @deprecated Phase 3: media credentials moved to per-group sessions. */
   localStreamId: string;
+  /** @deprecated Phase 3: media credentials moved to per-group sessions. */
   localMediaPassword: string;
+  /** @deprecated Phase 3: auto-watch removed. */
   autoWatchFriend: boolean;
-  notifyWhenFriendShares: boolean;
-  allowRemoteQualityRequests: boolean;
-  allowRemoteGlobalChanges: boolean;
 
   // Actions
   setIsSharing: (sharing: boolean) => void;
   setIsDegraded: (degraded: boolean) => void;
-  setSource: (id: string, name: string) => void;
+  setSource: (input: { id: string; name: string; kind: "screen" | "window"; displayId: string; fingerprint: string | null } | string, name?: string) => void;
   setCaptureInfo: (width: number, height: number, fps: number) => void;
   setCaptureBitrate: (kbps: number) => void;
   setViewers: (viewers: ViewerInfo[]) => void;
-  setViewerUrl: (url: string) => void;
   setSessionDuration: (ms: number) => void;
   setTotalBytesSent: (bytes: number) => void;
-  setShareConfig: (config: { shareId: string; viewerToken: string; hostToken: string; workerBaseUrl: string; viewerBaseUrl: string }) => void;
   setMode: (mode: "host" | "view") => void;
   setIsViewing: (isViewing: boolean) => void;
   setViewStatus: (status: string) => void;
   setViewStreamHostName: (name: string) => void;
+  setSelectedGroupId: (id: string | null) => void;
+  setQualityPresets: (presets: unknown[]) => void;
   reset: () => void;
 
   // State machine actions
   setLocalShareState: (state: LocalShareState) => void;
   setRemoteShareState: (state: RemoteShareState) => void;
-  setPairingState: (state: PairingState) => void;
+  setLocalStreamSession: (s: { sessionId: string; streamId: string; password: string } | null) => void;
+  setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => void;
+
+  // Deprecated shim setters — kept for Dashboard source compatibility.
+  setPairingState: (state: "unpaired" | "PAIRED_ONLINE" | "PAIRED_OFFLINE" | "error") => void;
   setFriendInfo: (deviceId: string, displayName: string) => void;
   setFriendSharing: (isSharing: boolean) => void;
   setRemoteMediaCredentials: (sessionId: string, streamId: string, password: string) => void;
@@ -116,9 +133,6 @@ export interface AppState {
   clearRemoteMediaCredentials: () => void;
   clearLocalMediaCredentials: () => void;
   setAutoWatchFriend: (enabled: boolean) => void;
-  setNotifyWhenFriendShares: (enabled: boolean) => void;
-  setAllowRemoteQualityRequests: (enabled: boolean) => void;
-  setAllowRemoteGlobalChanges: (enabled: boolean) => void;
 }
 
 // ─── State machine types ────────────────────────────────────────
@@ -140,45 +154,36 @@ export type RemoteShareState =
   | "reconnecting"
   | "error";
 
-export type PairingState =
-  // Legacy states (kept only where still referenced)
-  | "unpaired"
-  | "error"
-  // Active lifecycle states matching shared PAIRING_LIFECYCLE
-  | "PAIR_CREATED_WAITING_FOR_IMPORT"
-  | "PAIR_IMPORTED_CONNECTING"
-  | "PAIR_CONNECTED_UNCONFIRMED"
-  | "PAIRED_OFFLINE"
-  | "PAIRED_ONLINE";
-
 const initialState = {
   currentPage: "dashboard" as Page,
   isSharing: false,
   isDegraded: false,
   sourceId: null as string | null,
   sourceName: "",
+  sourceKind: null as "screen" | "window" | null,
+  sourceDisplayId: null as string | null,
+  sourceFingerprint: null as string | null,
   captureWidth: 854,
   captureHeight: 480,
   captureFps: 15,
   captureBitrate: 650,
   viewerCount: 0,
   viewers: [] as ViewerInfo[],
-  shareId: "",
-  viewerToken: "",
-  hostToken: "",
-  workerBaseUrl: "",
-  viewerBaseUrl: "",
-  viewerUrl: "",
   sessionDuration: 0,
   totalBytesSent: 0,
   mode: "host" as "host" | "view",
   isViewing: false,
   viewStatus: "",
   viewStreamHostName: "",
-
+  selectedGroupId: null as string | null,
   localShareState: "idle" as LocalShareState,
   remoteShareState: "remote-offline" as RemoteShareState,
-  pairingState: "unpaired" as PairingState,
+  localStreamSession: null as { sessionId: string; streamId: string; password: string } | null,
+  watchedStreamsBySessionId: {} as Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>,
+  qualityPresets: [] as unknown[],
+
+  // Deprecated shim fields
+  pairingState: "unpaired" as "unpaired" | "PAIRED_ONLINE" | "PAIRED_OFFLINE" | "error",
   friendDisplayName: "",
   friendDeviceId: "",
   friendIsSharing: false,
@@ -189,9 +194,6 @@ const initialState = {
   localStreamId: "",
   localMediaPassword: "",
   autoWatchFriend: false,
-  notifyWhenFriendShares: true,
-  allowRemoteQualityRequests: true,
-  allowRemoteGlobalChanges: true,
 };
 
 // ─── Store ──────────────────────────────────────────────────────────────────
@@ -204,7 +206,19 @@ export const useStore = create<AppState>((set) => ({
   setIsSharing: (sharing) => set({ isSharing: sharing }),
   setIsDegraded: (degraded) => set({ isDegraded: degraded }),
 
-  setSource: (id, name) => set({ sourceId: id, sourceName: name }),
+  setSource: (input, name) => {
+    if (typeof input === "string") {
+      set({ sourceId: input, sourceName: name ?? "" });
+    } else {
+      set({
+        sourceId: input.id,
+        sourceName: input.name,
+        sourceKind: input.kind,
+        sourceDisplayId: input.displayId,
+        sourceFingerprint: input.fingerprint,
+      });
+    }
+  },
 
   setCaptureInfo: (width, height, fps) =>
     set({ captureWidth: width, captureHeight: height, captureFps: fps }),
@@ -213,28 +227,23 @@ export const useStore = create<AppState>((set) => ({
 
   setViewers: (viewers) => set({ viewers, viewerCount: viewers.length }),
 
-  setViewerUrl: (url) => set({ viewerUrl: url }),
+  setSessionDuration: (ms) => set({ sessionDuration: ms }),
 
-  setShareConfig: (config) =>
-    set({
-      shareId: config.shareId,
-      viewerToken: config.viewerToken,
-      hostToken: config.hostToken,
-      workerBaseUrl: config.workerBaseUrl,
-      viewerBaseUrl: config.viewerBaseUrl,
-    }),
+  setTotalBytesSent: (bytes) => set({ totalBytesSent: bytes }),
 
   setMode: (mode) => set({ mode }),
   setIsViewing: (isViewing) => set({ isViewing }),
   setViewStatus: (status) => set({ viewStatus: status }),
   setViewStreamHostName: (name) => set({ viewStreamHostName: name }),
-
-  setSessionDuration: (ms) => set({ sessionDuration: ms }),
-
-  setTotalBytesSent: (bytes) => set({ totalBytesSent: bytes }),
+  setSelectedGroupId: (id) => set({ selectedGroupId: id }),
+  setQualityPresets: (presets) => set({ qualityPresets: presets }),
 
   setLocalShareState: (state) => set({ localShareState: state }),
   setRemoteShareState: (state) => set({ remoteShareState: state }),
+  setLocalStreamSession: (s) => set({ localStreamSession: s }),
+  setWatchedStreams: (s) => set({ watchedStreamsBySessionId: s }),
+
+  // Deprecated shim setters — no-op or local-only
   setPairingState: (state) => set({ pairingState: state }),
   setFriendInfo: (deviceId, displayName) => set({ friendDeviceId: deviceId, friendDisplayName: displayName }),
   setFriendSharing: (isSharing) => set({ friendIsSharing: isSharing }),
@@ -247,9 +256,6 @@ export const useStore = create<AppState>((set) => ({
   clearLocalMediaCredentials: () =>
     set({ localMediaSessionId: "", localStreamId: "", localMediaPassword: "" }),
   setAutoWatchFriend: (enabled) => set({ autoWatchFriend: enabled }),
-  setNotifyWhenFriendShares: (enabled) => set({ notifyWhenFriendShares: enabled }),
-  setAllowRemoteQualityRequests: (enabled) => set({ allowRemoteQualityRequests: enabled }),
-  setAllowRemoteGlobalChanges: (enabled) => set({ allowRemoteGlobalChanges: enabled }),
 
   reset: () => set(initialState),
 }));
