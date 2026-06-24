@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <mutex>
 #include <set>
@@ -11,6 +12,35 @@
 #include <windows.h>
 
 namespace screenlink::audio {
+
+namespace {
+
+/// Measure the actual energy in an AudioPacket by scanning samples.
+struct PacketEnergy {
+    float peak = 0.0f;
+    uint64_t nonZeroSamples = 0;
+};
+
+PacketEnergy MeasurePacketEnergy(const AudioPacket& packet) {
+    PacketEnergy energy;
+    if (packet.frames == nullptr || packet.frameCount == 0 || packet.channels == 0) {
+        return energy;
+    }
+    const size_t sampleCount = static_cast<size_t>(packet.frameCount) *
+                               static_cast<size_t>(packet.channels);
+    for (size_t idx = 0; idx < sampleCount; ++idx) {
+        const float magnitude = std::abs(packet.frames[idx]);
+        if (magnitude > energy.peak) {
+            energy.peak = magnitude;
+        }
+        if (magnitude > 1.0e-8f) {
+            ++energy.nonZeroSamples;
+        }
+    }
+    return energy;
+}
+
+} // anonymous namespace
 
 // ============================================================================
 // Construction / Destruction
@@ -682,8 +712,12 @@ bool FilteredMonitorController::AddSource(const FilteredSourceCandidate& candida
         capture.consecutiveStartFailures = 0;
         capture.nextRetryAt = {};
 
-        std::cerr << "[FilteredMonitorController] Source PID="
-                  << candidate.identity.pid << " started successfully" << std::endl;
+        std::cerr << "[FilteredMonitor] source-added"
+                  << " sessionPid=" << candidate.sessionPid
+                  << " capturePid=" << candidate.identity.pid
+                  << " rootName=" << candidate.rootExecutableName
+                  << " activeSession=" << (candidate.activeSession ? "true" : "false")
+                  << std::endl;
 
         {
             std::lock_guard<std::mutex> lock(diagMutex_);
@@ -798,16 +832,29 @@ void FilteredMonitorController::WakeReconciliation() {
 // Diagnostics Recording
 // ============================================================================
 
-void FilteredMonitorController::RecordFilteredInputPacket(const AudioPacket& /*packet*/) {
+void FilteredMonitorController::RecordFilteredInputPacket(const AudioPacket& packet) {
+    const PacketEnergy energy = MeasurePacketEnergy(packet);
     std::lock_guard<std::mutex> lock(diagMutex_);
-    diag_.mixerInputPackets++;
+    ++diag_.mixerInputPackets;
+    diag_.lastInputPeak = energy.peak;
+    diag_.maximumInputPeak = (std::max)(diag_.maximumInputPeak, energy.peak);
+    if (energy.nonZeroSamples > 0) {
+        ++diag_.mixerInputNonZeroPackets;
+    } else {
+        ++diag_.mixerInputZeroPackets;
+    }
 }
 
 void FilteredMonitorController::RecordFilteredMixerOutput(const AudioPacket& packet) {
+    const PacketEnergy energy = MeasurePacketEnergy(packet);
     std::lock_guard<std::mutex> lock(diagMutex_);
-    diag_.mixerOutputPackets++;
-    if (!packet.isSilent) {
-        diag_.mixerNonZeroOutputPackets++;
+    ++diag_.mixerOutputPackets;
+    diag_.lastOutputPeak = energy.peak;
+    diag_.maximumOutputPeak = (std::max)(diag_.maximumOutputPeak, energy.peak);
+    if (energy.nonZeroSamples > 0) {
+        ++diag_.mixerOutputNonZeroPackets;
+    } else {
+        ++diag_.mixerOutputZeroPackets;
     }
 }
 

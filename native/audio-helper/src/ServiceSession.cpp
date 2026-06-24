@@ -1950,8 +1950,15 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
         result += "\"sourceRetries\":" + std::to_string(diag.sourceRetries) + ",";
         result += "\"sourceUnexpectedStops\":" + std::to_string(diag.sourceUnexpectedStops) + ",";
         result += "\"mixerInputPackets\":" + std::to_string(diag.mixerInputPackets) + ",";
+        result += "\"mixerInputNonZeroPackets\":" + std::to_string(diag.mixerInputNonZeroPackets) + ",";
+        result += "\"mixerInputZeroPackets\":" + std::to_string(diag.mixerInputZeroPackets) + ",";
         result += "\"mixerOutputPackets\":" + std::to_string(diag.mixerOutputPackets) + ",";
-        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(diag.mixerNonZeroOutputPackets) + ",";
+        result += "\"mixerOutputNonZeroPackets\":" + std::to_string(diag.mixerOutputNonZeroPackets) + ",";
+        result += "\"mixerOutputZeroPackets\":" + std::to_string(diag.mixerOutputZeroPackets) + ",";
+        result += "\"lastInputPeak\":" + std::to_string(static_cast<double>(diag.lastInputPeak)) + ",";
+        result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(diag.maximumInputPeak)) + ",";
+        result += "\"lastOutputPeak\":" + std::to_string(static_cast<double>(diag.lastOutputPeak)) + ",";
+        result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(diag.maximumOutputPeak)) + ",";
         result += "\"pipeline\":\"dynamic-process-mix\",";
         result += "\"lastErrorCode\":\"";
         result += diag.lastErrorCode.empty() ? "" : diag.lastErrorCode;

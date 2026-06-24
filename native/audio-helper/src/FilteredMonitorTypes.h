@@ -108,8 +108,15 @@ struct FilteredMonitorDiagnostics {
     uint32_t duplicateRootsLastScan = 0;
     uint32_t sourceLimitSkippedLastScan = 0;
     uint64_t mixerInputPackets = 0;
+    uint64_t mixerInputNonZeroPackets = 0;
+    uint64_t mixerInputZeroPackets = 0;
     uint64_t mixerOutputPackets = 0;
-    uint64_t mixerNonZeroOutputPackets = 0;
+    uint64_t mixerOutputNonZeroPackets = 0;
+    uint64_t mixerOutputZeroPackets = 0;
+    float lastInputPeak = 0.0f;
+    float maximumInputPeak = 0.0f;
+    float lastOutputPeak = 0.0f;
+    float maximumOutputPeak = 0.0f;
     uint64_t lastReconcileDurationMs = 0;
     uint64_t lastSuccessfulInventoryTimestamp = 0;
     std::string lastErrorCode;

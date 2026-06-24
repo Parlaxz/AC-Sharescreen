@@ -484,12 +484,14 @@ void MultiSourceMixer::MixerThread() {
             }
         }
 
-        // Compute peak level in this block
+        // Compute peak level in this block and derive silence from actual samples
         float peak = 0.0f;
         for (size_t i = 0; i < outputSamples; ++i) {
             float absVal = std::abs(outputBuffer[i]);
             if (absVal > peak) peak = absVal;
         }
+        static constexpr float kSilenceThreshold = 1.0e-8f;
+        const bool outputIsSilent = peak <= kSilenceThreshold;
 
         // Build output AudioPacket
         AudioPacket output;
@@ -497,7 +499,7 @@ void MultiSourceMixer::MixerThread() {
         output.frameCount = framesPerPacket_;
         output.channels = channels_;
         output.sequenceNumber = outputSequence;
-        output.isSilent = allSilent;
+        output.isSilent = outputIsSilent;
         output.isDiscontinuous = anyDiscontinuous;
         output.isEndOfStream = false;
         output.sourceId = 0; // mixed output
