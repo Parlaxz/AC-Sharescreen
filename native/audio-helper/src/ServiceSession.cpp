@@ -1765,7 +1765,7 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     SimpleJson result;
     result.Set("streamGeneration", static_cast<uint64_t>(gen));
     result.Set("sourceType", "monitor");
-    result.Set("pipeline", "filtered-monitor");
+    result.Set("pipeline", "dynamic-process-mix");
     result.Set("initialActiveSources", static_cast<uint64_t>(outcome.initialActiveSources));
 
     SimpleJson resp;
