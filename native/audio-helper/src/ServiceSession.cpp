@@ -1695,12 +1695,15 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     // Transfer ownership
     filteredMonitor_ = std::move(controller);
 
-    // Build result
+    // Build result matching StartFilteredMonitorResult interface
     SimpleJson result;
     result.Set("streamGeneration", static_cast<uint64_t>(gen));
     result.Set("sourceType", "monitor");
-    result.Set("pipeline", "filtered-monitor");
+    result.Set("pipeline", "dynamic-process-mix");
     result.Set("initialActiveSources", static_cast<uint64_t>(outcome.initialActiveSources));
+    result.Set("excludeDiscord", excludeDiscord);
+    result.Set("excludeScreenLink", excludeScreenLink);
+    result.Set("dynamicDiscovery", true);
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1877,7 +1880,7 @@ void ServiceSession::HandleGetMixerState(const CommandContext& ctx,
     if (activeSrc == "monitor" && filteredMonitor_) {
         result = "{";
         result += "\"sourceType\":\"monitor\",";
-        result += "\"pipeline\":\"filtered-monitor\",";
+        result += "\"pipeline\":\"dynamic-process-mix\",";
         result += "\"running\":" + std::string(filteredMonitor_->IsRunning() ? "true" : "false");
         result += "}";
     } else if (activeSrc == "application" && applicationSource_) {

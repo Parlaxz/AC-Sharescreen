@@ -58,9 +58,11 @@ interface StartSystemAudioResult {
 interface StartFilteredMonitorResult {
   streamGeneration: number;
   sourceType: "monitor";
-  mixerReady: boolean;
-  activeSourceCount: number;
-  success: boolean;
+  pipeline: "dynamic-process-mix";
+  initialActiveSources: number;
+  excludeDiscord: boolean;
+  excludeScreenLink: boolean;
+  dynamicDiscovery: true;
 }
 
 interface StartApplicationAudioResult {
@@ -313,17 +315,25 @@ describe("Phase 2G — pipeline structure", () => {
   });
 
   // ── Test 8: Filtered result pipeline is dynamic-process-mix ──
-  it("filtered monitor result uses monitor source type with mixer", () => {
+  it("filtered monitor result matches StartFilteredMonitorResult contract", () => {
     const result: StartFilteredMonitorResult = {
       streamGeneration: 1,
       sourceType: "monitor",
-      mixerReady: true,
-      activeSourceCount: 3,
-      success: true,
+      pipeline: "dynamic-process-mix",
+      initialActiveSources: 0,
+      excludeDiscord: true,
+      excludeScreenLink: true,
+      dynamicDiscovery: true as const,
     };
-    expect(result.sourceType).toBe("monitor");
-    expect(result.mixerReady).toBe(true);
-    expect(result.activeSourceCount).toBeGreaterThan(0);
+    expect(result).toMatchObject({
+      sourceType: "monitor",
+      pipeline: "dynamic-process-mix",
+      excludeDiscord: true,
+      excludeScreenLink: true,
+      dynamicDiscovery: true,
+    });
+    expect(result.streamGeneration).toBeGreaterThan(0);
+    expect(result.initialActiveSources).toBeGreaterThanOrEqual(0);
   });
 });
 
