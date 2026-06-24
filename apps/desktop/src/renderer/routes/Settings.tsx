@@ -1,11 +1,311 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
-import type { PersistedSettings } from "../../preload/api-types.js";
+import type { PersistedSettings, UpdateStatusDTO } from "../../preload/api-types.js";
 import { restartControlConnection } from "../services/control-connection.js";
 
 async function getApi() {
   return (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
 }
+
+// ─── Byte formatting utility ───────────────────────────────────────────────
+
+function formatBytes(bytes: number | undefined): string {
+  if (bytes === undefined || bytes === null || bytes < 0) return "0 B";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, i);
+  return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatSpeed(bytesPerSecond: number | undefined): string {
+  if (!bytesPerSecond || bytesPerSecond < 0) return "";
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatTime(timestamp: number | undefined): string {
+  if (!timestamp) return "";
+  const d = new Date(timestamp);
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+// ─── Initial update status for SSR / loading ───────────────────────────────
+
+const INITIAL_UPDATE_STATUS: UpdateStatusDTO = {
+  phase: "idle",
+  currentVersion: "",
+  userMessage: "Loading...",
+  isPackaged: false,
+  isPortable: false,
+  updaterSupported: false,
+};
+
+// ─── UpdateSection component ───────────────────────────────────────────────
+
+function UpdateSection() {
+  const [status, setStatus] = useState<UpdateStatusDTO>(INITIAL_UPDATE_STATUS);
+  const [loading, setLoading] = useState(true);
+  const [actionInProgress, setActionInProgress] = useState(false);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+
+  // Subscribe to status updates and load initial status
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      const api = await getApi();
+      if (!api) return;
+
+      // Get initial status
+      try {
+        const initialStatus = await api.getUpdateStatus();
+        if (mounted) {
+          setStatus(initialStatus);
+          setLoading(false);
+        }
+      } catch {
+        if (mounted) setLoading(false);
+      }
+
+      // Subscribe to ongoing status changes
+      const unsubscribe = api.onUpdateStatusChanged((newStatus) => {
+        if (mounted) {
+          setStatus(newStatus);
+          setActionInProgress(false);
+        }
+      });
+      unsubscribeRef.current = unsubscribe;
+    })();
+
+    return () => {
+      mounted = false;
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleCheck = useCallback(async () => {
+    setActionInProgress(true);
+    const api = await getApi();
+    if (!api) return;
+    try {
+      const newStatus = await api.checkForUpdates();
+      setStatus(newStatus);
+    } catch {
+      // Status update from event handler will handle this
+    } finally {
+      setActionInProgress(false);
+    }
+  }, []);
+
+  const handleDownload = useCallback(async () => {
+    setActionInProgress(true);
+    const api = await getApi();
+    if (!api) return;
+    try {
+      const newStatus = await api.downloadUpdate();
+      setStatus(newStatus);
+    } catch {
+      // Status update from event handler will handle this
+    } finally {
+      setActionInProgress(false);
+    }
+  }, []);
+
+  const handleInstall = useCallback(async () => {
+    setActionInProgress(true);
+    const api = await getApi();
+    if (!api) return;
+    try {
+      const newStatus = await api.restartAndInstallUpdate();
+      setStatus(newStatus);
+    } catch {
+      // Status update from event handler will handle this
+    } finally {
+      setActionInProgress(false);
+    }
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="card">
+        <h3>Updates</h3>
+        <p className="dim">Loading update status...</p>
+      </div>
+    );
+  }
+
+  const showProgress = status.phase === "downloading" && status.downloadPercent !== undefined;
+  const canCheck = status.phase === "idle" || status.phase === "up-to-date" || status.phase === "error" || status.phase === "update-available";
+  const canDownload = status.phase === "update-available";
+  const canInstall = status.phase === "downloaded";
+  const isChecking = status.phase === "checking";
+  const isInstalling = status.phase === "installing";
+  const isUnsupported = status.phase === "unsupported";
+  const showTryAgain = status.phase === "error";
+  const showCheckAgain = status.phase === "up-to-date";
+
+  return (
+    <div className="card">
+      <h3>Updates</h3>
+
+      {/* Current version */}
+      <p className="dim" style={{ marginBottom: "0.75rem" }}>
+        Version: <strong>{status.currentVersion || "Unknown"}</strong>
+        {status.isPortable && <span style={{ marginLeft: "0.5rem", color: "var(--warning)" }}>Portable</span>}
+      </p>
+
+      {/* Unsupported: development build */}
+      {isUnsupported && !status.isPortable && status.userMessage && (
+        <p className="dim">{status.userMessage}</p>
+      )}
+
+      {/* Unsupported: portable build */}
+      {isUnsupported && status.isPortable && (
+        <div>
+          <p className="dim" style={{ color: "var(--warning)" }}>
+            Portable version cannot self-update. Download the ScreenLink Setup installer to receive automatic updates.
+          </p>
+          <p className="dim" style={{ marginTop: "0.5rem" }}>
+            You can download the latest version from the GitHub releases page.
+          </p>
+        </div>
+      )}
+
+      {/* Supported update states */}
+      {!isUnsupported && (
+        <>
+          {/* Status message */}
+          <p className="dim" style={{ marginBottom: "0.75rem" }}>
+            {status.userMessage}
+            {status.phase === "update-available" && status.availableVersion && (
+              <strong style={{ color: "var(--success)", marginLeft: "0.25rem" }}>
+                {status.availableVersion}
+              </strong>
+            )}
+            {status.phase === "downloaded" && status.downloadedVersion && (
+              <strong style={{ color: "var(--accent)", marginLeft: "0.25rem" }}>
+                {status.downloadedVersion}
+              </strong>
+            )}
+          </p>
+
+          {/* Last checked */}
+          {status.lastCheckedAt && status.phase !== "checking" && status.phase !== "downloading" && (
+            <p className="dim" style={{ fontSize: "0.7rem", marginBottom: "0.5rem" }}>
+              Last checked: {formatTime(status.lastCheckedAt)}
+            </p>
+          )}
+
+          {/* Download progress */}
+          {showProgress && (
+            <div className="progress-section" style={{ marginBottom: "0.75rem" }}>
+              <div className="progress-bar-bg" style={{
+                width: "100%",
+                height: "8px",
+                background: "var(--bg-tertiary)",
+                borderRadius: "4px",
+                overflow: "hidden",
+              }}>
+                <div className="progress-bar-fill" style={{
+                  width: `${status.downloadPercent ?? 0}%`,
+                  height: "100%",
+                  background: "var(--accent)",
+                  borderRadius: "4px",
+                  transition: "width 0.3s ease",
+                }} />
+              </div>
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginTop: "0.25rem",
+                fontSize: "0.7rem",
+                color: "var(--text-dim)",
+              }}>
+                <span>{status.downloadPercent?.toFixed(0) ?? 0}%</span>
+                <span>{formatBytes(status.transferredBytes)} / {formatBytes(status.totalBytes)}</span>
+                <span>{formatSpeed(status.bytesPerSecond)}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Error message */}
+          {status.phase === "error" && status.errorMessage && (
+            <p className="dim" style={{
+              color: "var(--danger)",
+              marginBottom: "0.5rem",
+              padding: "0.5rem",
+              background: "var(--danger-bg)",
+              borderRadius: "var(--radius-sm)",
+              fontSize: "0.75rem",
+            }}>
+              {status.errorMessage}
+            </p>
+          )}
+
+          {/* Action buttons */}
+          <div className="update-actions" style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
+            {/* Check for updates */}
+            {canCheck && !showCheckAgain && (
+              <button onClick={handleCheck} disabled={actionInProgress}>
+                {actionInProgress ? "Checking..." : "Check for Updates"}
+              </button>
+            )}
+
+            {/* Check Again (when up-to-date) */}
+            {showCheckAgain && (
+              <button onClick={handleCheck} disabled={actionInProgress} className="ghost">
+                {actionInProgress ? "Checking..." : "Check Again"}
+              </button>
+            )}
+
+            {/* Checking state */}
+            {isChecking && (
+              <button disabled>Checking...</button>
+            )}
+
+            {/* Download Update */}
+            {canDownload && (
+              <button onClick={handleDownload} disabled={actionInProgress} style={{ background: "var(--success)" }}>
+                {actionInProgress ? "Starting download..." : "Download Update"}
+              </button>
+            )}
+
+            {/* Restart and Install */}
+            {canInstall && (
+              <button onClick={handleInstall} disabled={actionInProgress} style={{ background: "var(--accent)" }}>
+                {actionInProgress ? "Restarting..." : "Restart and Install"}
+              </button>
+            )}
+
+            {/* Installing state */}
+            {isInstalling && (
+              <button disabled>Restarting to install...</button>
+            )}
+
+            {/* Try Again after error */}
+            {showTryAgain && (
+              <button onClick={handleCheck} disabled={actionInProgress}>
+                {actionInProgress ? "Checking..." : "Try Again"}
+              </button>
+            )}
+          </div>
+
+          {/* Install warning when sharing/viewing */}
+          {canInstall && (
+            <p className="dim" style={{ marginTop: "0.5rem", fontSize: "0.7rem", color: "var(--warning)" }}>
+              Restarting will stop any active screen sharing or viewing sessions.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Settings component ──────────────────────────────────────────────
 
 /**
  * Render the Settings page with pairing lifecycle-driven UI.
@@ -258,6 +558,9 @@ export function Settings() {
         <h1>Settings</h1>
         <button className="ghost" onClick={() => navigate("dashboard" as Page)}>&larr; Back</button>
       </div>
+
+      {/* ── Updates ─────────────────────────────────────────────────── */}
+      <UpdateSection />
 
       {/* ── Pairing ──────────────────────────────────────────────── */}
       <div className="card">

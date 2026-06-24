@@ -1,0 +1,437 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# ScreenLink — Windows x64 Release Workflow
+#
+# Triggered by:
+#   1. A GitHub Release being published (release.published)
+#   2. Manual workflow_dispatch to retry an existing release
+#
+# Builds the native audio helper, TypeScript packages, and the Electron desktop
+# app, then uploads updater metadata and installers to the existing GitHub Release.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Build and Release ScreenLink (Windows x64)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing published release tag to retry (e.g. v0.1.1)"
+        required: true
+        type: string
+
+# Required to upload assets to releases
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: "24"
+  PNPM_VERSION: "10"
+
+jobs:
+  build-and-release:
+    name: Build and release
+    runs-on: windows-latest
+    # Do not run on draft or prerelease — stable channel only
+    if: >
+      (github.event_name == 'release' && github.event.release.prerelease == false) ||
+      github.event_name == 'workflow_dispatch'
+
+    outputs:
+      tag: ${{ steps.determine-tag.outputs.tag }}
+      version: ${{ steps.determine-version.outputs.version }}
+      setup_exe: ${{ steps.discover-artifacts.outputs.setup_exe }}
+      blockmap: ${{ steps.discover-artifacts.outputs.blockmap }}
+      portable_exe: ${{ steps.discover-artifacts.outputs.portable_exe }}
+
+    steps:
+      # ── 1. Determine the release tag ──────────────────────────────────
+      - name: Determine release tag
+        id: determine-tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "release") {
+            $tag = "${{ github.event.release.tag_name }}"
+          } else {
+            $tag = "${{ github.event.inputs.tag }}"
+          }
+          Write-Host "tag=$tag"
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Validate and derive version
+        id: determine-version
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          if (-not ($tag -match '^v\d+\.\d+\.\d+$')) {
+            Write-Host "::error::Release tag '$tag' must match vMAJOR.MINOR.PATCH (e.g. v0.1.1)"
+            exit 1
+          }
+          # Strip leading "v"
+          $version = $tag.Substring(1)
+          Write-Host "version=$version"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Verify release exists (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          $release = gh release view "$tag" --json isDraft,isPrerelease 2>$null
+          if (-not $release) {
+            Write-Host "::error::Release '$tag' does not exist or is not accessible."
+            exit 1
+          }
+          $releaseObj = $release | ConvertFrom-Json
+          if ($releaseObj.isDraft -or $releaseObj.isPrerelease) {
+            Write-Host "::error::Release '$tag' is a draft or prerelease. Only published stable releases can be retried."
+            exit 1
+          }
+          Write-Host "Release '$tag' verified."
+
+      # ── 2. Check out exact tag ──────────────────────────────────────
+      - name: Check out exact tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.determine-tag.outputs.tag }}
+          fetch-depth: 0
+
+      # ── 3. Set up Node.js and pnpm ───────────────────────────────────
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm ${{ env.PNPM_VERSION }}
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: pwsh
+        run: |
+          echo "store_path=$(pnpm store path)" >> $env:GITHUB_OUTPUT
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.store_path }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── 4. Set release version ───────────────────────────────────────
+      - name: Set release version
+        id: set-version
+        shell: pwsh
+        run: |
+          node scripts/set-release-version.mjs "${{ steps.determine-version.outputs.version }}"
+
+      - name: Verify version consistency
+        shell: pwsh
+        run: |
+          $expected = "${{ steps.determine-version.outputs.version }}"
+          $rootVersion = node -e "console.log(require('./package.json').version)"
+          $desktopVersion = node -e "console.log(require('./apps/desktop/package.json').version)"
+          if ($rootVersion -ne $expected) {
+            Write-Host "::error::Root package.json version mismatch: expected $expected, got $rootVersion"
+            exit 1
+          }
+          if ($desktopVersion -ne $expected) {
+            Write-Host "::error::Desktop package.json version mismatch: expected $expected, got $desktopVersion"
+            exit 1
+          }
+          if ($rootVersion -ne $desktopVersion) {
+            Write-Host "::error::Package versions do not match: root=$rootVersion desktop=$desktopVersion"
+            exit 1
+          }
+          Write-Host "All package versions match: $expected"
+
+      # ── 5. Build native audio helper ─────────────────────────────────
+      - name: Configure native helper (CMake)
+        shell: pwsh
+        run: |
+          cmake -S native/audio-helper -B native/audio-helper/build `
+            -G "Visual Studio 17 2022" -A x64
+
+      - name: Build native helper (Release)
+        shell: pwsh
+        run: |
+          cmake --build native/audio-helper/build --config Release
+
+      - name: Run native helper self-test
+        id: helper-self-test
+        shell: pwsh
+        run: |
+          $helper = "native/audio-helper/build/Release/screenlink-audio-helper.exe"
+          if (-not (Test-Path $helper)) {
+            Write-Host "::error::Audio helper binary not found at $helper"
+            exit 1
+          }
+          & $helper --self-test
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Audio helper self-test failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "Audio helper self-test passed."
+
+      # ── 6. TypeScript checks and tests ───────────────────────────────
+      - name: Type check all packages
+        shell: pwsh
+        run: pnpm typecheck
+
+      - name: Run tests
+        id: run-tests
+        shell: pwsh
+        run: pnpm test -- --reporter=verbose
+
+      # ── 7. Build packages ───────────────────────────────────────────
+      - name: Build shared package
+        run: pnpm build:shared
+
+      - name: Build vdo-adapter
+        run: pnpm build:vdo-adapter
+
+      - name: Build desktop
+        run: pnpm build:desktop
+
+      - name: Verify desktop build output
+        shell: pwsh
+        run: |
+          $errors = @()
+          if (-not (Test-Path "apps/desktop/dist/main/main.js")) {
+            $errors += "dist/main/main.js is missing"
+          }
+          if (-not (Test-Path "apps/desktop/dist/preload/index.js")) {
+            $errors += "dist/preload/index.js is missing"
+          }
+          if (-not (Test-Path "apps/desktop/dist/renderer/index.html")) {
+            $errors += "dist/renderer/index.html is missing"
+          }
+          if ($errors.Count -gt 0) {
+            foreach ($e in $errors) { Write-Host "::error::$e" }
+            exit 1
+          }
+          Write-Host "Desktop build output verified."
+
+      # ── 8. Package with Electron Builder ─────────────────────────────
+      - name: Package Windows x64
+        id: package
+        shell: pwsh
+        working-directory: apps/desktop
+        run: |
+          # Remove previous release output
+          if (Test-Path "../../release") {
+            Remove-Item -Recurse -Force "../../release"
+          }
+          npx electron-builder --win --x64 --config electron-builder.config.cjs --publish never
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Electron Builder packaging failed"
+            exit 1
+          }
+
+      # ── 9. Validate all artifacts ────────────────────────────────────
+      - name: Validate release artifacts
+        id: validate-artifacts
+        shell: pwsh
+        run: |
+          $version = "${{ steps.determine-version.outputs.version }}"
+          $releaseDir = "release"
+          $errors = @()
+
+          # latest.yml
+          if (-not (Test-Path "$releaseDir/latest.yml")) {
+            $errors += "latest.yml is missing"
+          }
+
+          # latest.yml version check
+          if (Test-Path "$releaseDir/latest.yml") {
+            $yml = Get-Content "$releaseDir/latest.yml" -Raw
+            if ($yml -notmatch "version: $version") {
+              $errors += "latest.yml version does not match $version"
+            }
+            if ($yml -notmatch "\.exe") {
+              $errors += "latest.yml does not reference an .exe installer"
+            }
+            # Ensure latest.yml does NOT reference the portable artifact
+            if ($yml -match "portable") {
+              $errors += "latest.yml appears to reference a portable build"
+            }
+          }
+
+          # Setup EXE
+          $setupExe = Get-ChildItem "$releaseDir/ScreenLink Setup *.exe" -ErrorAction SilentlyContinue
+          if (-not $setupExe) {
+            $errors += "ScreenLink Setup EXE not found in $releaseDir"
+          }
+
+          # Blockmap
+          $blockmap = Get-ChildItem "$releaseDir/ScreenLink Setup *.exe.blockmap" -ErrorAction SilentlyContinue
+          if (-not $blockmap) {
+            $errors += "ScreenLink Setup blockmap not found in $releaseDir"
+          }
+
+          # Portable EXE
+          $portableExe = Get-ChildItem "$releaseDir/ScreenLink *.exe" | Where-Object { $_.Name -notlike "*Setup*" }
+          if (-not $portableExe) {
+            $errors += "Portable EXE not found in $releaseDir"
+          }
+
+          # Packaged resources (win-unpacked)
+          $unpackedHelper = "$releaseDir/win-unpacked/resources/screenlink-audio-helper.exe"
+          if (-not (Test-Path $unpackedHelper)) {
+            $errors += "Packaged audio helper is missing from win-unpacked"
+          }
+
+          $unpackedTray = "$releaseDir/win-unpacked/resources/tray-icon.png"
+          if (-not (Test-Path $unpackedTray)) {
+            $errors += "Packaged tray icon is missing from win-unpacked"
+          }
+
+          $appUpdateYml = "$releaseDir/win-unpacked/resources/app-update.yml"
+          if (-not (Test-Path $appUpdateYml)) {
+            $errors += "app-update.yml is missing from win-unpacked/resources"
+          } else {
+            $updateYml = Get-Content $appUpdateYml -Raw
+            if ($updateYml -match "token") {
+              $errors += "app-update.yml contains a token!"
+            }
+            if ($updateYml -notmatch "Parlaxz") {
+              $errors += "app-update.yml does not point to Parlaxz/AC-Sharescreen"
+            }
+            if ($updateYml -notmatch "AC-Sharescreen") {
+              $errors += "app-update.yml does not point to AC-Sharescreen"
+            }
+          }
+
+          # Main entry in asar
+          $asarMain = "$releaseDir/win-unpacked/resources/app.asar/package.json"
+          if (Test-Path $asarMain) {
+            $asarPkg = Get-Content $asarMain -Raw | ConvertFrom-Json
+            $asarVersion = $asarPkg.version
+            if ($asarVersion -ne $version) {
+              $errors += "Packaged app version ($asarVersion) does not match release version ($version)"
+            }
+          } else {
+            # Not using asar — check dist/main/main.js directly
+            $mainEntry = "$releaseDir/win-unpacked/resources/app/dist/main/main.js"
+            if (-not (Test-Path $mainEntry)) {
+              $errors += "Main entry (dist/main/main.js) not found in packaged app"
+            }
+          }
+
+          if ($errors.Count -gt 0) {
+            foreach ($e in $errors) { Write-Host "::error::$e" }
+            exit 1
+          }
+
+          # Set outputs for later steps
+          $setupExeName = $setupExe.Name
+          $blockmapName = $blockmap.Name
+          $portableExeName = $portableExe.Name
+
+          echo "setup_exe=$setupExeName" >> $env:GITHUB_OUTPUT
+          echo "blockmap=$blockmapName" >> $env:GITHUB_OUTPUT
+          echo "portable_exe=$portableExeName" >> $env:GITHUB_OUTPUT
+
+          Write-Host "All artifacts validated successfully."
+          Write-Host "  Setup EXE: $setupExeName ($( [math]::Round($setupExe.Length / 1MB, 1) ) MB)"
+          Write-Host "  Blockmap: $blockmapName ($( [math]::Round($blockmap.Length / 1KB, 1) ) KB)"
+          Write-Host "  Portable: $portableExeName ($( [math]::Round($portableExe.Length / 1MB, 1) ) MB)"
+          Write-Host "  latest.yml: present"
+          Write-Host "  app-update.yml: present (no token)"
+
+      # ── 10. Upload artifacts to existing release ──────────────────────
+      - name: Upload artifacts to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          $releaseDir = "release"
+
+          # Required updater assets
+          $requiredAssets = @(
+            "latest.yml",
+            ${{ steps.validate-artifacts.outputs.setup_exe }},
+            ${{ steps.validate-artifacts.outputs.blockmap }}
+          )
+
+          # Optional distribution asset
+          $optionalAssets = @(
+            ${{ steps.validate-artifacts.outputs.portable_exe }}
+          )
+
+          $allAssets = $requiredAssets + $optionalAssets
+
+          foreach ($asset in $allAssets) {
+            $path = "$releaseDir/$asset"
+            if (Test-Path $path) {
+              Write-Host "Uploading $asset..."
+              gh release upload "$tag" "$path" --clobber
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "::warning::Failed to upload $asset"
+              }
+            } else {
+              Write-Host "::warning::Asset not found for upload: $asset"
+            }
+          }
+
+          Write-Host "Upload complete."
+
+      # ── 11. Post-upload verification ─────────────────────────────────
+      - name: Verify uploaded assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          $requiredAssets = @(
+            "latest.yml",
+            ${{ steps.validate-artifacts.outputs.setup_exe }},
+            ${{ steps.validate-artifacts.outputs.blockmap }}
+          )
+
+          $releaseInfo = gh release view "$tag" --json assets 2>$null
+          if (-not $releaseInfo) {
+            Write-Host "::error::Failed to fetch release info for '$tag'"
+            exit 1
+          }
+
+          $releaseObj = $releaseInfo | ConvertFrom-Json
+          $assetNames = $releaseObj.assets | ForEach-Object { $_.name }
+
+          $missing = @()
+          foreach ($asset in $requiredAssets) {
+            if ($assetNames -notcontains $asset) {
+              $missing += $asset
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::Required assets still missing after upload: $($missing -join ', ')"
+            exit 1
+          }
+
+          Write-Host "All required assets verified on release '$tag'."
+
+      # ── 12. Job summary ──────────────────────────────────────────────
+      - name: Generate job summary
+        shell: pwsh
+        run: |
+          $trigger = if ("${{ github.event_name }}" -eq "release") { "Release published" } else { "Manual retry" }
+          & scripts/generate-release-summary.ps1 `
+            -Trigger $trigger `
+            -Tag "${{ steps.determine-tag.outputs.tag }}" `
+            -Version "${{ steps.determine-version.outputs.version }}" `
+            -Sha "${{ github.sha }}" `
+            -SetupExe "${{ steps.validate-artifacts.outputs.setup_exe }}" `
+            -Blockmap "${{ steps.validate-artifacts.outputs.blockmap }}" `
+            -PortableExe "${{ steps.validate-artifacts.outputs.portable_exe }}"

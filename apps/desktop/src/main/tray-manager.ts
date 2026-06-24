@@ -1,4 +1,4 @@
-import { Tray, Menu, nativeImage } from "electron";
+import { Tray, Menu, nativeImage, app } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -6,6 +6,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export type TrayState = "idle" | "friend-online" | "sharing" | "viewing" | "sharing-and-viewing" | "degraded" | "error";
+
+/**
+ * Resolve the tray icon path based on whether the app is packaged.
+ *
+ * In development (unpackaged), the icon lives relative to `__dirname`
+ * inside the source tree. In packaged builds, it is copied to
+ * `process.resourcesPath` via electron-builder `extraResources`.
+ */
+export function getTrayIconPath(isPackaged: boolean): string {
+  if (isPackaged) {
+    return path.join(process.resourcesPath, "tray-icon.png");
+  }
+  return path.join(__dirname, "../../assets/tray-icon.png");
+}
 
 export interface TrayMenuActions {
   onOpen: () => void;
@@ -38,13 +52,17 @@ export class TrayManager {
   }
 
   create(): void {
+    const iconPath = getTrayIconPath(app.isPackaged);
     let icon: Electron.NativeImage;
     try {
-      icon = nativeImage.createFromPath(
-        path.join(__dirname, "../../assets/tray-icon.png"),
-      );
-    } catch {
+      icon = nativeImage.createFromPath(iconPath);
+    } catch (err) {
+      console.error(`[tray-manager] Failed to load icon from ${iconPath}`, err);
       icon = nativeImage.createEmpty();
+    }
+
+    if (icon.isEmpty()) {
+      console.error(`[tray-manager] Tray icon is empty — path resolved to: ${iconPath}`);
     }
 
     this.tray = new Tray(icon);
