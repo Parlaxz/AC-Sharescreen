@@ -628,6 +628,7 @@ export function Dashboard() {
             }
             case 'application': {
               captureResult = await api?.startApplicationAudio({ sourceId }) as { success: boolean; error?: string; streamGeneration?: number } | undefined;
+              console.log('[Audio] application captureResult=', JSON.stringify(captureResult));
               break;
             }
             case 'monitor': {
@@ -635,6 +636,7 @@ export function Dashboard() {
                 excludeDiscord: true,
                 excludeScreenLink: true,
               }) as { success: boolean; error?: string; streamGeneration?: number } | undefined;
+              console.log('[Audio] monitor captureResult=', JSON.stringify(captureResult));
               break;
             }
             default:
