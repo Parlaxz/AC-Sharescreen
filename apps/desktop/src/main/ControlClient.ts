@@ -2,6 +2,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { AUDIO_SERVICE_PROTOCOL_VERSION } from './audio-protocol.js';
 
 // ── Diagnostic trace file (2 levels up from dist/main/ → apps/desktop/) ──
 const _ccDir = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +68,24 @@ export interface StartApplicationAudioResult {
   rootName: string;
   sourceType: string;
   mixerReady: boolean;
+}
+
+export interface StartFilteredMonitorResult {
+    streamGeneration: number;
+    sourceType: 'monitor';
+    pipeline: 'dynamic-process-mix';
+    initialActiveSources: number;
+    excludeDiscord: boolean;
+    excludeScreenLink: boolean;
+    dynamicDiscovery: true;
+}
+
+export interface StartEndpointLoopbackResult {
+    streamGeneration: number;
+    sourceType: 'system';
+    pipeline: 'endpoint-direct';
+    sampleRate: 48000;
+    channels: 2;
 }
 
 export interface HelperDiagnostics {
@@ -253,7 +272,7 @@ export class ControlClient {
 
     const requestId = ++this.requestId;
     const request: ControlRequest = {
-      protocolVersion: '0.2.0',
+      protocolVersion: AUDIO_SERVICE_PROTOCOL_VERSION,
       requestId,
       sessionId: this.sessionId,
       authToken: this.authToken,
@@ -347,10 +366,38 @@ export class ControlClient {
     return result as StartApplicationAudioResult;
   }
 
-  async startEndpointLoopback(): Promise<{ streamGeneration: number }> {
+  async startFilteredMonitorAudio(payload: {
+    excludeDiscord: boolean;
+    excludeScreenLink: boolean;
+    screenLinkPid: number;
+  }): Promise<StartFilteredMonitorResult> {
+    const resp = await this.sendRequest('startFilteredMonitorAudio', payload as Record<string, unknown>);
+    if (!resp.success || !resp.result) {
+      throw new Error(`startFilteredMonitorAudio failed: ${resp.error ?? 'unknown'}`);
+    }
+    const result = resp.result as unknown as Partial<StartFilteredMonitorResult>;
+    const gen = result.streamGeneration;
+    if (!Number.isSafeInteger(gen) || Number(gen) <= 0) {
+      throw new Error(`startFilteredMonitorAudio returned invalid streamGeneration: ${gen}`);
+    }
+    if (result.pipeline !== 'dynamic-process-mix') {
+      throw new Error(`startFilteredMonitorAudio returned unexpected pipeline: ${result.pipeline}`);
+    }
+    return result as StartFilteredMonitorResult;
+  }
+
+  async startEndpointLoopback(): Promise<StartEndpointLoopbackResult> {
     const resp = await this.sendRequest('startEndpointLoopback');
     if (!resp.success || !resp.result) throw new Error(`startEndpointLoopback failed: ${resp.error ?? 'unknown'}`);
-    return { streamGeneration: resp.result.streamGeneration as number };
+    const result = resp.result as unknown as Partial<StartEndpointLoopbackResult>;
+    const gen = result.streamGeneration;
+    if (!Number.isSafeInteger(gen) || Number(gen) <= 0) {
+      throw new Error(`startEndpointLoopback returned invalid streamGeneration: ${gen}`);
+    }
+    if (result.pipeline !== 'endpoint-direct') {
+      throw new Error(`startEndpointLoopback returned unexpected pipeline: ${result.pipeline}`);
+    }
+    return result as StartEndpointLoopbackResult;
   }
 
   async stopCapture(): Promise<ControlResponse> { return this.sendRequest('stopCapture'); }

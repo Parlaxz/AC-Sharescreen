@@ -80,12 +80,14 @@ public:
     ~MultiSourceMixer();
 
     /// Structured error codes for Start() failures.
+    /// Note: NoActiveSources is retained in the enum for backward compat
+    /// but is never returned by Start() — zero sources are now supported.
     enum class StartError {
         None,
         AlreadyRunning,
         NoOutputCallback,
         InvalidFormat,
-        NoActiveSources,
+        NoActiveSources,  // retained for ABI compat
         ThreadCreationFailed,
         StaleThreadNotJoined,
     };

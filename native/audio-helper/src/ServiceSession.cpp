@@ -5,6 +5,7 @@
 #include "ExclusionPolicy.h"
 #include "ProcessResolver.h"
 #include "SourceMapper.h"
+#include "FilteredMonitorController.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -387,32 +388,14 @@ ServiceSession::~ServiceSession() {
         state_.store(static_cast<SessionState>(3)); // kStopping
     }
 
-    // Stop Phase 2E multi-source resources before joining threads
-    StopPhase2EResources();
+    // Stop all audio resources before joining threads
+    StopAudioResources();
 
     // Join threads
     if (captureThread_.joinable()) captureThread_.join();
     if (controlThread_.joinable()) controlThread_.join();
     if (pcmConnectThread_.joinable()) pcmConnectThread_.join();
     if (monitorThread_.joinable()) monitorThread_.join();
-
-    // Stop and clean up multi-source capture sources
-    for (auto& source : captureSources_) {
-        if (source) source->Stop();
-    }
-    captureSources_.clear();
-
-    // Stop mixer
-    if (mixer_) {
-        mixer_->Stop();
-        mixer_.reset();
-    }
-
-    // Stop session monitor
-    if (sessionMonitor_) {
-        sessionMonitor_->Stop();
-        sessionMonitor_.reset();
-    }
 
     // Close parent process handle
     if (parentProcessHandle_ != nullptr) {
@@ -727,6 +710,9 @@ bool ServiceSession::DispatchCommand(const CommandContext& ctx,
                command == "startendpointloopback") {
         HandleStartEndpointLoopback(ctx, payload, response);
         return true;
+    } else if (command == "getEndpointDiagnostics" || command == "getendpointdiagnostics") {
+        HandleGetEndpointDiagnostics(ctx, payload, response);
+        return true;
     }
     return false;
 }
@@ -971,7 +957,6 @@ void ServiceSession::HandleStartSynthetic(const CommandContext& ctx,
                 std::lock_guard<std::mutex> lock(stateMutex_);
                 activeSourceType_ = "";
             }
-            streamGeneration_.fetch_sub(1);
             SimpleJson resp;
             resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
             resp.Set("requestId", ctx.requestId);
@@ -1139,8 +1124,8 @@ void ServiceSession::HandleStopCapture(const CommandContext& ctx,
         captureThread_.join();
     }
 
-    // Stop Phase 2E multi-source resources
-    StopPhase2EResources();
+    // Stop audio capture resources
+    StopAudioResources();
 
     uint64_t finalPacketCount = totalPackets_.load();
     state_.store(static_cast<SessionState>(0)); // kIdle
@@ -1264,8 +1249,8 @@ void ServiceSession::HandleShutdown(const CommandContext& ctx,
         state_.store(static_cast<SessionState>(0)); // kIdle
     }
 
-    // Stop Phase 2E multi-source resources
-    StopPhase2EResources();
+    // Stop audio capture resources
+    StopAudioResources();
 
     std::string result = "{";
     result += "\"exitCode\":0";
@@ -1606,7 +1591,7 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
         return;
     }
 
-    captureSources_.push_back(std::move(source));
+    applicationSource_ = std::move(source);
 
     SimpleJson result;
     result.Set("streamGeneration", static_cast<uint64_t>(gen));
@@ -1629,337 +1614,71 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
 void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
                                                         const std::string& payload,
                                                         std::string& response) {
+    // Parse options from payload
     bool excludeDiscord = SimpleJson::GetBool(payload, "excludeDiscord", true);
     bool excludeScreenLink = SimpleJson::GetBool(payload, "excludeScreenLink", true);
     uint32_t screenLinkPid = static_cast<uint32_t>(
         SimpleJson::GetUint(payload, "screenLinkPid", 0));
 
-    // ── 1. Validate OS capability ──
-    auto osInfo = DetectWindowsVersion();
-    uint32_t currentBuild = osInfo.build;
-    if (!IsProcessLoopbackSupported()) {
-        auto probeResult = ProbeProcessLoopbackRuntime();
-        std::string result;
-        if (currentBuild >= kExperimentalProcessLoopbackFloor && currentBuild < kMinProcessLoopbackBuild) {
-            result = "{";
-            result += "\"error\":\"process-loopback-experimental-probe-failed\",";
-            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
-            result += "\"currentBuild\":" + std::to_string(currentBuild) + ",";
-            result += "\"experimentalFloor\":" + std::to_string(kExperimentalProcessLoopbackFloor) + ",";
-            result += "\"probeFailure\":\"" + probeResult.failureReason + "\"";
-            result += "}";
-        } else {
-            result = "{";
-            result += "\"error\":\"process-loopback-unsupported\",";
-            result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
-            result += "\"currentBuild\":" + std::to_string(currentBuild);
-            result += "}";
-        }
+    // Lock audio lifecycle mutex to serialize start/stop transitions
+    std::lock_guard<std::mutex> lock(audioLifecycleMutex_);
 
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "process-loopback-unsupported");
-        resp.SetRaw("result", result);
-        response = resp.Str();
+    // Require idle state
+    if (state_.load() != SessionState::kIdle) {
+        response = MakeErrorResponse(ctx, "already-capturing");
         return;
     }
 
-    // ── 2. Enumerate sessions ──
-    auto monitor = std::make_unique<AudioSessionMonitor>();
-    if (!monitor->Initialize()) {
-        long hresult = monitor->LastErrorCode();
-        char errorBuf[96] = {};
-        snprintf(errorBuf, sizeof(errorBuf),
-                 "session-enumeration-failed (HRESULT=0x%08lx)", hresult);
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", errorBuf);
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        return;
-    }
-
-    auto sessions = monitor->EnumerateSessions();
-    monitor->Stop();
-    std::cerr << "[filtered] sessions.enumerated=" << sessions.size() << std::endl;
-
-    // ── 3. Process sessions: exclusions, dedup, source starts ──
-    uint32_t eligibleCount = 0;
-    uint32_t excludedDiscordCount = 0;
-    uint32_t excludedScreenLinkCount = 0;
-    uint32_t duplicateRootCount = 0;
-    uint32_t invalidSessionCount = 0;
-    uint32_t sourcesAttempted = 0;
-    uint32_t sourcesStarted = 0;
-    uint32_t sourcesFailed = 0;
-    std::vector<std::string> sourceFailureCodes;
-
-    struct RootIdentity {
-        uint32_t pid;
-        uint64_t creationTimeUtc100ns;
-    };
-    std::vector<RootIdentity> addedRoots;
-
-    // First pass: determine which process trees should be captured
-    struct SelectedSource {
-        uint32_t rootPid;
-        uint64_t rootCreationTime;
-    };
-    std::vector<SelectedSource> selectedSources;
-
-    for (const auto& session : sessions) {
-        if (session.systemSound || session.pid == 0) {
-            invalidSessionCount++;
-            continue;
+    // Wait for PCM connection
+    {
+        int waitCount = 0;
+        while (!pcmWriter_.IsClientConnected() && waitCount < 100) {
+            Sleep(10);
+            waitCount++;
         }
-        if (!session.identityValidated) {
-            invalidSessionCount++;
-            continue;
-        }
-
-        auto treeResult = ResolveProcessTree(session.pid);
-        if (!treeResult.succeeded) {
-            invalidSessionCount++;
-            continue;
-        }
-
-        uint32_t rootPid = treeResult.applicationRootPid;
-        uint64_t rootCreationTime = treeResult.targetCreationTimeUtc100ns;
-
-        std::string rootName = treeResult.applicationRootName;
-        std::string rootPath;
-        for (const auto& p : treeResult.processes) {
-            if (p.processId == rootPid) {
-                rootPath = p.processPath;
-                break;
-            }
-        }
-
-        // Apply exclusion policy
-        if (excludeDiscord || excludeScreenLink) {
-            auto exclusion = CheckExclusion(rootName, rootPath);
-            if (exclusion.isDiscord && excludeDiscord) {
-                excludedDiscordCount++;
-                continue;
-            }
-            if (exclusion.isScreenLink && excludeScreenLink) {
-                bool shouldExclude = true;
-                if (screenLinkPid != 0 && rootPid != screenLinkPid) {
-                    shouldExclude = false;
-                }
-                if (shouldExclude) {
-                    excludedScreenLinkCount++;
-                    continue;
-                }
-            }
-        }
-
-        // Deduplicate by root PID + creation time
-        bool isDuplicate = false;
-        for (const auto& added : addedRoots) {
-            if (added.pid == rootPid && added.creationTimeUtc100ns == rootCreationTime) {
-                isDuplicate = true;
-                break;
-            }
-        }
-        if (isDuplicate) {
-            duplicateRootCount++;
-            continue;
-        }
-        addedRoots.push_back({rootPid, rootCreationTime});
-
-        eligibleCount++;
-        selectedSources.push_back({rootPid, rootCreationTime});
-    }
-
-    std::cerr << "[filtered] sessions.excluded=" << excludedDiscordCount + excludedScreenLinkCount
-              << " processTrees.selected=" << selectedSources.size() << std::endl;
-
-    if (selectedSources.empty()) {
-        // All sessions were excluded or invalid — no-capturable-sessions, not a mixer failure
-        std::string result = "{";
-        result += "\"totalSessions\":" + std::to_string(sessions.size()) + ",";
-        result += "\"eligibleCount\":" + std::to_string(eligibleCount) + ",";
-        result += "\"excludedDiscordCount\":" + std::to_string(excludedDiscordCount) + ",";
-        result += "\"excludedScreenLinkCount\":" + std::to_string(excludedScreenLinkCount) + ",";
-        result += "\"duplicateRootCount\":" + std::to_string(duplicateRootCount) + ",";
-        result += "\"invalidSessionCount\":" + std::to_string(invalidSessionCount);
-        result += "}";
-
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "no-capturable-sessions");
-        resp.SetRaw("result", result);
-        response = resp.Str();
-        return;
-    }
-
-    // ── 4. Try to start capture sources for each selected process ──
-    // Only the sources that actually start are registered with the mixer.
-    struct StartedSource {
-        uint32_t rootPid;
-        uint64_t rootCreationTime;
-        uint32_t sourceId;    // mixer source ID (assigned after mixer creation)
-        std::unique_ptr<ApplicationCaptureSource> captureSource;
-    };
-    std::vector<StartedSource> startedSources;
-
-    for (const auto& sel : selectedSources) {
-        sourcesAttempted++;
-        std::cerr << "[filtered] source.start.attempt: pid=" << sel.rootPid << std::endl;
-
-        auto source = std::make_unique<ApplicationCaptureSource>();
-
-        // The source won't be registered with the mixer yet — we'll do that after
-        // confirming it started. We need a temporary callback that feeds packets
-        // but we don't have a sourceId yet. So we create a placeholder callback.
-        // Instead, we start the capture with a no-op temporary callback, then
-        // re-attach if successful.
-        //
-        // Better approach: start capture first, then add to mixer.
-        AppCaptureStartOutcome startOutcome = source->Start(sel.rootPid, sel.rootCreationTime,
-            [](const AudioPacket&) -> bool {
-                // Temporary — the real callback will be set when the source
-                // is registered with the mixer after mixer creation.
-                return true;
-            });
-
-        if (startOutcome.result == AppCaptureStartResult::Success) {
-            std::cerr << "[filtered] source.start.result: started pid=" << sel.rootPid << std::endl;
-            sourcesStarted++;
-            startedSources.push_back({
-                sel.rootPid, sel.rootCreationTime, 0, std::move(source)
-            });
-        } else {
-            sourcesFailed++;
-            sourceFailureCodes.push_back("capture-start-failed");
-            std::cerr << "[filtered] source.start.result: failed pid=" << sel.rootPid << std::endl;
+        if (!pcmWriter_.IsClientConnected()) {
+            response = MakeErrorResponse(ctx, "pcm-not-connected");
+            return;
         }
     }
 
-    std::cerr << "[filtered] sources.attempted=" << sourcesAttempted
-              << " sources.started=" << sourcesStarted
-              << " sources.failed=" << sourcesFailed << std::endl;
-
-    if (sourcesStarted == 0) {
-        // No sources could be started — all capture sources failed
-        std::string result = "{";
-        result += "\"totalSessions\":" + std::to_string(sessions.size()) + ",";
-        result += "\"eligibleCount\":" + std::to_string(eligibleCount) + ",";
-        result += "\"sourcesAttempted\":" + std::to_string(sourcesAttempted) + ",";
-        result += "\"sourcesFailed\":" + std::to_string(sourcesFailed) + ",";
-        result += "\"sourceFailureCodes\":[";
-        for (size_t i = 0; i < sourceFailureCodes.size(); ++i) {
-            if (i > 0) result += ",";
-            result += "\"" + sourceFailureCodes[i] + "\"";
-        }
-        result += "],";
-        result += "\"requiresBuild\":" + std::to_string(kMinProcessLoopbackBuild) + ",";
-        result += "\"currentBuild\":" + std::to_string(currentBuild);
-        result += "}";
-
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "capture-start-failed");
-        resp.SetRaw("result", result);
-        response = resp.Str();
-        return;
-    }
-
-    // ── 5. Create mixer and register successful sources ──
-    if (!mixer_) {
-        mixer_ = std::make_unique<MultiSourceMixer>(48000, static_cast<uint16_t>(2));
-    }
-
-    // Register each source with the mixer and re-attach the callback
-    for (auto& ss : startedSources) {
-        uint32_t sourceId = mixer_->AddSource(ss.rootPid, ss.rootCreationTime);
-        ss.sourceId = sourceId;
-
-        // Replace the temporary callback with the real one that feeds the mixer
-        ss.captureSource->Stop();  // Stop the temporary capture
-        AppCaptureStartOutcome restartOutcome = ss.captureSource->Start(ss.rootPid, ss.rootCreationTime,
-            [this, sourceId](const AudioPacket& p) -> bool {
-                mixer_->FeedPacket(sourceId, p);
-                return true;
-            });
-
-        if (restartOutcome.result == AppCaptureStartResult::Success) {
-            std::cerr << "[filtered] source registered: sourceId=" << sourceId
-                      << " pid=" << ss.rootPid << std::endl;
-        } else {
-            // Failed on restart — shouldn't happen if first start succeeded
-            mixer_->RemoveSource(sourceId);
-            sourcesStarted--;
-            std::cerr << "[filtered] source restart failed: pid=" << ss.rootPid << std::endl;
-        }
-    }
-
-    if (sourcesStarted == 0) {
-        // All sources failed on the re-attach — unusual but handle it
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "capture-start-failed");
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        return;
-    }
-
-    // ── 6. Allocate generation and set state BEFORE mixer start ──
+    // Set state to kStarting and allocate stream generation
     state_.store(SessionState::kStarting);
     const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
 
     {
-        std::lock_guard<std::mutex> lock(stateMutex_);
+        std::lock_guard<std::mutex> stateLock(stateMutex_);
         activeSourceType_ = "monitor";
     }
 
-    // Set kCapturing before mixer_->Start so OnCapturePacket accepts output.
+    // Construct FilteredMonitorController
+    auto controller = std::make_unique<FilteredMonitorController>();
+
+    // Set state to kCapturing before native callbacks may begin
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
-    std::cerr << "[filtered] mixer.start.enter: sources=" << mixer_->SourceCount() << std::endl;
-    auto mixResult = mixer_->Start([this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
-    });
-    std::cerr << "[filtered] mixer.start.result: success=" << mixResult.success
-              << " error=" << static_cast<int>(mixResult.error) << std::endl;
+    // Configure options
+    FilteredMonitorOptions options;
+    options.excludeDiscord = excludeDiscord;
+    options.excludeScreenLink = excludeScreenLink;
+    options.screenLinkPid = screenLinkPid;
 
-    if (!mixResult.success) {
-        state_.store(SessionState::kIdle, std::memory_order_release);
+    // Start controller with OnCapturePacket callback
+    auto outcome = controller->Start(options,
+        [this](const AudioPacket& packet) -> bool {
+            return OnCapturePacket(packet);
+        });
+
+    if (!outcome.success) {
+        // Transition through stopping back to idle
+        state_.store(SessionState::kStopping, std::memory_order_release);
+        controller->Stop();
+        controller.reset();
         {
-            std::lock_guard<std::mutex> lock(stateMutex_);
+            std::lock_guard<std::mutex> stateLock(stateMutex_);
             activeSourceType_.clear();
         }
-
-        // Clean up sources
-        for (auto& ss : startedSources) {
-            ss.captureSource->Stop();
-        }
-        startedSources.clear();
-        if (mixer_) {
-            mixer_->Stop();
-            mixer_.reset();
-        }
+        state_.store(SessionState::kIdle, std::memory_order_release);
 
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -1967,57 +1686,21 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
         resp.Set("sessionId", config_.sessionId);
         resp.Set("success", false);
         resp.Set("state", "idle");
-
-        // Map mixer error to a diagnostics string
-        const char* errorCode = "mixer-start-failed";
-        switch (mixResult.error) {
-            case MultiSourceMixer::StartError::AlreadyRunning:
-                errorCode = "mixer-already-running";
-                break;
-            case MultiSourceMixer::StartError::NoOutputCallback:
-                errorCode = "mixer-no-output-callback";
-                break;
-            case MultiSourceMixer::StartError::InvalidFormat:
-                errorCode = "mixer-invalid-format";
-                break;
-            case MultiSourceMixer::StartError::ThreadCreationFailed:
-                errorCode = "mixer-thread-creation-failed";
-                break;
-            case MultiSourceMixer::StartError::StaleThreadNotJoined:
-                errorCode = "mixer-stale-thread";
-                break;
-            default:
-                break;
-        }
-        resp.Set("error", errorCode);
+        resp.Set("error", outcome.errorCode.empty() ? "capture-start-failed" : outcome.errorCode.c_str());
         resp.SetRaw("result", "{}");
         response = resp.Str();
-        std::cerr << "[filtered] mixer.start.result=" << errorCode << std::endl;
         return;
     }
 
-    // ── 7. Transfer ownership of started sources ──
-    for (auto& ss : startedSources) {
-        captureSources_.push_back(std::move(ss.captureSource));
-    }
+    // Transfer ownership
+    filteredMonitor_ = std::move(controller);
 
-    uint32_t activeSourceCount = mixer_->SourceCount();
-    std::cerr << "[filtered] start.result: success activeSources=" << activeSourceCount << std::endl;
-
-    // Use SimpleJson for result — all strings are properly escaped.
+    // Build result
     SimpleJson result;
     result.Set("streamGeneration", static_cast<uint64_t>(gen));
     result.Set("sourceType", "monitor");
-    result.Set("mixerReady", true);
-    result.Set("totalSessions", static_cast<uint64_t>(sessions.size()));
-    result.Set("eligibleCount", static_cast<uint64_t>(eligibleCount));
-    result.Set("excludedDiscordCount", static_cast<uint64_t>(excludedDiscordCount));
-    result.Set("excludedScreenLinkCount", static_cast<uint64_t>(excludedScreenLinkCount));
-    result.Set("duplicateRootCount", static_cast<uint64_t>(duplicateRootCount));
-    result.Set("invalidSessionCount", static_cast<uint64_t>(invalidSessionCount));
-    result.Set("sourcesAttempted", static_cast<uint64_t>(sourcesAttempted));
-    result.Set("sourcesStarted", static_cast<uint64_t>(sourcesStarted));
-    result.Set("activeSourceCount", static_cast<uint64_t>(activeSourceCount));
+    result.Set("pipeline", "filtered-monitor");
+    result.Set("initialActiveSources", static_cast<uint64_t>(outcome.initialActiveSources));
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -2031,13 +1714,13 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
 }
 
 void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
-                                                   const std::string& /*payload*/,
-                                                   std::string& response) {
-    // Parse payload (if any) — currently no options needed.
-    // Future: could add eMultimedia/eCommunications/eConsole routing.
+                                                    const std::string& /*payload*/,
+                                                    std::string& response) {
+    // Lock audio lifecycle mutex to serialize start/stop transitions
+    std::lock_guard<std::mutex> lock(audioLifecycleMutex_);
 
-    // 1. Reject if not idle
-    if (state_.load() != static_cast<SessionState>(0)) { // kIdle
+    // Require idle state
+    if (state_.load() != SessionState::kIdle) {
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", ctx.requestId);
@@ -2050,16 +1733,7 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
         return;
     }
 
-    // 2. Set state=kStarting, increment generation, set activeSourceType_
-    state_.store(static_cast<SessionState>(1)); // kStarting
-    uint32_t gen = streamGeneration_.fetch_add(1) + 1;
-
-    {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        activeSourceType_ = "endpoint-loopback";
-    }
-
-    // 3. Wait for PCM client connection (up to 100 x 10ms)
+    // Wait for PCM connection
     {
         int waitCount = 0;
         while (!pcmWriter_.IsClientConnected() && waitCount < 100) {
@@ -2067,13 +1741,6 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
             waitCount++;
         }
         if (!pcmWriter_.IsClientConnected()) {
-            // PCM pipe not connected — rollback
-            state_.store(static_cast<SessionState>(0)); // kIdle
-            {
-                std::lock_guard<std::mutex> lock(stateMutex_);
-                activeSourceType_ = "";
-            }
-            streamGeneration_.fetch_sub(1);
             SimpleJson resp;
             resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
             resp.Set("requestId", ctx.requestId);
@@ -2087,23 +1754,30 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
         }
     }
 
-    // 4. Create mixer if needed; add sourceId
-    if (!mixer_) {
-        mixer_ = std::make_unique<MultiSourceMixer>(48000, static_cast<uint16_t>(2));
-    }
-    uint32_t sourceId = mixer_->AddSource(0, 0);
+    // Set state to kStarting and allocate stream generation
+    state_.store(SessionState::kStarting);
+    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-    // 5. Create endpointSource_, call Start(...) and capture EndpointStartOutcome
-    endpointSource_ = std::make_unique<EndpointLoopbackSource>();
-    auto startOutcome = endpointSource_->Start(
-        [this, sourceId](const AudioPacket& p) -> bool {
-            // Endpoint callback
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex_);
+        activeSourceType_ = "endpoint-loopback";
+    }
+
+    // Construct EndpointLoopbackSource
+    auto source = std::make_unique<EndpointLoopbackSource>();
+
+    // Set state to kCapturing before source Start so OnCapturePacket accepts output
+    state_.store(SessionState::kCapturing, std::memory_order_release);
+
+    // Start with direct OnCapturePacket callback (no mixer)
+    auto startOutcome = source->Start(
+        [this](const AudioPacket& p) -> bool {
+            // Track endpoint diagnostics
             endpointPacketsCaptured_.fetch_add(1, std::memory_order_relaxed);
 
             if (p.isSilent) {
                 endpointSilentPackets_.fetch_add(1, std::memory_order_relaxed);
             } else {
-                // Detect a nonzero sample from first up to 10 samples
                 bool hasNonZero = false;
                 uint32_t checkSamples = (std::min)(static_cast<uint32_t>(10),
                     p.frameCount * static_cast<uint32_t>(p.channels));
@@ -2118,105 +1792,44 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
                 }
             }
 
-            mixerFeedPackets_.fetch_add(1, std::memory_order_relaxed);
-            mixer_->FeedPacket(sourceId, p);
-            return true;
+            // Directly call OnCapturePacket — no mixer
+            return OnCapturePacket(p);
         });
 
-    // 6. Check endpoint Start() result
     if (startOutcome.result != EndpointStartResult::Success) {
-        // Rollback
-        endpointSource_.reset();
-        mixer_->RemoveSource(sourceId);
-        state_.store(static_cast<SessionState>(0)); // kIdle
+        // Transition through stopping back to idle
+        state_.store(SessionState::kStopping, std::memory_order_release);
+        source->Stop();
+        source.reset();
         {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            activeSourceType_ = "";
+            std::lock_guard<std::mutex> stateLock(stateMutex_);
+            activeSourceType_.clear();
         }
-        streamGeneration_.fetch_sub(1);
+        state_.store(SessionState::kIdle, std::memory_order_release);
 
-        // Map EndpointStartResult to structured error strings
         const char* errorCode = "capture-start-failed";
         switch (startOutcome.result) {
             case EndpointStartResult::ComInitFailed:
-                errorCode = "com-init-failed";
-                break;
+                errorCode = "com-init-failed"; break;
             case EndpointStartResult::EnumeratorFailed:
-                errorCode = "enumerator-failed";
-                break;
+                errorCode = "enumerator-failed"; break;
             case EndpointStartResult::EndpointNotFound:
-                errorCode = "endpoint-not-found";
-                break;
+                errorCode = "endpoint-not-found"; break;
             case EndpointStartResult::AudioClientActivationFailed:
-                errorCode = "audio-client-activation-failed";
-                break;
+                errorCode = "audio-client-activation-failed"; break;
             case EndpointStartResult::GetMixFormatFailed:
-                errorCode = "get-mix-format-failed";
-                break;
+                errorCode = "get-mix-format-failed"; break;
             case EndpointStartResult::InitializeFailed:
-                errorCode = "audio-client-initialize-failed";
-                break;
+                errorCode = "audio-client-initialize-failed"; break;
             case EndpointStartResult::CaptureClientFailed:
-                errorCode = "capture-client-failed";
-                break;
+                errorCode = "capture-client-failed"; break;
             case EndpointStartResult::AudioEngineStartFailed:
-                errorCode = "audio-engine-start-failed";
-                break;
+                errorCode = "audio-engine-start-failed"; break;
             case EndpointStartResult::Cancelled:
-                errorCode = "cancelled";
-                break;
-            default:
-                break;
-        }
-
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", "idle");
-        resp.Set("error", errorCode);
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        return;
-    }
-
-    // 7. Set state=kCapturing BEFORE mixer_->Start(...)
-    state_.store(static_cast<SessionState>(2)); // kCapturing
-
-    // 8. Start mixer with OnCapturePacket callback
-    auto mixResult = mixer_->Start([this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
-    });
-
-    if (!mixResult.success) {
-        // Rollback
-        endpointSource_->Stop();
-        endpointSource_.reset();
-        mixer_->RemoveSource(sourceId);
-        state_.store(static_cast<SessionState>(0)); // kIdle
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            activeSourceType_ = "";
-        }
-        streamGeneration_.fetch_sub(1);
-
-        const char* errorCode = "mixer-start-failed";
-        switch (mixResult.error) {
-            case MultiSourceMixer::StartError::AlreadyRunning:
-                errorCode = "mixer-already-running";
-                break;
-            case MultiSourceMixer::StartError::NoOutputCallback:
-                errorCode = "mixer-no-output-callback";
-                break;
-            case MultiSourceMixer::StartError::ThreadCreationFailed:
-                errorCode = "mixer-thread-creation-failed";
-                break;
-            case MultiSourceMixer::StartError::StaleThreadNotJoined:
-                errorCode = "mixer-stale-thread";
-                break;
+                errorCode = "cancelled"; break;
             default: break;
         }
+
         SimpleJson resp;
         resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
         resp.Set("requestId", ctx.requestId);
@@ -2229,39 +1842,16 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
         return;
     }
 
-    // 9. Check mixer is running immediately after successful start
-    if (!mixer_->IsRunning()) {
-        // Rollback
-        endpointSource_->Stop();
-        endpointSource_.reset();
-        mixer_->Stop();
-        mixer_->RemoveSource(sourceId);
-        state_.store(static_cast<SessionState>(0)); // kIdle
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            activeSourceType_ = "";
-        }
-        streamGeneration_.fetch_sub(1);
+    // Transfer ownership
+    endpointSource_ = std::move(source);
 
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", "idle");
-        resp.Set("error", "mixer-stopped-immediately");
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        return;
-    }
-
-    // 10. Return success result
-    std::string result = "{";
-    result += "\"streamGeneration\":" + std::to_string(gen) + ",";
-    result += "\"sourceId\":" + std::to_string(sourceId) + ",";
-    result += "\"sourceType\":\"endpoint-loopback\",";
-    result += "\"endpointReady\":true";
-    result += "}";
+    // Return success result
+    SimpleJson result;
+    result.Set("streamGeneration", static_cast<uint64_t>(gen));
+    result.Set("sourceType", "system");
+    result.Set("pipeline", "endpoint-direct");
+    result.Set("sampleRate", static_cast<uint64_t>(48000));
+    result.Set("channels", static_cast<uint64_t>(2));
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -2269,21 +1859,46 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "capturing");
-    resp.SetRaw("result", result);
+    resp.SetRaw("result", result.Str());
     resp.Set("error", "null");
     response = resp.Str();
 }
 
 void ServiceSession::HandleGetMixerState(const CommandContext& ctx,
-                                           const std::string& /*payload*/,
-                                           std::string& response) {
-    bool mixerRunning = mixer_ && mixer_->IsRunning();
-    uint32_t sourceCount = mixer_ ? mixer_->SourceCount() : 0;
+                                            const std::string& /*payload*/,
+                                            std::string& response) {
+    std::string activeSrc;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSrc = activeSourceType_;
+    }
 
-    std::string result = "{";
-    result += "\"mixerRunning\":" + std::string(mixerRunning ? "true" : "false") + ",";
-    result += "\"sourceCount\":" + std::to_string(sourceCount);
-    result += "}";
+    std::string result;
+    if (activeSrc == "monitor" && filteredMonitor_) {
+        result = "{";
+        result += "\"sourceType\":\"monitor\",";
+        result += "\"pipeline\":\"filtered-monitor\",";
+        result += "\"running\":" + std::string(filteredMonitor_->IsRunning() ? "true" : "false");
+        result += "}";
+    } else if (activeSrc == "application" && applicationSource_) {
+        result = "{";
+        result += "\"sourceType\":\"application\",";
+        result += "\"pipeline\":\"application-direct\",";
+        result += "\"running\":" + std::string(applicationSource_->IsRunning() ? "true" : "false");
+        result += "}";
+    } else if (activeSrc == "endpoint-loopback" && endpointSource_) {
+        result = "{";
+        result += "\"sourceType\":\"system\",";
+        result += "\"pipeline\":\"endpoint-direct\",";
+        result += "\"running\":" + std::string(endpointSource_->IsRunning() ? "true" : "false");
+        result += "}";
+    } else {
+        result = "{";
+        result += "\"sourceType\":\"none\",";
+        result += "\"pipeline\":\"idle\",";
+        result += "\"running\":false";
+        result += "}";
+    }
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -2297,66 +1912,110 @@ void ServiceSession::HandleGetMixerState(const CommandContext& ctx,
 }
 
 void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
-                                                  const std::string& /*payload*/,
-                                                  std::string& response) {
-    if (!mixer_) {
-        SimpleJson resp;
-        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
-        resp.Set("requestId", ctx.requestId);
-        resp.Set("sessionId", config_.sessionId);
-        resp.Set("success", false);
-        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
-        resp.Set("error", "mixer-not-running");
-        resp.SetRaw("result", "{}");
-        response = resp.Str();
-        return;
+                                                   const std::string& /*payload*/,
+                                                   std::string& response) {
+    std::string activeSrc;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSrc = activeSourceType_;
     }
 
-    auto diag = mixer_->GetDiagnostics();
+    std::string result;
+    if (activeSrc == "monitor" && filteredMonitor_) {
+        // Return filtered controller diagnostics
+        auto diag = filteredMonitor_->GetDiagnostics();
 
-    // Build result JSON
-    std::string result = "{";
-    result += "\"outputPackets\":" + std::to_string(diag.outputPackets) + ",";
-    result += "\"outputFrames\":" + std::to_string(diag.outputFrames) + ",";
-    result += "\"silentOutputPackets\":" + std::to_string(diag.silentOutputPackets) + ",";
-    result += "\"discontinuities\":" + std::to_string(diag.discontinuities) + ",";
-    result += "\"activeSourceCount\":" + std::to_string(diag.activeSourceCount) + ",";
-    result += "\"peakSourceCount\":" + std::to_string(diag.peakSourceCount) + ",";
-    result += "\"eligibleSessionCount\":" + std::to_string(diag.eligibleSessionCount) + ",";
-    result += "\"excludedDiscordCount\":" + std::to_string(diag.excludedDiscordCount) + ",";
-    result += "\"excludedScreenLinkCount\":" + std::to_string(diag.excludedScreenLinkCount) + ",";
-    result += "\"duplicateRootCount\":" + std::to_string(diag.duplicateRootCount) + ",";
-    result += "\"invalidSessionCount\":" + std::to_string(diag.invalidSessionCount) + ",";
-    result += "\"sourcesAdded\":" + std::to_string(diag.sourcesAdded) + ",";
-    result += "\"sourcesRemoved\":" + std::to_string(diag.sourcesRemoved) + ",";
-    result += "\"peakMixLevel\":" + std::to_string(static_cast<double>(diag.peakMixLevel)) + ",";
-    result += "\"appliedHeadroomDb\":" + std::to_string(static_cast<double>(diag.appliedHeadroomDb)) + ",";
-    result += "\"clippedSamples\":" + std::to_string(diag.clippedSamples) + ",";
-    result += "\"limitedBlocks\":" + std::to_string(diag.limitedBlocks) + ",";
-    result += "\"maxQueueDepth\":" + std::to_string(diag.maxQueueDepth) + ",";
-    result += "\"maxQueueAge100ns\":" + std::to_string(diag.maxQueueAge100ns) + ",";
-    result += "\"sourceQueuesAtMax\":" + std::to_string(diag.sourceQueuesAtMax) + ",";
-
-    // Source states
-    result += "\"sourceStates\":[";
-    for (size_t i = 0; i < diag.sourceStates.size(); ++i) {
-        if (i > 0) result += ",";
-        const auto& s = diag.sourceStates[i];
-        result += "{";
-        result += "\"sourceId\":" + std::to_string(s.sourceId) + ",";
-        result += "\"pid\":" + std::to_string(s.pid) + ",";
-        result += "\"creationTimeUtc100ns\":" + std::to_string(s.creationTimeUtc100ns) + ",";
-        result += "\"active\":" + std::string(s.active ? "true" : "false") + ",";
-        result += "\"queueDepth\":" + std::to_string(s.queueDepth) + ",";
-        result += "\"latePackets\":" + std::to_string(s.latePackets) + ",";
-        result += "\"missingPackets\":" + std::to_string(s.missingPackets) + ",";
-        result += "\"silentPackets\":" + std::to_string(s.silentPackets) + ",";
-        result += "\"discontinuities\":" + std::to_string(s.discontinuities) + ",";
-        result += "\"droppedPackets\":" + std::to_string(s.droppedPackets) + ",";
-        result += "\"droppedFrames\":" + std::to_string(s.droppedFrames);
+        result = "{";
+        result += "\"sourceType\":\"monitor\",";
+        result += "\"running\":" + std::string(diag.running ? "true" : "false") + ",";
+        result += "\"mixerRunning\":" + std::string(diag.mixerRunning ? "true" : "false") + ",";
+        result += "\"totalReconciliations\":" + std::to_string(diag.totalReconciliations) + ",";
+        result += "\"activeCaptureSources\":" + std::to_string(diag.activeCaptureSources) + ",";
+        result += "\"sourcesAdded\":" + std::to_string(diag.sourcesAdded) + ",";
+        result += "\"sourcesRemoved\":" + std::to_string(diag.sourcesRemoved) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(diag.mixerOutputPackets) + ",";
+        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(diag.mixerNonZeroOutputPackets);
+        result += "}";
+    } else if (activeSrc == "application" && applicationSource_) {
+        result = "{";
+        result += "\"sourceType\":\"application\",";
+        result += "\"pipeline\":\"application-direct\",";
+        result += "\"running\":" + std::string(applicationSource_->IsRunning() ? "true" : "false") + ",";
+        result += "\"packets\":" + std::to_string(appAudioDiag_.packets.load()) + ",";
+        result += "\"frames\":" + std::to_string(appAudioDiag_.frames.load()) + ",";
+        result += "\"nonZeroPackets\":" + std::to_string(appAudioDiag_.nonZeroPackets.load()) + ",";
+        result += "\"peak\":" + std::to_string(static_cast<double>(appAudioDiag_.peak.load()));
+        result += "}";
+    } else if (activeSrc == "endpoint-loopback" && endpointSource_) {
+        auto diag = endpointSource_->GetDiagnostics();
+        result = "{";
+        result += "\"sourceType\":\"system\",";
+        result += "\"pipeline\":\"endpoint-direct\",";
+        result += "\"running\":" + std::string(diag.running ? "true" : "false") + ",";
+        result += "\"packetsCaptured\":" + std::to_string(diag.packetsCaptured) + ",";
+        result += "\"nonZeroPackets\":" + std::to_string(diag.nonZeroPackets) + ",";
+        result += "\"silentPackets\":" + std::to_string(diag.silentPackets);
+        result += "}";
+    } else {
+        result = "{";
+        result += "\"sourceType\":\"none\",";
+        result += "\"pipeline\":\"idle\"";
         result += "}";
     }
-    result += "]}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", ctx.requestId);
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.SetRaw("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+// ========================================================================
+// HandleGetEndpointDiagnostics
+// ========================================================================
+
+void ServiceSession::HandleGetEndpointDiagnostics(const CommandContext& ctx,
+                                                    const std::string& /*payload*/,
+                                                    std::string& response) {
+    std::string activeSrc;
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSrc = activeSourceType_;
+    }
+
+    std::string result;
+    if (activeSrc == "endpoint-loopback" && endpointSource_) {
+        auto diag = endpointSource_->GetDiagnostics();
+        result = "{";
+        result += "\"running\":" + std::string(diag.running ? "true" : "false") + ",";
+        result += "\"packetsCaptured\":" + std::to_string(diag.packetsCaptured) + ",";
+        result += "\"nonZeroPackets\":" + std::to_string(diag.nonZeroPackets) + ",";
+        result += "\"silentPackets\":" + std::to_string(diag.silentPackets) + ",";
+        result += "\"deviceInvalidations\":" + std::to_string(diag.deviceInvalidations) + ",";
+        result += "\"deviceRestarts\":" + std::to_string(diag.deviceRestarts) + ",";
+        result += "\"lastHresult\":" + std::to_string(static_cast<long>(diag.lastHresult)) + ",";
+        result += "\"lastError\":\"";
+        {
+            // Escape quotes in lastError
+            std::string escaped = diag.lastError;
+            size_t pos = 0;
+            while ((pos = escaped.find('"', pos)) != std::string::npos) {
+                escaped.replace(pos, 1, "\\\"");
+                pos += 2;
+            }
+            result += escaped;
+        }
+        result += "\"";
+        result += "}";
+    } else {
+        result = "{";
+        result += "\"sourceType\":\"none\"";
+        result += "}";
+    }
 
     SimpleJson resp;
     resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
@@ -2409,20 +2068,21 @@ void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
 }
 
 // ========================================================================
-// StopPhase2EResources
+// StopAudioResources
 // ========================================================================
 
-void ServiceSession::StopPhase2EResources() {
-    // Stop mixer first (stops producing output)
-    if (mixer_) {
-        mixer_->Stop();
+void ServiceSession::StopAudioResources() {
+    // Stop filtered monitor first (owns its own captures, mixer, and threads)
+    if (filteredMonitor_) {
+        filteredMonitor_->Stop();
+        filteredMonitor_.reset();
     }
 
-    // Stop all application capture sources
-    for (auto& src : captureSources_) {
-        if (src) src->Stop();
+    // Stop application capture source
+    if (applicationSource_) {
+        applicationSource_->Stop();
+        applicationSource_.reset();
     }
-    captureSources_.clear();
 
     // Stop endpoint loopback source
     if (endpointSource_) {
@@ -2430,9 +2090,10 @@ void ServiceSession::StopPhase2EResources() {
         endpointSource_.reset();
     }
 
-    // Stop session monitor
-    if (sessionMonitor_) {
-        sessionMonitor_->Stop();
+    // Clear active source type
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        activeSourceType_.clear();
     }
 }
 
@@ -2517,10 +2178,6 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
     capturePacketsProduced_.fetch_add(1, std::memory_order_relaxed);
     captureBytesProduced_.fetch_add(hdr.payloadBytes, std::memory_order_relaxed);
     sourcePacketsEnqueued_.fetch_add(1, std::memory_order_relaxed);
-    mixerOutputPackets_.fetch_add(1, std::memory_order_relaxed);
-    if (!packet.isSilent) {
-        mixerNonZeroOutputPackets_.fetch_add(1, std::memory_order_relaxed);
-    }
 
     // Push to queue: always succeeds (drops oldest if full).
     // Dropped packets are counted in pcmWriter_.Queue().DroppedCount().

@@ -17,6 +17,7 @@
 #include "MultiSourceMixer.h"      // MultiSourceMixer, MixerDiagnostics
 #include "ApplicationCaptureSource.h" // ApplicationCaptureSource
 #include "EndpointLoopbackSource.h"   // EndpointLoopbackSource
+#include "FilteredMonitorController.h" // FilteredMonitorController, FilteredMonitorDiagnostics
 
 namespace screenlink::audio {
 
@@ -71,13 +72,14 @@ private:
     // Source resolution (shared with CLI --resolve-source)
     void HandleResolveSource(const CommandContext& ctx, const std::string& payload, std::string& response);
 
-    // Phase 2E: Multi-source audio mixer handlers
+    // Audio source handlers
     void HandleEnumerateAudioSessions(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandleStartApplicationAudio(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandleStartFilteredMonitorAudio(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandleStartEndpointLoopback(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandleGetMixerState(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandleGetMixerDiagnostics(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleGetEndpointDiagnostics(const CommandContext& ctx, const std::string& payload, std::string& response);
 
     /// Dispatch a parsed control request to the appropriate handler.
     /// Returns true if the command was recognised, false otherwise.
@@ -89,8 +91,8 @@ private:
     /// Validate auth token and sessionId from a request.
     bool ValidateRequest(const std::string& authToken, const std::string& sessionId);
 
-    /// Stop all Phase 2E multi-source mixer resources.
-    void StopPhase2EResources();
+    /// Stop all active audio capture resources.
+    void StopAudioResources();
 
     /// Capture callback — converts AudioPacket to PcmPacket and enqueues.
     bool OnCapturePacket(const AudioPacket& packet);
@@ -125,7 +127,7 @@ private:
     // State
     std::atomic<SessionState> state_{SessionState::kIdle};
     std::atomic<uint32_t> streamGeneration_{0};
-    std::string activeSourceType_;  // "synthetic", "process", or ""
+    std::string activeSourceType_;  // "synthetic", "process", "application", "monitor", "endpoint-loopback", or ""
     std::mutex stateMutex_;         // protects activeSourceType_
 
     // PCM writer (handles its own pipe creation and write thread)
@@ -171,11 +173,11 @@ private:
     // Parent process handle
     void* parentProcessHandle_ = nullptr;
 
-    // Phase 2E: Multi-source audio mixer
-    std::unique_ptr<AudioSessionMonitor> sessionMonitor_;
-    std::unique_ptr<MultiSourceMixer> mixer_;
-    std::vector<std::unique_ptr<ApplicationCaptureSource>> captureSources_;
-    std::unique_ptr<EndpointLoopbackSource> endpointSource_;
+    // Audio capture sources — each mode owns exactly one resource type
+    std::unique_ptr<ApplicationCaptureSource> applicationSource_;     // Application Audio
+    std::unique_ptr<FilteredMonitorController> filteredMonitor_;      // Filtered Monitor
+    std::unique_ptr<EndpointLoopbackSource> endpointSource_;          // System Audio / Endpoint Loopback
+    std::mutex audioLifecycleMutex_;                                  // Serializes start/stop transitions
 };
 
 } // namespace screenlink::audio

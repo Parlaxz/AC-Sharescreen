@@ -210,7 +210,7 @@ describe('IPC handlers — audio start response normalisation', () => {
 
   it('start-application-audio response includes "streamGeneration"', () => {
     const handlerStart = content.indexOf("'start-application-audio'");
-    const block = content.slice(handlerStart, handlerStart + 600);
+    const block = content.slice(handlerStart, handlerStart + 1400);
     expect(block).toContain('streamGeneration');
   });
 

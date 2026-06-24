@@ -12,6 +12,7 @@
 #include "ExclusionPolicy.h"
 #include "AudioSessionMonitor.h"
 #include "MultiSourceMixer.h"
+#include "Phase2GSelfTest.h"
 #include "ApplicationCaptureSource.h"
 
 #define NOMINMAX
@@ -1141,6 +1142,11 @@ int main(int argc, char* argv[]) {
                 expect(true, "AudioSessionMonitor: init failed gracefully (acceptable)");
             }
         }
+      }
+
+      // ── Phase 2G self-tests ──
+      if (!screenlink::audio::RunAndReportPhase2GSelfTests()) {
+          allPassed = false;
       }
 
       // ── Phase 2E: MultiSourceMixer tests ──
