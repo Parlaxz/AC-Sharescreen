@@ -370,6 +370,7 @@ export class ControlClient {
     excludeDiscord: boolean;
     excludeScreenLink: boolean;
     screenLinkPid: number;
+    screenLinkIdentity?: Record<string, unknown>;
   }): Promise<StartFilteredMonitorResult> {
     const resp = await this.sendRequest('startFilteredMonitorAudio', payload as Record<string, unknown>);
     if (!resp.success || !resp.result) {

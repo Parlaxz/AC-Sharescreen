@@ -51,16 +51,35 @@ bool FilteredSourcePlanner::IsScreenLinkSession(
     const AudioSessionInfo& session,
     const FilteredMonitorOptions& options) const
 {
-    // Check via ExclusionPolicy name/path matching
+    // Check via ExclusionPolicy name/path matching (basename fallback)
     if (IsScreenLinkProcess(session.executableName, session.executablePath)) {
         return true;
     }
-    // Check if PID matches the known ScreenLink PID
+
+    // Check against structured ScreenLinkIdentity (preferred method)
+    const auto& identity = options.screenLinkIdentity;
+    if (identity.IsValid()) {
+        // Check by current root PID + creation time
+        if (identity.IsCurrentRoot(session.pid, session.creationTimeUtc100ns)) {
+            return true;
+        }
+        // Check if resolved root identity matches
+        if (session.rootPid != 0 &&
+            identity.IsCurrentRoot(session.rootPid, session.rootCreationTimeUtc100ns)) {
+            return true;
+        }
+        // Check application identity via session executable path
+        if (!session.executablePath.empty() &&
+            identity.IsScreenLinkApplication(session.executablePath)) {
+            return true;
+        }
+    }
+
+    // Fallback: legacy single-PID check (maintains backward compat)
     if (options.screenLinkPid != 0) {
         if (session.pid == options.screenLinkPid) {
             return true;
         }
-        // Check if resolved root PID matches
         if (session.rootPid != 0 && session.rootPid == options.screenLinkPid) {
             return true;
         }
@@ -188,11 +207,22 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
         // --- Step 7: Apply ScreenLink exclusion (check both session AND root level) ---
         if (options.excludeScreenLink) {
             bool slExcluded = false;
-            // Session-level check
+            // Session-level check using structured identity
             if (IsScreenLinkSession(session, options)) {
                 slExcluded = true;
             }
-            // Root-level check
+            // Root-level check using structured identity
+            if (!slExcluded) {
+                // Check via CheckExclusionV2 for the root identity
+                auto rootMatch = CheckExclusionV2(
+                    tree.applicationRootName,
+                    tree.applicationRootPath,
+                    options.screenLinkIdentity);
+                if (rootMatch.isScreenLink) {
+                    slExcluded = true;
+                }
+            }
+            // Fallback root-level basename check
             if (!slExcluded && IsScreenLinkProcess(tree.applicationRootName, tree.applicationRootPath)) {
                 slExcluded = true;
             }

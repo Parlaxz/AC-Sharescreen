@@ -99,6 +99,14 @@ export interface PcmPipelineSnapshot {
   helperBinaryPath?: string;
   helperBinarySize?: number;
   helperBinaryMtime?: string;
+  helperBinarySha256?: string;
+  // Helper-reported build provenance (for mismatch detection)
+  helperReportedCommit?: string;
+  helperReportedDirty?: boolean;
+  helperReportedProtocolVersion?: string;
+  helperReportedBuildConfig?: string;
+  expectedCommit?: string;
+  provenanceMismatch?: string;
 }
 
 // ── AudioHelperManager ──
@@ -348,15 +356,64 @@ export class AudioHelperManager {
     return { success: true, streamGeneration: gen };
   }
 
+  private buildScreenLinkIdentity(): Record<string, unknown> {
+    const identity: Record<string, unknown> = {
+      rootPid: process.pid,
+      rootCreationTimeUtc100ns: undefined as unknown as string, // filled below
+      productIdentifier: 'screenlink',
+    };
+
+    // Try to get current process creation time
+    try {
+      // On Windows, we can read /proc/pid equivalent via process module
+      const creation = process.getCreationTime?.();
+      if (creation) {
+        // Convert Unix ms to Windows FILETIME 100ns ticks
+        identity.rootCreationTimeUtc100ns = String(
+          BigInt(Math.floor(creation * 10000)) + BigInt(116444736000000000)
+        );
+      }
+    } catch { /* best effort */ }
+
+    // Determine if packaged or development
+    const isPackaged = !process.env.VITE_DEV_SERVER_URL && !process.env.ELECTRON_RUN_AS_NODE;
+    const appPath = process.env.APP_PATH || process.cwd();
+
+    if (isPackaged) {
+      // Packaged: use resources/app path and app executable path
+      identity.normalizedPackagedPath = process.execPath;
+      try {
+        const resourcesPath = require('path').resolve(process.execPath, '..', '..');
+        identity.normalizedInstallationRoot = resourcesPath;
+      } catch { /* best effort */ }
+    } else {
+      // Development: use the app root directory
+      identity.normalizedDevAppRoot = appPath;
+      // Entrypoint is the main script path
+      try {
+        identity.normalizedDevEntrypoint = require('path').resolve(__dirname, '..', 'main', 'main.js');
+      } catch { /* best effort */ }
+    }
+
+    // Helper executable path
+    try {
+      identity.helperExePath = this.config.helperPath;
+    } catch { /* best effort */ }
+
+    return identity;
+  }
+
   async startFilteredMonitorCapture(options: {
     excludeDiscord?: boolean;
     excludeScreenLink?: boolean;
   }): Promise<StartFilteredMonitorResult> {
     this.ensureReady();
+    const identity = this.buildScreenLinkIdentity();
     const result = await this.control!.startFilteredMonitorAudio({
       excludeDiscord: options.excludeDiscord ?? true,
       excludeScreenLink: options.excludeScreenLink ?? true,
       screenLinkPid: process.pid,
+      screenLinkIdentity: identity,
     });
     this.streamGeneration = result.streamGeneration;
     this.currentSourceType = 'monitor';
@@ -391,6 +448,10 @@ export class AudioHelperManager {
 
   async shutdown(): Promise<void> {
     this.shuttingDown_ = true; // Prevent restart during shutdown
+
+    // Prevent any delayed callback from spawning or restarting
+    this.restartCount = this.maxRestarts;
+
     try {
       if (this.state === 'capturing') {
         await this.stopCapture();
@@ -403,7 +464,7 @@ export class AudioHelperManager {
     }
     await this.cleanup();
     this.state = 'disconnected';
-    this.shuttingDown_ = false;
+    // Keep shuttingDown_ = true to prevent unintended restarts
   }
 
   // ── Queries ──
@@ -440,12 +501,51 @@ export class AudioHelperManager {
     let helperPath = '';
     let helperSize = 0;
     let helperMtime = '';
+    let helperSha256 = '';
+    let helperReportedCommit: string | undefined;
+    let helperReportedDirty: boolean | undefined;
+    let helperReportedProtocolVersion: string | undefined;
+    let helperReportedBuildConfig: string | undefined;
+    let expectedCommit: string | undefined;
+    let provenanceMismatch: string | undefined;
+
     try {
       const stats = fs.statSync(this.config.helperPath);
       helperPath = this.config.helperPath;
       helperSize = stats.size;
       helperMtime = stats.mtime.toISOString();
+      // SHA-256 hash of the binary
+      const hash = crypto.createHash('sha256');
+      hash.update(fs.readFileSync(this.config.helperPath));
+      helperSha256 = hash.digest('hex');
     } catch { /* best effort */ }
+
+    // Extract helper-reported provenance from diagnostics
+    const helperBuildInfo = (helperDiag as any)?.buildInfo;
+    if (helperBuildInfo) {
+      helperReportedCommit = helperBuildInfo.gitCommit;
+      helperReportedDirty = helperBuildInfo.gitDirty === 'true';
+      helperReportedProtocolVersion = helperBuildInfo.protocolVersion ?? helperDiag?.protocolVersion;
+      helperReportedBuildConfig = helperBuildInfo.buildConfig;
+    }
+
+    // Build expected commit from (hypothetical) packaged metadata
+    // In development, this is the current repo HEAD
+    try {
+      const { execSync } = await import('child_process');
+      expectedCommit = execSync('git rev-parse --short HEAD', {
+        cwd: path.resolve(_dirname, '..', '..', '..', '..'),
+        encoding: 'utf-8',
+        timeout: 5000,
+      }).trim();
+    } catch { /* best effort */ }
+
+    if (helperReportedCommit && expectedCommit && helperReportedCommit !== 'unknown' && expectedCommit !== 'unknown') {
+      if (helperReportedCommit !== expectedCommit) {
+        provenanceMismatch = `helper-commit=${helperReportedCommit} expected=${expectedCommit}`;
+        diag(`PROVENANCE MISMATCH: ${provenanceMismatch}`);
+      }
+    }
 
     return {
       synthPacketsProduced: helperDiag
@@ -492,6 +592,13 @@ export class AudioHelperManager {
       helperBinaryPath: helperPath,
       helperBinarySize: helperSize,
       helperBinaryMtime: helperMtime,
+      helperBinarySha256: helperSha256,
+      helperReportedCommit: helperReportedCommit,
+      helperReportedDirty: helperReportedDirty,
+      helperReportedProtocolVersion: helperReportedProtocolVersion,
+      helperReportedBuildConfig: helperReportedBuildConfig,
+      expectedCommit: expectedCommit,
+      provenanceMismatch: provenanceMismatch,
     };
   }
 
@@ -729,6 +836,13 @@ export class AudioHelperManager {
   }
 
   private async attemptRestart(): Promise<void> {
+    // Re-check shutdown state before restarting
+    if (this.shuttingDown_) {
+      diag('Restart cancelled — manager is shutting down');
+      this.state = 'disconnected';
+      return;
+    }
+
     await this.cleanup();
 
     this.state = 'connecting';
@@ -750,6 +864,52 @@ export class AudioHelperManager {
     }
   }
 
+  /**
+   * Wait for the helper process to exit with a deadline.
+   * Falls back to force kill if the process doesn't exit within the timeout.
+   */
+  private async awaitHelperExit(deadlineMs: number = 5000): Promise<void> {
+    if (!this.helper || this.helper.killed) return;
+
+    const helper = this.helper;
+    const exitPromise = new Promise<{ code: number | null; signal: string | null }>(
+      (resolve) => {
+        helper.once('exit', (code, signal) => resolve({ code, signal }));
+      },
+    );
+
+    const timeoutPromise = new Promise<{ code: number | null; signal: string | null }>(
+      (_, reject) => {
+        setTimeout(() => reject(new Error('Helper exit timeout')), deadlineMs);
+      },
+    );
+
+    try {
+      // Send graceful termination signal
+      if (helper.pid) {
+        process.kill(helper.pid, 'SIGTERM');
+      } else {
+        helper.kill();
+      }
+      await Promise.race([exitPromise, timeoutPromise]);
+      diag('Helper exited gracefully');
+    } catch {
+      // Timeout or other error — force kill
+      if (!helper.killed) {
+        try {
+          helper.kill('SIGKILL');
+          diag('Force-killed helper after exit timeout');
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Final verification
+    const stillAlive = helper.exitCode === null && !helper.killed;
+    if (stillAlive) {
+      diag('WARNING: helper may still be running after force kill');
+    }
+  }
+
   private async cleanup(): Promise<void> {
     this.pcmBridge.detach();
 
@@ -757,6 +917,10 @@ export class AudioHelperManager {
       clearInterval(this.diagnosticsInterval);
       this.diagnosticsInterval = null;
     }
+
+    // Cancel any pending restart
+    this.restartCount = this.maxRestarts; // Prevent further automatic restarts
+    this.shuttingDown_ = true;
 
     // Close PCM socket
     if (this.pcmSocket) {
@@ -771,13 +935,9 @@ export class AudioHelperManager {
     this.control = null;
     this.parser = null;
 
-    // Kill helper process
+    // Await helper exit with deadline
     if (this.helper && !this.helper.killed) {
-      try {
-        this.helper.kill();
-      } catch {
-        /* ignore */
-      }
+      await this.awaitHelperExit(5000);
     }
     this.helper = null;
   }

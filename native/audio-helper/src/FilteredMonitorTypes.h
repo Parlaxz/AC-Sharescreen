@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "LoopbackCapture.h" // AudioPacket
+#include "ExclusionPolicy.h" // ScreenLinkIdentity
 
 namespace screenlink::audio {
 
@@ -46,6 +47,7 @@ struct FilteredMonitorOptions {
     bool excludeDiscord = true;
     bool excludeScreenLink = true;
     uint32_t screenLinkPid = 0;
+    ScreenLinkIdentity screenLinkIdentity;
 
     std::chrono::milliseconds reconcileInterval{1000};
     std::chrono::milliseconds removalGracePeriod{2000};
