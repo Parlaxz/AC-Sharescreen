@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { GroupStore } from "../src/main/group-store.js";
 import { QualityPresetStore } from "../src/main/quality-preset-store.js";
 import type { SecureStore } from "../src/main/secure-store.js";
+import type { GroupQualitySettings } from "@screenlink/shared";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -127,18 +128,43 @@ describe("QualityPresetStore", () => {
     store = new QualityPresetStore(dir);
   });
 
+  const defaultTestSettings: GroupQualitySettings = {
+    schemaVersion: 1,
+    video: {
+      videoBitrateKbps: 1000,
+      sendWidth: 1280,
+      sendHeight: 720,
+      sendFps: 30,
+      captureWidth: 1280,
+      captureHeight: 720,
+      captureFps: 30,
+      preserveAspectRatio: true,
+      preventUpscale: true,
+      resolutionMode: "target-dimensions",
+      scaleResolutionDownBy: 1,
+      codec: "vp9",
+      h264Profile: "auto",
+      contentHint: "detail",
+      degradationPreference: "maintain-resolution",
+      scalabilityMode: null,
+      cursorMode: "always",
+      rtpPriority: "medium",
+    },
+    audio: {
+      bitrateKbps: 64,
+      channels: "stereo",
+      bitrateMode: "vbr",
+      dtx: false,
+      fec: true,
+      packetDurationMs: 20,
+      redundantAudio: false,
+    },
+  };
+
   it("creates a preset and lists it", () => {
     const preset = store.create({
       name: "Test",
-      settings: {
-        videoBitrateKbps: 1000,
-        maxWidth: 1280,
-        maxHeight: 720,
-        maxFps: 30,
-        degradationPreference: "maintain-resolution",
-        contentHint: "detail",
-        audioEnabled: true,
-      },
+      settings: defaultTestSettings,
     });
     expect(preset.id).toBeTruthy();
     expect(store.list()).toHaveLength(1);
@@ -147,15 +173,7 @@ describe("QualityPresetStore", () => {
   it("updates a preset", () => {
     const preset = store.create({
       name: "Original",
-      settings: {
-        videoBitrateKbps: 1000,
-        maxWidth: 1280,
-        maxHeight: 720,
-        maxFps: 30,
-        degradationPreference: "maintain-resolution",
-        contentHint: "detail",
-        audioEnabled: true,
-      },
+      settings: defaultTestSettings,
     });
     const updated = store.update(preset.id, { name: "Updated" });
     expect(updated!.name).toBe("Updated");
@@ -165,15 +183,7 @@ describe("QualityPresetStore", () => {
   it("duplicates a preset", () => {
     const preset = store.create({
       name: "Source",
-      settings: {
-        videoBitrateKbps: 1000,
-        maxWidth: 1280,
-        maxHeight: 720,
-        maxFps: 30,
-        degradationPreference: "maintain-resolution",
-        contentHint: "detail",
-        audioEnabled: true,
-      },
+      settings: defaultTestSettings,
     });
     const dup = store.duplicate(preset.id, "Source (copy)");
     expect(dup).toBeTruthy();
@@ -185,15 +195,7 @@ describe("QualityPresetStore", () => {
   it("deletes a preset", () => {
     const preset = store.create({
       name: "Doomed",
-      settings: {
-        videoBitrateKbps: 1000,
-        maxWidth: 1280,
-        maxHeight: 720,
-        maxFps: 30,
-        degradationPreference: "maintain-resolution",
-        contentHint: "detail",
-        audioEnabled: true,
-      },
+      settings: defaultTestSettings,
     });
     const ok = store.delete(preset.id);
     expect(ok).toBe(true);
@@ -205,13 +207,8 @@ describe("QualityPresetStore", () => {
     const preset = store.create({
       name: uniqueName,
       settings: {
-        videoBitrateKbps: 2000,
-        maxWidth: 1920,
-        maxHeight: 1080,
-        maxFps: 60,
-        degradationPreference: "maintain-framerate",
-        contentHint: "motion",
-        audioEnabled: false,
+        ...defaultTestSettings,
+        video: { ...defaultTestSettings.video, videoBitrateKbps: 2000, sendWidth: 1920, sendHeight: 1080, sendFps: 60, degradationPreference: "maintain-framerate", contentHint: "motion" },
       },
     });
     const exported = await store.export(preset.id);
@@ -230,15 +227,7 @@ describe("QualityPresetStore", () => {
   it("imports with a unique new id", async () => {
     const preset = store.create({
       name: "First",
-      settings: {
-        videoBitrateKbps: 1000,
-        maxWidth: 1280,
-        maxHeight: 720,
-        maxFps: 30,
-        degradationPreference: "maintain-resolution",
-        contentHint: "detail",
-        audioEnabled: true,
-      },
+      settings: defaultTestSettings,
     });
     const exported = await store.export(preset.id);
     const result = await store.import(exported!);
@@ -257,15 +246,7 @@ describe("QualityPresetStore", () => {
   it("renames on import collision", async () => {
     const a = store.create({
       name: "MyPreset",
-      settings: {
-        videoBitrateKbps: 1000,
-        maxWidth: 1280,
-        maxHeight: 720,
-        maxFps: 30,
-        degradationPreference: "maintain-resolution",
-        contentHint: "detail",
-        audioEnabled: true,
-      },
+      settings: defaultTestSettings,
     });
     const exported = await store.export(a.id);
     const result = await store.import(exported!);

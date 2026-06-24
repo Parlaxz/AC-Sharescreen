@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { HybridTimestamp } from "./hybrid-logical-clock.js";
 import type { GroupQualitySettings } from "./quality-settings.js";
 import { randomBase64Url } from "./ids.js";
+import { createDefaultGroupQualitySettings } from "./quality-settings.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -69,15 +70,7 @@ export function createGroupInvite(opts: CreateGroupInviteOpts): GroupInviteV1 {
       counter: 0,
       nodeId: opts.nodeId,
     },
-    bootstrapSettings: {
-      videoBitrateKbps: 1800,
-      maxWidth: 1280,
-      maxHeight: 720,
-      maxFps: 30,
-      degradationPreference: "balanced",
-      contentHint: "detail",
-      audioEnabled: true,
-    },
+    bootstrapSettings: createDefaultGroupQualitySettings(),
     bootstrapSettingsStamp: {
       wallTimeMs: now,
       counter: 0,

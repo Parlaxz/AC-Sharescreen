@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../stores/main-store.js";
+import { getGroupConnectionManager } from "../App.js";
 
 interface GroupRecord {
   groupId: string;
@@ -20,11 +21,16 @@ export function Groups() {
   const [joinLink, setJoinLink] = useState("");
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const setSelectedGroupId = useStore((s) => s.setSelectedGroupId);
+  const connectionStateById = useStore((s) => s.groupConnectionStateById);
+  const onlineDeviceIdsByGroup = useStore((s) => s.onlineDeviceIdsByGroup);
 
   const refresh = async () => {
-    const list = (await (window as unknown as { screenlink: { listGroups: () => Promise<unknown[]> } }).screenlink.listGroups()) as GroupRecord[];
+    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    if (!api) return;
+    const list = (await api.listGroups()) as GroupRecord[];
     setGroups(list);
   };
 
@@ -32,14 +38,41 @@ export function Groups() {
     void refresh();
   }, []);
 
+  const onConnectGroup = async (record: GroupRecord) => {
+    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    if (!api) return;
+    const config = await api.getGroupConnectionConfig(record.groupId) as { groupId: string; controlRoomId: string; groupSecret: string; nodeId: string } | null;
+    if (!config) return;
+    const identity = await api.getDeviceIdentity();
+    if (!identity) return;
+    const connManager = getGroupConnectionManager();
+    if (connManager) {
+      await connManager.addGroup({
+        groupId: config.groupId,
+        controlRoomId: config.controlRoomId,
+        groupSecret: config.groupSecret,
+        nodeId: identity.deviceId,
+        displayName: identity.displayName,
+      });
+    }
+  };
+
   const onCreate = async () => {
     setError(null);
     try {
-      const result = (await (window as unknown as { screenlink: { createGroup: (i: { groupName: string }) => Promise<{ invite: unknown; link?: string }> } }).screenlink.createGroup({ groupName: newName.trim() || "Group" })) as { invite: unknown; link?: string };
-      setInviteLink(result.link ?? null);
+      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+      if (!api) return;
+      const result = (await api.createGroup({ groupName: newName.trim() || "Group" })) as { record: GroupRecord; invite: unknown; link?: string };
+      if (result.invite) {
+        const link = (result as unknown as { invite: { groupId: string }; link?: string }).link;
+        setInviteLink(link ?? null);
+      }
       setNewName("");
       setCreating(false);
       await refresh();
+      if (result.record) {
+        await onConnectGroup(result.record);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -48,10 +81,13 @@ export function Groups() {
   const onJoin = async () => {
     setError(null);
     try {
-      await (window as unknown as { screenlink: { joinGroup: (i: { link: string }) => Promise<unknown> } }).screenlink.joinGroup({ link: joinLink.trim() });
+      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+      if (!api) return;
+      const record = (await api.joinGroup({ link: joinLink.trim() })) as GroupRecord;
       setJoinLink("");
       setJoining(false);
       await refresh();
+      await onConnectGroup(record);
     } catch (e) {
       setError(String(e));
     }
@@ -59,7 +95,9 @@ export function Groups() {
 
   const onCopyInvite = async (groupId: string) => {
     try {
-      const result = (await (window as unknown as { screenlink: { getGroupInvite: (id: string) => Promise<{ link: string } | null> } }).screenlink.getGroupInvite(groupId)) as { link: string } | null;
+      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+      if (!api) return;
+      const result = (await api.getGroupInvite(groupId)) as { link: string } | null;
       if (result?.link) {
         await navigator.clipboard.writeText(result.link);
         setInviteLink(result.link);
@@ -67,6 +105,28 @@ export function Groups() {
     } catch (e) {
       setError(String(e));
     }
+  };
+
+  const onLeaveGroup = async (groupId: string) => {
+    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    if (!api) return;
+    const connManager = getGroupConnectionManager();
+    if (connManager) {
+      await connManager.removeGroup(groupId);
+    }
+    await api.leaveGroup(groupId);
+    await refresh();
+  };
+
+  const sortedMembers = (members: Record<string, { deviceId: string; displayName: string }>, online: string[]) => {
+    const all = Object.values(members);
+    const onlineSet = new Set(online);
+    const onlineList = all.filter((m) => onlineSet.has(m.deviceId));
+    const offlineList = all.filter((m) => !onlineSet.has(m.deviceId));
+    return [
+      ...onlineList.sort((a, b) => a.displayName.localeCompare(b.displayName)),
+      ...offlineList.sort((a, b) => a.displayName.localeCompare(b.displayName)),
+    ];
   };
 
   return (
@@ -80,7 +140,7 @@ export function Groups() {
       </header>
 
       {creating && (
-        <div className="dialog">
+        <div className="dialog card">
           <h2>Create Group</h2>
           <input
             type="text"
@@ -97,7 +157,7 @@ export function Groups() {
       )}
 
       {joining && (
-        <div className="dialog">
+        <div className="dialog card">
           <h2>Join Group</h2>
           <input
             type="text"
@@ -113,18 +173,12 @@ export function Groups() {
       )}
 
       {inviteLink && (
-        <div className="dialog">
+        <div className="dialog card">
           <h2>Group Created</h2>
           <p>Copy this link and share it with anyone you want to invite.</p>
           <textarea readOnly value={inviteLink} rows={3} />
           <div className="actions">
-            <button
-              onClick={async () => {
-                await navigator.clipboard.writeText(inviteLink);
-              }}
-            >
-              Copy Group Link
-            </button>
+            <button onClick={async () => { await navigator.clipboard.writeText(inviteLink); }}>Copy Group Link</button>
             <button onClick={() => setInviteLink(null)}>Done</button>
           </div>
         </div>
@@ -137,38 +191,30 @@ export function Groups() {
           <p>You have no groups yet. Create or join a group to start sharing.</p>
         ) : (
           groups.map((g) => {
+            const onlineIds = onlineDeviceIdsByGroup[g.groupId] ?? [];
+            const connState = connectionStateById[g.groupId];
             const members = Object.values(g.sharedState?.members ?? {});
-            const onlineCount = 0; // tracked separately by GroupConnectionManager in renderer
-            const knownCount = members.length;
             return (
               <div
                 key={g.groupId}
-                className={`group-card ${selectedGroupId === g.groupId ? "selected" : ""}`}
+                className={`group-card card ${selectedGroupId === g.groupId ? "selected" : ""}`}
                 onClick={() => setSelectedGroupId(g.groupId)}
               >
                 <h3>{g.sharedState?.name?.value ?? "(unnamed)"}</h3>
-                <p>
-                  {onlineCount} online · {knownCount} known user{knownCount === 1 ? "" : "s"}
+                <p className="connection-state">
+                  {connState ? connState.state : "idle"} · {onlineIds.length} online · {members.length} known user{members.length === 1 ? "" : "s"}
                 </p>
+                <div className="member-list compact">
+                  {sortedMembers(g.sharedState?.members ?? {}, onlineIds).slice(0, 8).map((m) => (
+                    <span key={m.deviceId} className={`member-tag ${onlineIds.includes(m.deviceId) ? "online" : "offline"}`}>
+                      {m.displayName}
+                    </span>
+                  ))}
+                </div>
                 <div className="actions">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void onCopyInvite(g.groupId);
-                    }}
-                  >
-                    Copy Group Link
-                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); void onCopyInvite(g.groupId); }}>Copy Group Link</button>
                   <button disabled>Group Settings</button>
-                  <button
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      await (window as unknown as { screenlink: { leaveGroup: (id: string) => Promise<void> } }).screenlink.leaveGroup(g.groupId);
-                      await refresh();
-                    }}
-                  >
-                    Leave Group
-                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); void onLeaveGroup(g.groupId); }}>Leave Group</button>
                 </div>
               </div>
             );

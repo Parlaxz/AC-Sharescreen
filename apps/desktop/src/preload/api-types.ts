@@ -136,13 +136,36 @@ export interface PersistedSettings {
     allowViewerQualityRequests: boolean;
   };
   globalQualityDefaults: {
-    videoBitrateKbps: number;
-    maxWidth: number;
-    maxHeight: number;
-    maxFps: number;
-    degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
-    contentHint: "detail" | "motion" | "auto" | "text";
-    audioEnabled: boolean;
+    schemaVersion: 1;
+    video: {
+      videoBitrateKbps: number;
+      sendWidth: number;
+      sendHeight: number;
+      sendFps: number;
+      captureWidth: number;
+      captureHeight: number;
+      captureFps: number;
+      preserveAspectRatio: boolean;
+      preventUpscale: boolean;
+      resolutionMode: "target-dimensions" | "scale-factor";
+      scaleResolutionDownBy: number;
+      codec: "auto" | "vp9" | "av1" | "h264" | "vp8";
+      h264Profile: "auto" | "baseline" | "main" | "high";
+      contentHint: "auto" | "text" | "detail" | "motion";
+      degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
+      scalabilityMode: string | null;
+      cursorMode: "always" | "motion" | "never";
+      rtpPriority: "very-low" | "low" | "medium" | "high";
+    };
+    audio: {
+      bitrateKbps: number;
+      channels: "mono" | "stereo";
+      bitrateMode: "vbr" | "cbr";
+      dtx: boolean;
+      fec: boolean;
+      packetDurationMs: 10 | 20 | 40 | 60;
+      redundantAudio: boolean;
+    };
   };
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;

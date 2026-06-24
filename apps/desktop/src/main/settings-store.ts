@@ -41,13 +41,36 @@ export interface PersistedSettings {
     allowViewerQualityRequests: boolean;
   };
   globalQualityDefaults: {
-    videoBitrateKbps: number;
-    maxWidth: number;
-    maxHeight: number;
-    maxFps: number;
-    degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
-    contentHint: "detail" | "motion" | "auto" | "text";
-    audioEnabled: boolean;
+    schemaVersion: 1;
+    video: {
+      videoBitrateKbps: number;
+      sendWidth: number;
+      sendHeight: number;
+      sendFps: number;
+      captureWidth: number;
+      captureHeight: number;
+      captureFps: number;
+      preserveAspectRatio: boolean;
+      preventUpscale: boolean;
+      resolutionMode: "target-dimensions" | "scale-factor";
+      scaleResolutionDownBy: number;
+      codec: "auto" | "vp9" | "av1" | "h264" | "vp8";
+      h264Profile: "auto" | "baseline" | "main" | "high";
+      contentHint: "auto" | "text" | "detail" | "motion";
+      degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
+      scalabilityMode: string | null;
+      cursorMode: "always" | "motion" | "never";
+      rtpPriority: "very-low" | "low" | "medium" | "high";
+    };
+    audio: {
+      bitrateKbps: number;
+      channels: "mono" | "stereo";
+      bitrateMode: "vbr" | "cbr";
+      dtx: boolean;
+      fec: boolean;
+      packetDurationMs: 10 | 20 | 40 | 60;
+      redundantAudio: boolean;
+    };
   };
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;
@@ -65,13 +88,36 @@ const DEFAULT_HOST_LIMITS: PersistedSettings["hostQualityLimits"] = {
 };
 
 const DEFAULT_GLOBAL_DEFAULTS: PersistedSettings["globalQualityDefaults"] = {
-  videoBitrateKbps: 650,
-  maxWidth: 854,
-  maxHeight: 480,
-  maxFps: 15,
-  degradationPreference: "maintain-resolution",
-  contentHint: "detail",
-  audioEnabled: true,
+  schemaVersion: 1,
+  video: {
+    videoBitrateKbps: 650,
+    sendWidth: 854,
+    sendHeight: 480,
+    sendFps: 15,
+    captureWidth: 854,
+    captureHeight: 480,
+    captureFps: 15,
+    preserveAspectRatio: true,
+    preventUpscale: true,
+    resolutionMode: "target-dimensions",
+    scaleResolutionDownBy: 1,
+    codec: "vp9",
+    h264Profile: "auto",
+    contentHint: "detail",
+    degradationPreference: "maintain-resolution",
+    scalabilityMode: null,
+    cursorMode: "always",
+    rtpPriority: "medium",
+  },
+  audio: {
+    bitrateKbps: 64,
+    channels: "stereo",
+    bitrateMode: "vbr",
+    dtx: false,
+    fec: true,
+    packetDurationMs: 20,
+    redundantAudio: false,
+  },
 };
 
 function getDefaults(): PersistedSettings {

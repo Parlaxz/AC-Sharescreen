@@ -13,13 +13,36 @@ import type {
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 const defaultSettings: GroupQualitySettings = {
-  videoBitrateKbps: 1800,
-  maxWidth: 1280,
-  maxHeight: 720,
-  maxFps: 30,
-  degradationPreference: "balanced",
-  contentHint: "detail",
-  audioEnabled: true,
+  schemaVersion: 1,
+  video: {
+    videoBitrateKbps: 1800,
+    sendWidth: 1280,
+    sendHeight: 720,
+    sendFps: 30,
+    captureWidth: 1280,
+    captureHeight: 720,
+    captureFps: 30,
+    preserveAspectRatio: true,
+    preventUpscale: true,
+    resolutionMode: "target-dimensions",
+    scaleResolutionDownBy: 1,
+    codec: "vp9",
+    h264Profile: "auto",
+    contentHint: "detail",
+    degradationPreference: "balanced",
+    scalabilityMode: null,
+    cursorMode: "always",
+    rtpPriority: "medium",
+  },
+  audio: {
+    bitrateKbps: 64,
+    channels: "stereo",
+    bitrateMode: "vbr",
+    dtx: false,
+    fec: true,
+    packetDurationMs: 20,
+    redundantAudio: false,
+  },
 };
 
 function ts(wallTimeMs: number, counter: number, nodeId: string): HybridTimestamp {
