@@ -847,6 +847,12 @@ export class AudioHelperManager {
         this.stats.droppedPackets = diag.droppedPackets;
         this.stats.queueDepth = diag.queueSize;
         this.stats.maxQueueDepth = Math.max(this.stats.maxQueueDepth, diag.queueSize);
+        // Map native helper uptime into desktop state
+        // uptimeMs is the native helper's process uptime; non-negative, finite,
+        // monotonic while the same helper is alive, and resets on new helper.
+        if (typeof diag.uptimeMs === 'number' && diag.uptimeMs >= 0) {
+          this.stats.helperUptimeMs = diag.uptimeMs;
+        }
         this.emitStats();
       } catch {
         /* ignore polling errors */
