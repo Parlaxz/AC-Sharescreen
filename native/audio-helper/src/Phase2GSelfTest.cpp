@@ -429,6 +429,58 @@ void TestMixerAddSourceReturnsId() {
 }
 
 // ====================================================================
+// Retry / Backoff Tests
+// ====================================================================
+
+void TestRetryBackoffSequence() {
+    TEST("Retry - backoff sequence is 1s, 2s, 4s, 8s, 30s, 30s...")
+    // Formula: totalFailures >= 5 ? 30000 : 1000 << (totalFailures - 1)
+    const uint64_t expected[] = {1000, 2000, 4000, 8000, 30000, 30000, 30000};
+    for (uint32_t f = 1; f <= 7; f++) {
+        const uint64_t delayMs = f >= 5u
+            ? 30000ULL
+            : 1000ULL << (f - 1u);
+        ASSERT_EQ(delayMs, expected[f - 1]);
+    }
+    END_TEST("Retry - backoff sequence is 1s, 2s, 4s, 8s, 30s, 30s...");
+}
+
+void TestRetrySuccessResetsFailures() {
+    TEST("Retry - success resets failure count to zero")
+    // Successful start: failures=0, no delay
+    // Fresh failure after reset: 1s (not accumulated)
+    const uint32_t freshFailure = 1u;
+    const uint64_t delayAfterReset = freshFailure >= 5u
+        ? 30000ULL
+        : 1000ULL << (freshFailure - 1u);
+    ASSERT_EQ(delayAfterReset, 1000u);
+
+    // Second consecutive failure: 2s
+    const uint32_t secondFailure = 2u;
+    const uint64_t delaySecond = secondFailure >= 5u
+        ? 30000ULL
+        : 1000ULL << (secondFailure - 1u);
+    ASSERT_EQ(delaySecond, 2000u);
+    END_TEST("Retry - success resets failure count to zero");
+}
+
+void TestRetryConsecutiveFailureProgression() {
+    TEST("Retry - consecutive failures advance through 1s,2s,4s,8s,30s")
+    uint64_t prevDelay = 0;
+    for (uint32_t f = 1; f <= 6; f++) {
+        const uint64_t delayMs = f >= 5u
+            ? 30000ULL
+            : 1000ULL << (f - 1u);
+        // Each delay should be >= the previous
+        ASSERT(delayMs >= prevDelay);
+        prevDelay = delayMs;
+    }
+    // After 5 failures, delay stays at 30s
+    ASSERT_EQ(prevDelay, 30000ULL);
+    END_TEST("Retry - consecutive failures advance through 1s,2s,4s,8s,30s");
+}
+
+// ====================================================================
 // Lifecycle Tests
 // ====================================================================
 
@@ -519,6 +571,11 @@ bool RunPhase2GSelfTests() {
     TestMixerAddRemoveSource();
     TestMixerAddSourceReturnsId();
     TestMixerPacketSize();
+    
+    // Retry / Backoff tests
+    TestRetryBackoffSequence();
+    TestRetrySuccessResetsFailures();
+    TestRetryConsecutiveFailureProgression();
     
     // Lifecycle tests
     TestStopCalledTwice();

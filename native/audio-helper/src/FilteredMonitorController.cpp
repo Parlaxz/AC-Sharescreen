@@ -528,20 +528,20 @@ bool FilteredMonitorController::ReconcileOnce() {
             }
         }
 
-        [[maybe_unused]] bool added = AddSource(candidate);
+        const bool added = AddSource(candidate);
 
-        if (isRetry && preservedFailureCount > 0) {
-            // Preserve the failure count so backoff progresses
-            // Update the entry we just inserted (it has fresh failureCount = 0 or 1)
+        // Only preserve failure count when the retry failed again.
+        // A successful retry keeps AddSource()'s values (zero failures).
+        if (isRetry && !added) {
             std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
             auto it = activeCaptures_.find(candidate.identity);
             if (it != activeCaptures_.end()) {
-                // Carry forward the accumulated failure count for backoff
-                uint32_t totalFailures = preservedFailureCount + 1;
+                const uint32_t totalFailures = preservedFailureCount + 1u;
                 it->second.consecutiveStartFailures = totalFailures;
-                // Recompute backoff
-                uint64_t delayMs = 1000ULL * (1ULL << (std::min)((totalFailures > 0u ? totalFailures - 1u : 0u), 4u));
-                if (totalFailures > 5) delayMs = 30000;
+                // Backoff: 1s, 2s, 4s, 8s, then 30s maximum
+                const uint64_t delayMs = totalFailures >= 5u
+                    ? 30000ULL
+                    : 1000ULL << (totalFailures - 1u);
                 it->second.nextRetryAt = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(delayMs);
             }
