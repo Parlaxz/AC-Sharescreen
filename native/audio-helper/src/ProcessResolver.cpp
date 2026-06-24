@@ -253,6 +253,22 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
   }
 
   // Build ProcessInfo for each PID in the chain.
+  // Preserve szExeFile from Toolhelp as the processName baseline so that
+  // basename fallback works even when full-path query fails.
+  std::unordered_map<uint32_t, std::string> toolhelpNames;
+  {
+    AutoHandle snap2(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (snap2.IsValid()) {
+      PROCESSENTRY32W pe2 = {};
+      pe2.dwSize = sizeof(pe2);
+      if (Process32FirstW(snap2.Get(), &pe2)) {
+        do {
+          toolhelpNames[pe2.th32ProcessID] = WideToUtf8(pe2.szExeFile);
+        } while (Process32NextW(snap2.Get(), &pe2));
+      }
+    }
+  }
+
   for (auto pid : pidChain) {
     ProcessInfo info;
     info.processId = pid;
@@ -263,10 +279,20 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
       info.parentProcessId = it->second;
     }
 
-    // Get executable path.
+    // Get executable path (may be empty if process cannot be opened).
     std::string path = GetProcessPathForPid(pid);
     info.processPath = path;
-    info.processName = ExtractFilename(path);
+
+    // Prefer path-derived name; fall back to Toolhelp szExeFile.
+    std::string pathName = ExtractFilename(path);
+    if (!pathName.empty()) {
+      info.processName = pathName;
+    } else {
+      auto thIt = toolhelpNames.find(pid);
+      if (thIt != toolhelpNames.end() && !thIt->second.empty()) {
+        info.processName = thIt->second;
+      }
+    }
 
     // Get creation time.
     info.creationTimeUtc100ns = GetProcessCreationTime(pid);

@@ -47,6 +47,28 @@ export function Diagnostics() {
   }, []);
 
   // Browser feature detection (renderer-side only)
+  const [helperProvenance, setHelperProvenance] = useState<any>(null);
+
+  useEffect(() => {
+    // Read the audio-diag.log for helper provenance
+    // (logged by AudioHelperManager at startup)
+    const checkProvenance = async () => {
+      const api = (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink;
+      if (api) {
+        // getPipelineSnapshot includes helper uptime and state
+        const snap = await api.getPipelineSnapshot().catch(() => null);
+        if (snap) {
+          setHelperProvenance({
+            state: snap.helperState,
+            uptimeMs: snap.helperUptimeMs,
+            generation: snap.streamGeneration,
+          });
+        }
+      }
+    };
+    checkProvenance();
+  }, []);
+
   const browserInfo = {
     userAgent: navigator.userAgent,
     platform: navigator.platform,
@@ -93,6 +115,23 @@ export function Diagnostics() {
           <p className="dim">Not available</p>
         )}
       </div>
+
+      {/* Helper provenance */}
+      {helperProvenance && (
+        <div className="card">
+          <h3>Audio Helper Provenance</h3>
+          <table className="info-table">
+            <tbody>
+              <tr><td>Helper State</td><td className="mono">{helperProvenance.state}</td></tr>
+              <tr><td>Uptime</td><td className="mono">{helperProvenance.uptimeMs ? `${(helperProvenance.uptimeMs / 1000).toFixed(1)}s` : '—'}</td></tr>
+              <tr><td>Stream Generation</td><td className="mono">{helperProvenance.generation}</td></tr>
+            </tbody>
+          </table>
+          <p className="dim" style={{ fontSize: '0.75rem', marginTop: '0.25rem' }}>
+            Full binary path and size are logged to the console by AudioHelperManager at startup.
+          </p>
+        </div>
+      )}
 
       {/* Browser / Renderer info */}
       <div className="card">
@@ -209,6 +248,7 @@ export function Diagnostics() {
               <tr><td>Exclude Discord</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.excludeDiscord === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.excludeDiscord ? 'Yes' : 'No'}</td></tr>
               <tr><td>Exclude ScreenLink</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.excludeScreenLink === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.excludeScreenLink ? 'Yes' : 'No'}</td></tr>
               <tr><td>System Sounds Skipped</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.systemSoundsSkipped ?? '—'}</td></tr>
+              <tr><td>Duplicate Roots</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.duplicateRootsLastScan ?? '—'}</td></tr>
             </tbody>
           </table>
 

@@ -95,6 +95,10 @@ export interface PcmPipelineSnapshot {
   // Phase 2G additions:
   filteredMonitorDiagnostics?: Record<string, unknown>;
   endpointDiagnostics?: Record<string, unknown>;
+  // Helper binary provenance (logged at each pipeline snapshot)
+  helperBinaryPath?: string;
+  helperBinarySize?: number;
+  helperBinaryMtime?: string;
 }
 
 // ── AudioHelperManager ──
@@ -432,6 +436,17 @@ export class AudioHelperManager {
       }
     } catch { /* best effort */ }
 
+    // Collect helper binary provenance at runtime
+    let helperPath = '';
+    let helperSize = 0;
+    let helperMtime = '';
+    try {
+      const stats = fs.statSync(this.config.helperPath);
+      helperPath = this.config.helperPath;
+      helperSize = stats.size;
+      helperMtime = stats.mtime.toISOString();
+    } catch { /* best effort */ }
+
     return {
       synthPacketsProduced: helperDiag
         ? ((helperDiag as any).synthPacketsProduced ?? helperDiag.capturePacketsProduced ?? undefined)
@@ -473,6 +488,10 @@ export class AudioHelperManager {
       endpointDiagnostics: helperDiag
         ? (helperDiag as any).endpointDiagnostics ?? undefined
         : undefined,
+      // Helper binary provenance
+      helperBinaryPath: helperPath,
+      helperBinarySize: helperSize,
+      helperBinaryMtime: helperMtime,
     };
   }
 

@@ -29,7 +29,7 @@ interface FilteredMonitorDiagnostics {
   discordExcludedLastScan: number;
   screenLinkExcludedLastScan: number;
   duplicateRootsLastScan: number;
-  duplicateRootSessionsLastScan: number;
+
   sourceStartAttempts: number;
   sourceStartFailures: number;
   sourceRetries: number;
@@ -128,7 +128,6 @@ function isValidFilteredMonitorDiagnostics(obj: unknown): obj is FilteredMonitor
     typeof d.totalSessionsLastScan === "number" &&
     typeof d.desiredSourcesLastScan === "number" &&
     typeof d.duplicateRootsLastScan === "number" &&
-    typeof d.duplicateRootSessionsLastScan === "number" &&
     typeof d.sourceStartFailures === "number" &&
     typeof d.mixerInputPackets === "number" &&
     typeof d.mixerInputNonZeroPackets === "number" &&
@@ -493,7 +492,6 @@ describe("Phase 2G — diagnostics typing", () => {
       discordExcludedLastScan: 0,
       screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 0,
-      duplicateRootSessionsLastScan: 0,
       sourceStartAttempts: 10,
       sourceStartFailures: 0,
       sourceRetries: 0,
@@ -568,7 +566,6 @@ describe("Phase 2G — diagnostics typing", () => {
       discordExcludedLastScan: 0,
       screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 0,
-      duplicateRootSessionsLastScan: 0,
       sourceStartAttempts: 0,
       sourceStartFailures: 0,
       sourceRetries: 0,
@@ -622,7 +619,6 @@ describe("Phase 2G — diagnostics typing", () => {
       discordExcludedLastScan: 0,
       screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 0,
-      duplicateRootSessionsLastScan: 0,
       sourceStartAttempts: 1,
       sourceStartFailures: 0,
       sourceRetries: 0,
@@ -664,7 +660,7 @@ describe("Phase 2G — duplicate root and PID tracking fields", () => {
       desiredSourcesLastScan: 1, invalidSessionsLastScan: 0,
       expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
       discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
-      duplicateRootsLastScan: 3, duplicateRootSessionsLastScan: 3,
+      duplicateRootsLastScan: 3,
       sourceStartAttempts: 1, sourceStartFailures: 0, sourceRetries: 0,
       sourceUnexpectedStops: 0,
       mixerInputPackets: 10, mixerInputNonZeroPackets: 5, mixerInputZeroPackets: 5,
@@ -677,27 +673,7 @@ describe("Phase 2G — duplicate root and PID tracking fields", () => {
     expect(diag.duplicateRootsLastScan).toBe(3);
   });
 
-  it("duplicateRootSessionsLastScan is a number", () => {
-    const diag: FilteredMonitorDiagnostics = {
-      running: true, monitorInitialized: true, mixerRunning: true,
-      totalReconciliations: 0, activeCaptureSources: 1, sourcesAdded: 1,
-      sourcesRemoved: 0, totalSessionsLastScan: 5,
-      activeSessionsLastScan: 3, inactiveSessionsLastScan: 2,
-      desiredSourcesLastScan: 1, invalidSessionsLastScan: 0,
-      expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
-      discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
-      duplicateRootsLastScan: 1, duplicateRootSessionsLastScan: 2,
-      sourceStartAttempts: 1, sourceStartFailures: 0, sourceRetries: 0,
-      sourceUnexpectedStops: 0,
-      mixerInputPackets: 10, mixerInputNonZeroPackets: 5, mixerInputZeroPackets: 5,
-      lastInputPeak: 0, maximumInputPeak: 0, lastInputRms: 0, maximumInputRms: 0,
-      mixerOutputPackets: 10, mixerOutputNonZeroPackets: 5, mixerOutputZeroPackets: 5,
-      lastOutputPeak: 0, maximumOutputPeak: 0, lastOutputRms: 0, maximumOutputRms: 0,
-      lastErrorCode: "", lastErrorMessage: "",
-    };
-    expect(typeof diag.duplicateRootSessionsLastScan).toBe("number");
-    expect(diag.duplicateRootSessionsLastScan).toBe(2);
-  });
+
 
   it("RMS fields are typed as numbers (not undefined)", () => {
     const diag: FilteredMonitorDiagnostics = {
@@ -708,7 +684,7 @@ describe("Phase 2G — duplicate root and PID tracking fields", () => {
       desiredSourcesLastScan: 2, invalidSessionsLastScan: 0,
       expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
       discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
-      duplicateRootsLastScan: 0, duplicateRootSessionsLastScan: 0,
+      duplicateRootsLastScan: 0,
       sourceStartAttempts: 3, sourceStartFailures: 0, sourceRetries: 0,
       sourceUnexpectedStops: 0,
       mixerInputPackets: 500, mixerInputNonZeroPackets: 400, mixerInputZeroPackets: 100,

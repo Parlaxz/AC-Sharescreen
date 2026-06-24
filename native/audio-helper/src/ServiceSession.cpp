@@ -1226,7 +1226,6 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
         result += "\"sourceStartFailures\":" + std::to_string(monDiag.sourceStartFailures) + ",";
         result += "\"sourceRetries\":" + std::to_string(monDiag.sourceRetries) + ",";
         result += "\"duplicateRootsLastScan\":" + std::to_string(monDiag.duplicateRootsLastScan) + ",";
-        result += "\"duplicateRootSessionsLastScan\":" + std::to_string(monDiag.duplicateRootSessionsLastScan) + ",";
         result += "\"mixerInputPackets\":" + std::to_string(monDiag.mixerInputPackets) + ",";
         result += "\"mixerInputNonZeroPackets\":" + std::to_string(monDiag.mixerInputNonZeroPackets) + ",";
         result += "\"mixerInputZeroPackets\":" + std::to_string(monDiag.mixerInputZeroPackets) + ",";
@@ -1993,7 +1992,6 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
         result += "\"discordExcludedLastScan\":" + std::to_string(diag.discordExcludedLastScan) + ",";
         result += "\"screenLinkExcludedLastScan\":" + std::to_string(diag.screenLinkExcludedLastScan) + ",";
         result += "\"duplicateRootsLastScan\":" + std::to_string(diag.duplicateRootsLastScan) + ",";
-        result += "\"duplicateRootSessionsLastScan\":" + std::to_string(diag.duplicateRootSessionsLastScan) + ",";
         result += "\"sourceStartAttempts\":" + std::to_string(diag.sourceStartAttempts) + ",";
         result += "\"sourceStartFailures\":" + std::to_string(diag.sourceStartFailures) + ",";
         result += "\"sourceRetries\":" + std::to_string(diag.sourceRetries) + ",";

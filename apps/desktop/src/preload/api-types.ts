@@ -96,9 +96,9 @@ export interface ScreenLinkAPI {
   startFilteredMonitorAudio: (options?: { excludeDiscord?: boolean; excludeScreenLink?: boolean }) => Promise<any>;
   startSystemAudio: () => Promise<{ success: boolean; streamGeneration?: number; error?: string }>;
   getMixerState: () => Promise<any>;
-  getMixerDiagnostics: () => Promise<any>;
+  getMixerDiagnostics: () => Promise<FilteredMonitorDiagnostics>;
   /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
-  getPipelineSnapshot: () => Promise<any>;
+  getPipelineSnapshot: () => Promise<PipelineSnapshotWithDiagnostics>;
 }
 
 export type AudioStateDTO =
@@ -141,4 +141,84 @@ export interface PersistedSettings {
   friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
   lastAudioMode?: AudioMode;
+}
+
+/** Filtered Monitor diagnostics returned by getMixerDiagnostics */
+export interface FilteredMonitorDiagnostics {
+  sourceType: string;
+  pipeline: string;
+  running: boolean;
+  mixerRunning: boolean;
+  totalReconciliations: number;
+  activeCaptureSources: number;
+  sourcesAdded: number;
+  sourcesRemoved: number;
+  totalSessionsLastScan: number;
+  activeSessionsLastScan: number;
+  inactiveSessionsLastScan: number;
+  desiredSourcesLastScan: number;
+  invalidSessionsLastScan: number;
+  expiredSessionsLastScan: number;
+  systemSoundsSkippedLastScan: number;
+  discordExcludedLastScan: number;
+  screenLinkExcludedLastScan: number;
+  duplicateRootsLastScan: number;
+  sourceStartAttempts: number;
+  sourceStartFailures: number;
+  sourceRetries: number;
+  sourceUnexpectedStops: number;
+  mixerInputPackets: number;
+  mixerInputNonZeroPackets: number;
+  mixerInputZeroPackets: number;
+  lastInputPeak: number;
+  maximumInputPeak: number;
+  lastInputRms: number;
+  maximumInputRms: number;
+  mixerOutputPackets: number;
+  mixerOutputNonZeroPackets: number;
+  mixerOutputZeroPackets: number;
+  lastOutputPeak: number;
+  maximumOutputPeak: number;
+  lastOutputRms: number;
+  maximumOutputRms: number;
+  lastErrorCode: string;
+  lastErrorMessage: string;
+}
+
+/** Pipeline snapshot with inline filtered monitor diagnostics */
+export interface PipelineSnapshotWithDiagnostics {
+  mixerFeedPackets?: number;
+  mixerOutputPackets?: number;
+  mixerNonZeroOutputPackets?: number;
+  filteredMonitorDiagnostics?: {
+    running: boolean;
+    activeCaptureSources: number;
+    totalSessionsLastScan: number;
+    desiredSourcesLastScan: number;
+    sourcesAdded: number;
+    sourcesRemoved: number;
+    sourceStartFailures: number;
+    sourceRetries: number;
+    duplicateRootsLastScan: number;
+    mixerInputPackets: number;
+    mixerInputNonZeroPackets: number;
+    mixerInputZeroPackets: number;
+    lastInputPeak: number;
+    maximumInputPeak: number;
+    lastInputRms: number;
+    maximumInputRms: number;
+    mixerOutputPackets: number;
+    mixerOutputNonZeroPackets: number;
+    mixerOutputZeroPackets: number;
+    lastOutputPeak: number;
+    maximumOutputPeak: number;
+    lastOutputRms: number;
+    maximumOutputRms: number;
+    lastErrorCode: string;
+    lastErrorMessage: string;
+  };
+  bridge: Record<string, unknown>;
+  helperState: string;
+  helperUptimeMs: number;
+  streamGeneration: number;
 }
