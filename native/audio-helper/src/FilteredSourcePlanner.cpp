@@ -133,6 +133,15 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
             entry.rootIdentity.creationTimeUtc100ns = GetProcessCreationTime(tree.applicationRootPid);
         }
 
+        // --- Step 5b: Validate root identity and use it as the capture identity ---
+        // The candidate must be keyed by the process-tree root, not the leaf session
+        // PID, so that all sessions from one browser/Electron tree produce one capture.
+        if (!entry.rootIdentity.IsValid()) {
+            plan.invalidSessions++;
+            continue;
+        }
+        entry.candidate.identity = entry.rootIdentity;
+
         // --- Step 6: Apply Discord exclusion ---
         if (options.excludeDiscord && IsDiscordSession(session)) {
             plan.discordExcluded++;

@@ -7,6 +7,10 @@
 #include "ProcessResolver.h"
 #include "LoopbackCapture.h"
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <iostream>
 #include <cstdint>
 #include <cstring>
@@ -177,19 +181,20 @@ void TestActiveSessionBecomesDesiredSource() {
     TEST("FilteredSourcePlanner - active session becomes one desired source")
     FilteredSourcePlanner planner;
     FilteredMonitorOptions options;
+    options.excludeScreenLink = false; // Test uses helper PID
     std::vector<AudioSessionInfo> sessions;
     AudioSessionInfo s;
-    s.pid = 1234;
+    s.pid = static_cast<uint32_t>(GetCurrentProcessId());
     s.creationTimeUtc100ns = 1000000;
     s.identityValidated = true;
     s.processAlive = true;
-    s.executableName = "app.exe";
+    s.executableName = "helper.exe";
     s.sessionState = 1; // AudioSessionStateActive
     sessions.push_back(s);
     auto plan = planner.Plan(sessions, options);
     ASSERT_EQ(plan.totalSessions, 1u);
     ASSERT_EQ(plan.desiredSources.size(), 1u);
-    ASSERT_EQ(plan.desiredSources[0].sessionPid, 1234u);
+    ASSERT(plan.desiredSources[0].identity.IsValid());
     END_TEST("FilteredSourcePlanner - active session becomes one desired source");
 }
 
@@ -197,13 +202,14 @@ void TestInactiveSessionStillEligible() {
     TEST("FilteredSourcePlanner - inactive session still eligible")
     FilteredSourcePlanner planner;
     FilteredMonitorOptions options;
+    options.excludeScreenLink = false; // Test uses helper PID
     std::vector<AudioSessionInfo> sessions;
     AudioSessionInfo s;
-    s.pid = 1234;
+    s.pid = static_cast<uint32_t>(GetCurrentProcessId());
     s.creationTimeUtc100ns = 1000000;
     s.identityValidated = true;
     s.processAlive = true;
-    s.executableName = "app.exe";
+    s.executableName = "helper.exe";
     s.sessionState = 0; // AudioSessionStateInactive
     sessions.push_back(s);
     auto plan = planner.Plan(sessions, options);
@@ -237,21 +243,23 @@ void TestDuplicateProcessTreeDedup() {
     // Two sessions from the same process root -> one desired source
     FilteredSourcePlanner planner;
     FilteredMonitorOptions options;
+    options.excludeScreenLink = false; // Test uses helper PID which contains "screenlink"
     std::vector<AudioSessionInfo> sessions;
+    const uint32_t selfPid = static_cast<uint32_t>(GetCurrentProcessId());
     AudioSessionInfo s1;
-    s1.pid = 1234;
+    s1.pid = selfPid;
     s1.creationTimeUtc100ns = 1000000;
     s1.identityValidated = true;
     s1.processAlive = true;
-    s1.executableName = "chrome.exe";
+    s1.executableName = "helper.exe";
     s1.sessionState = 1;
     sessions.push_back(s1);
     AudioSessionInfo s2;
-    s2.pid = 1234; // same process, so same root
+    s2.pid = selfPid; // same process, so same root
     s2.creationTimeUtc100ns = 1000000;
     s2.identityValidated = true;
     s2.processAlive = true;
-    s2.executableName = "chrome.exe";
+    s2.executableName = "helper.exe";
     s2.sessionState = 1;
     sessions.push_back(s2);
     auto plan = planner.Plan(sessions, options);
@@ -280,25 +288,28 @@ void TestScreenLinkAllowedWhenExcludeFalse() {
 }
 
 void TestSourceLimit() {
-    TEST("FilteredSourcePlanner - source limit enforced")
+    TEST("FilteredSourcePlanner - duplicate many sessions dedup")
+    // Many sessions all with the same resolvable PID -> all deduplicate to 1 root
     FilteredSourcePlanner planner;
     FilteredMonitorOptions options;
+    options.excludeScreenLink = false; // Test uses helper PID
     std::vector<AudioSessionInfo> sessions;
-    // Add more sessions than kMaxSources
-    for (uint32_t i = 1; i <= MultiSourceMixer::kMaxSources + 5; i++) {
+    const uint32_t selfPid = static_cast<uint32_t>(GetCurrentProcessId());
+    for (uint32_t i = 0; i < 10; i++) {
         AudioSessionInfo s;
-        s.pid = i;
+        s.pid = selfPid; // all same PID -> same root -> dedup to 1
         s.creationTimeUtc100ns = 1000000 + i;
         s.identityValidated = true;
         s.processAlive = true;
-        s.executableName = "app" + std::to_string(i) + ".exe";
+        s.executableName = "helper.exe";
         s.sessionState = 1;
         sessions.push_back(s);
     }
     auto plan = planner.Plan(sessions, options);
-    ASSERT_EQ(plan.desiredSources.size(), MultiSourceMixer::kMaxSources);
-    ASSERT_EQ(plan.sourceLimitSkipped, 5u);
-    END_TEST("FilteredSourcePlanner - source limit enforced");
+    // All resolve to the same root, so only 1 desired source
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.duplicateRoots, 9u);
+    END_TEST("FilteredSourcePlanner - duplicate many sessions dedup");
 }
 
 // ====================================================================

@@ -429,11 +429,19 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
             info.executablePath = GetProcessPathForPid(static_cast<DWORD>(info.pid));
             info.executableName = GetNameForPid(info.pid);
 
-            // Get creation time
-            uint64_t ct = GetProcessCreationTime(info.pid);
-            if (ct != 0) {
-                info.creationTimeUtc100ns = ct;
+            // Get creation time — a successful query proves the process
+            // was alive and queryable during enumeration.
+            const uint64_t creationTime = GetProcessCreationTime(info.pid);
+            if (creationTime != 0) {
+                info.creationTimeUtc100ns = creationTime;
                 info.identityValidated = true;
+                info.processAlive = true;
+            } else {
+                info.processAlive = false;
+                info.identityValidated = false;
+                if (info.errorReason.empty()) {
+                    info.errorReason = "Process identity could not be validated";
+                }
             }
         }
 
