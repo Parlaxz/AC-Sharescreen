@@ -85,6 +85,188 @@ struct SourceFormat {
     DWORD channelMask = 0; // 0 = unknown/use default order
 };
 
+// ── WASAPI initialization helper ──
+// Encapsulates the full endpoint + IAudioClient + IAudioCaptureClient setup.
+// Used for initial startup and for device recovery.
+
+struct WasapiInitResult {
+    bool success = false;
+    IMMDeviceEnumerator* enumerator = nullptr;
+    IMMDevice* device = nullptr;
+    IAudioClient* audioClient = nullptr;
+    IAudioCaptureClient* captureClient = nullptr;
+    WAVEFORMATEX* mixFormat = nullptr;
+    EndpointStartResult startResult = EndpointStartResult::Success;
+    HRESULT hr = S_OK;
+
+    void Reset() {
+        enumerator = nullptr;
+        device = nullptr;
+        audioClient = nullptr;
+        captureClient = nullptr;
+        mixFormat = nullptr;
+        startResult = EndpointStartResult::Success;
+        hr = S_OK;
+    }
+};
+
+WasapiInitResult InitializeWasapiEndpoint() {
+    WasapiInitResult result;
+
+    // ── 2. Create device enumerator ──
+    IMMDeviceEnumerator* pEnumerator = nullptr;
+    HRESULT hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator),
+        reinterpret_cast<void**>(&pEnumerator));
+    if (FAILED(hr) || !pEnumerator) {
+        std::cerr << "[EndpointLoopback] CoCreateInstance(MMDeviceEnumerator) failed: "
+                  << HresultToString(hr) << std::endl;
+        result.startResult = EndpointStartResult::EnumeratorFailed;
+        result.hr = hr;
+        return result;
+    }
+
+    // ── 3. Get default render endpoint ──
+    IMMDevice* pDevice = nullptr;
+    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
+    if (FAILED(hr) || !pDevice) {
+        std::cerr << "[EndpointLoopback] GetDefaultAudioEndpoint failed: "
+                  << HresultToString(hr) << std::endl;
+        SafeRelease(pEnumerator);
+        result.startResult = EndpointStartResult::EndpointNotFound;
+        result.hr = hr;
+        return result;
+    }
+
+    // ── 4. Activate IAudioClient ──
+    IAudioClient* pAudioClient = nullptr;
+    hr = pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
+                           nullptr, reinterpret_cast<void**>(&pAudioClient));
+    SafeRelease(pDevice); // device no longer needed once we have the client
+    if (FAILED(hr) || !pAudioClient) {
+        std::cerr << "[EndpointLoopback] Activate(IAudioClient) failed: "
+                  << HresultToString(hr) << std::endl;
+        SafeRelease(pEnumerator);
+        result.startResult = EndpointStartResult::AudioClientActivationFailed;
+        result.hr = hr;
+        return result;
+    }
+
+    // ── 5. Get mix format ──
+    WAVEFORMATEX* pMixFormat = nullptr;
+    hr = pAudioClient->GetMixFormat(&pMixFormat);
+    if (FAILED(hr) || !pMixFormat) {
+        std::cerr << "[EndpointLoopback] GetMixFormat failed: "
+                  << HresultToString(hr) << std::endl;
+        SafeRelease(pAudioClient);
+        SafeRelease(pEnumerator);
+        result.startResult = EndpointStartResult::GetMixFormatFailed;
+        result.hr = hr;
+        return result;
+    }
+
+    // ── 6. Describe source format (informational) ──
+    SourceFormat srcFmt;
+    srcFmt.sampleRate = pMixFormat->nSamplesPerSec;
+    srcFmt.channels = pMixFormat->nChannels;
+    srcFmt.bitsPerSample = pMixFormat->wBitsPerSample;
+    srcFmt.isFloat = (pMixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
+
+    if (pMixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && pMixFormat->cbSize >= 22) {
+        auto pExt = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pMixFormat);
+        srcFmt.channelMask = pExt->dwChannelMask;
+        if (pExt->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
+            srcFmt.isFloat = true;
+        } else {
+            srcFmt.isFloat = false;
+        }
+    }
+
+    // ── 7. Build target format ──
+    WAVEFORMATEXTENSIBLE targetFmt = {};
+    targetFmt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    targetFmt.Format.nChannels = kTargetChannels;
+    targetFmt.Format.nSamplesPerSec = kTargetSampleRate;
+    targetFmt.Format.wBitsPerSample = kTargetBitsPerSample;
+    targetFmt.Format.nBlockAlign = kTargetChannels * (kTargetBitsPerSample / 8);
+    targetFmt.Format.nAvgBytesPerSec = kTargetSampleRate * targetFmt.Format.nBlockAlign;
+    targetFmt.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    targetFmt.Samples.wValidBitsPerSample = kTargetBitsPerSample;
+    targetFmt.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    targetFmt.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+
+    // ── 8. Initialize audio client in loopback mode ──
+    REFERENCE_TIME bufferDuration = 100000; // 100 ns units = 10 ms
+
+    hr = pAudioClient->Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK |
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+        bufferDuration,
+        0,
+        reinterpret_cast<WAVEFORMATEX*>(&targetFmt),
+        nullptr);
+
+    if (FAILED(hr)) {
+        std::cerr << "[EndpointLoopback] IAudioClient::Initialize failed: "
+                  << HresultToString(hr) << std::endl;
+
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+            std::cerr << "[EndpointLoopback] Device invalidated during init" << std::endl;
+        }
+
+        CoTaskMemFree(pMixFormat);
+        SafeRelease(pAudioClient);
+        SafeRelease(pEnumerator);
+        result.startResult = EndpointStartResult::InitializeFailed;
+        result.hr = hr;
+        return result;
+    }
+
+    // ── 9. Get capture client ──
+    IAudioCaptureClient* pCaptureClient = nullptr;
+    hr = pAudioClient->GetService(
+        __uuidof(IAudioCaptureClient),
+        reinterpret_cast<void**>(&pCaptureClient));
+    if (FAILED(hr) || !pCaptureClient) {
+        std::cerr << "[EndpointLoopback] GetService(IAudioCaptureClient) failed: "
+                  << HresultToString(hr) << std::endl;
+        CoTaskMemFree(pMixFormat);
+        SafeRelease(pAudioClient);
+        SafeRelease(pEnumerator);
+        result.startResult = EndpointStartResult::CaptureClientFailed;
+        result.hr = hr;
+        return result;
+    }
+
+    // ── Get buffer size (informational / validation) ──
+    UINT32 bufferFrameCount = 0;
+    hr = pAudioClient->GetBufferSize(&bufferFrameCount);
+    if (FAILED(hr)) {
+        std::cerr << "[EndpointLoopback] GetBufferSize failed: "
+                  << HresultToString(hr) << std::endl;
+        CoTaskMemFree(pMixFormat);
+        SafeRelease(pCaptureClient);
+        SafeRelease(pAudioClient);
+        SafeRelease(pEnumerator);
+        result.startResult = EndpointStartResult::InitializeFailed;
+        result.hr = hr;
+        return result;
+    }
+
+    // Success — populate result
+    result.success = true;
+    result.enumerator = pEnumerator;
+    result.audioClient = pAudioClient;
+    result.captureClient = pCaptureClient;
+    result.mixFormat = pMixFormat;
+    // pDevice was already released after Activate — we don't cache it
+    // The caller doesn't need pDevice once we have the client.
+    return result;
+}
+
 } // anonymous namespace
 
 // ── Linear interpolation sample-rate converter ──
@@ -392,6 +574,80 @@ void EndpointLoopbackSource::Stop() {
     }
 }
 
+EndpointLoopbackDiagnostics EndpointLoopbackSource::GetDiagnostics() const {
+    std::lock_guard<std::mutex> lock(diagMutex_);
+    EndpointLoopbackDiagnostics d = diag_;
+    d.running = running_.load();
+    return d;
+}
+
+// ========================================================================
+// RecoverEndpoint — exponential-backoff device recovery
+// ========================================================================
+//
+// Called when AUDCLNT_E_DEVICE_INVALIDATED is encountered during active
+// capture. Waits with backoff (250ms → 500ms → 1000ms → 2000ms), then
+// attempts to reinitialize the WASAPI endpoint loopback. Returns true if
+// a new session was successfully created (stored in recoverySession_).
+// Returns false if cancelled (Stop() called) or all retries exhausted.
+
+bool EndpointLoopbackSource::RecoverEndpoint() {
+    static const DWORD backoffMs[] = {250, 500, 1000, 2000};
+    const int maxRetries = static_cast<int>(sizeof(backoffMs) / sizeof(backoffMs[0]));
+
+    for (int retry = 0; retry < maxRetries && running_.load(); ++retry) {
+        // ── Backoff: sleep in 10ms increments to detect cancellation ──
+        DWORD waitMs = backoffMs[retry];
+        for (DWORD elapsed = 0; elapsed < waitMs && running_.load(); elapsed += 10) {
+            Sleep(10);
+        }
+        if (!running_.load()) {
+            return false; // Stop() was called
+        }
+
+        // ── Try to reinitialize the WASAPI endpoint ──
+        WasapiInitResult init = InitializeWasapiEndpoint();
+        if (init.success) {
+            // Store recovered session for CaptureThread to pick up
+            recoverySession_.enumerator = init.enumerator;
+            recoverySession_.device = init.device;
+            recoverySession_.audioClient = init.audioClient;
+            recoverySession_.captureClient = init.captureClient;
+            recoverySession_.mixFormat = init.mixFormat;
+
+            // Clear pointers in init so its destructor doesn't release them
+            init.Reset();
+
+            std::cerr << "[EndpointLoopback] Device recovered after "
+                      << (retry + 1) << " attempt(s)" << std::endl;
+            return true;
+        }
+
+        // Init failed — release partial resources (Reset ensures non-null members
+        // are freed; init goes out of scope here but was Reset on success above).
+        // On failure, InitializeWasapiEndpoint already cleaned up partial
+        // allocations so we just log and retry.
+        std::cerr << "[EndpointLoopback] Recovery attempt " << (retry + 1)
+                  << " failed: " << HresultToString(init.hr) << std::endl;
+
+        {
+            std::lock_guard<std::mutex> lock(diagMutex_);
+            diag_.lastHresult = init.hr;
+            diag_.lastError = "Recovery attempt " + std::to_string(retry + 1) + " failed";
+        }
+    }
+
+    // All retries exhausted
+    {
+        std::lock_guard<std::mutex> lock(diagMutex_);
+        diag_.initializationFailures++;
+        diag_.lastError = "All recovery retries exhausted";
+    }
+    std::cerr << "[EndpointLoopback] Recovery failed after "
+              << maxRetries << " attempts" << std::endl;
+    return false;
+}
+
 // ========================================================================
 // CaptureThread — WASAPI endpoint loopback capture loop
 // ========================================================================
@@ -409,382 +665,341 @@ void EndpointLoopbackSource::CaptureThread(
         return;
     }
 
-    // Check if Stop() was called during COM init
     if (!running_.load()) {
         SignalStartupComplete(EndpointStartResult::Cancelled, S_OK);
         CoUninitialize();
         return;
     }
 
-    // ── 2. Create device enumerator ──
-    IMMDeviceEnumerator* pEnumerator = nullptr;
-    hr = CoCreateInstance(
-        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-        __uuidof(IMMDeviceEnumerator),
-        reinterpret_cast<void**>(&pEnumerator));
-    if (FAILED(hr) || !pEnumerator) {
-        std::cerr << "[EndpointLoopback] CoCreateInstance(MMDeviceEnumerator) failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::EnumeratorFailed, hr);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // ── 3. Get default render endpoint ──
-    IMMDevice* pDevice = nullptr;
-    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
-    if (FAILED(hr) || !pDevice) {
-        std::cerr << "[EndpointLoopback] GetDefaultAudioEndpoint failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::EndpointNotFound, hr);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // ── 4. Activate IAudioClient ──
-    IAudioClient* pAudioClient = nullptr;
-    hr = pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
-                           nullptr, reinterpret_cast<void**>(&pAudioClient));
-    SafeRelease(pDevice);
-    if (FAILED(hr) || !pAudioClient) {
-        std::cerr << "[EndpointLoopback] Activate(IAudioClient) failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::AudioClientActivationFailed, hr);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // ── 5. Get mix format ──
-    WAVEFORMATEX* pMixFormat = nullptr;
-    hr = pAudioClient->GetMixFormat(&pMixFormat);
-    if (FAILED(hr) || !pMixFormat) {
-        std::cerr << "[EndpointLoopback] GetMixFormat failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::GetMixFormatFailed, hr);
-        SafeRelease(pAudioClient);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // ── 6. Describe source format ──
-    SourceFormat srcFmt;
-    srcFmt.sampleRate = pMixFormat->nSamplesPerSec;
-    srcFmt.channels = pMixFormat->nChannels;
-    srcFmt.bitsPerSample = pMixFormat->wBitsPerSample;
-    srcFmt.isFloat = (pMixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
-
-    // If WAVEFORMATEXTENSIBLE, extract channel mask and subformat
-    if (pMixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && pMixFormat->cbSize >= 22) {
-        auto pExt = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(pMixFormat);
-        srcFmt.channelMask = pExt->dwChannelMask;
-        if (pExt->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) {
-            srcFmt.isFloat = true;
-        } else {
-            srcFmt.isFloat = false;
-        }
-    }
-
-    // ── 7. Build target format ──
-    // For endpoint loopback, we initialize the audio client in shared mode
-    // with the mix format (so it uses the engine's format), then we convert
-    // on the fly in our capture loop. But we can also let the audio engine
-    // do format conversion by specifying our target format.
-    //
-    // Approach: Use AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM with our target format,
-    // so the engine converts to 48kHz stereo float32 for us.
-    // This is simpler and more robust than manual conversion.
-
-    WAVEFORMATEXTENSIBLE targetFmt = {};
-    targetFmt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    targetFmt.Format.nChannels = kTargetChannels;
-    targetFmt.Format.nSamplesPerSec = kTargetSampleRate;
-    targetFmt.Format.wBitsPerSample = kTargetBitsPerSample;
-    targetFmt.Format.nBlockAlign = kTargetChannels * (kTargetBitsPerSample / 8);
-    targetFmt.Format.nAvgBytesPerSec = kTargetSampleRate * targetFmt.Format.nBlockAlign;
-    targetFmt.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    targetFmt.Samples.wValidBitsPerSample = kTargetBitsPerSample;
-    targetFmt.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
-    targetFmt.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-
-    // ── 8. Initialize audio client in loopback mode ──
-    // Use a 10ms buffer duration
-    REFERENCE_TIME bufferDuration = 100000; // 100 ns units = 10 ms
-
-    hr = pAudioClient->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK |
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
-            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        bufferDuration,
-        0,
-        reinterpret_cast<WAVEFORMATEX*>(&targetFmt),
-        nullptr);
-
-    if (FAILED(hr)) {
-        std::cerr << "[EndpointLoopback] IAudioClient::Initialize failed: "
-                  << HresultToString(hr) << std::endl;
-
-        // Check for device invalidated
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-            std::cerr << "[EndpointLoopback] Device invalidated during init" << std::endl;
-        }
-
-        SignalStartupComplete(EndpointStartResult::InitializeFailed, hr);
-        CoTaskMemFree(pMixFormat);
-        SafeRelease(pAudioClient);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // ── 9. Get capture client ──
-    IAudioCaptureClient* pCaptureClient = nullptr;
-    hr = pAudioClient->GetService(
-        __uuidof(IAudioCaptureClient),
-        reinterpret_cast<void**>(&pCaptureClient));
-    if (FAILED(hr) || !pCaptureClient) {
-        std::cerr << "[EndpointLoopback] GetService(IAudioCaptureClient) failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::CaptureClientFailed, hr);
-        CoTaskMemFree(pMixFormat);
-        SafeRelease(pAudioClient);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // We now have the mix format but the audio engine will deliver data in
-    // our target format (48kHz stereo float) thanks to AUTOCONVERTPCM.
-    // However, GetMixFormat may give us a different format than the engine
-    // uses for loopback — the engine might deliver in the ORIGINAL mix
-    // format regardless of what we pass to Initialize. Let's get the actual
-    // format by querying the period and testing.
-    //
-    // Actually, per MSDN: when using AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    // the engine converts from the mix format to our target format.
-    // So we should receive data in target format (48kHz stereo float).
-    //
-    // To be safe, we'll also handle the case where the engine delivers
-    // data in the mix format by checking the actual frame size.
-    //
-    // Actually, the convention is:
-    // - Without AUTOCONVERTPCM: engine delivers in its internal mix format
-    // - With AUTOCONVERTPCM: engine delivers in the target format we specified
-    //
-    // So we SHOULD get 48kHz stereo float. Let's test by getting the period.
-
-    UINT32 bufferFrameCount = 0;
-    hr = pAudioClient->GetBufferSize(&bufferFrameCount);
-    if (FAILED(hr)) {
-        std::cerr << "[EndpointLoopback] GetBufferSize failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::InitializeFailed, hr);
-        CoTaskMemFree(pMixFormat);
-        SafeRelease(pCaptureClient);
-        SafeRelease(pAudioClient);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // ── 10. Start the audio engine ──
-    hr = pAudioClient->Start();
-    if (FAILED(hr)) {
-        std::cerr << "[EndpointLoopback] IAudioClient::Start failed: "
-                  << HresultToString(hr) << std::endl;
-        SignalStartupComplete(EndpointStartResult::AudioEngineStartFailed, hr);
-        CoTaskMemFree(pMixFormat);
-        SafeRelease(pCaptureClient);
-        SafeRelease(pAudioClient);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // Check for cancellation before signaling success
-    if (!running_.load()) {
-        pAudioClient->Stop();
-        SignalStartupComplete(EndpointStartResult::Cancelled, S_OK);
-        CoTaskMemFree(pMixFormat);
-        SafeRelease(pCaptureClient);
-        SafeRelease(pAudioClient);
-        SafeRelease(pEnumerator);
-        CoUninitialize();
-        running_.store(false);
-        return;
-    }
-
-    // Make client accessible to Stop() before signaling success
-    audioClient_.store(pAudioClient);
-    SignalStartupComplete(EndpointStartResult::Success, S_OK);
-
-    // ── 11. Set Pro Audio thread priority ──
-    DWORD taskIndex = 0;
-    HANDLE avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
-
-    // ── 12. Capture loop ──
-
-    // The AUTOCONVERTPCM flag makes WASAPI convert to our target format,
-    // but the actual captured format might still be the mix format because
-    // loopback captures the post-mix stream. Let's figure this out correctly.
-    //
-    // MSDN: "A client can also use loopback mode on a render device to capture
-    // the audio stream that is being played on that device."
-    //
-    // When we initialize with AUDCLNT_STREAMFLAGS_LOOPBACK and specify a target
-    // format with AUTOCONVERTPCM, the captured data is converted to our target
-    // format. So we should get 48kHz stereo float.
-    //
-    // But there's a catch: the loopback stream includes the audio from ALL
-    // processes, already mixed by the audio engine. The format we get back
-    // is the mix format of the engine (which is usually 48kHz float but could
-    // have more channels).
-    //
-    // With AUTOCONVERTPCM, WASAPI should convert. Let's trust the flag and
-    // add a safety check.
-
-    // We assume data arrives in our target format (48kHz stereo float) thanks to
-    // AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM. If the engine delivers a different format
-    // despite the conversion flag, the capture loop below handles manual conversion
-    // from the mix format (srcFmt) as a fallback.
-    // Pre-allocate conversion buffers (member variables, reused across packets)
-    conversionBuffer_.clear();
-    stereoBuffer_.clear();
-    resampleBuffer_.clear();
-
+    // ── Persistent state (survives recovery) ──
     uint64_t sequenceNumber = 0;
     uint64_t framesCaptured = 0;
+    DWORD avrtTaskIndex = 0;
+    HANDLE avrtHandle = nullptr;
+    bool firstStartup = true; // true until we signal readiness to Start()
 
+    // ── OUTER LOOP: supports device recovery ──
+    // On first entry performs the initial WASAPI setup and signals readiness.
+    // On subsequent entries (after device invalidation) picks up a recovered
+    // session from recoverySession_ (set by RecoverEndpoint()).
     while (running_.load()) {
-        // Get the next available packet size
-        UINT32 packetSize = 0;
-        hr = pCaptureClient->GetNextPacketSize(&packetSize);
-        if (FAILED(hr)) {
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                std::cerr << "[EndpointLoopback] Device invalidated — stopping" << std::endl;
-            } else {
-                std::cerr << "[EndpointLoopback] GetNextPacketSize failed: "
-                          << HresultToString(hr) << std::endl;
+        // ── WASAPI session pointers (reacquired each iteration) ──
+        IMMDeviceEnumerator* pEnumerator = nullptr;
+        IMMDevice* pDevice = nullptr;
+        IAudioClient* pAudioClient = nullptr;
+        IAudioCaptureClient* pCaptureClient = nullptr;
+        WAVEFORMATEX* pMixFormat = nullptr;
+        bool isRecoveredSession = false;
+
+        if (firstStartup) {
+            // ── Initial WASAPI setup (no backoff — fail fast) ──
+            WasapiInitResult init = InitializeWasapiEndpoint();
+            if (!init.success) {
+                std::cerr << "[EndpointLoopback] Initial WASAPI init failed: "
+                          << HresultToString(init.hr) << std::endl;
+                SignalStartupComplete(init.startResult, init.hr);
+                break;
+            }
+
+            pEnumerator = init.enumerator;
+            pDevice = init.device;
+            pAudioClient = init.audioClient;
+            pCaptureClient = init.captureClient;
+            pMixFormat = init.mixFormat;
+            // Clear init pointers so we own them
+            init.Reset();
+        } else {
+            // ── Recovery: use session from RecoverEndpoint() ──
+            if (!recoverySession_.IsValid()) {
+                // No valid recovery session — should not happen if RecoverEndpoint succeeded
+                break;
+            }
+
+            pEnumerator = recoverySession_.enumerator;
+            pDevice = recoverySession_.device;
+            pAudioClient = recoverySession_.audioClient;
+            pCaptureClient = recoverySession_.captureClient;
+            pMixFormat = recoverySession_.mixFormat;
+            recoverySession_ = WasapiSession{}; // clear
+            isRecoveredSession = true;
+        }
+
+        // At this point we own all session pointers. pDevice may be null
+        // since InitializeWasapiEndpoint releases it after Activate.
+        // That's fine — we don't need pDevice past activation.
+
+        // ── If Stop() was called during setup, bail out ──
+        if (!running_.load()) {
+            if (pAudioClient) pAudioClient->Stop();
+            SafeRelease(pCaptureClient);
+            SafeRelease(pAudioClient);
+            SafeRelease(pEnumerator);
+            if (pMixFormat) CoTaskMemFree(pMixFormat);
+            // pDevice is null (released by InitializeWasapiEndpoint)
+            if (firstStartup) {
+                SignalStartupComplete(EndpointStartResult::Cancelled, S_OK);
             }
             break;
         }
 
-        while (packetSize > 0) {
-            BYTE* pData = nullptr;
-            UINT32 numFramesAvailable = 0;
-            DWORD flags = 0;
-            UINT64 devicePosition = 0;
-            UINT64 qpcPosition = 0;
+        // ── Check for device-invalidated during init (unlikely but possible) ──
+        // The InitializeWasapiEndpoint handles AUDCLNT_E_DEVICE_INVALIDATED
+        // and returns it as InitializeFailed. If the first startup hits this,
+        // we'll fail below. If recovery hits this, we'll go through recovery
+        // again after backoff.
 
-            hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
-                                           &flags, &devicePosition, &qpcPosition);
+        // ── Start the audio engine ──
+        hr = pAudioClient->Start();
+        if (FAILED(hr)) {
+            std::cerr << "[EndpointLoopback] IAudioClient::Start failed: "
+                      << HresultToString(hr) << std::endl;
+            SafeRelease(pCaptureClient);
+            SafeRelease(pAudioClient);
+            SafeRelease(pEnumerator);
+            if (pMixFormat) CoTaskMemFree(pMixFormat);
+            if (firstStartup) {
+                SignalStartupComplete(EndpointStartResult::AudioEngineStartFailed, hr);
+            }
+            break;
+        }
+
+        // ── Make the client accessible to Stop() ──
+        audioClient_.store(pAudioClient);
+
+        // ── Signal readiness (only on first startup) ──
+        if (firstStartup) {
+            SignalStartupComplete(EndpointStartResult::Success, S_OK);
+            firstStartup = false;
+
+            // Set Pro Audio thread priority
+            avrtHandle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &avrtTaskIndex);
+
+            std::cerr << "[EndpointLoopback] Capture started" << std::endl;
+        } else {
+            // Recovery success
+            {
+                std::lock_guard<std::mutex> lock(diagMutex_);
+                diag_.deviceRestarts++;
+                diag_.lastHresult = S_OK;
+                diag_.lastError.clear();
+            }
+            std::cerr << "[EndpointLoopback] Capture resumed after recovery" << std::endl;
+        }
+
+        // ── Pre-allocate conversion buffers ──
+        conversionBuffer_.clear();
+        stereoBuffer_.clear();
+        resampleBuffer_.clear();
+
+        // ── CAPTURE LOOP ──
+        bool deviceInvalidated = false;
+
+        while (running_.load() && !deviceInvalidated) {
+            // Get the next available packet size
+            UINT32 packetSize = 0;
+            hr = pCaptureClient->GetNextPacketSize(&packetSize);
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                std::cerr << "[EndpointLoopback] Device invalidated — recovering" << std::endl;
+                deviceInvalidated = true;
+                {
+                    std::lock_guard<std::mutex> lock(diagMutex_);
+                    diag_.deviceInvalidations++;
+                    diag_.lastHresult = hr;
+                    diag_.lastError = "Device invalidated";
+                }
+                break;
+            }
             if (FAILED(hr)) {
+                std::cerr << "[EndpointLoopback] GetNextPacketSize failed: "
+                          << HresultToString(hr) << std::endl;
+                {
+                    std::lock_guard<std::mutex> lock(diagMutex_);
+                    diag_.lastHresult = hr;
+                    diag_.lastError = "GetNextPacketSize failed";
+                }
+                running_.store(false);
+                break;
+            }
+
+            while (packetSize > 0 && running_.load() && !deviceInvalidated) {
+                BYTE* pData = nullptr;
+                UINT32 numFramesAvailable = 0;
+                DWORD flags = 0;
+                UINT64 devicePosition = 0;
+                UINT64 qpcPosition = 0;
+
+                hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
+                                               &flags, &devicePosition, &qpcPosition);
                 if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
                     std::cerr << "[EndpointLoopback] Device invalidated during GetBuffer" << std::endl;
-                } else {
+                    deviceInvalidated = true;
+                    {
+                        std::lock_guard<std::mutex> lock(diagMutex_);
+                        diag_.deviceInvalidations++;
+                        diag_.lastHresult = hr;
+                        diag_.lastError = "Device invalidated";
+                    }
+                    break;
+                }
+                if (FAILED(hr)) {
                     std::cerr << "[EndpointLoopback] GetBuffer failed: "
                               << HresultToString(hr) << std::endl;
+                    {
+                        std::lock_guard<std::mutex> lock(diagMutex_);
+                        diag_.lastHresult = hr;
+                        diag_.lastError = "GetBuffer failed";
+                    }
+                    running_.store(false);
+                    break;
                 }
-                running_.store(false);
-                break;
-            }
 
-            if (numFramesAvailable == 0) {
+                if (numFramesAvailable == 0) {
+                    pCaptureClient->ReleaseBuffer(numFramesAvailable);
+                    break;
+                }
+
+                // ── Build AudioPacket ──
+                AudioPacket packet{};
+                packet.frameCount = numFramesAvailable;
+                packet.channels = kTargetChannels;
+                packet.sequenceNumber = sequenceNumber;
+                packet.qpcPosition100ns = qpcPosition;
+                packet.devicePosition = devicePosition;
+                packet.isDiscontinuous =
+                    (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
+                packet.hasTimestampError =
+                    (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
+                packet.sourceId = 0; // endpoint source
+
+                // ── Format conversion ──
+                // With AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, WASAPI delivers data
+                // in our target format (48 kHz stereo float).
+
+                bool isWasapiSilent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+                if (isWasapiSilent) {
+                    // Zero-fill silent frames to preserve timeline
+                    size_t totalSamples =
+                        static_cast<size_t>(numFramesAvailable) * kTargetChannels;
+                    conversionBuffer_.assign(totalSamples, 0.0f);
+                    packet.frames = conversionBuffer_.data();
+                    packet.isSilent = true;
+                } else {
+                    // AUTOCONVERTPCM delivers in target format directly
+                    packet.frames = reinterpret_cast<const float*>(pData);
+                }
+                packet.channels = kTargetChannels;
+
+                // ── Update diagnostics ──
+                {
+                    std::lock_guard<std::mutex> lock(diagMutex_);
+                    diag_.packetsCaptured++;
+                    diag_.endpointActive = true;
+                    diag_.running = true;
+                    if (isWasapiSilent) {
+                        diag_.silentPackets++;
+                    } else {
+                        // Check if any sample is non-zero
+                        bool nonZero = false;
+                        size_t totalSamples =
+                            static_cast<size_t>(numFramesAvailable) * kTargetChannels;
+                        const float* frames = reinterpret_cast<const float*>(pData);
+                        for (size_t i = 0; i < totalSamples && !nonZero; ++i) {
+                            if (frames[i] != 0.0f) nonZero = true;
+                        }
+                        if (nonZero) diag_.nonZeroPackets++;
+                    }
+                }
+
+                // Invoke callback
+                if (!onPacket(packet)) {
+                    running_.store(false);
+                }
+
+                framesCaptured += packet.frameCount;
+                sequenceNumber++;
+
                 pCaptureClient->ReleaseBuffer(numFramesAvailable);
-                break;
-            }
 
-            // Build AudioPacket
-            AudioPacket packet{};
-            packet.frameCount = numFramesAvailable;
-            packet.channels = kTargetChannels;
-            packet.sequenceNumber = sequenceNumber;
-            packet.qpcPosition100ns = qpcPosition;
-            packet.devicePosition = devicePosition;
-            packet.isDiscontinuous =
-                (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
-            packet.hasTimestampError =
-                (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) != 0;
-            packet.sourceId = 0; // endpoint source
+                if (!running_.load()) break;
 
-            // ── Format conversion ──
-            // With AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, WASAPI delivers data
-            // in our target format (48 kHz stereo float).  Data is always
-            // interpreted as target format when not silent.
-
-            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                // Zero-fill silent frames to preserve timeline
-                size_t totalSamples =
-                    static_cast<size_t>(numFramesAvailable) * kTargetChannels;
-                conversionBuffer_.assign(totalSamples, 0.0f);
-                packet.frames = conversionBuffer_.data();
-                packet.isSilent = true;
-            } else {
-                // AUTOCONVERTPCM delivers in target format directly
-                packet.frames = reinterpret_cast<const float*>(pData);
-            }
-            packet.channels = kTargetChannels;
-
-            // Invoke callback
-            if (!onPacket(packet)) {
-                running_.store(false);
-            }
-
-            framesCaptured += packet.frameCount;
-            sequenceNumber++;
-
-            pCaptureClient->ReleaseBuffer(numFramesAvailable);
-
-            if (!running_.load()) break;
-
-            // Check for more packets
-            hr = pCaptureClient->GetNextPacketSize(&packetSize);
-            if (FAILED(hr)) {
+                // Check for more packets
+                hr = pCaptureClient->GetNextPacketSize(&packetSize);
                 if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
                     std::cerr << "[EndpointLoopback] Device invalidated" << std::endl;
+                    deviceInvalidated = true;
+                    {
+                        std::lock_guard<std::mutex> lock(diagMutex_);
+                        diag_.deviceInvalidations++;
+                        diag_.lastHresult = hr;
+                        diag_.lastError = "Device invalidated";
+                    }
+                    break;
                 }
-                running_.store(false);
-                break;
+                if (FAILED(hr)) {
+                    std::cerr << "[EndpointLoopback] GetNextPacketSize failed: "
+                              << HresultToString(hr) << std::endl;
+                    running_.store(false);
+                    break;
+                }
+            }
+
+            // Brief sleep if no data available
+            if (packetSize == 0 && running_.load() && !deviceInvalidated) {
+                Sleep(1);
             }
         }
 
-        // Brief sleep if no data available
-        if (packetSize == 0 && running_.load()) {
-            Sleep(1);
+        // ── Cleanup after capture loop ──
+        // Stop the engine only if we still own the client and Stop() hasn't already done it
+        if (pAudioClient && running_.load()) {
+            pAudioClient->Stop();
         }
+
+        SafeRelease(pCaptureClient);
+        audioClient_.store(nullptr);
+        SafeRelease(pAudioClient);
+        SafeRelease(pEnumerator);
+        // pDevice was released by InitializeWasapiEndpoint after Activate
+        if (pMixFormat) {
+            CoTaskMemFree(pMixFormat);
+            pMixFormat = nullptr;
+        }
+
+        if (!running_.load()) break;
+
+        // ── Device recovery ──
+        if (deviceInvalidated) {
+            std::cerr << "[EndpointLoopback] Attempting device recovery..." << std::endl;
+
+            if (RecoverEndpoint()) {
+                // recoverySession_ is now populated — next outer-loop iteration
+                // picks it up
+                continue;
+            }
+
+            // Recovery failed — exit
+            std::cerr << "[EndpointLoopback] Device recovery failed, stopping" << std::endl;
+            break;
+        }
+
+        // Normal exit from capture loop (running_ was set to false)
+        break;
     }
 
-    // ── 13. Stop the engine ──
-    // Only stop if the control thread didn't already do it
-    if (running_.load()) {
-        pAudioClient->Stop();
-    }
-
-    // Revert Pro Audio priority
+    // ── Final cleanup ──
     if (avrtHandle) {
         AvRevertMmThreadCharacteristics(avrtHandle);
     }
 
-    // ── 14. Cleanup ──
-    CoTaskMemFree(pMixFormat);
-    SafeRelease(pCaptureClient);
-    audioClient_.store(nullptr);
-    SafeRelease(pAudioClient);
-    SafeRelease(pEnumerator);
-    CoUninitialize();
+    // Release any leftover recovery session
+    recoverySession_.Release();
 
+    CoUninitialize();
     running_.store(false);
+
+    std::cerr << "[EndpointLoopback] Capture thread exiting"
+              << " (seq=" << sequenceNumber
+              << " frames=" << framesCaptured << ")" << std::endl;
 }
 
 } // namespace screenlink::audio
