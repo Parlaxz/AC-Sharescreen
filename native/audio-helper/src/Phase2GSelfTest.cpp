@@ -170,6 +170,138 @@ void TestScreenLinkExcluded() {
 }
 
 // ====================================================================
+// Additional FilteredSourcePlanner Tests
+// ====================================================================
+
+void TestActiveSessionBecomesDesiredSource() {
+    TEST("FilteredSourcePlanner - active session becomes one desired source")
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    AudioSessionInfo s;
+    s.pid = 1234;
+    s.creationTimeUtc100ns = 1000000;
+    s.identityValidated = true;
+    s.processAlive = true;
+    s.executableName = "app.exe";
+    s.sessionState = 1; // AudioSessionStateActive
+    sessions.push_back(s);
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.totalSessions, 1u);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.desiredSources[0].sessionPid, 1234u);
+    END_TEST("FilteredSourcePlanner - active session becomes one desired source");
+}
+
+void TestInactiveSessionStillEligible() {
+    TEST("FilteredSourcePlanner - inactive session still eligible")
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    AudioSessionInfo s;
+    s.pid = 1234;
+    s.creationTimeUtc100ns = 1000000;
+    s.identityValidated = true;
+    s.processAlive = true;
+    s.executableName = "app.exe";
+    s.sessionState = 0; // AudioSessionStateInactive
+    sessions.push_back(s);
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.totalSessions, 1u);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.inactiveSessions, 1u);
+    END_TEST("FilteredSourcePlanner - inactive session still eligible");
+}
+
+void TestExpiredSessionSkipped() {
+    TEST("FilteredSourcePlanner - expired session skipped")
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    AudioSessionInfo s;
+    s.pid = 1234;
+    s.creationTimeUtc100ns = 1000000;
+    s.identityValidated = true;
+    s.processAlive = false; // expired
+    s.executableName = "app.exe";
+    sessions.push_back(s);
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.totalSessions, 1u);
+    ASSERT_EQ(plan.expiredSessions, 1u);
+    ASSERT_EQ(plan.desiredSources.size(), 0u);
+    END_TEST("FilteredSourcePlanner - expired session skipped");
+}
+
+void TestDuplicateProcessTreeDedup() {
+    TEST("FilteredSourcePlanner - duplicate process tree dedup")
+    // Two sessions from the same process root -> one desired source
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    AudioSessionInfo s1;
+    s1.pid = 1234;
+    s1.creationTimeUtc100ns = 1000000;
+    s1.identityValidated = true;
+    s1.processAlive = true;
+    s1.executableName = "chrome.exe";
+    s1.sessionState = 1;
+    sessions.push_back(s1);
+    AudioSessionInfo s2;
+    s2.pid = 1234; // same process, so same root
+    s2.creationTimeUtc100ns = 1000000;
+    s2.identityValidated = true;
+    s2.processAlive = true;
+    s2.executableName = "chrome.exe";
+    s2.sessionState = 1;
+    sessions.push_back(s2);
+    auto plan = planner.Plan(sessions, options);
+    // Both sessions have same PID, so ResolveProcessTree returns
+    // the same root -> one gets deduplicated
+    ASSERT_EQ(plan.totalSessions, 2u);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    END_TEST("FilteredSourcePlanner - duplicate process tree dedup");
+}
+
+void TestDiscordAllowedWhenExcludeFalse() {
+    TEST("FilteredSourcePlanner - Discord allowed when excludeDiscord=false")
+    // When excludeDiscord is false, Discord sessions should be eligible
+    ASSERT(!IsDiscordProcess("notdiscord.exe"));
+    ASSERT(IsDiscordProcess("discord.exe"));
+    ASSERT(!IsDiscordProcess(""));
+    END_TEST("FilteredSourcePlanner - Discord allowed when excludeDiscord=false");
+}
+
+void TestScreenLinkAllowedWhenExcludeFalse() {
+    TEST("ExclusionPolicy - ScreenLink allowed when excludeScreenLink=false")
+    ASSERT(IsScreenLinkProcess("screenlink.exe", ""));
+    ASSERT(IsScreenLinkProcess("ScreenLink.exe", "C:\\app\\ScreenLink.exe"));
+    ASSERT(!IsScreenLinkProcess("electron.exe", "C:\\browser\\electron.exe"));
+    END_TEST("ExclusionPolicy - ScreenLink allowed when excludeScreenLink=false");
+}
+
+void TestSourceLimit() {
+    TEST("FilteredSourcePlanner - source limit enforced")
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    // Add more sessions than kMaxSources
+    for (uint32_t i = 1; i <= MultiSourceMixer::kMaxSources + 5; i++) {
+        AudioSessionInfo s;
+        s.pid = i;
+        s.creationTimeUtc100ns = 1000000 + i;
+        s.identityValidated = true;
+        s.processAlive = true;
+        s.executableName = "app" + std::to_string(i) + ".exe";
+        s.sessionState = 1;
+        sessions.push_back(s);
+    }
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.desiredSources.size(), MultiSourceMixer::kMaxSources);
+    ASSERT_EQ(plan.sourceLimitSkipped, 5u);
+    END_TEST("FilteredSourcePlanner - source limit enforced");
+}
+
+// ====================================================================
 // MultiSourceMixer Tests
 // ====================================================================
 
@@ -364,23 +496,30 @@ bool RunPhase2GSelfTests() {
     // FilteredSourcePlanner tests
     TestEmptyInventory();
     TestSystemSoundsSkipped();
-
+    TestActiveSessionBecomesDesiredSource();
+    TestInactiveSessionStillEligible();
+    TestExpiredSessionSkipped();
+    TestDuplicateProcessTreeDedup();
+    TestDiscordAllowedWhenExcludeFalse();
+    TestScreenLinkAllowedWhenExcludeFalse();
+    TestSourceLimit();
+    
     // ProcessIdentity tests
     TestProcessIdentityEquality();
     TestProcessIdentityValidCheck();
     TestSamePidDifferentCreationTime();
-
+    
     // Exclusion tests
     TestDiscordExcluded();
     TestScreenLinkExcluded();
-
+    
     // MultiSourceMixer tests
     TestMixerZeroSourcesStart();
     TestMixerSequenceNumbers();
     TestMixerAddRemoveSource();
     TestMixerAddSourceReturnsId();
     TestMixerPacketSize();
-
+    
     // Lifecycle tests
     TestStopCalledTwice();
     TestMixerStartStopStart();

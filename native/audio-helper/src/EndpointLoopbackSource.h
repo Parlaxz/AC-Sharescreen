@@ -51,6 +51,8 @@ struct EndpointLoopbackDiagnostics {
     uint64_t nonZeroPackets = 0;
     uint64_t silentPackets = 0;
     uint64_t deviceInvalidations = 0;
+    uint64_t resourcesInvalidated = 0;
+    uint64_t serviceNotRunning = 0;
     uint64_t deviceRestarts = 0;
     uint64_t initializationFailures = 0;
     long lastHresult = S_OK;

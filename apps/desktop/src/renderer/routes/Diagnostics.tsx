@@ -15,6 +15,7 @@ export function Diagnostics() {
   const [loading, setLoading] = useState(true);
   const [audioDiag, setAudioDiag] = useState<any>(null);
   const [mixerDiag, setMixerDiag] = useState<any>(null);
+  const [pipelineSnapshot, setPipelineSnapshot] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -40,6 +41,7 @@ export function Diagnostics() {
       if (api) {
         api.getAudioState().then(state => setAudioDiag(state)).catch(() => {});
         api.getMixerDiagnostics().then(diag => setMixerDiag(diag)).catch(() => {});
+        api.getPipelineSnapshot().then(snap => setPipelineSnapshot(snap)).catch(() => {});
       }
     })();
   }, []);
@@ -152,6 +154,71 @@ export function Diagnostics() {
           </>
         )}
       </div>
+
+      {/* System Audio Diagnostics (endpoint pipeline) */}
+      {pipelineSnapshot?.endpointPacketsCaptured !== undefined && (
+        <div className="card">
+          <h3>System Audio Diagnostics</h3>
+          <table className="info-table">
+            <tbody>
+              <tr><td>Pipeline Type</td><td className="mono">Endpoint Direct</td></tr>
+              <tr><td>Endpoint Active</td><td className="mono">{(pipelineSnapshot.endpointPacketsCaptured ?? 0) > 0 ? 'Yes' : 'Yes (idle)'}</td></tr>
+              <tr><td>Packets Captured</td><td className="mono">{pipelineSnapshot.endpointPacketsCaptured?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Nonzero Packets</td><td className="mono">{pipelineSnapshot.endpointNonZeroPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Silent Packets</td><td className="mono">{pipelineSnapshot.endpointSilentPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Stream Generation</td><td className="mono">{pipelineSnapshot.streamGeneration ?? '—'}</td></tr>
+              <tr><td>Helper State</td><td className="mono">{pipelineSnapshot.helperState ?? '—'}</td></tr>
+              <tr><td>Helper Uptime</td><td className="mono">{pipelineSnapshot.helperUptimeMs ? `${(pipelineSnapshot.helperUptimeMs / 1000).toFixed(1)}s` : '—'}</td></tr>
+              <tr><td>Parser Invalid Headers</td><td className="mono">{pipelineSnapshot.parserInvalidHeaders ?? '—'}</td></tr>
+              <tr><td>Pipe Write Failures</td><td className="mono">{pipelineSnapshot.pcmPipeWriteFailures ?? '—'}</td></tr>
+              <tr><td>Bridge Dropped (wrong gen)</td><td className="mono">{pipelineSnapshot.bridge?.droppedWrongGeneration ?? '—'}</td></tr>
+              <tr><td>Bridge Post Errors</td><td className="mono">{pipelineSnapshot.bridge?.postErrors ?? '—'}</td></tr>
+              <tr><td>Bridge Last Error</td><td className="mono" style={{ fontSize: "0.7rem" }}>{pipelineSnapshot.bridge?.lastError ?? 'none'}</td></tr>
+            </tbody>
+          </table>
+          {pipelineSnapshot.endpointDiagnostics && (
+            <>
+              <h4 style={{ marginTop: "0.5rem" }}>Endpoint Diagnostics</h4>
+              <pre className="log-box" style={{ fontSize: "0.7rem" }}>{JSON.stringify(pipelineSnapshot.endpointDiagnostics, null, 2)}</pre>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Filtered Monitor Diagnostics (dynamic-process-mix pipeline) */}
+      {(pipelineSnapshot?.mixerFeedPackets !== undefined || pipelineSnapshot?.filteredMonitorDiagnostics !== undefined) && (
+        <div className="card">
+          <h3>Filtered Monitor Diagnostics</h3>
+          <table className="info-table">
+            <tbody>
+              <tr><td>Pipeline Type</td><td className="mono">Dynamic Process Mix</td></tr>
+              <tr><td>Stream Generation</td><td className="mono">{pipelineSnapshot.streamGeneration ?? '—'}</td></tr>
+              <tr><td>Helper State</td><td className="mono">{pipelineSnapshot.helperState ?? '—'}</td></tr>
+              <tr><td>Mixer Feed Packets</td><td className="mono">{pipelineSnapshot.mixerFeedPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Mixer Output Packets</td><td className="mono">{pipelineSnapshot.mixerOutputPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Mixer Nonzero Output</td><td className="mono">{pipelineSnapshot.mixerNonZeroOutputPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Capture Accepted</td><td className="mono">{pipelineSnapshot.onCaptureAccepted === undefined ? '—' : pipelineSnapshot.onCaptureAccepted ? 'Yes' : 'No'}</td></tr>
+              <tr><td>Capture Rejected State</td><td className="mono">{pipelineSnapshot.onCaptureRejectedState ?? '—'}</td></tr>
+              <tr><td>Active Capture Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.activeCaptureSources ?? '—'}</td></tr>
+              <tr><td>Sessions (last scan)</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sessionsInLastScan ?? '—'}</td></tr>
+              <tr><td>Desired Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.desiredSources ?? '—'}</td></tr>
+              <tr><td>Sources Added</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sourcesAdded ?? '—'}</td></tr>
+              <tr><td>Sources Removed</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.sourcesRemoved ?? '—'}</td></tr>
+              <tr><td>Start Failures</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.startFailures ?? '—'}</td></tr>
+              <tr><td>Retries</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.retryCount ?? '—'}</td></tr>
+              <tr><td>Exclude Discord</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.excludeDiscord === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.excludeDiscord ? 'Yes' : 'No'}</td></tr>
+              <tr><td>Exclude ScreenLink</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.excludeScreenLink === undefined ? '—' : pipelineSnapshot.filteredMonitorDiagnostics.excludeScreenLink ? 'Yes' : 'No'}</td></tr>
+              <tr><td>System Sounds Skipped</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.systemSoundsSkipped ?? '—'}</td></tr>
+            </tbody>
+          </table>
+          {pipelineSnapshot.filteredMonitorDiagnostics?.mixerStats && (
+            <>
+              <h4 style={{ marginTop: "0.5rem" }}>Mixer Stats</h4>
+              <pre className="log-box" style={{ fontSize: "0.7rem" }}>{JSON.stringify(pipelineSnapshot.filteredMonitorDiagnostics.mixerStats, null, 2)}</pre>
+            </>
+          )}
+        </div>
+      )}
 
       {/* Log section */}
       <div className="card">

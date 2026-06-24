@@ -200,8 +200,8 @@ describe('native helper service integration', () => {
     expect(response.state).toBe('idle');
     expect(response.protocolVersion).toBe('0.3.0');
     expect(response.sessionId).toBe(sessionId);
-    // requestId is always 0 in responses (SimpleJson doesn't echo)
-    expect(response.requestId).toBe(0);
+    // requestId is now echoed by the helper for correlation
+    expect(response.requestId).toBe(1);
 
     // result is a JSON string — parse it to verify nested fields
     const result = parseResult(response);

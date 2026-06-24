@@ -98,6 +98,7 @@ struct WasapiInitResult {
     WAVEFORMATEX* mixFormat = nullptr;
     EndpointStartResult startResult = EndpointStartResult::Success;
     HRESULT hr = S_OK;
+    bool recoverable = false; // true if failure may be transient (retryable)
 
     void Reset() {
         enumerator = nullptr;
@@ -136,6 +137,9 @@ WasapiInitResult InitializeWasapiEndpoint() {
         SafeRelease(pEnumerator);
         result.startResult = EndpointStartResult::EndpointNotFound;
         result.hr = hr;
+        if (hr == E_NOTFOUND) {
+            result.recoverable = true;
+        }
         return result;
     }
 
@@ -150,6 +154,11 @@ WasapiInitResult InitializeWasapiEndpoint() {
         SafeRelease(pEnumerator);
         result.startResult = EndpointStartResult::AudioClientActivationFailed;
         result.hr = hr;
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+            hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+            hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+            result.recoverable = true;
+        }
         return result;
     }
 
@@ -214,8 +223,17 @@ WasapiInitResult InitializeWasapiEndpoint() {
                   << HresultToString(hr) << std::endl;
 
         if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-            std::cerr << "[EndpointLoopback] Device invalidated during init" << std::endl;
+            std::cerr << "[EndpointLoopback]   -> device invalidated" << std::endl;
+        } else if (hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+            std::cerr << "[EndpointLoopback]   -> resources invalidated" << std::endl;
+        } else if (hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+            std::cerr << "[EndpointLoopback]   -> audio service not running" << std::endl;
         }
+
+        result.recoverable =
+            (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+             hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+             hr == AUDCLNT_E_SERVICE_NOT_RUNNING);
 
         CoTaskMemFree(pMixFormat);
         SafeRelease(pAudioClient);
@@ -585,8 +603,9 @@ EndpointLoopbackDiagnostics EndpointLoopbackSource::GetDiagnostics() const {
 // RecoverEndpoint — exponential-backoff device recovery
 // ========================================================================
 //
-// Called when AUDCLNT_E_DEVICE_INVALIDATED is encountered during active
-// capture. Waits with backoff (250ms → 500ms → 1000ms → 2000ms), then
+// Called when a recoverable WASAPI error is encountered (device invalidated,
+// resources invalidated, audio service not running, endpoint temporarily
+// missing). Waits with backoff (250ms → 500ms → 1000ms → 2000ms), then
 // attempts to reinitialize the WASAPI endpoint loopback. Returns true if
 // a new session was successfully created (stored in recoverySession_).
 // Returns false if cancelled (Stop() called) or all retries exhausted.
@@ -692,22 +711,47 @@ void EndpointLoopbackSource::CaptureThread(
         bool isRecoveredSession = false;
 
         if (firstStartup) {
-            // ── Initial WASAPI setup (no backoff — fail fast) ──
+            // ── Initial WASAPI setup ──
             WasapiInitResult init = InitializeWasapiEndpoint();
             if (!init.success) {
                 std::cerr << "[EndpointLoopback] Initial WASAPI init failed: "
                           << HresultToString(init.hr) << std::endl;
-                SignalStartupComplete(init.startResult, init.hr);
-                break;
-            }
 
-            pEnumerator = init.enumerator;
-            pDevice = init.device;
-            pAudioClient = init.audioClient;
-            pCaptureClient = init.captureClient;
-            pMixFormat = init.mixFormat;
-            // Clear init pointers so we own them
-            init.Reset();
+                if (init.recoverable) {
+                    // Recoverable error — retry with backoff via RecoverEndpoint
+                    std::cerr << "[EndpointLoopback] Error is recoverable — entering recovery loop"
+                              << std::endl;
+                    if (RecoverEndpoint()) {
+                        // Take ownership of recovered session
+                        pEnumerator = recoverySession_.enumerator;
+                        pDevice = recoverySession_.device;
+                        pAudioClient = recoverySession_.audioClient;
+                        pCaptureClient = recoverySession_.captureClient;
+                        pMixFormat = recoverySession_.mixFormat;
+                        recoverySession_ = WasapiSession{};
+                        isRecoveredSession = true;
+                        std::cerr << "[EndpointLoopback] Initial startup recovered after retries"
+                                  << std::endl;
+                    } else {
+                        // Recovery exhausted — permanent failure.
+                        // RecoverEndpoint() already incremented initializationFailures
+                        // and set lastError in diagnostics.
+                        SignalStartupComplete(init.startResult, init.hr);
+                        break;
+                    }
+                } else {
+                    // Non-recoverable — fail immediately
+                    SignalStartupComplete(init.startResult, init.hr);
+                    break;
+                }
+            } else {
+                pEnumerator = init.enumerator;
+                pDevice = init.device;
+                pAudioClient = init.audioClient;
+                pCaptureClient = init.captureClient;
+                pMixFormat = init.mixFormat;
+                init.Reset();
+            }
         } else {
             // ── Recovery: use session from RecoverEndpoint() ──
             if (!recoverySession_.IsValid()) {
@@ -742,11 +786,12 @@ void EndpointLoopbackSource::CaptureThread(
             break;
         }
 
-        // ── Check for device-invalidated during init (unlikely but possible) ──
-        // The InitializeWasapiEndpoint handles AUDCLNT_E_DEVICE_INVALIDATED
-        // and returns it as InitializeFailed. If the first startup hits this,
-        // we'll fail below. If recovery hits this, we'll go through recovery
-        // again after backoff.
+        // ── Check for recoverable init errors (unlikely but possible) ──
+        // InitializeWasapiEndpoint now marks AUDCLNT_E_DEVICE_INVALIDATED,
+        // AUDCLNT_E_RESOURCES_INVALIDATED, AUDCLNT_E_SERVICE_NOT_RUNNING,
+        // and E_NOTFOUND as recoverable. For first startup these trigger the
+        // recovery loop above. For subsequent recovery iterations they are
+        // handled by RecoverEndpoint's retry loop.
 
         // ── Start the audio engine ──
         hr = pAudioClient->Start();
@@ -798,14 +843,26 @@ void EndpointLoopbackSource::CaptureThread(
             // Get the next available packet size
             UINT32 packetSize = 0;
             hr = pCaptureClient->GetNextPacketSize(&packetSize);
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                std::cerr << "[EndpointLoopback] Device invalidated — recovering" << std::endl;
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+                hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+                hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
                 deviceInvalidated = true;
                 {
                     std::lock_guard<std::mutex> lock(diagMutex_);
-                    diag_.deviceInvalidations++;
                     diag_.lastHresult = hr;
-                    diag_.lastError = "Device invalidated";
+                    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                        diag_.deviceInvalidations++;
+                        diag_.lastError = "Device invalidated";
+                        std::cerr << "[EndpointLoopback] Device invalidated — recovering" << std::endl;
+                    } else if (hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+                        diag_.resourcesInvalidated++;
+                        diag_.lastError = "Resources invalidated";
+                        std::cerr << "[EndpointLoopback] Resources invalidated — recovering" << std::endl;
+                    } else {
+                        diag_.serviceNotRunning++;
+                        diag_.lastError = "Audio service not running";
+                        std::cerr << "[EndpointLoopback] Audio service not running — recovering" << std::endl;
+                    }
                 }
                 break;
             }
@@ -830,14 +887,26 @@ void EndpointLoopbackSource::CaptureThread(
 
                 hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable,
                                                &flags, &devicePosition, &qpcPosition);
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    std::cerr << "[EndpointLoopback] Device invalidated during GetBuffer" << std::endl;
+                if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+                    hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+                    hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
                     deviceInvalidated = true;
                     {
                         std::lock_guard<std::mutex> lock(diagMutex_);
-                        diag_.deviceInvalidations++;
                         diag_.lastHresult = hr;
-                        diag_.lastError = "Device invalidated";
+                        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                            diag_.deviceInvalidations++;
+                            diag_.lastError = "Device invalidated";
+                            std::cerr << "[EndpointLoopback] Device invalidated during GetBuffer" << std::endl;
+                        } else if (hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+                            diag_.resourcesInvalidated++;
+                            diag_.lastError = "Resources invalidated";
+                            std::cerr << "[EndpointLoopback] Resources invalidated during GetBuffer" << std::endl;
+                        } else {
+                            diag_.serviceNotRunning++;
+                            diag_.lastError = "Audio service not running";
+                            std::cerr << "[EndpointLoopback] Audio service not running during GetBuffer" << std::endl;
+                        }
                     }
                     break;
                 }
@@ -924,14 +993,26 @@ void EndpointLoopbackSource::CaptureThread(
 
                 // Check for more packets
                 hr = pCaptureClient->GetNextPacketSize(&packetSize);
-                if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    std::cerr << "[EndpointLoopback] Device invalidated" << std::endl;
+                if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+                    hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+                    hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
                     deviceInvalidated = true;
                     {
                         std::lock_guard<std::mutex> lock(diagMutex_);
-                        diag_.deviceInvalidations++;
                         diag_.lastHresult = hr;
-                        diag_.lastError = "Device invalidated";
+                        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+                            diag_.deviceInvalidations++;
+                            diag_.lastError = "Device invalidated";
+                            std::cerr << "[EndpointLoopback] Device invalidated" << std::endl;
+                        } else if (hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+                            diag_.resourcesInvalidated++;
+                            diag_.lastError = "Resources invalidated";
+                            std::cerr << "[EndpointLoopback] Resources invalidated" << std::endl;
+                        } else {
+                            diag_.serviceNotRunning++;
+                            diag_.lastError = "Audio service not running";
+                            std::cerr << "[EndpointLoopback] Audio service not running" << std::endl;
+                        }
                     }
                     break;
                 }
@@ -967,7 +1048,7 @@ void EndpointLoopbackSource::CaptureThread(
 
         if (!running_.load()) break;
 
-        // ── Device recovery ──
+        // ── Recoverable error recovery (device/resource invalidation, service down, etc.) ──
         if (deviceInvalidated) {
             std::cerr << "[EndpointLoopback] Attempting device recovery..." << std::endl;
 

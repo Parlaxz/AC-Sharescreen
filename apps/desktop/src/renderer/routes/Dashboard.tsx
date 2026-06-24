@@ -892,7 +892,7 @@ export function Dashboard() {
                 </label>
                 {audioMode === 'system' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Shares all sound played through your default Windows output device.
+                    Everything playing through the current default output device. This includes Discord and ScreenLink audio.
                   </p>
                 )}
                 {!audioOptionsReady && (
@@ -909,14 +909,14 @@ export function Dashboard() {
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
                     {capAudioModes?.['application'] === false
                       ? 'Application Audio is not available on this system.'
-                      : 'Captures audio from the selected application process tree only.'}
+                      : 'Only the selected application and its process tree.'}
                   </p>
                 )}
                 {audioMode === 'monitor' && (
                   <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
                     {capAudioModes?.['monitor'] === false
                       ? 'Filtered Monitor is not available on this system.'
-                      : 'Captures audio from active applications. Discord and ScreenLink playback are excluded.'}
+                      : 'All capturable application audio except Discord and ScreenLink. New apps are detected while sharing. Windows System Sounds and protected audio may not be included.'}
                   </p>
                 )}
                 {audioMode === 'test-tone' && (
