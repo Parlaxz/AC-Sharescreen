@@ -26,6 +26,8 @@ function diag(msg: string): void {
 
 // ── Types ──
 
+type CleanupIntent = 'restart' | 'startup-failure' | 'normal-stop' | 'permanent-shutdown';
+
 export interface AudioHelperConfig {
   helperPath: string;
   protocolVersion?: string;
@@ -153,6 +155,15 @@ export class AudioHelperManager {
 
   private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
   private shuttingDown_: boolean = false;
+
+  // Phase 2G lifecycle management fields
+  private restartTimer: NodeJS.Timeout | null = null;
+  private connectionRetryTimer: NodeJS.Timeout | null = null;
+  private pendingCleanup: CleanupIntent | null = null;
+  private lifecycleGen: number = 0;
+  private cleanupPromise: Promise<void> | null = null;
+  private captureLifecycleGen: number = -1;
+
   readonly pcmBridge: PcmBridge = new PcmBridge();
   private diagSocketChunks = 0;
   private diagSocketBytes = 0;
@@ -294,6 +305,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'synthetic';
     this.state = 'capturing';
     this.parser?.reset();
+    this.captureLifecycleGen = this.lifecycleGen;
     this.pcmBridge.forwardReset(result.streamGeneration);
     // Send diagnostic canary to verify MessagePort is alive
     this.pcmBridge.sendCanary?.();
@@ -311,6 +323,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'process';
     this.state = 'capturing';
     this.parser?.reset();
+    this.captureLifecycleGen = this.lifecycleGen;
     this.pcmBridge.forwardReset(result.streamGeneration);
     return result.streamGeneration;
   }
@@ -322,6 +335,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'system';
     this.state = 'capturing';
     this.parser?.reset();
+    this.captureLifecycleGen = this.lifecycleGen;
     this.pcmBridge.forwardReset(result.streamGeneration);
     this.pcmBridge.sendCanary?.();
     return result;
@@ -351,6 +365,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'application';
     this.state = 'capturing';
     this.parser?.reset();
+    this.captureLifecycleGen = this.lifecycleGen;
     this.pcmBridge.forwardReset(gen);
     this.pcmBridge.sendCanary?.();
     return { success: true, streamGeneration: gen };
@@ -419,6 +434,7 @@ export class AudioHelperManager {
     this.currentSourceType = 'monitor';
     this.state = 'capturing';
     this.parser?.reset();
+    this.captureLifecycleGen = this.lifecycleGen;
     this.pcmBridge.forwardReset(result.streamGeneration);
     this.pcmBridge.sendCanary?.();
     return result;
@@ -437,20 +453,51 @@ export class AudioHelperManager {
   async stopCapture(): Promise<void> {
     if (this.state !== 'capturing') return;
     this.state = 'stopping';
+
+    // Increment lifecycle gen to reject late PCM from old generation stream
+    this.lifecycleGen++;
+
     try {
       await this.control!.stopCapture();
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // Native stop failed — terminate helper and go to error
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastError_ = `stopCapture failed: ${msg}`;
+      this.state = 'error';
+      this.helper?.kill();
+      this.onErrorCallback?.(this.lastError_);
+      throw err; // Surface the failure
     }
+
+    // Native stop succeeded — transition to ready, clear source type
     this.state = 'ready';
     this.currentSourceType = null;
   }
 
   async shutdown(): Promise<void> {
     this.shuttingDown_ = true; // Prevent restart during shutdown
+    this.pendingCleanup = 'permanent-shutdown'; // Prevent any restart/reconnect
 
-    // Prevent any delayed callback from spawning or restarting
-    this.restartCount = this.maxRestarts;
+    // Cancel restart timer if set
+    if (this.restartTimer !== null) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+
+    // Cancel connection retry timer if set
+    if (this.connectionRetryTimer !== null) {
+      clearTimeout(this.connectionRetryTimer);
+      this.connectionRetryTimer = null;
+    }
+
+    // Cancel diagnostics polling
+    if (this.diagnosticsInterval !== null) {
+      clearInterval(this.diagnosticsInterval);
+      this.diagnosticsInterval = null;
+    }
+
+    // Increment lifecycle gen to reject delayed callbacks
+    this.lifecycleGen++;
 
     try {
       if (this.state === 'capturing') {
@@ -459,12 +506,13 @@ export class AudioHelperManager {
       if (this.control?.isConnected()) {
         await this.control!.shutdown();
       }
-    } catch {
-      /* ignore */
+    } catch (err) {
+      // Surface but don't block shutdown
+      this.lastError_ = err instanceof Error ? err.message : String(err);
     }
     await this.cleanup();
     this.state = 'disconnected';
-    // Keep shuttingDown_ = true to prevent unintended restarts
+    // Keep shuttingDown_ = true permanently to prevent unintended restarts
   }
 
   // ── Queries ──
@@ -685,13 +733,20 @@ export class AudioHelperManager {
       const start = Date.now();
       const timeoutMs = 5000;
       let attempts = 0;
+      let settled = false;
 
       const tryConnect = () => {
+        // If shutdown was requested, stop retrying
+        if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown') {
+          if (!settled) { settled = true; reject(new Error('Shutdown requested during PCM connect')); }
+          return;
+        }
+
         const elapsed = Date.now() - start;
         attempts++;
         if (elapsed > timeoutMs) {
           diag(`PCM CONNECT TIMEOUT after ${elapsed}ms (${attempts} attempts)`);
-          reject(new Error(`Timeout connecting to PCM pipe after ${elapsed}ms`));
+          if (!settled) { settled = true; reject(new Error(`Timeout connecting to PCM pipe after ${elapsed}ms`)); }
           return;
         }
 
@@ -700,7 +755,7 @@ export class AudioHelperManager {
         const onError = () => {
           socket.destroy();
           diag(`PCM connect attempt ${attempts} failed at ${elapsed}ms`);
-          setTimeout(tryConnect, 200);
+          this.connectionRetryTimer = setTimeout(tryConnect, 200);
         };
 
         socket.once('connect', () => {
@@ -708,7 +763,7 @@ export class AudioHelperManager {
           diag(`PCM pipe connected at ${elapsed}ms`);
           this.pcmSocket = socket;
           this.setupPcmSocket(socket);
-          resolve();
+          if (!settled) { settled = true; resolve(); }
         });
 
         socket.once('error', onError);
@@ -732,6 +787,11 @@ export class AudioHelperManager {
 
         // Check stream generation
         if (this.streamGeneration >= 0 && packet.header.streamGeneration !== this.streamGeneration) {
+          // If lifecycleGen has advanced since capture started, this packet is from
+          // a superseded generation — silently drop (expected after stopCapture)
+          if (this.lifecycleGen !== this.captureLifecycleGen) {
+            return;
+          }
           this.onErrorCallback?.(`Stream generation mismatch: expected ${this.streamGeneration}, got ${packet.header.streamGeneration}`);
           return;
         }
@@ -815,14 +875,14 @@ export class AudioHelperManager {
     diag(`Helper exit: ${exitDetail}`);
     console.error(`[AudioHelper] ${this.lastError_}`);
 
-    // Don't restart if we're shutting down
-    if (this.shuttingDown_) return;
+    // Don't restart if we're shutting down or permanent shutdown
+    if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown') return;
 
     if (wasRunning && this.restartCount < this.maxRestarts) {
       this.restartCount++;
       this.stats.helperRestarts = this.restartCount;
       diag(`Scheduling restart attempt ${this.restartCount}/${this.maxRestarts} in ${this.restartCooldownMs}ms`);
-      setTimeout(() => this.attemptRestart(), this.restartCooldownMs);
+      this.restartTimer = setTimeout(() => this.attemptRestart(), this.restartCooldownMs);
     } else if (this.restartCount >= this.maxRestarts) {
       diag(`Max restart attempts (${this.maxRestarts}) reached — giving up`);
       this.onErrorCallback?.(`Helper crashed ${this.maxRestarts} times, not restarting: ${this.lastError_}`);
@@ -836,14 +896,45 @@ export class AudioHelperManager {
   }
 
   private async attemptRestart(): Promise<void> {
-    // Re-check shutdown state before restarting
-    if (this.shuttingDown_) {
+    // Re-check shutdown / permanent-shutdown state before restarting
+    if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown') {
       diag('Restart cancelled — manager is shutting down');
       this.state = 'disconnected';
       return;
     }
 
-    await this.cleanup();
+    // Prevent concurrent restart attempts
+    if (this.pendingCleanup === 'restart') {
+      diag('Restart already in progress — skipping duplicate');
+      return;
+    }
+
+    const gen = this.lifecycleGen;
+    this.pendingCleanup = 'restart';
+
+    // Clear the timer handle since it fired
+    if (this.restartTimer !== null) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+
+    // Clean up without setting shuttingDown_ (restart is intentional, not permanent shutdown)
+    await this.cleanup(false);
+
+    // Re-check lifecycleGen after async cleanup — abort if superseded
+    if (this.lifecycleGen !== gen) {
+      diag('Restart cancelled — lifecycleGen changed during cleanup');
+      this.pendingCleanup = null;
+      return;
+    }
+
+    // Re-check shutdown state after async cleanup
+    if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown') {
+      diag('Restart cancelled — shutdown requested during cleanup');
+      this.state = 'disconnected';
+      this.pendingCleanup = null;
+      return;
+    }
 
     this.state = 'connecting';
     this.sessionId = this.generateId();
@@ -853,36 +944,66 @@ export class AudioHelperManager {
 
     try {
       await this.spawnHelper();
+
+      // Re-check lifecycleGen immediately before proceeding after spawn
+      if (this.lifecycleGen !== gen) {
+        diag('Restart cancelled — lifecycleGen changed after spawn');
+        if (this.helper) {
+          this.helper.kill();
+          this.helper = null;
+        }
+        this.state = 'disconnected';
+        this.pendingCleanup = null;
+        return;
+      }
+
       this.control = new ControlClient(this.ctrlPipeName, this.sessionId, this.authToken);
       await this.control.connect(5000);
       await this.control.hello();
       await this.connectPcmPipe();
+      this.startDiagnostics();
+
+      // Reset retry count only after handshake, PCM connection, AND diagnostics all succeed
       this.state = 'ready';
       this.restartCount = 0;
-    } catch {
+      this.pendingCleanup = null;
+      diag(`Restart succeeded — helper is ready`);
+    } catch (err) {
       this.state = 'error';
+      this.lastError_ = err instanceof Error ? err.message : String(err);
+      this.pendingCleanup = null; // Allow future restart attempts
     }
   }
 
   /**
    * Wait for the helper process to exit with a deadline.
    * Falls back to force kill if the process doesn't exit within the timeout.
+   * Resolves only from observed exit event — does not treat helper.killed as proof of exit.
+   * Does NOT null helper ownership — caller is responsible for that.
    */
-  private async awaitHelperExit(deadlineMs: number = 5000): Promise<void> {
-    if (!this.helper || this.helper.killed) return;
+  private async awaitHelperExit(deadlineMs: number = 5000): Promise<{success: boolean; exitCode: number | null; signal: string | null}> {
+    if (!this.helper) {
+      return { success: true, exitCode: null, signal: null };
+    }
 
     const helper = this.helper;
-    const exitPromise = new Promise<{ code: number | null; signal: string | null }>(
-      (resolve) => {
-        helper.once('exit', (code, signal) => resolve({ code, signal }));
-      },
-    );
 
-    const timeoutPromise = new Promise<{ code: number | null; signal: string | null }>(
-      (_, reject) => {
-        setTimeout(() => reject(new Error('Helper exit timeout')), deadlineMs);
-      },
-    );
+    // If helper already exited before we set up the listener, return immediately
+    if (helper.exitCode !== null) {
+      return { success: true, exitCode: helper.exitCode, signal: helper.signalCode };
+    }
+
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    let sigkillTimeoutHandle: NodeJS.Timeout | null = null;
+
+    const exitPromise = new Promise<{code: number | null; signal: string | null}>((resolve) => {
+      helper.once('exit', (code, signal) => {
+        // Clear any pending timeout handles in every path
+        if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+        if (sigkillTimeoutHandle !== null) clearTimeout(sigkillTimeoutHandle);
+        resolve({ code, signal });
+      });
+    });
 
     try {
       // Send graceful termination signal
@@ -891,55 +1012,98 @@ export class AudioHelperManager {
       } else {
         helper.kill();
       }
-      await Promise.race([exitPromise, timeoutPromise]);
-      diag('Helper exited gracefully');
-    } catch {
-      // Timeout or other error — force kill
-      if (!helper.killed) {
-        try {
-          helper.kill('SIGKILL');
-          diag('Force-killed helper after exit timeout');
-        } catch { /* ignore */ }
-      }
-    }
 
-    // Final verification
-    const stillAlive = helper.exitCode === null && !helper.killed;
-    if (stillAlive) {
-      diag('WARNING: helper may still be running after force kill');
+      const timeoutPromise = new Promise<{code: number | null; signal: string | null}>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error('Helper exit timeout')), deadlineMs);
+      });
+
+      const result = await Promise.race([exitPromise, timeoutPromise]);
+      diag('Helper exited gracefully');
+      return { success: true, exitCode: result.code, signal: result.signal };
+    } catch {
+      // Timeout — force kill with SIGKILL
+      diag('Helper exit timeout — sending SIGKILL');
+      try {
+        helper.kill('SIGKILL');
+      } catch { /* ignore */ }
+
+      // After SIGKILL, wait with a second bounded deadline
+      const sigkillDeadline = 3000;
+      const sigkillTimeoutPromise = new Promise<never>((_, reject) => {
+        sigkillTimeoutHandle = setTimeout(() => reject(new Error('SIGKILL exit timeout')), sigkillDeadline);
+      });
+
+      try {
+        const result = await Promise.race([exitPromise, sigkillTimeoutPromise]);
+        if (sigkillTimeoutHandle !== null) clearTimeout(sigkillTimeoutHandle);
+        diag('Helper exited after SIGKILL');
+        return { success: true, exitCode: result.code, signal: result.signal };
+      } catch {
+        diag('WARNING: helper may still be running after SIGKILL timeout');
+        return { success: false, exitCode: null, signal: 'SIGKILL' };
+      }
     }
   }
 
-  private async cleanup(): Promise<void> {
-    this.pcmBridge.detach();
-
-    if (this.diagnosticsInterval !== null) {
-      clearInterval(this.diagnosticsInterval);
-      this.diagnosticsInterval = null;
+  private async cleanup(setShuttingDown: boolean = true): Promise<void> {
+    // Serialize cleanup — if one is already in progress, await it
+    if (this.cleanupPromise !== null) {
+      diag('cleanup already in progress — awaiting');
+      await this.cleanupPromise;
+      return;
     }
 
-    // Cancel any pending restart
-    this.restartCount = this.maxRestarts; // Prevent further automatic restarts
-    this.shuttingDown_ = true;
+    const run = async (): Promise<void> => {
+      this.pcmBridge.detach();
 
-    // Close PCM socket
-    if (this.pcmSocket) {
-      try {
-        this.pcmSocket.destroy();
-      } catch { /* ignore */ }
-      this.pcmSocket = null;
+      if (this.diagnosticsInterval !== null) {
+        clearInterval(this.diagnosticsInterval);
+        this.diagnosticsInterval = null;
+      }
+
+      // Cancel any pending restart timer
+      if (this.restartTimer !== null) {
+        clearTimeout(this.restartTimer);
+        this.restartTimer = null;
+      }
+
+      // Cancel connection retry timer
+      if (this.connectionRetryTimer !== null) {
+        clearTimeout(this.connectionRetryTimer);
+        this.connectionRetryTimer = null;
+      }
+
+      if (setShuttingDown) {
+        this.restartCount = this.maxRestarts; // Prevent further automatic restarts
+        this.shuttingDown_ = true;
+      }
+
+      // Close PCM socket
+      if (this.pcmSocket) {
+        try {
+          this.pcmSocket.destroy();
+        } catch { /* ignore */ }
+        this.pcmSocket = null;
+      }
+
+      // Disconnect control client
+      this.control?.disconnect();
+      this.control = null;
+      this.parser = null;
+
+      // Await helper exit with deadline (resolve only from observed exit event)
+      if (this.helper) {
+        await this.awaitHelperExit(5000);
+      }
+      this.helper = null;
+    };
+
+    this.cleanupPromise = run();
+    try {
+      await this.cleanupPromise;
+    } finally {
+      this.cleanupPromise = null;
     }
-
-    // Disconnect control client
-    this.control?.disconnect();
-    this.control = null;
-    this.parser = null;
-
-    // Await helper exit with deadline
-    if (this.helper && !this.helper.killed) {
-      await this.awaitHelperExit(5000);
-    }
-    this.helper = null;
   }
 
   private generateId(): string {
