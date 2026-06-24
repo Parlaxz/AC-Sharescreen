@@ -439,15 +439,22 @@ bool FilteredMonitorController::ReconcileOnce() {
         desiredIdentities.insert(candidate.identity);
     }
 
-    // --- Phase 1: Build list of new sources to add (under activeCapturesMutex_) ---
-    // Collect identities that are desired but not yet active.
-    // We must NOT hold activeCapturesMutex_ while calling AddSource()
-    // because AddSource() also tries to lock activeCapturesMutex_.
+    // --- Phase 1: Build list of new/existing sources to add (under activeCapturesMutex_) ---
+    // Collect identities that are desired (new or retry). We must NOT hold
+    // activeCapturesMutex_ while calling AddSource() because AddSource()
+    // also tries to lock activeCapturesMutex_. And we must NOT lock diagMutex_
+    // while holding activeCapturesMutex_ to avoid lock-order inversion.
+    struct RetryEntry {
+        ProcessIdentity identity;
+        uint32_t previousFailureCount = 0;
+        std::unique_ptr<ApplicationCaptureSource> oldSource;
+        uint32_t oldMixerSourceId = 0;
+    };
     std::vector<FilteredSourceCandidate> newCandidates;
+    std::vector<RetryEntry> retryCleanups; // sources to stop outside the lock
     {
         std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
 
-        // Refresh lastSeenAt for existing desired captures
         for (const auto& candidate : plan.desiredSources) {
             auto it = activeCaptures_.find(candidate.identity);
             if (it != activeCaptures_.end()) {
@@ -455,8 +462,8 @@ bool FilteredMonitorController::ReconcileOnce() {
 
                 // Check if source needs retry (null source or stopped unexpectedly)
                 bool needsRetry = false;
+                uint32_t prevFailureCount = it->second.consecutiveStartFailures;
                 if (!it->second.source && now >= it->second.nextRetryAt) {
-                    // Null source from previous failed start - ready for retry
                     needsRetry = true;
                 } else if (it->second.source && !it->second.source->IsRunning() &&
                            now >= it->second.nextRetryAt) {
@@ -465,21 +472,27 @@ bool FilteredMonitorController::ReconcileOnce() {
 
                 if (needsRetry) {
                     std::cerr << "[FilteredMonitorController] Retrying source PID="
-                              << candidate.identity.pid << std::endl;
-                    {
-                        std::lock_guard<std::mutex> dLock(diagMutex_);
-                        diag_.sourceRetries++;
-                    }
+                              << candidate.identity.pid
+                              << " (failureCount=" << prevFailureCount << ")" << std::endl;
 
-                    // Move capture out for external processing
-                    auto oldCapture = std::move(it->second);
-                    // Erase it - we'll re-add via newCandidates
-                    // Don't use iterator after erase
+                    // Move old capture out for cleanup outside the lock
+                    RetryEntry re;
+                    re.identity = candidate.identity;
+                    re.previousFailureCount = prevFailureCount;
+                    re.oldSource = std::move(it->second.source);
+                    re.oldMixerSourceId = it->second.mixerSourceId;
+                    retryCleanups.push_back(std::move(re));
+
+                    // Erase the old entry so the second loop below picks it up
+                    activeCaptures_.erase(it);
+
+                    // Mark for re-add via newCandidates (handled by the second loop)
                 }
             }
         }
 
         // Now collect new desired sources (not already in activeCaptures_)
+        // Since we erased retry entries above, they'll appear as "new" here.
         for (const auto& candidate : plan.desiredSources) {
             if (activeCaptures_.find(candidate.identity) == activeCaptures_.end()) {
                 newCandidates.push_back(candidate);
@@ -488,9 +501,57 @@ bool FilteredMonitorController::ReconcileOnce() {
     }
     // activeCapturesMutex_ is released here
 
-    // --- Phase 2: Add new sources WITHOUT holding activeCapturesMutex_ ---
+    // Clean up old retry sources outside the lock (no mutex held)
+    for (auto& re : retryCleanups) {
+        if (re.oldSource) {
+            re.oldSource->Stop();
+        }
+        if (mixer_ && re.oldMixerSourceId != 0) {
+            mixer_->RemoveSource(re.oldMixerSourceId);
+        }
+    }
+
+    // --- Phase 2: Add new/retry sources WITHOUT holding activeCapturesMutex_ ---
+    // We collect candidates that need retries with their previous failure count
+    // so AddSource can carry the backoff forward. We do this by modifying the
+    // ActiveCapture entry after AddSource returns. But since AddSource creates
+    // a fresh entry, we need to inject the preserved count afterwards.
     for (const auto& candidate : newCandidates) {
-        AddSource(candidate);
+        // Check if this was a retry (existed in retryCleanups)
+        bool isRetry = false;
+        uint32_t preservedFailureCount = 0;
+        for (const auto& re : retryCleanups) {
+            if (re.identity == candidate.identity) {
+                isRetry = true;
+                preservedFailureCount = re.previousFailureCount;
+                break;
+            }
+        }
+
+        [[maybe_unused]] bool added = AddSource(candidate);
+
+        if (isRetry && preservedFailureCount > 0) {
+            // Preserve the failure count so backoff progresses
+            // Update the entry we just inserted (it has fresh failureCount = 0 or 1)
+            std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
+            auto it = activeCaptures_.find(candidate.identity);
+            if (it != activeCaptures_.end()) {
+                // Carry forward the accumulated failure count for backoff
+                uint32_t totalFailures = preservedFailureCount + 1;
+                it->second.consecutiveStartFailures = totalFailures;
+                // Recompute backoff
+                uint64_t delayMs = 1000ULL * (1ULL << (std::min)((totalFailures > 0u ? totalFailures - 1u : 0u), 4u));
+                if (totalFailures > 5) delayMs = 30000;
+                it->second.nextRetryAt = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(delayMs);
+            }
+        }
+
+        // Track retry in diagnostics
+        if (isRetry) {
+            std::lock_guard<std::mutex> dLock(diagMutex_);
+            diag_.sourceRetries++;
+        }
     }
 
     // --- Phase 3: Handle removal grace period ---
@@ -538,29 +599,16 @@ bool FilteredMonitorController::ReconcileOnce() {
         }
     }
 
-    // --- Update active capture count in diagnostics ---
+    // --- Update active capture count in diagnostics (no mutex nesting) ---
+    uint32_t sourceCount = 0;
     {
         std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
-        // Count only entries with a valid source
-        uint32_t activeCount = 0;
         for (const auto& [_, cap] : activeCaptures_) {
-            if (cap.source && cap.source->IsRunning()) {
-                activeCount++;
-            }
+            if (cap.source) sourceCount++;
         }
-        // Lock diagMutex_ separately (never nested under capLock)
-        // Must release capLock first
-        // (We already have capLock; need to update diag after releasing it)
     }
     {
         std::lock_guard<std::mutex> dLock(diagMutex_);
-        uint32_t sourceCount = 0;
-        {
-            std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
-            for (const auto& [_, cap] : activeCaptures_) {
-                if (cap.source) sourceCount++;
-            }
-        }
         diag_.activeCaptureSources = sourceCount;
     }
 

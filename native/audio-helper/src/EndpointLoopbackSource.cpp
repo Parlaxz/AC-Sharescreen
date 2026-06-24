@@ -888,18 +888,19 @@ void EndpointLoopbackSource::CaptureThread(
         // This lets us detect when the user switches audio output devices
         // without waiting for a WASAPI error.
         {
-            EndpointDeviceNotificationSink* pSink =
-                new EndpointDeviceNotificationSink(deviceChangePending_);
+            auto* pSink = new EndpointDeviceNotificationSink(deviceChangePending_);
             HRESULT hrReg = pEnumerator->RegisterEndpointNotificationCallback(pSink);
             if (SUCCEEDED(hrReg)) {
                 notificationRegistered_ = true;
                 notificationSink_ = pSink;
-                // Enumerator now owns the sink reference; release ours.
-                pSink->Release();
+                // IMPORTANT: Do NOT Release here. RegisterEndpointNotificationCallback
+                // does NOT take a reference (per MSDN). We must keep the sink alive
+                // until after Unregister + our Release in cleanup.
             } else {
                 std::cerr << "[EndpointLoopback] RegisterEndpointNotificationCallback failed: "
                           << HresultToString(hrReg) << std::endl;
-                delete pSink;
+                pSink->Release();
+                notificationSink_ = nullptr;
             }
         }
 
@@ -1125,10 +1126,11 @@ void EndpointLoopbackSource::CaptureThread(
 
         // Unregister the device-change notification sink before releasing
         // the enumerator so the callback can no longer fire.
+        // MSDN: RegisterEndpointNotificationCallback does NOT take a reference,
+        // so we must Release ourselves after unregistering.
         if (notificationRegistered_ && pEnumerator && notificationSink_) {
-            // The enumerator holds a reference to the sink and will Release()
-            // it here, causing self-deletion when the ref count reaches 0.
             pEnumerator->UnregisterEndpointNotificationCallback(notificationSink_);
+            notificationSink_->Release();
         }
         notificationRegistered_ = false;
         notificationSink_ = nullptr;

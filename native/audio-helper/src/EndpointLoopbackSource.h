@@ -144,8 +144,9 @@ private:
     // Tracks whether the IMMNotificationClient sink is registered on the
     // current pEnumerator so we can unregister during cleanup.
     bool notificationRegistered_ = false;
-    // Raw pointer to the registered sink (owned by the enumerator via refcounting).
-    // Only valid when notificationRegistered_ is true.
+    // Owned pointer to the registered sink. RegisterEndpointNotificationCallback
+    // does NOT take a reference (per MSDN). We must keep the object alive
+    // until after UnregisterEndpointNotificationCallback + Release.
     IMMNotificationClient* notificationSink_ = nullptr;
 
     // Stateful resampler — must persist across packets to avoid boundary clicks.
