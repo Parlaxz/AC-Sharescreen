@@ -3,11 +3,17 @@ import { enumerateSources, getSourceFingerprint } from "./capture-source-manager
 import { setApprovedSource } from "./display-media-handler.js";
 import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.js";
 import { AudioHelperManager } from "./AudioHelperManager.js";
-import { generateVdoStreamId, generateVdoPassword } from "@screenlink/shared";
+import {
+  generateVdoStreamId,
+  generateVdoPassword,
+  type GroupInviteV1,
+  type GroupQualitySettings,
+} from "@screenlink/shared";
 import type { SettingsStore } from "./settings-store.js";
 import type { SecureStore } from "./secure-store.js";
 import type { TrayManager } from "./tray-manager.js";
-
+import type { GroupStore } from "./group-store.js";
+import type { QualityPresetStore } from "./quality-preset-store.js";
 
 // In-memory VDO session credentials (set by host when sharing starts)
 let currentVdoStreamId = "";
@@ -53,15 +59,13 @@ async function ensureAudioHelper(): Promise<AudioHelperManager> {
   return helper;
 }
 
-/**
- * Register all IPC handlers that bridge renderer requests to main process
- * capabilities.
- */
 export function registerIpcHandlers(
   window: BrowserWindow,
   settings: SettingsStore,
   secureStore: SecureStore,
   trayManager: TrayManager,
+  groupStore?: GroupStore,
+  presetStore?: QualityPresetStore,
 ): void {
   // ── VDO session credentials (for LAN testing) ─────────────────────────
 
@@ -116,7 +120,7 @@ export function registerIpcHandlers(
   ipcMain.handle(
     "update-settings",
     (_event, partial: Record<string, unknown>) => {
-      settings.update(partial);
+      settings.update(partial as never);
     },
   );
 
@@ -138,210 +142,161 @@ export function registerIpcHandlers(
     window.hide();
   });
 
-  // ── Pairing ─────────────────────────────────────────────────────
+  // ── Device identity ──────────────────────────────────────────────────────
 
   ipcMain.handle("safe-storage-available", () => {
     return secureStore.isEncryptionAvailable();
   });
 
-  ipcMain.handle("create-pairing", async (_event, displayName: string) => {
-    const {
-      generatePairId,
-      generatePairSecret,
-      generateDeviceId,
-      createCreatorConfig,
-    } = await import("@screenlink/shared");
-    const pairId = generatePairId();
-    const pairSecret = generatePairSecret();
-    const deviceId = generateDeviceId();
-    const name = displayName || "ScreenLink User";
+  ipcMain.handle("get-device-identity", () => {
+    return settings.get().deviceIdentity;
+  });
 
-    // Encrypt pair secret for storage
-    const encrypted = secureStore.encrypt(pairSecret);
-    if (!encrypted) {
-      throw new Error("Secure storage unavailable — cannot store pair secret");
+  ipcMain.handle("update-display-name", (_event, displayName: string) => {
+    const trimmed = String(displayName ?? "").trim();
+    if (trimmed.length < 1 || trimmed.length > 100) {
+      throw new Error("displayName must be 1-100 characters");
     }
-
-    const result = createCreatorConfig({
-      pairId,
-      pairSecret,
-      localDeviceId: deviceId,
-      localDisplayName: name,
-    });
-
-    // Persist to settings with lifecycle
+    const current = settings.get();
     settings.update({
-      pairingConfig: JSON.stringify(result.config),
-      encryptedPairSecret: encrypted.toString("base64"),
-    } as Record<string, unknown>);
-
-    return {
-      pairingCode: result.pairingLink,
-      pairingLink: result.pairingLink,
-      pairId,
-      deviceId,
-      displayName: name,
-      exportData: result.exportData as unknown as Record<string, unknown>,
-    };
-  });
-
-  ipcMain.handle("get-pairing-link", () => {
-    const s = settings.get();
-    const raw = (s as unknown as Record<string, unknown>).pairingConfig;
-    if (typeof raw !== "string") return null;
-    try {
-      const config = JSON.parse(raw);
-      if ((config as Record<string, unknown>).pendingPairingLink) {
-        return (config as Record<string, unknown>).pendingPairingLink as string;
-      }
-      // If no pending link stored, try to reconstruct from stored export data
-      // (fallback for legacy configs)
-      return null;
-    } catch {
-      return null;
-    }
-  });
-
-  ipcMain.handle("import-pairing", async (_event, pairingCode: string) => {
-    const {
-      parsePairingCode,
-      generateDeviceId,
-      createImporterConfig,
-      getImporterDisplayName,
-    } = await import("@screenlink/shared");
-    const exportData = parsePairingCode(pairingCode);
-    if (!exportData) {
-      throw new Error("Invalid pairing code format");
-    }
-
-    const localDeviceId = generateDeviceId();
-
-    // Use the current saved display name (with dev profile defaults) instead
-    // of hardcoding "ScreenLink User"
-    const currentSavedName = settings.get().hostDisplayName;
-    const devProfile = (process.argv as string[]).includes("--dev-profile")
-      ? ((): string | undefined => {
-          const idx = (process.argv as string[]).indexOf("--dev-profile");
-          return idx !== -1 && idx + 1 < (process.argv as string[]).length
-            ? (process.argv as string[])[idx + 1]
-            : undefined;
-        })()
-      : undefined;
-    const localDisplayName = getImporterDisplayName(currentSavedName, devProfile);
-
-    const config = createImporterConfig({
-      exportData,
-      localDeviceId,
-      localDisplayName,
+      deviceIdentity: { ...current.deviceIdentity, displayName: trimmed },
+      hostDisplayName: trimmed,
     });
-
-    // Encrypt the shared pair secret
-    const encrypted = secureStore.encrypt(exportData.pairSecret);
-    if (!encrypted) {
-      throw new Error("Secure storage unavailable — cannot store pair secret");
-    }
-
-    settings.update({
-      pairingConfig: JSON.stringify(config),
-      encryptedPairSecret: encrypted.toString("base64"),
-    } as Record<string, unknown>);
-
-    return { deviceId: localDeviceId, remoteName: exportData.creatorDisplayName };
+    return settings.get().deviceIdentity;
   });
 
-  ipcMain.handle("get-pairing-config", () => {
-    const s = settings.get();
-    const raw = (s as unknown as Record<string, unknown>).pairingConfig;
-    if (typeof raw !== "string") return null;
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
-  });
+  // ── Groups ──────────────────────────────────────────────────────────────
 
-  ipcMain.handle("get-pair-secret", () => {
-    const s = settings.get();
-    const encryptedB64 = (s as unknown as Record<string, unknown>).encryptedPairSecret;
-    if (typeof encryptedB64 !== "string") return null;
-    const buf = Buffer.from(encryptedB64, "base64");
-    return secureStore.decrypt(buf);
-  });
+  if (groupStore) {
+    ipcMain.handle("list-groups", () => groupStore.list());
 
-  ipcMain.handle("update-pairing-config", (_event, partial: Record<string, unknown>) => {
-    const s = settings.get();
-    const raw = (s as unknown as Record<string, unknown>).pairingConfig;
-    if (typeof raw !== "string") return;
-    const config = JSON.parse(raw);
-    Object.assign(config, partial);
-    settings.update({ pairingConfig: JSON.stringify(config) } as Record<string, unknown>);
-  });
+    ipcMain.handle("get-group", (_event, groupId: string) => groupStore.get(groupId));
 
-  ipcMain.handle("update-remote-identity", async (_event, remoteDeviceId: string, remoteDisplayName: string) => {
-    try {
-      const { applyPeerHello } = await import("@screenlink/shared");
-      const s = settings.get();
-      const raw = (s as unknown as Record<string, unknown>).pairingConfig;
-      if (typeof raw !== "string") return { accepted: false, reason: "No pairing config" };
-      const config = JSON.parse(raw);
-      const result = applyPeerHello(config, remoteDeviceId, remoteDisplayName);
-      if (result.accepted && result.config) {
-        settings.update({ pairingConfig: JSON.stringify(result.config) } as Record<string, unknown>);
-        // Return authoritative result so caller can observe the transition
-        return {
-          accepted: true,
-          pairingLifecycle: result.config.pairingLifecycle,
-          remoteDeviceId: result.config.remoteDeviceId,
-          remoteDisplayName: result.config.remoteDisplayName,
+    ipcMain.handle(
+      "create-group",
+      async (
+        _event,
+        input: { groupName: string; nodeId: string; groupId?: string; nowMs?: number },
+      ) => {
+        const { createGroupInvite } = await import("@screenlink/shared");
+        const invite = createGroupInvite({
+          groupName: input.groupName,
+          displayName: settings.get().deviceIdentity.displayName,
+          nodeId: input.nodeId,
+          groupId: input.groupId,
+          nowMs: input.nowMs,
+        });
+        const record = groupStore.create({
+          groupId: invite.groupId,
+          controlRoomId: invite.controlRoomId,
+          groupSecret: invite.groupSecret,
+          nodeId: input.nodeId,
+          groupName: input.groupName,
+        });
+        return { record, invite };
+      },
+    );
+
+    ipcMain.handle(
+      "join-group",
+      async (_event, payload: { link: string; nodeId: string; nowMs?: number }) => {
+        const { parseGroupInviteLink, parseGroupInviteCode } = await import(
+          "@screenlink/shared"
+        );
+        const invite: GroupInviteV1 | null = payload.link.startsWith("screenlink://")
+          ? parseGroupInviteLink(payload.link)
+          : parseGroupInviteCode(payload.link);
+        if (!invite) {
+          throw new Error("Invalid group link or code");
+        }
+        const record = groupStore.import({ invite, nodeId: payload.nodeId, joinedAt: payload.nowMs });
+        return record;
+      },
+    );
+
+    ipcMain.handle(
+      "get-group-invite",
+      async (_event, groupId: string) => {
+        const { formatGroupInviteLink } = await import(
+          "@screenlink/shared"
+        );
+        const record = groupStore.get(groupId);
+        if (!record) return null;
+        const settings: GroupQualitySettings = record.sharedState.defaultQuality.value;
+        const invite: GroupInviteV1 = {
+          version: 1,
+          groupId: record.groupId,
+          controlRoomId: record.controlRoomId,
+          groupSecret: "",
+          bootstrapName: record.sharedState.name.value,
+          bootstrapNameStamp: record.sharedState.name.stamp,
+          bootstrapSettings: settings,
+          bootstrapSettingsStamp: record.sharedState.defaultQuality.stamp,
         };
-      }
-      console.warn("[IPC] update-remote-identity rejected:", result.reason);
-      return { accepted: false, reason: result.reason };
-    } catch (err) {
-      return { accepted: false, reason: String(err) };
-    }
-  });
+        return { invite, link: formatGroupInviteLink(invite) };
+      },
+    );
 
-  ipcMain.handle("clear-pairing", () => {
-    settings.clearPairing();
-  });
+    ipcMain.handle(
+      "update-group-shared-state",
+      (_event, groupId: string, state: unknown) => {
+        const record = groupStore.get(groupId);
+        if (!record) throw new Error("Group not found");
+        // Renderer already validated via Zod; we trust it for performance.
+        // Re-validate is also fine — keep store interface simple.
+        groupStore.updateSharedState(groupId, state as never);
+        return groupStore.get(groupId);
+      },
+    );
 
-  /** Persist a lifecycle transition (e.g. PAIRED_ONLINE → PAIRED_OFFLINE). */
-  ipcMain.handle("set-pairing-lifecycle", (_event, lifecycle: string) => {
-    const s = settings.get();
-    const raw = (s as unknown as Record<string, unknown>).pairingConfig;
-    if (typeof raw !== "string") return;
-    try {
-      const config = JSON.parse(raw);
-      config.pairingLifecycle = lifecycle;
-      settings.update({ pairingConfig: JSON.stringify(config) } as Record<string, unknown>);
-    } catch {
-      // ignore parse errors
-    }
-  });
+    ipcMain.handle("update-group-clock", (_event, groupId: string, stamp: unknown) => {
+      groupStore.updateClock(groupId, stamp as never);
+    });
 
-  ipcMain.handle("export-current-pairing", () => {
-    const s = settings.get();
-    const raw = (s as unknown as Record<string, unknown>).pairingConfig;
-    const encryptedB64 = (s as unknown as Record<string, unknown>).encryptedPairSecret;
-    if (typeof raw !== "string" || typeof encryptedB64 !== "string") return null;
-    try {
-      const config = JSON.parse(raw);
-      const buf = Buffer.from(encryptedB64, "base64");
-      const pairSecret = secureStore.decrypt(buf);
-      if (!pairSecret) return null;
-      const exportData = {
-        version: 1 as const,
-        pairId: config.pairId as string,
-        pairSecret,
-        creatorDeviceId: config.localDeviceId as string,
-        creatorDisplayName: config.localDisplayName as string,
-      };
-      return exportData;
-    } catch {
-      return null;
-    }
-  });
+    ipcMain.handle("set-group-notifications", (_event, groupId: string, enabled: boolean) => {
+      groupStore.setNotificationsEnabled(groupId, enabled);
+    });
+
+    ipcMain.handle("leave-group", (_event, groupId: string) => {
+      groupStore.leave(groupId);
+    });
+
+    ipcMain.handle("get-group-connection-config", (_event, groupId: string) => {
+      const identity = settings.get().deviceIdentity;
+      return groupStore.getConnectionConfig(groupId, identity.deviceId);
+    });
+  }
+
+  // ── Quality presets ─────────────────────────────────────────────────────
+
+  if (presetStore) {
+    ipcMain.handle("list-quality-presets", () => presetStore.list());
+    ipcMain.handle("get-quality-preset", (_event, id: string) => presetStore.get(id));
+    ipcMain.handle(
+      "create-quality-preset",
+      (_event, input: { name: string; settings: import("@screenlink/shared").QualityPreset["settings"] }) => {
+        return presetStore.create({ name: input.name, settings: input.settings });
+      },
+    );
+    ipcMain.handle(
+      "update-quality-preset",
+      (_event, id: string, input: { name?: string; settings?: import("@screenlink/shared").QualityPreset["settings"] }) => {
+        return presetStore.update(id, { name: input.name, settings: input.settings });
+      },
+    );
+    ipcMain.handle("duplicate-quality-preset", (_event, id: string, newName: string) =>
+      presetStore.duplicate(id, newName),
+    );
+    ipcMain.handle("delete-quality-preset", (_event, id: string) =>
+      presetStore.delete(id),
+    );
+    ipcMain.handle("export-quality-preset", async (_event, id: string) =>
+      presetStore.export(id),
+    );
+    ipcMain.handle("import-quality-preset", async (_event, exportString: string) =>
+      presetStore.import(exportString),
+    );
+  }
 
   // ── Application info ─────────────────────────────────────────────────────
 
@@ -406,8 +361,6 @@ export function registerIpcHandlers(
     }
   });
 
-  // ── Phase 2E: Audio sessions ───────────────────────────────────────────
-
   ipcMain.handle('enumerate-audio-sessions', async () => {
     if (!currentAudioHelper) {
       return { success: false, error: 'no-audio-helper' };
@@ -427,11 +380,7 @@ export function registerIpcHandlers(
       const src = await currentAudioHelper.resolveSource(options.sourceId);
       if (!src.found) return { success: false, error: `Source not found: ${src.error}` };
 
-      // Use capturePid (application root) if available, fall back to window-owning pid
       const targetPid = Number(src.source.capturePid ?? src.source.pid);
-
-      // Creation time is a 64-bit FILETIME value that exceeds Number.MAX_SAFE_INTEGER.
-      // Keep as string throughout TypeScript; parse with std::stoull on native.
       const expectedCreationTimeUtc100ns = String(
         src.source.captureCreationTimeUtc100ns ??
         src.source.processCreationTimeUtc100ns ??
@@ -534,14 +483,6 @@ export function registerIpcHandlers(
     else trayManager.setState("idle");
   });
 
-  ipcMain.on("tray-set-friend-name", (_event, name: string) => {
-    trayManager.setFriendName(name);
-  });
-
-  ipcMain.on("tray-set-friend-sharing", (_event, sharing: boolean) => {
-    trayManager.setFriendSharing(sharing);
-  });
-
   ipcMain.on("tray-select-preset", (_event, presetId: string) => {
     window.webContents.send("select-preset", presetId);
   });
@@ -554,7 +495,6 @@ export function registerIpcHandlers(
     return newState;
   });
 
-  // Forward native fullscreen changes to the renderer so it can update state
   window.on("enter-full-screen", () => {
     window.webContents.send("fullscreen-state-changed", true);
   });

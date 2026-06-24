@@ -57,18 +57,17 @@ export * from "./urls.js";
 export * from "./bitrate.js";
 export * from "./stats.js";
 export * from "./settings.js";
-export * from "./pairing.js";
 export * from "./audio-capabilities.js";
 export * from "./control-messages.js";
 
 // ── Phase 3: Group / Quality / Sync ────────────────────────────────────────
 
-// device-identity.js exports getDefaultDevDisplayName which conflicts with
-// pairing.js — omit it here (pairing.js re-export covers it).
+// device-identity.js exports getDefaultDevDisplayName (used by main process for dev profiles)
 export {
   DeviceIdentitySchema,
   generateDeviceIdentity,
   updateDeviceDisplayName,
+  getDefaultDevDisplayName,
 } from "./device-identity.js";
 export type {
   DeviceIdentity,
