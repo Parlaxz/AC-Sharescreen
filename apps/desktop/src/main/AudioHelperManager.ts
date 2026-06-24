@@ -525,7 +525,7 @@ export class AudioHelperManager {
     if (helperBuildInfo) {
       helperReportedCommit = helperBuildInfo.gitCommit;
       helperReportedDirty = helperBuildInfo.gitDirty === 'true';
-      helperReportedProtocolVersion = helperBuildInfo.protocolVersion ?? helperDiag?.protocolVersion;
+      helperReportedProtocolVersion = helperBuildInfo.protocolVersion ?? (helperDiag as any)?.protocolVersion;
       helperReportedBuildConfig = helperBuildInfo.buildConfig;
     }
 
