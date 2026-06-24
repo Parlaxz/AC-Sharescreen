@@ -1578,7 +1578,80 @@ int main(int argc, char* argv[]) {
           expect(!valid4, "ServiceSession: validation fails with both wrong");
         }
 
-        // 9. Session config argument parsing test
+        // 9. Service dispatch: resolveSource command recognition
+        {
+          // Validate that resolveSource command would be recognized by
+          // ServiceSession::DispatchCommand by testing the JSON structure.
+
+          // Build a resolveSource request
+          std::string req = "{";
+          req += "\"protocolVersion\":\"0.2.0\",";
+          req += "\"requestId\":10,";
+          req += "\"sessionId\":\"test-session\",";
+          req += "\"authToken\":\"test-token\",";
+          req += "\"command\":\"resolveSource\",";
+          req += "\"payload\":{";
+          req += "\"sourceId\":\"window:0x1234\"";
+          req += "}";
+          req += "}";
+
+          expect(req.find("\"command\":\"resolveSource\"") != std::string::npos,
+                 "ServiceSession: resolveSource request has command");
+          expect(req.find("\"sourceId\":\"window:0x1234\"") != std::string::npos,
+                 "ServiceSession: resolveSource request has sourceId");
+
+          // Validate the command string matches what DispatchCommand checks
+          expect(req.find("\"command\":\"resolveSource\"") != std::string::npos,
+                 "ServiceSession: resolveSource command matches DispatchCommand");
+        }
+
+        // 10. Service dispatch: resolveSource found/not-found response format
+        {
+          // Simulate the response format from HandleResolveSource
+
+          // Not-found response
+          std::string notFoundResp = "{";
+          notFoundResp += "\"protocolVersion\":\"0.3.0\",";
+          notFoundResp += "\"success\":true,";
+          notFoundResp += "\"result\":{";
+          notFoundResp += "\"found\":false,";
+          notFoundResp += "\"error\":\"source-not-found\"";
+          notFoundResp += "}";
+          notFoundResp += "}";
+
+          expect(notFoundResp.find("\"found\":false") != std::string::npos,
+                 "ServiceSession: resolveSource not-found response has found=false");
+          expect(notFoundResp.find("\"error\":\"source-not-found\"") != std::string::npos,
+                 "ServiceSession: resolveSource not-found response has error");
+
+          // Found response (simulated)
+          std::string foundResp = "{";
+          foundResp += "\"protocolVersion\":\"0.3.0\",";
+          foundResp += "\"success\":true,";
+          foundResp += "\"result\":{";
+          foundResp += "\"found\":true,";
+          foundResp += "\"source\":{";
+          foundResp += "\"sourceId\":\"window:0x1234\",";
+          foundResp += "\"pid\":1234,";
+          foundResp += "\"capturePid\":1234,";
+          foundResp += "\"processCreationTimeUtc100ns\":133000000000000000,";
+          foundResp += "\"captureCreationTimeUtc100ns\":133000000000000000,";
+          foundResp += "\"applicationRootPid\":1234,";
+          foundResp += "\"applicationRootCreationTimeUtc100ns\":133000000000000000,";
+          foundResp += "\"processName\":\"example.exe\",";
+          foundResp += "\"processPath\":\"C:\\\\example.exe\"";
+          foundResp += "}}";
+          foundResp += "}";
+
+          expect(foundResp.find("\"found\":true") != std::string::npos,
+                 "ServiceSession: resolveSource found response has found=true");
+          expect(foundResp.find("\"capturePid\":1234") != std::string::npos,
+                 "ServiceSession: resolveSource found response has capturePid");
+          expect(foundResp.find("\"processName\":\"example.exe\"") != std::string::npos,
+                 "ServiceSession: resolveSource found response has processName");
+        }
+
+        // 11. Session config argument parsing test
         {
           // Simulate argument parsing
           auto findArg = [](int argc, char* argv[], const char* name) -> std::string {

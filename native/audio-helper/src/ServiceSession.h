@@ -62,6 +62,9 @@ private:
     void HandlePing(const std::string& payload, std::string& response);
     void HandleShutdown(const std::string& payload, std::string& response);
 
+    // Source resolution (shared with CLI --resolve-source)
+    void HandleResolveSource(const std::string& payload, std::string& response);
+
     // Phase 2E: Multi-source audio mixer handlers
     void HandleEnumerateAudioSessions(const std::string& payload, std::string& response);
     void HandleStartApplicationAudio(const std::string& payload, std::string& response);

@@ -4,6 +4,7 @@
 #include "Protocol.h"
 #include "ExclusionPolicy.h"
 #include "ProcessResolver.h"
+#include "SourceMapper.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -659,6 +660,10 @@ bool ServiceSession::DispatchCommand(const std::string& command,
     } else if (command == "shutdown") {
         HandleShutdown(payload, response);
         return true;
+    } else if (command == "resolveSource" ||
+               command == "resolvesource") {
+        HandleResolveSource(payload, response);
+        return true;
     } else if (command == "enumerateAudioSessions" ||
                command == "enumerateaudiosessions") {
         HandleEnumerateAudioSessions(payload, response);
@@ -1220,6 +1225,129 @@ void ServiceSession::HandleShutdown(const std::string& /*payload*/,
     resp.Set("sessionId", config_.sessionId);
     resp.Set("success", true);
     resp.Set("state", "idle");
+    resp.SetRaw("result", result);
+    resp.Set("error", "null");
+    response = resp.Str();
+}
+
+// ========================================================================
+// HandleResolveSource — resolve a desktop-capture source ID
+// ========================================================================
+
+void ServiceSession::HandleResolveSource(const std::string& payload,
+                                          std::string& response) {
+    // 1. Parse sourceId from payload
+    std::string sourceId = SimpleJson::GetString(payload, "sourceId");
+
+    if (sourceId.empty()) {
+        std::string result = "{";
+        result += "\"found\":false,";
+        result += "\"error\":\"invalid-source-id\"";
+        result += "}";
+
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", true);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.SetRaw("result", result);
+        resp.Set("error", "null");
+        response = resp.Str();
+        return;
+    }
+
+    // 2. Resolve the desktop-capture source (reuses CLI --resolve-source logic)
+    auto resolveResult = ResolveDesktopCapturerSource(sourceId);
+
+    if (!resolveResult.found) {
+        std::string result = "{";
+        result += "\"found\":false,";
+        result += "\"error\":\"" + resolveResult.error + "\"";
+        result += "}";
+
+        SimpleJson resp;
+        resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+        resp.Set("requestId", static_cast<uint64_t>(0));
+        resp.Set("sessionId", config_.sessionId);
+        resp.Set("success", true);
+        resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+        resp.SetRaw("result", result);
+        resp.Set("error", "null");
+        response = resp.Str();
+        return;
+    }
+
+    // 3. Resolve application root for capture PID
+    uint32_t capturePid = resolveResult.source.processId;
+    uint64_t captureCreationTime = resolveResult.source.processCreationTimeUtc100ns;
+
+    auto treeResult = ResolveProcessTree(resolveResult.source.processId);
+    if (treeResult.succeeded && treeResult.applicationRootPid != 0) {
+        capturePid = treeResult.applicationRootPid;
+        captureCreationTime = treeResult.targetCreationTimeUtc100ns;
+    }
+
+    // 4. Build success result
+    std::string result = "{";
+    result += "\"found\":true,";
+    result += "\"source\":{";
+    result += "\"sourceId\":\"" + resolveResult.source.sourceId + "\",";
+    result += "\"pid\":" + std::to_string(resolveResult.source.processId) + ",";
+    result += "\"capturePid\":" + std::to_string(capturePid) + ",";
+    result += "\"processCreationTimeUtc100ns\":"
+        + std::to_string(resolveResult.source.processCreationTimeUtc100ns) + ",";
+    result += "\"captureCreationTimeUtc100ns\":"
+        + std::to_string(captureCreationTime) + ",";
+    result += "\"applicationRootPid\":" + std::to_string(capturePid) + ",";
+    result += "\"applicationRootCreationTimeUtc100ns\":"
+        + std::to_string(captureCreationTime) + ",";
+
+    // Escape strings for JSON safety
+    {
+        std::string safeName = resolveResult.source.processName;
+        size_t pos = 0;
+        while ((pos = safeName.find('"', pos)) != std::string::npos) {
+            safeName.replace(pos, 1, "\\\"");
+            pos += 2;
+        }
+        result += "\"processName\":\"" + safeName + "\",";
+    }
+    {
+        std::string safePath = resolveResult.source.processPath;
+        size_t pos = 0;
+        while ((pos = safePath.find('"', pos)) != std::string::npos) {
+            safePath.replace(pos, 1, "\\\"");
+            pos += 2;
+        }
+        result += "\"processPath\":\"" + safePath + "\",";
+    }
+    {
+        std::string safeTitle = resolveResult.source.windowTitle;
+        size_t pos = 0;
+        while ((pos = safeTitle.find('"', pos)) != std::string::npos) {
+            safeTitle.replace(pos, 1, "\\\"");
+            pos += 2;
+        }
+        result += "\"windowTitle\":\"" + safeTitle + "\",";
+    }
+
+    result += "\"hwnd\":" + std::to_string(resolveResult.source.hwnd) + ",";
+    result += "\"displayName\":\""
+        + resolveResult.source.displayName + "\",";
+    result += "\"isElectron\":";
+    result += (resolveResult.source.isElectron ? "true" : "false");
+    result += ",";
+    result += "\"hasAudio\":";
+    result += (resolveResult.source.hasAudio ? "true" : "false");
+    result += "}}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", static_cast<uint64_t>(0));
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", true);
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
     resp.SetRaw("result", result);
     resp.Set("error", "null");
     response = resp.Str();
