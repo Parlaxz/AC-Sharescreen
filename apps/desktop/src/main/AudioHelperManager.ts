@@ -10,6 +10,8 @@ import {
   HelperCapabilities,
   HelperDiagnostics,
   HelperState,
+  StartFilteredMonitorResult,
+  StartEndpointLoopbackResult,
 } from './ControlClient.js';
 
 // Diagnostic log file for audio startup debugging (ESM-compatible path)
@@ -90,6 +92,9 @@ export interface PcmPipelineSnapshot {
   helperState: HelperStateEnum;
   helperUptimeMs: number;
   streamGeneration: number;
+  // Phase 2G additions:
+  filteredMonitorDiagnostics?: Record<string, unknown>;
+  endpointDiagnostics?: Record<string, unknown>;
 }
 
 // ── AudioHelperManager ──
@@ -290,20 +295,16 @@ export class AudioHelperManager {
     return result.streamGeneration;
   }
 
-  async startEndpointLoopback(): Promise<number> {
+  async startEndpointLoopback(): Promise<StartEndpointLoopbackResult> {
     this.ensureReady();
     const result = await this.control!.startEndpointLoopback();
-    const gen = result.streamGeneration;
-    if (!Number.isSafeInteger(gen)) {
-      throw new Error(`Invalid streamGeneration from endpoint loopback: ${gen}`);
-    }
-    this.streamGeneration = gen;
+    this.streamGeneration = result.streamGeneration;
     this.currentSourceType = 'system';
     this.state = 'capturing';
     this.parser?.reset();
-    this.pcmBridge.forwardReset(gen);
+    this.pcmBridge.forwardReset(result.streamGeneration);
     this.pcmBridge.sendCanary?.();
-    return gen;
+    return result;
   }
 
   // ── Phase 2E: Audio sessions ──
@@ -338,22 +339,20 @@ export class AudioHelperManager {
   async startFilteredMonitorCapture(options: {
     excludeDiscord?: boolean;
     excludeScreenLink?: boolean;
-  }): Promise<{ success: boolean; streamGeneration: number; error?: string }> {
+  }): Promise<StartFilteredMonitorResult> {
     this.ensureReady();
-    const resp = await this.control!.sendRequest('startFilteredMonitorAudio', {
+    const result = await this.control!.startFilteredMonitorAudio({
       excludeDiscord: options.excludeDiscord ?? true,
       excludeScreenLink: options.excludeScreenLink ?? true,
       screenLinkPid: process.pid,
     });
-    const gen = Number(resp.result?.streamGeneration);
-    if (!Number.isSafeInteger(gen)) throw new Error(`Invalid gen: ${gen}`);
-    this.streamGeneration = gen;
+    this.streamGeneration = result.streamGeneration;
     this.currentSourceType = 'monitor';
     this.state = 'capturing';
     this.parser?.reset();
-    this.pcmBridge.forwardReset(gen);
+    this.pcmBridge.forwardReset(result.streamGeneration);
     this.pcmBridge.sendCanary?.();
-    return { success: true, streamGeneration: gen };
+    return result;
   }
 
   async getMixerState(): Promise<any> {
@@ -410,6 +409,11 @@ export class AudioHelperManager {
   async getDiagnostics(): Promise<HelperDiagnostics> {
     this.ensureReady();
     return this.control!.getDiagnostics();
+  }
+
+  async getEndpointDiagnostics(): Promise<any> {
+    this.ensureReady();
+    return this.control!.sendRequest('getEndpointDiagnostics');
   }
 
   async getPipelineSnapshot(): Promise<PcmPipelineSnapshot> {

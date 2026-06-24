@@ -4,6 +4,7 @@ import fs from "fs";
 import { fileURLToPath } from "url";
 import { app } from "electron";
 import type { AudioCapabilityResult } from "@screenlink/shared";
+import { AUDIO_CAPABILITY_PROTOCOL_VERSION } from "./audio-protocol.js";
 
 // ESM-compatible __dirname — set once at module load
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -143,7 +144,7 @@ export async function getAudioCapabilities(): Promise<HelperResult<AudioCapabili
 
       const cap = parsed as Record<string, unknown>;
 
-      if (typeof cap.protocolVersion !== "string" || cap.protocolVersion !== "0.2.0") {
+      if (typeof cap.protocolVersion !== "string" || cap.protocolVersion !== AUDIO_CAPABILITY_PROTOCOL_VERSION) {
         resolve(
           errorResult(
             "unsupported-protocol",
