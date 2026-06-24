@@ -427,7 +427,15 @@ bool FilteredMonitorController::ReconcileOnce() {
         diag_.screenLinkExcludedLastScan = plan.screenLinkExcluded;
         diag_.duplicateRootsLastScan = plan.duplicateRoots;
         diag_.sourceLimitSkippedLastScan = plan.sourceLimitSkipped;
-        diag_.desiredSourcesLastScan = static_cast<uint32_t>(plan.desiredSources.size());
+        diag_.validatedLiveSessionsLastScan = plan.validatedLiveSessions;
+        diag_.inconsistentIdentitySessionsLastScan = plan.inconsistentIdentitySessions;
+        diag_.identityLookupFailuresLastScan = plan.identityLookupFailures;
+
+        if (plan.inconsistentIdentitySessions > 0) {
+            std::cerr << "[FilteredMonitor] session-identity-invariant-failure count="
+                      << plan.inconsistentIdentitySessions << std::endl;
+        }
+
         diag_.lastSuccessfulInventoryTimestamp = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());

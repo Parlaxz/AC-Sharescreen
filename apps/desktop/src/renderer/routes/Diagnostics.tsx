@@ -269,6 +269,18 @@ export function Diagnostics() {
             </tbody>
           </table>
 
+          {/* Session Identity Diagnostics */}
+          <h4 style={{ marginTop: "0.5rem" }}>Session Identity</h4>
+          <table className="info-table">
+            <tbody>
+              <tr><td>Validated Live Sessions</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.validatedLiveSessionsLastScan ?? '—'}</td></tr>
+              <tr><td>Identity Lookup Failures</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.identityLookupFailuresLastScan ?? '—'}</td></tr>
+              <tr><td>Inconsistent Identity Sessions</td><td className="mono" style={pipelineSnapshot.filteredMonitorDiagnostics?.inconsistentIdentitySessionsLastScan != null && pipelineSnapshot.filteredMonitorDiagnostics.inconsistentIdentitySessionsLastScan > 0 ? { color: '#e74c3c', fontWeight: 'bold' } : undefined}>{pipelineSnapshot.filteredMonitorDiagnostics?.inconsistentIdentitySessionsLastScan ?? '—'}</td></tr>
+              <tr><td>Expired Sessions</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.expiredSessionsLastScan ?? '—'}</td></tr>
+              <tr><td>Invalid Sessions</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.invalidSessionsLastScan ?? '—'}</td></tr>
+            </tbody>
+          </table>
+
           {/* Active Sources PID tracking */}
           {pipelineSnapshot.filteredMonitorDiagnostics?.activeSources &&
            pipelineSnapshot.filteredMonitorDiagnostics.activeSources.length > 0 && (

@@ -1658,6 +1658,266 @@ void TestDuplicateRootsField() {
     END_TEST("FilteredMonitorDiagnostics - duplicateRootsLastScan field");
 }
 
+// ====================================================================
+// ApplyProcessIdentityResult Tests (Fix 2G)
+// ====================================================================
+
+void TestApplyIdentityResultSuccessMarksAlive() {
+    TEST("ApplyProcessIdentityResult - success marks process alive")
+    AudioSessionInfo info;
+    ApplyProcessIdentityResult(info, 133700000000000000ULL);
+    ASSERT_EQ(info.processAlive, true);
+    ASSERT_EQ(info.identityValidated, true);
+    ASSERT_EQ(info.creationTimeUtc100ns, 133700000000000000ULL);
+    END_TEST("ApplyProcessIdentityResult - success marks process alive");
+}
+
+void TestApplyIdentityResultFailureMarksInvalid() {
+    TEST("ApplyProcessIdentityResult - failure marks process invalid")
+    AudioSessionInfo info;
+    ApplyProcessIdentityResult(info, 0);
+    ASSERT_EQ(info.processAlive, false);
+    ASSERT_EQ(info.identityValidated, false);
+    ASSERT_EQ(info.creationTimeUtc100ns, 0ULL);
+    END_TEST("ApplyProcessIdentityResult - failure marks process invalid");
+}
+
+void TestApplyIdentityResultFailureClearsStale() {
+    TEST("ApplyProcessIdentityResult - failure clears stale valid state")
+    AudioSessionInfo info;
+    info.processAlive = true;
+    info.identityValidated = true;
+    info.creationTimeUtc100ns = 133700000000000000ULL;
+    ApplyProcessIdentityResult(info, 0);
+    ASSERT_EQ(info.processAlive, false);
+    ASSERT_EQ(info.identityValidated, false);
+    ASSERT_EQ(info.creationTimeUtc100ns, 0ULL);
+    END_TEST("ApplyProcessIdentityResult - failure clears stale valid state");
+}
+
+void TestApplyIdentityResultSuccessOverwritesStale() {
+    TEST("ApplyProcessIdentityResult - success overwrites stale invalid state")
+    AudioSessionInfo info;
+    info.processAlive = false;
+    info.identityValidated = false;
+    info.creationTimeUtc100ns = 0;
+    ApplyProcessIdentityResult(info, 133700000000000000ULL);
+    ASSERT_EQ(info.processAlive, true);
+    ASSERT_EQ(info.identityValidated, true);
+    ASSERT_EQ(info.creationTimeUtc100ns, 133700000000000000ULL);
+    END_TEST("ApplyProcessIdentityResult - success overwrites stale invalid state");
+}
+
+// ====================================================================
+// HasConsistentProcessIdentity Tests
+// ====================================================================
+
+void TestInvariantAcceptsValidLive() {
+    TEST("HasConsistentProcessIdentity - accepts valid live state")
+    AudioSessionInfo info;
+    info.processAlive = true;
+    info.identityValidated = true;
+    info.creationTimeUtc100ns = 133700000000000000ULL;
+    ASSERT(HasConsistentProcessIdentity(info));
+    END_TEST("HasConsistentProcessIdentity - accepts valid live state");
+}
+
+void TestInvariantAcceptsCleanInvalid() {
+    TEST("HasConsistentProcessIdentity - accepts clean invalid state")
+    AudioSessionInfo info;
+    info.processAlive = false;
+    info.identityValidated = false;
+    info.creationTimeUtc100ns = 0;
+    ASSERT(HasConsistentProcessIdentity(info));
+    END_TEST("HasConsistentProcessIdentity - accepts clean invalid state");
+}
+
+void TestInvariantRejectsValidatedButDead() {
+    TEST("HasConsistentProcessIdentity - rejects validated-but-dead state")
+    AudioSessionInfo info;
+    info.processAlive = false;
+    info.identityValidated = true;
+    info.creationTimeUtc100ns = 133700000000000000ULL;
+    ASSERT(!HasConsistentProcessIdentity(info));
+    END_TEST("HasConsistentProcessIdentity - rejects validated-but-dead state");
+}
+
+void TestInvariantRejectsAliveButUnvalidated() {
+    TEST("HasConsistentProcessIdentity - rejects alive-but-unvalidated state")
+    AudioSessionInfo info;
+    info.processAlive = true;
+    info.identityValidated = false;
+    info.creationTimeUtc100ns = 133700000000000000ULL;
+    ASSERT(!HasConsistentProcessIdentity(info));
+    END_TEST("HasConsistentProcessIdentity - rejects alive-but-unvalidated state");
+}
+
+void TestInvariantRejectsZeroCreationTimeForLive() {
+    TEST("HasConsistentProcessIdentity - rejects zero creation time for live process")
+    AudioSessionInfo info;
+    info.processAlive = true;
+    info.identityValidated = true;
+    info.creationTimeUtc100ns = 0;
+    ASSERT(!HasConsistentProcessIdentity(info));
+    END_TEST("HasConsistentProcessIdentity - rejects zero creation time for live process");
+}
+
+// ====================================================================
+// Planner Acceptance/Rejection via Helper
+// ====================================================================
+
+void TestPlannerAcceptsHelperProducedValid() {
+    TEST("Planner - accepts helper-produced valid session")
+    FilteredSourcePlanner planner([](uint32_t) {
+        ProcessTreeResult tree;
+        tree.succeeded = true;
+        tree.targetPid = 100;
+        tree.applicationRootPid = 200;
+        tree.applicationRootCreationTimeUtc100ns = 1000200;
+        tree.applicationRootName = "app.exe";
+        tree.applicationRootPath = "C:\\App\\app.exe";
+        ProcessInfo pi;
+        pi.processId = 100;
+        pi.parentProcessId = 200;
+        pi.processName = "app.exe";
+        pi.processPath = "C:\\App\\app.exe";
+        pi.creationTimeUtc100ns = 1000100;
+        tree.processes.push_back(pi);
+        ProcessInfo pi2;
+        pi2.processId = 200;
+        pi2.parentProcessId = 0;
+        pi2.processName = "app.exe";
+        pi2.processPath = "C:\\App\\app.exe";
+        pi2.creationTimeUtc100ns = 1000200;
+        tree.processes.push_back(pi2);
+        return tree;
+    });
+
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    AudioSessionInfo s;
+    s.pid = 100;
+    s.executableName = "app.exe";
+    s.sessionState = 1; // active
+    ApplyProcessIdentityResult(s, 1000100);
+    sessions.push_back(s);
+
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.desiredSources.size(), 1u);
+    ASSERT_EQ(plan.expiredSessions, 0u);
+    ASSERT_EQ(plan.invalidSessions, 0u);
+    END_TEST("Planner - accepts helper-produced valid session");
+}
+
+void TestPlannerRejectsHelperProducedInvalid() {
+    TEST("Planner - rejects helper-produced invalid session as expired")
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    AudioSessionInfo s;
+    s.pid = 100;
+    s.executableName = "app.exe";
+    ApplyProcessIdentityResult(s, 0);
+    sessions.push_back(s);
+
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.desiredSources.size(), 0u);
+    ASSERT_EQ(plan.expiredSessions, 1u);
+    END_TEST("Planner - rejects helper-produced invalid session as expired");
+}
+
+// ====================================================================
+// System Sounds + Aggregate Counter Tests
+// ====================================================================
+
+void TestSystemSoundsNotCountedAsLookupFailure() {
+    TEST("System sounds not counted as identity lookup failure")
+    AudioSessionInfo sys;
+    sys.pid = 0;
+    sys.systemSound = true;
+    sys.executableName = "System Sounds";
+
+    FilteredSourcePlanner planner;
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    sessions.push_back(sys);
+
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.systemSoundsSkipped, 1u);
+    ASSERT_EQ(plan.identityLookupFailures, 0u);
+    END_TEST("System sounds not counted as identity lookup failure");
+}
+
+void TestAggregateCounters() {
+    TEST("Aggregate counters - mixed session scan")
+    // Session 1: valid live application
+    AudioSessionInfo valid;
+    valid.pid = 100;
+    valid.executableName = "chrome.exe";
+    valid.sessionState = 1;
+    ApplyProcessIdentityResult(valid, 1000100);
+
+    // Session 2: failed identity lookup
+    AudioSessionInfo failed;
+    failed.pid = 200;
+    failed.executableName = "protected.exe";
+    ApplyProcessIdentityResult(failed, 0);
+
+    // Session 3: intentionally contradictory (synthetic)
+    AudioSessionInfo bad;
+    bad.pid = 300;
+    bad.executableName = "bad.exe";
+    bad.processAlive = false;
+    bad.identityValidated = true;
+    bad.creationTimeUtc100ns = 133700000000000000ULL;
+
+    // Session 4: system sounds
+    AudioSessionInfo sys;
+    sys.pid = 0;
+    sys.systemSound = true;
+    sys.executableName = "System Sounds";
+
+    // Use a resolver that resolves PIDs 100 and 300 but not 200
+    auto resolver = [](uint32_t pid) -> ProcessTreeResult {
+        if (pid == 100 || pid == 300) {
+            ProcessTreeResult tree;
+            tree.succeeded = true;
+            tree.targetPid = pid;
+            tree.applicationRootPid = pid;
+            tree.applicationRootCreationTimeUtc100ns = 1000000 + pid;
+            tree.applicationRootName = "app.exe";
+            tree.applicationRootPath = "C:\\App\\app.exe";
+            ProcessInfo pi;
+            pi.processId = pid;
+            pi.parentProcessId = 0;
+            pi.processName = "app.exe";
+            pi.processPath = "C:\\App\\app.exe";
+            pi.creationTimeUtc100ns = 1000000 + pid;
+            tree.processes.push_back(pi);
+            return tree;
+        }
+        ProcessTreeResult bad;
+        bad.succeeded = false;
+        return bad;
+    };
+
+    FilteredSourcePlanner planner(resolver);
+    FilteredMonitorOptions options;
+    std::vector<AudioSessionInfo> sessions;
+    sessions.push_back(valid);
+    sessions.push_back(failed);
+    sessions.push_back(bad);
+    sessions.push_back(sys);
+
+    auto plan = planner.Plan(sessions, options);
+    ASSERT_EQ(plan.totalSessions, 4u);
+    ASSERT_EQ(plan.validatedLiveSessions, 1u);
+    ASSERT_EQ(plan.identityLookupFailures, 1u);
+    ASSERT_EQ(plan.inconsistentIdentitySessions, 1u);
+    ASSERT_EQ(plan.systemSoundsSkipped, 1u);
+    END_TEST("Aggregate counters - mixed session scan");
+}
+
 } // anonymous namespace
 
 bool RunPhase2GSelfTests() {
@@ -1750,6 +2010,27 @@ bool RunPhase2GSelfTests() {
     // Diagnostics tests
     TestFilteredMonitorDiagnosticsRmsFields();
     TestDuplicateRootsField();
+
+    // ApplyProcessIdentityResult tests (Fix 2G)
+    TestApplyIdentityResultSuccessMarksAlive();
+    TestApplyIdentityResultFailureMarksInvalid();
+    TestApplyIdentityResultFailureClearsStale();
+    TestApplyIdentityResultSuccessOverwritesStale();
+
+    // HasConsistentProcessIdentity tests
+    TestInvariantAcceptsValidLive();
+    TestInvariantAcceptsCleanInvalid();
+    TestInvariantRejectsValidatedButDead();
+    TestInvariantRejectsAliveButUnvalidated();
+    TestInvariantRejectsZeroCreationTimeForLive();
+
+    // Planner acceptance via helper
+    TestPlannerAcceptsHelperProducedValid();
+    TestPlannerRejectsHelperProducedInvalid();
+
+    // System sounds + aggregate counter tests
+    TestSystemSoundsNotCountedAsLookupFailure();
+    TestAggregateCounters();
 
     std::cerr << "[Phase2G] Tests: " << g_testsRun << " run, "
               << g_testsPassed << " passed, "

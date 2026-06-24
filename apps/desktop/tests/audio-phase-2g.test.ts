@@ -29,6 +29,9 @@ interface FilteredMonitorDiagnostics {
   discordExcludedLastScan: number;
   screenLinkExcludedLastScan: number;
   duplicateRootsLastScan: number;
+  validatedLiveSessionsLastScan: number;
+  inconsistentIdentitySessionsLastScan: number;
+  identityLookupFailuresLastScan: number;
 
   sourceStartAttempts: number;
   sourceStartFailures: number;
@@ -128,6 +131,9 @@ function isValidFilteredMonitorDiagnostics(obj: unknown): obj is FilteredMonitor
     typeof d.totalSessionsLastScan === "number" &&
     typeof d.desiredSourcesLastScan === "number" &&
     typeof d.duplicateRootsLastScan === "number" &&
+    typeof d.validatedLiveSessionsLastScan === "number" &&
+    typeof d.inconsistentIdentitySessionsLastScan === "number" &&
+    typeof d.identityLookupFailuresLastScan === "number" &&
     typeof d.sourceStartFailures === "number" &&
     typeof d.mixerInputPackets === "number" &&
     typeof d.mixerInputNonZeroPackets === "number" &&
@@ -492,6 +498,9 @@ describe("Phase 2G — diagnostics typing", () => {
       discordExcludedLastScan: 0,
       screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 0,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
       sourceStartAttempts: 10,
       sourceStartFailures: 0,
       sourceRetries: 0,
@@ -566,6 +575,9 @@ describe("Phase 2G — diagnostics typing", () => {
       discordExcludedLastScan: 0,
       screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 0,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
       sourceStartAttempts: 0,
       sourceStartFailures: 0,
       sourceRetries: 0,
@@ -661,6 +673,9 @@ describe("Phase 2G — duplicate root and PID tracking fields", () => {
       expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
       discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 3,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
       sourceStartAttempts: 1, sourceStartFailures: 0, sourceRetries: 0,
       sourceUnexpectedStops: 0,
       mixerInputPackets: 10, mixerInputNonZeroPackets: 5, mixerInputZeroPackets: 5,
@@ -685,6 +700,9 @@ describe("Phase 2G — duplicate root and PID tracking fields", () => {
       expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
       discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
       duplicateRootsLastScan: 0,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
       sourceStartAttempts: 3, sourceStartFailures: 0, sourceRetries: 0,
       sourceUnexpectedStops: 0,
       mixerInputPackets: 500, mixerInputNonZeroPackets: 400, mixerInputZeroPackets: 100,

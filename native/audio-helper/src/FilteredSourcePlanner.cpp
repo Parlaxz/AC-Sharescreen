@@ -90,6 +90,25 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
             continue;
         }
 
+        // --- Identity/liveness diagnostics for non-system sessions ---
+
+        // identityLookupFailures: clean invalid state from failed lookup
+        if (!session.identityValidated && !session.processAlive &&
+            session.creationTimeUtc100ns == 0) {
+            plan.identityLookupFailures++;
+        }
+
+        // inconsistentIdentity: any contradictory combination
+        if (!HasConsistentProcessIdentity(session)) {
+            plan.inconsistentIdentitySessions++;
+        }
+
+        // validatedLive: fully validated live process
+        if (session.processAlive && session.identityValidated &&
+            session.creationTimeUtc100ns != 0) {
+            plan.validatedLiveSessions++;
+        }
+
         // --- Step 2: Skip expired sessions (process no longer alive) ---
         if (!session.processAlive) {
             plan.expiredSessions++;

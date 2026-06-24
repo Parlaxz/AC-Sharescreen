@@ -77,6 +77,11 @@ struct FilteredSourcePlan {
     uint32_t screenLinkExcluded = 0;
     uint32_t duplicateRoots = 0;
     uint32_t sourceLimitSkipped = 0;
+
+    // Phase 2G identity/liveness diagnostics
+    uint32_t validatedLiveSessions = 0;
+    uint32_t inconsistentIdentitySessions = 0;
+    uint32_t identityLookupFailures = 0;
 };
 
 /// Diagnostics for one active capture source in filtered monitor mode.
@@ -118,6 +123,9 @@ struct FilteredMonitorDiagnostics {
     uint32_t screenLinkExcludedLastScan = 0;
     uint32_t duplicateRootsLastScan = 0;
     uint32_t sourceLimitSkippedLastScan = 0;
+    uint32_t validatedLiveSessionsLastScan = 0;
+    uint32_t inconsistentIdentitySessionsLastScan = 0;
+    uint32_t identityLookupFailuresLastScan = 0;
     // Input energy diagnostics (measured from actual float samples)
     uint64_t mixerInputPackets = 0;
     uint64_t mixerInputNonZeroPackets = 0;

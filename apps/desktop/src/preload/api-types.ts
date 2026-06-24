@@ -185,6 +185,9 @@ export interface FilteredMonitorDiagnostics {
   discordExcludedLastScan: number;
   screenLinkExcludedLastScan: number;
   duplicateRootsLastScan: number;
+  validatedLiveSessionsLastScan: number;
+  inconsistentIdentitySessionsLastScan: number;
+  identityLookupFailuresLastScan: number;
   sourceStartAttempts: number;
   sourceStartFailures: number;
   sourceRetries: number;

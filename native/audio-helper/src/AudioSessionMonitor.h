@@ -35,6 +35,20 @@ struct AudioSessionInfo {
     bool processAlive = false;        // process still alive at enumeration time
 };
 
+/// Apply the result of a process-creation-time lookup to AudioSessionInfo.
+/// When creationTimeUtc100ns is nonzero, the process is alive and identity is
+/// validated. When zero, all identity/liveness fields are cleared to false/0.
+/// This is the single authoritative state transition for process identity.
+void ApplyProcessIdentityResult(
+    AudioSessionInfo& info,
+    uint64_t creationTimeUtc100ns) noexcept;
+
+/// Check whether AudioSessionInfo has a consistent identity/liveness state.
+/// Returns true if identity is not validated, or if all of processAlive,
+/// identityValidated, and a nonzero creationTimeUtc100ns agree.
+bool HasConsistentProcessIdentity(
+    const AudioSessionInfo& info) noexcept;
+
 /// Enumerates Windows render audio sessions using Core Audio APIs.
 ///
 /// Supports live session-change and default-device-change notifications
