@@ -374,14 +374,12 @@ void MultiSourceMixer::MixerThread() {
             bool hasData = false;
         };
 
-        // ── Timestamp-aligned source collection ──
-        // Convert the current deadline (QPC ticks) to 100ns units for
-        // comparison against qpcPosition100ns in each queued packet.
-        uint64_t deadline100ns = static_cast<uint64_t>(
-            (static_cast<double>(deadline.QuadPart) * 10000000.0) / hostFreq);
-        uint64_t windowStart100ns = deadline100ns - static_cast<uint64_t>(
-            (static_cast<double>(packetIntervalQpc) * 10000000.0) / hostFreq);
-
+        // ── Source collection: consume the oldest queued packet ──
+        // WASAPI capture timestamps (qpcPosition100ns) are device positions
+        // and may not align with the mixer's wall-clock deadline. Instead of
+        // trying to match an exact 10ms window, we simply consume the oldest
+        // packet from each source's queue. Bounded queue age/depth protection
+        // was already applied in FeedPacket().
         std::vector<SourceContribution> contributions;
 
         {
@@ -399,80 +397,38 @@ void MultiSourceMixer::MixerThread() {
                     contrib.isSilent = true;
                     contrib.hasData = false;
                 } else {
-                    // Find a packet matching the current deadline window
-                    bool found = false;
-                    while (!source->queue_.empty()) {
-                        auto& front = source->queue_.front();
+                    // Consume the oldest queued packet regardless of timestamp.
+                    // Bounded queue depth and age are enforced in FeedPacket.
+                    auto qp = std::move(source->queue_.front());
+                    source->queue_.pop_front();
 
-                        // If timestamp is 0 (not set), use the packet immediately.
-                        // This handles legacy tests and callers that don't set
-                        // qpcPosition100ns.
-                        if (front.header.qpcPosition100ns == 0) {
-                            // Fall through to the "use it" path below
-                            // by setting qpcPosition100ns to the window start
-                            // (just need it to pass the >= check below).
-                            // We don't modify the packet; we just let it through.
-                        }
-                        // If front packet is for a future window, keep it
-                        else if (front.header.qpcPosition100ns > deadline100ns) {
-                            // Packet is ahead of this block — leave in queue,
-                            // output silence for this block
-                            break;
-                        }
+                    contrib.frameData = std::move(qp.frameData);
+                    contrib.frameCount = qp.header.frameCount;
+                    contrib.channels = qp.header.channels;
+                    contrib.isSilent = qp.header.isSilent;
+                    contrib.isDiscontinuous = qp.header.isDiscontinuous;
 
-                        // If front packet is within the current window (or timestamp
-                        // was 0 / not set), use it
-                        if (front.header.qpcPosition100ns == 0 ||
-                            front.header.qpcPosition100ns >= windowStart100ns) {
-                            auto qp = std::move(source->queue_.front());
-                            source->queue_.pop_front();
-
-                            contrib.frameData = std::move(qp.frameData);
-                            contrib.frameCount = qp.header.frameCount;
-                            contrib.channels = qp.header.channels;
-                            contrib.isSilent = qp.header.isSilent;
-                            contrib.isDiscontinuous = qp.header.isDiscontinuous;
-
-                            if (qp.header.isSilent) {
-                                source->silentPackets_++;
-                            }
-
-                            if (qp.header.isDiscontinuous) {
-                                source->discontinuities_++;
-                            }
-
-                            contrib.hasData = true;
-
-                            if (!qp.header.isSilent) {
-                                // Check if frames are actually non-zero
-                                bool nonZero = false;
-                                for (size_t i = 0; i < contrib.frameData.size(); ++i) {
-                                    if (contrib.frameData[i] != 0.0f) {
-                                        nonZero = true;
-                                        break;
-                                    }
-                                }
-                                if (nonZero) {
-                                    activeNonSilentSources++;
-                                }
-                            }
-
-                            found = true;
-                            break;
-                        }
-
-                        // Front packet is for a past window — discard it (too late)
-                        source->latePackets_++;
-                        source->droppedPackets_++;
-                        source->droppedFrames_ += front.header.frameCount;
-                        source->queue_.pop_front();
+                    if (qp.header.isSilent) {
+                        source->silentPackets_++;
                     }
 
-                    if (!found) {
-                        // No matching packet in the current window
-                        source->missingPackets_++;
-                        contrib.isSilent = true;
-                        contrib.hasData = false;
+                    if (qp.header.isDiscontinuous) {
+                        source->discontinuities_++;
+                    }
+
+                    contrib.hasData = true;
+
+                    if (!qp.header.isSilent) {
+                        bool nonZero = false;
+                        for (size_t i = 0; i < contrib.frameData.size(); ++i) {
+                            if (contrib.frameData[i] != 0.0f) {
+                                nonZero = true;
+                                break;
+                            }
+                        }
+                        if (nonZero) {
+                            activeNonSilentSources++;
+                        }
                     }
                 }
 
