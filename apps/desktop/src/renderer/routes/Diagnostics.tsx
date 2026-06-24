@@ -162,7 +162,7 @@ export function Diagnostics() {
           <table className="info-table">
             <tbody>
               <tr><td>Pipeline Type</td><td className="mono">Endpoint Direct</td></tr>
-              <tr><td>Endpoint Active</td><td className="mono">{(pipelineSnapshot.endpointPacketsCaptured ?? 0) > 0 ? 'Yes' : 'Yes (idle)'}</td></tr>
+              <tr><td>Endpoint Active</td><td className="mono">{pipelineSnapshot.endpointDiagnostics?.endpointActive === false ? 'No' : (pipelineSnapshot.endpointPacketsCaptured ?? 0) > 0 ? 'Yes' : 'Yes (starting)'}</td></tr>
               <tr><td>Packets Captured</td><td className="mono">{pipelineSnapshot.endpointPacketsCaptured?.toLocaleString() ?? '—'}</td></tr>
               <tr><td>Nonzero Packets</td><td className="mono">{pipelineSnapshot.endpointNonZeroPackets?.toLocaleString() ?? '—'}</td></tr>
               <tr><td>Silent Packets</td><td className="mono">{pipelineSnapshot.endpointSilentPackets?.toLocaleString() ?? '—'}</td></tr>

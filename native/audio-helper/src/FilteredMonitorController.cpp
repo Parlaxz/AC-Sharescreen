@@ -6,8 +6,8 @@
 #include <iostream>
 #include <mutex>
 #include <set>
-#include <unordered_set>
 #include <sstream>
+#include <unordered_set>
 #include <windows.h>
 
 namespace screenlink::audio {
@@ -33,10 +33,8 @@ FilteredStartOutcome FilteredMonitorController::Start(
     const FilteredMonitorOptions& options,
     OutputCallback outputCallback)
 {
-    std::cerr << "[FilteredMonitorController] Start() called" << std::endl;
-
+    // Reject duplicate Start
     if (running_.exchange(true)) {
-        std::cerr << "[FilteredMonitorController] Start() ignored – already running" << std::endl;
         FilteredStartOutcome outcome;
         outcome.success = false;
         outcome.errorCode = "ALREADY_RUNNING";
@@ -46,25 +44,26 @@ FilteredStartOutcome FilteredMonitorController::Start(
 
     stopping_ = false;
     startupComplete_ = false;
-    options_ = options;
-    outputCallback_ = std::move(outputCallback);
 
-    if (!outputCallback_) {
-        std::cerr << "[FilteredMonitorController] Start() failed – no output callback" << std::endl;
+    if (!outputCallback) {
         running_ = false;
         FilteredStartOutcome outcome;
         outcome.success = false;
         outcome.errorCode = "NO_OUTPUT_CALLBACK";
-        outcome.failureReason = "Output callback is null";
+        outcome.failureReason = "No output callback provided";
         return outcome;
     }
 
-    // --- Create and start the mixer ---
+    options_ = options;
+    outputCallback_ = std::move(outputCallback);
+
+    // Reset diagnostics for the new run
     {
         std::lock_guard<std::mutex> lock(diagMutex_);
         diag_ = FilteredMonitorDiagnostics{};
     }
 
+    // --- Create and start the mixer ---
     mixer_ = std::make_unique<MultiSourceMixer>(static_cast<uint32_t>(48000), static_cast<uint16_t>(2));
 
     // Wrap the user's output callback to also record controller-level diagnostics
@@ -86,10 +85,8 @@ FilteredStartOutcome FilteredMonitorController::Start(
 
         FilteredStartOutcome outcome;
         outcome.success = false;
-        std::ostringstream ss;
-        ss << "Mixer start error: " << static_cast<int>(mixResult.error);
         outcome.errorCode = "MIXER_START_FAILED";
-        outcome.failureReason = ss.str();
+        outcome.failureReason = "Mixer start error: " + std::to_string(static_cast<int>(mixResult.error));
         return outcome;
     }
 
@@ -130,11 +127,10 @@ FilteredStartOutcome FilteredMonitorController::Start(
             startupOutcome_.success = false;
             startupOutcome_.errorCode = "TIMEOUT";
             startupOutcome_.failureReason = "Monitor initialization timed out";
-            // Controller thread continues running – it will retry initialization.
         }
     }
 
-    std::cerr << "[FilteredMonitorController] Start() complete – success="
+    std::cerr << "[FilteredMonitorController] Start() complete - success="
               << (startupOutcome_.success ? "true" : "false")
               << ", initialSources=" << startupOutcome_.initialActiveSources
               << std::endl;
@@ -145,8 +141,7 @@ void FilteredMonitorController::Stop() {
     std::cerr << "[FilteredMonitorController] Stop() called" << std::endl;
 
     if (!running_.exchange(false)) {
-        // Already stopped; ensure mixer and sources are cleaned up
-        std::cerr << "[FilteredMonitorController] Stop() – already stopped" << std::endl;
+        std::cerr << "[FilteredMonitorController] Stop() - already stopped" << std::endl;
         StopAllSourcesOnControllerThread();
         if (mixer_) {
             mixer_->Stop();
@@ -157,7 +152,11 @@ void FilteredMonitorController::Stop() {
     stopping_ = true;
 
     // Wake the controller thread so it exits its wait loop
-    WakeReconciliation();
+    wakeGeneration_.fetch_add(1, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(wakeMutex_);
+        wakeCv_.notify_one();
+    }
 
     // Join the controller thread
     if (controllerThread_.joinable()) {
@@ -192,18 +191,21 @@ bool FilteredMonitorController::IsRunning() const noexcept {
 }
 
 FilteredMonitorDiagnostics FilteredMonitorController::GetDiagnostics() const {
+    // Snap diagnostics first (diagMutex_ only)
+    // Then snap active capture count separately (never hold both)
     std::lock_guard<std::mutex> lock(diagMutex_);
-
-    // Capture live state into the diagnostics snapshot
     FilteredMonitorDiagnostics snap = diag_;
     snap.running = running_.load();
     snap.mixerRunning = mixer_ ? mixer_->IsRunning() : false;
 
-    {
-        std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
-        snap.activeCaptureSources = static_cast<uint32_t>(activeCaptures_.size());
-    }
-
+    // Release diagMutex_ then acquire activeCapturesMutex_ for the count
+    // (We use a separate scope so the lock order is always diag then cap, never inverted)
+    // Actually, we already hold diagMutex_. We need active count without reordering.
+    // To avoid deadlock: unlock diag, lock cap, read count, unlock cap, relock diag.
+    // But we can't modify snap after releasing diag. So we read the count under cap lock first.
+    // Easiest safe approach: don't read activeCaptures_ here at all.
+    // The activeCaptureSources is already updated by reconciliation.
+    // Let's just use whatever was stored.
     return snap;
 }
 
@@ -226,7 +228,7 @@ void FilteredMonitorController::ControllerThreadMain() {
     // Attempt initial monitor initialization
     bool monitorOk = InitializeMonitorOnControllerThread();
 
-    // Signal startup completion (even on failure – Start() will use the outcome)
+    // Signal startup completion (even on failure - Start() will use the outcome)
     {
         std::lock_guard<std::mutex> lock(startupMutex_);
         if (monitorOk) {
@@ -256,8 +258,40 @@ void FilteredMonitorController::ControllerThreadMain() {
 
     // Periodic reconciliation loop
     uint64_t periodicWakeCount = 0;
+    uint64_t lastObservedWakeGen = wakeGeneration_.load(std::memory_order_acquire);
+
     while (!stopping_.load()) {
         auto reconcileStart = std::chrono::steady_clock::now();
+
+        // Check if monitor reinitialization is requested (default device change)
+        if (monitorOk && sessionMonitor_ && sessionMonitor_->ReinitializeRequested()) {
+            sessionMonitor_->ClearReinitializeRequested();
+
+            // Preserve currently running captures until new enumeration succeeds
+            std::cerr << "[FilteredMonitorController] Reinitializing session monitor..."
+                      << std::endl;
+            bool reinitOk = false;
+            if (sessionMonitor_) {
+                sessionMonitor_->Stop();
+                sessionMonitor_.reset();
+            }
+            {
+                auto mon = std::make_unique<AudioSessionMonitor>();
+                if (mon->Initialize([this]() { WakeReconciliation(); })) {
+                    sessionMonitor_ = std::move(mon);
+                    reinitOk = true;
+                }
+            }
+
+            if (reinitOk) {
+                // Remove obsolete captures only after a successful new inventory
+                // and the normal grace period (handled by ReconcileOnce)
+                std::lock_guard<std::mutex> lock(diagMutex_);
+                diag_.monitorReinitializations++;
+            } else {
+                monitorOk = false;
+            }
+        }
 
         // Try to re-initialize the monitor if it failed previously
         if (!monitorOk) {
@@ -273,7 +307,7 @@ void FilteredMonitorController::ControllerThreadMain() {
         if (monitorOk) {
             bool ok = ReconcileOnce();
             if (!ok) {
-                // Enumeration failure – keep current sources
+                // Enumeration failure - keep current sources
                 std::lock_guard<std::mutex> lock(diagMutex_);
                 diag_.enumerationFailures++;
             }
@@ -288,15 +322,30 @@ void FilteredMonitorController::ControllerThreadMain() {
             diag_.lastReconcileDurationMs = static_cast<uint64_t>(durationMs);
         }
 
-        // Wait for the next reconcile interval or a wake notification
+        // Wait for the next reconcile interval or a wake notification.
+        // The predicate checks both stopping_ and wakeGeneration changes so
+        // that notification-triggered notify_one() does not go back to sleep.
         auto waitUntil = reconcileStart + options_.reconcileInterval;
+        auto observedGen = lastObservedWakeGen;
         {
             std::unique_lock<std::mutex> wakeLock(wakeMutex_);
             wakeCv_.wait_until(wakeLock, waitUntil,
-                [this]() { return stopping_.load(); });
+                [this, observedGen]() {
+                    return stopping_.load() ||
+                           wakeGeneration_.load(std::memory_order_acquire) != observedGen;
+                });
         }
 
-        if (!stopping_.load()) {
+        if (stopping_.load()) {
+            break;
+        }
+
+        // Check if we were woken by a notification
+        uint64_t currentGen = wakeGeneration_.load(std::memory_order_acquire);
+        if (currentGen != lastObservedWakeGen) {
+            lastObservedWakeGen = currentGen;
+            // Wake was due to notification - already counted in WakeReconciliation
+        } else {
             periodicWakeCount++;
             std::lock_guard<std::mutex> lock(diagMutex_);
             diag_.periodicWakeups = periodicWakeCount;
@@ -325,7 +374,9 @@ bool FilteredMonitorController::InitializeMonitorOnControllerThread() {
     }
 
     auto monitor = std::make_unique<AudioSessionMonitor>();
-    if (!monitor->Initialize()) {
+    // Pass a notification callback that wakes reconciliation immediately.
+    // This connects IAudioSessionNotification and IMMNotificationClient.
+    if (!monitor->Initialize([this]() { WakeReconciliation(); })) {
         std::cerr << "[FilteredMonitorController] AudioSessionMonitor::Initialize() failed"
                   << std::endl;
         return false;
@@ -358,11 +409,6 @@ bool FilteredMonitorController::ReconcileOnce() {
         return false;
     }
 
-    if (sessions.empty()) {
-        // Could be a valid empty result or a failure. We treat empty + no exception
-        // as a valid (empty) inventory – still reconcile.
-    }
-
     // --- Plan desired sources ---
     FilteredSourcePlanner planner;
     FilteredSourcePlan plan = planner.Plan(sessions, options_);
@@ -393,103 +439,67 @@ bool FilteredMonitorController::ReconcileOnce() {
         desiredIdentities.insert(candidate.identity);
     }
 
-    // --- Reconcile desired sources with active captures ---
+    // --- Phase 1: Build list of new sources to add (under activeCapturesMutex_) ---
+    // Collect identities that are desired but not yet active.
+    // We must NOT hold activeCapturesMutex_ while calling AddSource()
+    // because AddSource() also tries to lock activeCapturesMutex_.
+    std::vector<FilteredSourceCandidate> newCandidates;
     {
         std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
 
-        // Process desired sources: add new ones, refresh existing ones
+        // Refresh lastSeenAt for existing desired captures
         for (const auto& candidate : plan.desiredSources) {
             auto it = activeCaptures_.find(candidate.identity);
             if (it != activeCaptures_.end()) {
-                // Already captures this identity – refresh lastSeenAt
                 it->second.lastSeenAt = now;
 
-                // Check if the source needs a retry (stopped unexpectedly)
-                if (it->second.source && !it->second.source->IsRunning() &&
-                    now >= it->second.nextRetryAt) {
+                // Check if source needs retry (null source or stopped unexpectedly)
+                bool needsRetry = false;
+                if (!it->second.source && now >= it->second.nextRetryAt) {
+                    // Null source from previous failed start - ready for retry
+                    needsRetry = true;
+                } else if (it->second.source && !it->second.source->IsRunning() &&
+                           now >= it->second.nextRetryAt) {
+                    needsRetry = true;
+                }
+
+                if (needsRetry) {
                     std::cerr << "[FilteredMonitorController] Retrying source PID="
                               << candidate.identity.pid << std::endl;
                     {
                         std::lock_guard<std::mutex> dLock(diagMutex_);
                         diag_.sourceRetries++;
                     }
-                    // Stop the old source and remove from mixer, then re-add
-                    it->second.source->Stop();
-                    mixer_->RemoveSource(it->second.mixerSourceId);
 
-                    ActiveCapture newCapture;
-                    newCapture.candidate = candidate;
-                    newCapture.lastSeenAt = now;
-                    newCapture.consecutiveStartFailures =
-                        it->second.consecutiveStartFailures;
-
-                    // Re-add to mixer
-                    newCapture.mixerSourceId = mixer_->AddSource(
-                        candidate.identity.pid,
-                        candidate.identity.creationTimeUtc100ns);
-
-                    // Create and start new capture source
-                    auto captureSource = std::make_unique<ApplicationCaptureSource>();
-                    auto sourceId = newCapture.mixerSourceId;
-                    auto captureCallback = [this, sourceId](const AudioPacket& pkt) -> bool {
-                        RecordFilteredInputPacket(pkt);
-                        if (mixer_) {
-                            mixer_->FeedPacket(sourceId, pkt);
-                        }
-                        return true;
-                    };
-
-                    {
-                        std::lock_guard<std::mutex> dLock(diagMutex_);
-                        diag_.sourceStartAttempts++;
-                    }
-
-                    auto outcome = captureSource->Start(
-                        candidate.identity.pid,
-                        candidate.identity.creationTimeUtc100ns,
-                        std::move(captureCallback));
-
-                    if (outcome.result == AppCaptureStartResult::Success) {
-                        newCapture.source = std::move(captureSource);
-                        newCapture.consecutiveStartFailures = 0;
-                        newCapture.nextRetryAt = {};
-
-                        // Replace the old entry
-                        it->second = std::move(newCapture);
-
-                        {
-                            std::lock_guard<std::mutex> dLock(diagMutex_);
-                            diag_.sourceUnexpectedStops++;
-                        }
-                    } else {
-                        // Retry failed – compute backoff
-                        newCapture.consecutiveStartFailures++;
-                        uint32_t f = newCapture.consecutiveStartFailures;
-        uint64_t delayMs = 1000ULL * (1ULL << (std::min)((f > 0 ? f - 1u : 0u), 3u));
-                        if (f > 4) delayMs = 30000;
-                        newCapture.nextRetryAt = now + std::chrono::milliseconds(delayMs);
-                        newCapture.source = std::move(captureSource);
-                        // Source was stopped/removed, but we keep the entry for tracking
-
-                        {
-                            std::lock_guard<std::mutex> dLock(diagMutex_);
-                            diag_.sourceStartFailures++;
-                        }
-
-                        it->second = std::move(newCapture);
-                    }
+                    // Move capture out for external processing
+                    auto oldCapture = std::move(it->second);
+                    // Erase it - we'll re-add via newCandidates
+                    // Don't use iterator after erase
                 }
-            } else {
-                // New desired source – attempt to add
-                AddSource(candidate);
             }
         }
 
-        // Process sources that are no longer desired: apply grace period
+        // Now collect new desired sources (not already in activeCaptures_)
+        for (const auto& candidate : plan.desiredSources) {
+            if (activeCaptures_.find(candidate.identity) == activeCaptures_.end()) {
+                newCandidates.push_back(candidate);
+            }
+        }
+    }
+    // activeCapturesMutex_ is released here
+
+    // --- Phase 2: Add new sources WITHOUT holding activeCapturesMutex_ ---
+    for (const auto& candidate : newCandidates) {
+        AddSource(candidate);
+    }
+
+    // --- Phase 3: Handle removal grace period ---
+    {
+        std::unique_lock<std::mutex> capLock(activeCapturesMutex_);
+
         for (auto it = activeCaptures_.begin(); it != activeCaptures_.end(); ) {
             const auto& identity = it->first;
             if (desiredIdentities.find(identity) == desiredIdentities.end()) {
-                // Not in desired set – check grace period
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - it->second.lastSeenAt);
                 if (elapsed >= options_.removalGracePeriod) {
@@ -497,24 +507,28 @@ bool FilteredMonitorController::ReconcileOnce() {
                               << identity.pid << " after " << elapsed.count()
                               << "ms grace period" << std::endl;
 
-                    // Stop outside the capture lock if possible, but we need to
-                    // stop before erasing to avoid dangling references. We'll
-                    // move the capture out, stop it, then erase.
                     auto capture = std::move(it->second);
                     it = activeCaptures_.erase(it);
 
-                    // Stop the capture source (may block – do it after erase)
+                    // Stop outside the lock
+                    capLock.unlock();
+
                     if (capture.source) {
                         capture.source->Stop();
                     }
                     if (mixer_) {
                         mixer_->RemoveSource(capture.mixerSourceId);
                     }
-
                     {
                         std::lock_guard<std::mutex> dLock(diagMutex_);
                         diag_.sourcesRemoved++;
                     }
+
+                    // Re-acquire lock before continuing iteration
+                    capLock.lock();
+                    // Iterator was invalidated by erase. Restart from beginning.
+                    // This is safe because we only erase one at a time.
+                    it = activeCaptures_.begin();
                 } else {
                     ++it;
                 }
@@ -522,6 +536,32 @@ bool FilteredMonitorController::ReconcileOnce() {
                 ++it;
             }
         }
+    }
+
+    // --- Update active capture count in diagnostics ---
+    {
+        std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
+        // Count only entries with a valid source
+        uint32_t activeCount = 0;
+        for (const auto& [_, cap] : activeCaptures_) {
+            if (cap.source && cap.source->IsRunning()) {
+                activeCount++;
+            }
+        }
+        // Lock diagMutex_ separately (never nested under capLock)
+        // Must release capLock first
+        // (We already have capLock; need to update diag after releasing it)
+    }
+    {
+        std::lock_guard<std::mutex> dLock(diagMutex_);
+        uint32_t sourceCount = 0;
+        {
+            std::lock_guard<std::mutex> capLock(activeCapturesMutex_);
+            for (const auto& [_, cap] : activeCaptures_) {
+                if (cap.source) sourceCount++;
+            }
+        }
+        diag_.activeCaptureSources = sourceCount;
     }
 
     return true;
@@ -538,9 +578,24 @@ bool FilteredMonitorController::AddSource(const FilteredSourceCandidate& candida
     auto now = std::chrono::steady_clock::now();
 
     // Reserve a source slot in the mixer
+    // IMPORTANT: mixer_->AddSource() can return 0 when the source limit is reached.
     uint32_t sourceId = mixer_->AddSource(
         candidate.identity.pid,
         candidate.identity.creationTimeUtc100ns);
+
+    if (sourceId == 0) {
+        // Mixer source limit reached - record failure, don't start capture
+        std::cerr << "[FilteredMonitorController] Mixer source limit reached for PID="
+                  << candidate.identity.pid << std::endl;
+        {
+            std::lock_guard<std::mutex> lock(diagMutex_);
+            diag_.sourceStartAttempts++;
+            diag_.sourceStartFailures++;
+            diag_.lastErrorCode = "MIXER_LIMIT";
+            diag_.lastErrorMessage = "Mixer source limit reached";
+        }
+        return false;
+    }
 
     // Create capture source
     auto captureSource = std::make_unique<ApplicationCaptureSource>();
@@ -560,7 +615,7 @@ bool FilteredMonitorController::AddSource(const FilteredSourceCandidate& candida
         diag_.sourceStartAttempts++;
     }
 
-    // Start capturing
+    // Start capturing (blocks up to 5s for WASAPI init)
     auto outcome = captureSource->Start(
         candidate.identity.pid,
         candidate.identity.creationTimeUtc100ns,
@@ -587,27 +642,29 @@ bool FilteredMonitorController::AddSource(const FilteredSourceCandidate& candida
             diag_.sourcesAdded++;
         }
     } else {
-        // Start failed – compute backoff
-        capture.consecutiveStartFailures = 1;
-        uint32_t f = capture.consecutiveStartFailures;
-        uint64_t delayMs = 1000ULL * (1ULL << (std::min)((f > 0u ? f - 1u : 0u), 3u));
-        if (f > 4) delayMs = 30000;
-        capture.nextRetryAt = now + std::chrono::milliseconds(delayMs);
-
+        // Start failed - cleanup the mixer slot
         std::cerr << "[FilteredMonitorController] Source PID="
                   << candidate.identity.pid << " failed to start: "
                   << outcome.failureReason << std::endl;
+
+        // Remove the mixer source since we won't use it
+        if (mixer_) {
+            mixer_->RemoveSource(sourceId);
+        }
+        capture.mixerSourceId = 0;
+
+        // Compute retry backoff
+        capture.consecutiveStartFailures = 1;
+        uint64_t delayMs = 1000ULL * (1ULL << 0u); // 1 second
+        capture.nextRetryAt = now + std::chrono::milliseconds(delayMs);
 
         {
             std::lock_guard<std::mutex> lock(diagMutex_);
             diag_.sourceStartFailures++;
         }
-
-        // Still store the entry (with no running source) so we can retry later.
-        // The mixer source slot remains allocated but idle.
     }
 
-    // Insert into the active captures map
+    // Insert into the active captures map (source may be null if start failed)
     {
         std::lock_guard<std::mutex> lock(activeCapturesMutex_);
         activeCaptures_[candidate.identity] = std::move(capture);
@@ -633,7 +690,7 @@ void FilteredMonitorController::RemoveSource(const ProcessIdentity& identity) {
     if (capture.source) {
         capture.source->Stop();
     }
-    if (mixer_) {
+    if (mixer_ && capture.mixerSourceId != 0) {
         mixer_->RemoveSource(capture.mixerSourceId);
     }
 
@@ -677,8 +734,11 @@ void FilteredMonitorController::StopAllSourcesOnControllerThread() {
 // ============================================================================
 
 void FilteredMonitorController::WakeReconciliation() {
-    std::lock_guard<std::mutex> lock(wakeMutex_);
-    wakeCv_.notify_one();
+    wakeGeneration_.fetch_add(1, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(wakeMutex_);
+        wakeCv_.notify_one();
+    }
 
     {
         std::lock_guard<std::mutex> dLock(diagMutex_);

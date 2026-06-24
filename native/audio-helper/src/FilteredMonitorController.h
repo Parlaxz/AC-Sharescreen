@@ -50,7 +50,7 @@ struct ActiveCapture {
 ///
 /// Thread safety:
 ///   - Start/Stop: call from a single thread, not concurrently
-///   - GetDiagnostics: thread-safe
+///   - GetDiagnostics: thread-safe (never holds activeCapturesMutex_ while diagMutex_ is held)
 ///   - Internal controller thread does all reconciliation work
 class FilteredMonitorController {
 public:
@@ -85,6 +85,10 @@ private:
     // Diagnostics helpers
     void RecordFilteredInputPacket(const AudioPacket& packet);
     void RecordFilteredMixerOutput(const AudioPacket& packet);
+
+    /// Wake generation counter: notifications increment this so the
+    /// controller-thread wait_until predicate can detect a wake request.
+    std::atomic<uint64_t> wakeGeneration_{0};
 
     // State
     FilteredMonitorOptions options_;

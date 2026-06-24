@@ -137,6 +137,17 @@ private:
     //   - CaptureThread cleanup: .store(nullptr) before release
     std::atomic<IAudioClient*> audioClient_{nullptr};
 
+    // Set by IMMNotificationClient when the default render endpoint changes.
+    // Checked in the capture loop to trigger early recovery.
+    std::atomic<bool> deviceChangePending_{false};
+
+    // Tracks whether the IMMNotificationClient sink is registered on the
+    // current pEnumerator so we can unregister during cleanup.
+    bool notificationRegistered_ = false;
+    // Raw pointer to the registered sink (owned by the enumerator via refcounting).
+    // Only valid when notificationRegistered_ is true.
+    IMMNotificationClient* notificationSink_ = nullptr;
+
     // Stateful resampler — must persist across packets to avoid boundary clicks.
     LinearResampler* resampler_ = nullptr;
     uint32_t lastSourceRate_ = 0;

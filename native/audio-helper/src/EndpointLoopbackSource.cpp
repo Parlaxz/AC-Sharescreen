@@ -38,6 +38,59 @@ void SafeRelease(T*& ptr) {
     }
 }
 
+// ── IMMNotificationClient for default-device-change detection ──
+//
+// Lightweight sink that sets an atomic flag when the default render
+// endpoint changes (eConsole or eMultimedia role). The capture thread
+// checks this flag on each iteration and triggers a full recovery cycle.
+
+class EndpointDeviceNotificationSink : public IMMNotificationClient {
+public:
+    explicit EndpointDeviceNotificationSink(std::atomic<bool>& changeFlag)
+        : refCount_(1), changeFlag_(changeFlag) {}
+
+    // IUnknown
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == __uuidof(IMMNotificationClient)) {
+            *ppv = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return InterlockedIncrement(&refCount_);
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG ref = InterlockedDecrement(&refCount_);
+        if (ref == 0) delete this;
+        return ref;
+    }
+
+    // IMMNotificationClient — minimal stubs
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+    // OnQueryDeviceRemoval is only available in Windows 10 SDK (1607+).
+    // We omit it for broader SDK compatibility — the sink still works correctly
+    // for our purpose (default-device-change detection via OnDefaultDeviceChanged).
+    // HRESULT STDMETHODCALLTYPE OnQueryDeviceRemoval(LPCWSTR) override { return S_OK; }
+
+    // ── The one we care about ──
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
+        if (flow == eRender && (role == eConsole || role == eMultimedia)) {
+            changeFlag_.store(true, std::memory_order_release);
+        }
+        return S_OK;
+    }
+
+private:
+    LONG refCount_;
+    std::atomic<bool>& changeFlag_;
+};
+
 // ── Target output format ──
 
 static constexpr uint32_t kTargetSampleRate = 48000;
@@ -831,6 +884,25 @@ void EndpointLoopbackSource::CaptureThread(
             std::cerr << "[EndpointLoopback] Capture resumed after recovery" << std::endl;
         }
 
+        // ── Register for default-device-change notifications ──
+        // This lets us detect when the user switches audio output devices
+        // without waiting for a WASAPI error.
+        {
+            EndpointDeviceNotificationSink* pSink =
+                new EndpointDeviceNotificationSink(deviceChangePending_);
+            HRESULT hrReg = pEnumerator->RegisterEndpointNotificationCallback(pSink);
+            if (SUCCEEDED(hrReg)) {
+                notificationRegistered_ = true;
+                notificationSink_ = pSink;
+                // Enumerator now owns the sink reference; release ours.
+                pSink->Release();
+            } else {
+                std::cerr << "[EndpointLoopback] RegisterEndpointNotificationCallback failed: "
+                          << HresultToString(hrReg) << std::endl;
+                delete pSink;
+            }
+        }
+
         // ── Pre-allocate conversion buffers ──
         conversionBuffer_.clear();
         stereoBuffer_.clear();
@@ -840,6 +912,21 @@ void EndpointLoopbackSource::CaptureThread(
         bool deviceInvalidated = false;
 
         while (running_.load() && !deviceInvalidated) {
+            // Check for default device change via IMMNotificationClient.
+            // This catches user-initiated endpoint switches faster than waiting
+            // for a WASAPI error (AUDCLNT_E_DEVICE_INVALIDATED).
+            if (deviceChangePending_.load(std::memory_order_acquire)) {
+                deviceChangePending_.store(false, std::memory_order_relaxed);
+                std::cerr << "[EndpointLoopback] Default device change detected, reinitializing"
+                          << std::endl;
+                {
+                    std::lock_guard<std::mutex> lock(diagMutex_);
+                    diag_.deviceInvalidations++;
+                }
+                deviceInvalidated = true;
+                break;
+            }
+
             // Get the next available packet size
             UINT32 packetSize = 0;
             hr = pCaptureClient->GetNextPacketSize(&packetSize);
@@ -1035,6 +1122,16 @@ void EndpointLoopbackSource::CaptureThread(
         if (pAudioClient && running_.load()) {
             pAudioClient->Stop();
         }
+
+        // Unregister the device-change notification sink before releasing
+        // the enumerator so the callback can no longer fire.
+        if (notificationRegistered_ && pEnumerator && notificationSink_) {
+            // The enumerator holds a reference to the sink and will Release()
+            // it here, causing self-deletion when the ref count reaches 0.
+            pEnumerator->UnregisterEndpointNotificationCallback(notificationSink_);
+        }
+        notificationRegistered_ = false;
+        notificationSink_ = nullptr;
 
         SafeRelease(pCaptureClient);
         audioClient_.store(nullptr);
