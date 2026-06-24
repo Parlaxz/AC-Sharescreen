@@ -37,7 +37,15 @@ struct ScreenLinkIdentity {
 
     /// Normalize a Windows path for comparison: absolute, case-insensitive,
     /// separator-normalized, quote-stripped, dot-segment normalized.
+    /// Uses GetFullPathNameW for real Windows canonicalization.
     static std::string NormalizePath(const std::string& rawPath);
+
+    /// Check if `child` is contained within `parent` with DIRECTORY-BOUNDARY
+    /// awareness. Both paths are canonicalized via GetFullPathNameW, then
+    /// checks if child starts with parent + backslash.
+    /// Example: C:\Program Files\ScreenLink\app.exe IS inside C:\Program Files\ScreenLink
+    ///          C:\Program Files\ScreenLink-Evil\app.exe is NOT inside C:\Program Files\ScreenLink
+    static bool IsPathContainedIn(const std::string& child, const std::string& parent);
 
     /// Check if a given PID+creation-time combo matches the current root.
     bool IsCurrentRoot(uint32_t pid, uint64_t creationTime) const noexcept;

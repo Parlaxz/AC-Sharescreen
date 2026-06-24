@@ -1,5 +1,9 @@
 #include "ExclusionPolicy.h"
 
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -58,35 +62,60 @@ std::string StripQuotes(const std::string& s) {
 std::string ScreenLinkIdentity::NormalizePath(const std::string& rawPath) {
     if (rawPath.empty()) return {};
 
-    // Strip quotes
-    std::string result = StripQuotes(rawPath);
+    // Step 1: Strip quotes
+    std::string stripped = StripQuotes(rawPath);
+    if (stripped.empty()) return {};
 
-    // Convert to lowercase
+    // Step 2: Convert to wide string
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, stripped.c_str(), -1, nullptr, 0);
+    if (wideLen <= 0) return {};
+    std::wstring wide(static_cast<size_t>(wideLen) - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, stripped.c_str(), -1, &wide[0], wideLen);
+
+    // Step 3: Call GetFullPathNameW to canonicalize (resolves dots,
+    //         normalizes separators, makes absolute)
+    wchar_t canonical[MAX_PATH + 1] = {};
+    DWORD resultLen = GetFullPathNameW(wide.c_str(), MAX_PATH, canonical, nullptr);
+    if (resultLen == 0 || resultLen > MAX_PATH) return {};
+
+    // Step 4: Convert back to UTF-8
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, canonical, -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) return {};
+    std::string result(static_cast<size_t>(utf8Len) - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, canonical, -1, &result[0], utf8Len, nullptr, nullptr);
+    if (result.empty()) return {};
+
+    // Step 5: Convert to lowercase
     for (auto& c : result) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
 
-    // Normalize separators to backslash
-    for (auto& c : result) {
-        if (c == '/') c = '\\';
-    }
-
-    // Remove trailing backslash (but preserve root like "c:\")
+    // Step 6: Strip trailing backslash (but preserve root like "c:\")
     if (result.size() > 3 && result.back() == '\\') {
         result.pop_back();
     }
 
-    // Collapse consecutive separators
-    std::string collapsed;
-    collapsed.reserve(result.size());
-    for (size_t i = 0; i < result.size(); ++i) {
-        if (result[i] == '\\' && i + 1 < result.size() && result[i + 1] == '\\') {
-            continue; // skip duplicate
-        }
-        collapsed += result[i];
+    return result;
+}
+
+bool ScreenLinkIdentity::IsPathContainedIn(const std::string& child, const std::string& parent) {
+    std::string normalizedChild = NormalizePath(child);
+    std::string normalizedParent = NormalizePath(parent);
+
+    if (normalizedChild.empty() || normalizedParent.empty()) return false;
+
+    // Build parent-with-trailing-backslash for the boundary check.
+    // NormalizePath strips trailing backslash, so we add it back here.
+    std::string parentBoundary = normalizedParent;
+    if (parentBoundary.back() != '\\') {
+        parentBoundary += '\\';
     }
 
-    return collapsed;
+    // DIRECTORY-BOUNDARY check: child must start with parent + backslash.
+    // This ensures C:\Program Files\ScreenLink-Evil does NOT match
+    // parent C:\Program Files\ScreenLink because the child path
+    // continues with "\screenlink-evil\" not "\screenlink\".
+    return normalizedChild.find(parentBoundary) == 0;
 }
 
 bool ScreenLinkIdentity::IsCurrentRoot(uint32_t pid, uint64_t creationTime) const noexcept {
@@ -103,14 +132,14 @@ bool ScreenLinkIdentity::IsScreenLinkApplication(const std::string& path) const 
         if (IEquals(normalized, normalizedPackagedPath)) return true;
     }
 
-    // Check against installation root
+    // Check against installation root (directory-boundary aware)
     if (!normalizedInstallationRoot.empty()) {
-        if (normalized.find(normalizedInstallationRoot) == 0) return true;
+        if (IsPathContainedIn(normalized, normalizedInstallationRoot)) return true;
     }
 
-    // Check against development app root
+    // Check against development app root (directory-boundary aware)
     if (!normalizedDevAppRoot.empty()) {
-        if (normalized.find(normalizedDevAppRoot) == 0) return true;
+        if (IsPathContainedIn(normalized, normalizedDevAppRoot)) return true;
     }
 
     // Check against development entrypoint
@@ -118,9 +147,9 @@ bool ScreenLinkIdentity::IsScreenLinkApplication(const std::string& path) const 
         if (IEquals(normalized, normalizedDevEntrypoint)) return true;
     }
 
-    // Basename fallback: check if path contains "screenlink" (existing behavior)
-    std::string base = Basename(path);
-    if (IContains(base, "screenlink")) return true;
+    // NOTE: Basename substring check (IContains) intentionally removed.
+    // The ONLY fallback for ScreenLink identification is IsScreenLinkProcess()
+    // in CheckExclusionV2, not in structured identity matching.
 
     return false;
 }

@@ -86,6 +86,14 @@ struct TestFailure final {};
     } \
 } while(0)
 
+#define ASSERT_NE(a, b) do { \
+    auto av = (a); auto bv = (b); \
+    if (av == bv) { \
+        std::cerr << "[Phase2G] ASSERT_NE failed at " << __LINE__ << ": " #a " (" << av << ") == " #b " (" << bv << ")\n"; \
+        throw TestFailure{}; \
+    } \
+} while(0)
+
 // ====================================================================
 // FilteredSourcePlanner Tests
 // ====================================================================
@@ -1800,6 +1808,97 @@ void TestExclusionAtRootLevel() {
 }
 
 // ====================================================================
+// Priority 3: Multi-instance Identity Tests
+// ====================================================================
+
+void TestScreenLinkDirectoryBoundary() {
+    TEST("ScreenLinkIdentity - directory boundary awareness")
+    // C:\ScreenLink\app.exe should be inside C:\ScreenLink
+    ASSERT(ScreenLinkIdentity::IsPathContainedIn(
+        "C:\\ScreenLink\\app.exe", "C:\\ScreenLink"));
+    // C:\ScreenLink-Evil must NOT match (directory boundary)
+    ASSERT(!ScreenLinkIdentity::IsPathContainedIn(
+        "C:\\ScreenLink-Evil\\app.exe", "C:\\ScreenLink"));
+    // Exact same path is NOT "contained in" itself (needs parent+backslash prefix)
+    ASSERT(!ScreenLinkIdentity::IsPathContainedIn(
+        "C:\\ScreenLink", "C:\\ScreenLink"));
+    // Different directory should not be contained
+    ASSERT(!ScreenLinkIdentity::IsPathContainedIn(
+        "C:\\Other\\app.exe", "C:\\ScreenLink"));
+    // Empty child or parent returns false
+    ASSERT(!ScreenLinkIdentity::IsPathContainedIn("", "C:\\ScreenLink"));
+    ASSERT(!ScreenLinkIdentity::IsPathContainedIn("C:\\app.exe", ""));
+    END_TEST("ScreenLinkIdentity - directory boundary awareness");
+}
+
+void TestPathGetFullPathNameW() {
+    TEST("ScreenLinkIdentity - GetFullPathNameW canonicalization")
+    // Dot segments should be resolved
+    {
+        std::string resolved = ScreenLinkIdentity::NormalizePath(
+            "C:\\Temp\\.\\App\\..\\app.exe");
+        ASSERT(resolved.find("..") == std::string::npos);
+        ASSERT(resolved.find("\\temp\\app.exe") != std::string::npos ||
+               resolved.find("\\Temp\\app.exe") != std::string::npos);
+    }
+    // Forward slashes should be converted to backslashes
+    {
+        std::string resolved = ScreenLinkIdentity::NormalizePath(
+            "C:/Program Files/App/app.exe");
+        ASSERT(resolved.find('/') == std::string::npos);
+        ASSERT(resolved.find('\\') != std::string::npos);
+    }
+    // Trailing backslash should be stripped (non-root)
+    {
+        std::string resolved = ScreenLinkIdentity::NormalizePath(
+            "C:\\Program Files\\App\\");
+        ASSERT(!resolved.empty());
+        ASSERT_NE(resolved.back(), '\\');
+    }
+    // Quote-stripping
+    {
+        std::string resolved = ScreenLinkIdentity::NormalizePath(
+            "\"C:\\Program Files\\App\\app.exe\"");
+        ASSERT(resolved.find('"') == std::string::npos);
+    }
+    // Empty input returns empty
+    {
+        std::string resolved = ScreenLinkIdentity::NormalizePath("");
+        ASSERT(resolved.empty());
+    }
+    END_TEST("ScreenLinkIdentity - GetFullPathNameW canonicalization");
+}
+
+void TestRemoveSubstringMatching() {
+    TEST("ScreenLinkIdentity - no basename substring matching")
+    // Create identity with structured paths set
+    ScreenLinkIdentity identity;
+    identity.rootPid = 100;
+    identity.rootCreationTimeUtc100ns = 1000;
+    identity.normalizedDevAppRoot = "C:\\dev\\screenlink";
+
+    // Path with "screenlink" in basename but NOT under any structured root
+    // must NOT match since the IContains fallback has been removed
+    ASSERT(!identity.IsScreenLinkApplication(
+        "C:\\some-other-app\\screenlink_evil.exe"));
+
+    // Path under structured root SHOULD still match
+    ASSERT(identity.IsScreenLinkApplication(
+        "C:\\dev\\screenlink\\app.exe"));
+
+    // Empty path returns false
+    ASSERT(!identity.IsScreenLinkApplication(""));
+
+    // Identity with no structured paths set should not match anything
+    ScreenLinkIdentity emptyIdentity;
+    emptyIdentity.rootPid = 100;
+    emptyIdentity.rootCreationTimeUtc100ns = 1000;
+    ASSERT(!emptyIdentity.IsScreenLinkApplication(
+        "C:\\some\\screenlink.exe"));
+    END_TEST("ScreenLinkIdentity - no basename substring matching");
+}
+
+// ====================================================================
 // Diagnostics Tests
 // ====================================================================
 
@@ -2195,6 +2294,11 @@ bool RunPhase2GSelfTests() {
 
     // Exclusion tests at root level
     TestExclusionAtRootLevel();
+
+    // Priority 3: Multi-instance identity tests
+    TestScreenLinkDirectoryBoundary();
+    TestPathGetFullPathNameW();
+    TestRemoveSubstringMatching();
 
     // Diagnostics tests
     TestFilteredMonitorDiagnosticsRmsFields();

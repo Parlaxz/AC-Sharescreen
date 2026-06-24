@@ -59,11 +59,11 @@ bool FilteredSourcePlanner::IsScreenLinkSession(
     // Check against structured ScreenLinkIdentity (preferred method)
     const auto& identity = options.screenLinkIdentity;
     if (identity.IsValid()) {
-        // Check by current root PID + creation time
+        // Check by current root PID + creation time (BOTH must match)
         if (identity.IsCurrentRoot(session.pid, session.creationTimeUtc100ns)) {
             return true;
         }
-        // Check if resolved root identity matches
+        // Check if resolved root identity matches (BOTH PID + creationTimeUtc100ns)
         if (session.rootPid != 0 &&
             identity.IsCurrentRoot(session.rootPid, session.rootCreationTimeUtc100ns)) {
             return true;
@@ -74,6 +74,11 @@ bool FilteredSourcePlanner::IsScreenLinkSession(
             return true;
         }
     }
+    // When structured identity is NOT valid (identity.IsValid() false), we fall
+    // back to the legacy single-PID check below. This handles cases where the
+    // desktop-side identity build failed or identity hasn't been provided yet.
+    // Both PID and creation time must match in the structured branch above;
+    // the legacy branch below uses only PID (backward compatibility).
 
     // Fallback: legacy single-PID check (maintains backward compat)
     if (options.screenLinkPid != 0) {

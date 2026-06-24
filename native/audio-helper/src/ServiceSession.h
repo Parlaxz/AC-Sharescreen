@@ -186,6 +186,9 @@ private:
     // Phase 2F: Production diagnostics
     uint32_t helperStartCount_ = 0;
     uint64_t lastErrorTimestamp_ = 0; // 100ns QPC timestamp of last error
+
+    // Priority 3: screenLinkIdentity root PID validation failures
+    std::atomic<uint64_t> screenLinkIdentityLookupFailures_{0};
     std::chrono::steady_clock::time_point startTime_;
 
     // Parent process handle

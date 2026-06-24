@@ -1204,6 +1204,8 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     result += StateToStr(currentState) + std::string("\",");
     result += "\"streamGeneration\":" + std::to_string(streamGen) + ",";
     result += "\"helperStartCount\":" + std::to_string(helperStartCount_) + ",";
+    result += "\"screenLinkIdentityLookupFailures\":" +
+              std::to_string(screenLinkIdentityLookupFailures_.load()) + ",";
     result += "\"lastErrorTimestamp\":" + std::to_string(lastErrorTimestamp_) + ",";
     result += "\"buildInfo\":{";
     result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
@@ -1734,6 +1736,25 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
             SimpleJson::GetString(identityJson, "productIdentifier");
         screenLinkIdentity.helperExePath =
             SimpleJson::GetString(identityJson, "helperExePath");
+    }
+
+    // ── C: Native PID validation for screenLinkIdentity ──
+    if (screenLinkIdentity.IsValid()) {
+        uint64_t actualCreationTime = GetProcessCreationTime(screenLinkIdentity.rootPid);
+        if (actualCreationTime == 0) {
+            // Process not found (gone already)
+            std::cerr << "[helper] screenLinkIdentity root PID not found: "
+                      << screenLinkIdentity.rootPid << std::endl;
+            screenLinkIdentity.rootPid = 0;
+            screenLinkIdentity.rootCreationTimeUtc100ns = 0;
+            screenLinkIdentityLookupFailures_.fetch_add(1, std::memory_order_relaxed);
+        } else if (actualCreationTime != screenLinkIdentity.rootCreationTimeUtc100ns) {
+            // Creation time mismatch (PID reused or spoofed)
+            std::cerr << "[helper] screenLinkIdentity root PID creation time mismatch: expected="
+                      << screenLinkIdentity.rootCreationTimeUtc100ns
+                      << " actual=" << actualCreationTime << std::endl;
+            screenLinkIdentityLookupFailures_.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // Lock audio lifecycle mutex to serialize start/stop transitions

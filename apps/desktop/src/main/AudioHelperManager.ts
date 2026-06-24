@@ -374,21 +374,19 @@ export class AudioHelperManager {
   private buildScreenLinkIdentity(): Record<string, unknown> {
     const identity: Record<string, unknown> = {
       rootPid: process.pid,
-      rootCreationTimeUtc100ns: undefined as unknown as string, // filled below
       productIdentifier: 'screenlink',
     };
 
-    // Try to get current process creation time
-    try {
-      // On Windows, we can read /proc/pid equivalent via process module
-      const creation = process.getCreationTime?.();
-      if (creation) {
-        // Convert Unix ms to Windows FILETIME 100ns ticks
-        identity.rootCreationTimeUtc100ns = String(
-          BigInt(Math.floor(creation * 10000)) + BigInt(116444736000000000)
-        );
-      }
-    } catch { /* best effort */ }
+    // Get current process creation time using process object (ESM-compatible)
+    const creationMs = process.getCreationTime?.();
+    if (creationMs) {
+      // Convert Unix ms to Windows FILETIME 100ns ticks
+      identity.rootCreationTimeUtc100ns = String(
+        BigInt(Math.floor(creationMs * 10000)) + BigInt(116444736000000000)
+      );
+    } else {
+      identity.rootCreationTimeUtc100ns = '0';
+    }
 
     // Determine if packaged or development
     const isPackaged = !process.env.VITE_DEV_SERVER_URL && !process.env.ELECTRON_RUN_AS_NODE;
@@ -398,16 +396,21 @@ export class AudioHelperManager {
       // Packaged: use resources/app path and app executable path
       identity.normalizedPackagedPath = process.execPath;
       try {
-        const resourcesPath = require('path').resolve(process.execPath, '..', '..');
+        const resourcesPath = path.resolve(process.execPath, '..', '..');
         identity.normalizedInstallationRoot = resourcesPath;
       } catch { /* best effort */ }
     } else {
       // Development: use the app root directory
       identity.normalizedDevAppRoot = appPath;
-      // Entrypoint is the main script path
-      try {
-        identity.normalizedDevEntrypoint = require('path').resolve(__dirname, '..', 'main', 'main.js');
-      } catch { /* best effort */ }
+      // Entrypoint is the main script path using ESM-compatible _dirname
+      identity.normalizedDevEntrypoint = path.resolve(_dirname, 'main.js');
+      // Throw descriptive error if a required development identity field is missing
+      if (!appPath) {
+        throw new Error(
+          'buildScreenLinkIdentity: missing required development identity field normalizedDevAppRoot ' +
+          `(APP_PATH env not set, cwd=${process.cwd()})`
+        );
+      }
     }
 
     // Helper executable path
@@ -928,8 +931,9 @@ export class AudioHelperManager {
       return;
     }
 
-    // Re-check shutdown state after async cleanup
-    if (this.shuttingDown_ || this.pendingCleanup === 'permanent-shutdown') {
+    // Re-check shutdown state after async cleanup (cast to full type since
+    // TS narrows to 'restart' but async operations may have changed it)
+    if (this.shuttingDown_ || (this.pendingCleanup as CleanupIntent | null) === 'permanent-shutdown') {
       diag('Restart cancelled — shutdown requested during cleanup');
       this.state = 'disconnected';
       this.pendingCleanup = null;
