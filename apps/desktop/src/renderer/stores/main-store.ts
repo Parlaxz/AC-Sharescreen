@@ -11,6 +11,14 @@ export type Page =
   | "diagnostics"
   | "about";
 
+/** Group dashboard internal nav pages (Section 6.2) */
+export type GroupNavPage =
+  | "overview"
+  | "active-shares"
+  | "members"
+  | "presets"
+  | "group-settings";
+
 export interface ViewerInfo {
   peerUuid: string;
   displayName: string;
@@ -44,6 +52,14 @@ export interface AppState {
   currentPage: Page;
   navigate: (page: Page) => void;
 
+  // Context panel (Section 9)
+  showContextPanel: boolean;
+  toggleContextPanel: () => void;
+
+  // Group dashboard nav (Section 6.2)
+  groupNavPage: GroupNavPage;
+  setGroupNavPage: (page: GroupNavPage) => void;
+
   // Sharing state (Phase 3)
   isSharing: boolean;
   isDegraded: boolean;
@@ -70,6 +86,7 @@ export interface AppState {
   // View mode
   isViewing: boolean;
   viewStatus: string;
+  focusMode: boolean;
 
   // Group state
   selectedGroupId: string | null;
@@ -80,12 +97,17 @@ export interface AppState {
   activeStreamsByGroup: Record<string, StreamAnnouncement[]>;
   watchedStreamsBySessionId: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>;
 
+  // Share setup dialog (Stage 3.7D)
+  openShareSetup: boolean;
+
   // Local streaming state
   localShareState: LocalShareState;
   localStreamSession: { sessionId: string; streamId: string; password: string } | null;
   qualityPresets: unknown[];
 
   // Actions
+  setOpenShareSetup: (open: boolean) => void;
+  toggleFocusMode: () => void;
   setIsSharing: (sharing: boolean) => void;
   setIsDegraded: (degraded: boolean) => void;
   setSource: (input: { id: string; name: string; kind: "screen" | "window"; displayId: string; fingerprint: string | null } | string, name?: string) => void;
@@ -120,6 +142,8 @@ export type LocalShareState =
 
 const initialState = {
   currentPage: "dashboard" as Page,
+  showContextPanel: false,
+  groupNavPage: "overview" as GroupNavPage,
   isSharing: false,
   isDegraded: false,
   sourceId: null as string | null,
@@ -137,6 +161,7 @@ const initialState = {
   totalBytesSent: 0,
   isViewing: false,
   viewStatus: "",
+  focusMode: false,
   selectedGroupId: null as string | null,
   groupsById: {} as Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>,
   groupOrder: [] as string[],
@@ -144,6 +169,7 @@ const initialState = {
   onlineDeviceIdsByGroup: {} as Record<string, string[]>,
   activeStreamsByGroup: {} as Record<string, StreamAnnouncement[]>,
   watchedStreamsBySessionId: {} as Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>,
+  openShareSetup: false,
   localShareState: "idle" as LocalShareState,
   localStreamSession: null as { sessionId: string; streamId: string; password: string } | null,
   qualityPresets: [] as unknown[],
@@ -154,6 +180,28 @@ export const useStore = create<AppState>((set, get) => ({
 
   navigate: (page) => set({ currentPage: page }),
 
+  toggleContextPanel: () => set((s) => ({ showContextPanel: !s.showContextPanel })),
+  setGroupNavPage: (page) => {
+    set({ groupNavPage: page });
+    // Map group nav pages to the global page for routing (Section 6.2)
+    switch (page) {
+      case "overview":
+      case "active-shares":
+        set({ currentPage: "dashboard" });
+        break;
+      case "members":
+        set({ currentPage: "groups" });
+        break;
+      case "presets":
+        set({ currentPage: "quality-presets" });
+        break;
+      case "group-settings":
+        set({ currentPage: "settings" });
+        break;
+    }
+  },
+
+  setOpenShareSetup: (open) => set({ openShareSetup: open }),
   setIsSharing: (sharing) => set({ isSharing: sharing }),
   setIsDegraded: (degraded) => set({ isDegraded: degraded }),
 
@@ -177,7 +225,8 @@ export const useStore = create<AppState>((set, get) => ({
   setViewers: (viewers) => set({ viewers, viewerCount: viewers.length }),
   setSessionDuration: (ms) => set({ sessionDuration: ms }),
   setTotalBytesSent: (bytes) => set({ totalBytesSent: bytes }),
-  setIsViewing: (isViewing) => set({ isViewing }),
+  setIsViewing: (isViewing) => set({ isViewing: isViewing, focusMode: false }),
+  toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
   setViewStatus: (status) => set({ viewStatus: status }),
   setSelectedGroupId: (id) => set({ selectedGroupId: id }),
   setQualityPresets: (presets) => set({ qualityPresets: presets }),

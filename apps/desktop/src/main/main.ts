@@ -16,6 +16,16 @@ import { LogManager } from "./log-manager.js";
 import { LoginItemManager } from "./login-item-manager.js";
 import { GroupStore } from "./group-store.js";
 import { QualityPresetStore } from "./quality-preset-store.js";
+import {
+  UpdateManager,
+  type LoggerAdapter,
+  type UpdaterAdapter,
+} from "./update-manager.js";
+import {
+  createStatusBroadcast,
+  registerUpdateIpcHandlers,
+  removeUpdateIpcHandlers,
+} from "./update-ipc.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,6 +59,7 @@ let logManager: LogManager;
 let loginItemManager: LoginItemManager;
 let groupStore: GroupStore;
 let presetStore: QualityPresetStore;
+let updateManager: UpdateManager | null = null;
 
 app.whenReady().then(() => {
   if (isMultiInstance && !devProfile) {

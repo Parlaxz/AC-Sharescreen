@@ -1,25 +1,25 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useStore, type Page } from "./stores/main-store.js";
+import { GroupOverview } from "@/components/workspace/GroupOverview";
+import { HostDashboard } from "@/components/workspace/HostDashboard";
+import { ShareSetup } from "@/components/workspace/ShareSetup";
 import { Dashboard } from "./routes/Dashboard.js";
 import { SourcePicker } from "./routes/SourcePicker.js";
-import { Groups } from "./routes/Groups.js";
-import { QualityPresets } from "./routes/QualityPresets.js";
-import { Settings } from "./routes/Settings.js";
-import { Diagnostics } from "./routes/Diagnostics.js";
+import { GroupsWorkspace } from "@/components/workspace/GroupsWorkspace";
+import { QualityPresetsPage } from "@/components/workspace/QualityPresetsPage";
+import { SettingsPage } from "@/components/workspace/SettingsPage";
+import { DiagnosticsPage } from "@/components/workspace/DiagnosticsPage";
 import { About } from "./routes/About.js";
+import { ComponentGallery } from "./routes/ComponentGallery.js";
+import { CommandPalette } from "@/components/CommandPalette";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AppShell } from "@/components/layout/AppShell";
+import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 import type { SyncPersistenceAdapter } from "./services/group-sync-service.js";
 import { acquirePhase3Runtime, releasePhase3Runtime } from "./services/phase3-runtime.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
-
-const NAV_ITEMS: { page: Page; label: string }[] = [
-  { page: "dashboard", label: "Dashboard" },
-  { page: "groups", label: "Groups" },
-  { page: "quality-presets", label: "Quality Presets" },
-  { page: "settings", label: "Settings" },
-  { page: "diagnostics", label: "Diagnostics" },
-  { page: "about", label: "About" },
-];
 
 /**
  * Initialize the Phase3 runtime on app startup:
@@ -79,6 +79,11 @@ export async function initializeAppRuntime(api: ScreenLinkAPI): Promise<void> {
   }
   store.setGroups(groupsById, groupOrder);
 
+  // Auto-select first group if none selected
+  if (!store.selectedGroupId && groupOrder.length > 0) {
+    store.setSelectedGroupId(groupOrder[0]);
+  }
+
   // Step 5: Start runtime connections for all groups
   for (const r of records) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
@@ -105,10 +110,35 @@ export async function initializeAppRuntime(api: ScreenLinkAPI): Promise<void> {
 }
 
 export function App() {
+  // Fix 2: If ?gallery=1 is in the URL, render ComponentGallery ONLY (no AppShell)
+  const isGalleryMode = typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("gallery") === "1";
+  if (isGalleryMode) {
+    return <ComponentGallery />;
+  }
+
   const currentPage = useStore((state) => state.currentPage);
-  const navigate = useStore((state) => state.navigate);
+  const isSharing = useStore((state) => state.isSharing);
+
+  // Command palette state (Ctrl+K)
+  const [commandOpen, setCommandOpen] = useState(false);
+
+  // Activate keyboard shortcuts
+  useKeyboardShortcuts();
+
+  // Listen for custom Ctrl+K toggle event from the hook
+  useEffect(() => {
+    const handler = () => setCommandOpen((prev) => !prev);
+    window.addEventListener("screenlink:toggle-command-palette", handler);
+    return () => window.removeEventListener("screenlink:toggle-command-palette", handler);
+  }, []);
 
   useEffect(() => {
+    // Expose store for audit harness (browser-only, dev)
+    if ((window as unknown as { __SCREENLINK_AUDIT_MODE__?: boolean }).__SCREENLINK_AUDIT_MODE__) {
+      (window as unknown as { __SCREENLINK_STORE__?: typeof useStore }).__SCREENLINK_STORE__ = useStore;
+    }
+
     const api = (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink;
     if (!api) {
       console.warn("[App] screenlink API not available – running outside Electron?");
@@ -126,43 +156,56 @@ export function App() {
   const renderPage = () => {
     switch (currentPage) {
       case "dashboard":
-        return <Dashboard />;
+        // When sharing, render HostDashboard instead of GroupOverview (Section 8.4)
+        if (isSharing) {
+          return <HostDashboard />;
+        }
+        return <GroupOverview />;
       case "source-picker":
         return <SourcePicker />;
       case "groups":
-        return <Groups />;
+        return <GroupsWorkspace />;
       case "quality-presets":
-        return <QualityPresets />;
+        return <QualityPresetsPage />;
       case "settings":
-        return <Settings />;
+        return <SettingsPage />;
       case "diagnostics":
-        return <Diagnostics />;
+        return <DiagnosticsPage />;
       case "about":
         return <About />;
       default:
-        return <Dashboard />;
+        return <GroupOverview />;
     }
   };
 
   return (
-    <div className="app-container">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <h2>ScreenLink</h2>
-        </div>
-        <nav>
-          {NAV_ITEMS.map(({ page, label }) => (
-            <a
-              key={page}
-              className={currentPage === page ? "active" : ""}
-              onClick={() => navigate(page)}
-            >
-              {label}
-            </a>
-          ))}
-        </nav>
-      </aside>
-      <main className="main-content">{renderPage()}</main>
-    </div>
+    <TooltipProvider>
+      <Toaster />
+      <AppShell>
+        <main className="h-full overflow-auto">{renderPage()}</main>
+      </AppShell>
+      {/* ShareSetup dialog — rendered at root level so it can be
+          triggered from GroupOverview, UserDock, and SourcePicker */}
+      <ShareSetup />
+      {/* Command palette (Ctrl+K, Section 14) */}
+      <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
+      {/* Accessibility live regions (Section 14) */}
+      <div
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        role="status"
+      >
+        {isSharing ? "Sharing active" : "Not sharing"}
+      </div>
+      <div
+        aria-live="assertive"
+        aria-atomic="true"
+        className="sr-only"
+        role="alert"
+      >
+        {/* Connection state changes rendered dynamically */}
+      </div>
+    </TooltipProvider>
   );
 }
