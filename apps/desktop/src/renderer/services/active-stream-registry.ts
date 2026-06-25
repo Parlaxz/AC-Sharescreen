@@ -13,6 +13,8 @@ export interface StreamAnnouncement {
   /** Per-viewer join metadata (not the actual media secret) */
   mediaJoinMetadata: string;
   replacesSessionId: string | null;
+  /** Stage 13: Whether audio has failed (video preserved) */
+  isAudioDegraded?: boolean;
 }
 
 interface InternalStream {
@@ -28,9 +30,9 @@ export interface StreamUpdate {
 
 export class ActiveStreamRegistry {
   private streams = new Map<string, InternalStream>();
-  /** Tracks stopped streams by logicalStreamId → stopTimeMs to prevent resurrection. */
+  /** Tracks stopped streams by composite key (groupId:hostDeviceId:logicalStreamId) → stopTimeMs to prevent resurrection. */
   private stopTombstones = new Map<string, number>();
-  /** Per-stream highest observed heartbeatSequence for stale rejection. */
+  /** Per-stream highest observed heartbeatSequence for stale rejection, keyed by composite key. */
   private heartbeatSequences = new Map<string, number>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(update: StreamUpdate) => void>();
@@ -63,7 +65,10 @@ export class ActiveStreamRegistry {
   }
 
   handleStarted(data: StreamAnnouncement): void {
-    const tombstoneStopTime = this.stopTombstones.get(data.logicalStreamId);
+    const k = this.key(data.groupId, data.hostDeviceId, data.logicalStreamId);
+
+    // Composite-key tombstone check — reject if recently stopped
+    const tombstoneStopTime = this.stopTombstones.get(k);
     if (tombstoneStopTime !== undefined) {
       const age = Date.now() - tombstoneStopTime;
       if (age < this.tombstoneMaxAgeMs) {
@@ -71,37 +76,33 @@ export class ActiveStreamRegistry {
         return;
       }
       // Tombstone older than 5 minutes — remove it and accept
-      this.stopTombstones.delete(data.logicalStreamId);
+      this.stopTombstones.delete(k);
     }
 
     if (data.replacesSessionId) {
-      // This is a restart — remove old stream and mark as replaced
-      for (const [k, s] of this.streams) {
-        if (!s.stopped &&
-            s.announcement.groupId === data.groupId &&
-            s.announcement.hostDeviceId === data.hostDeviceId &&
-            s.announcement.logicalStreamId === data.logicalStreamId &&
-            !s.announcement.replacesSessionId) {
-          // Same logical stream, update announcement
-          s.announcement = { ...data };
-          s.lastHeartbeatAt = Date.now();
-          this.emit({ type: "replaced", stream: data });
-          return;
-        }
+      // This is a restart — use composite key lookup.
+      // Accept replacement regardless of whether the existing stream
+      // was itself a replacement (legitimate replacement chains).
+      const existing = this.streams.get(k);
+      if (existing && !existing.stopped) {
+        existing.announcement = { ...data };
+        existing.lastHeartbeatAt = Date.now();
+        this.heartbeatSequences.set(k, data.heartbeatSequence);
+        this.emit({ type: "replaced", stream: data });
+        return;
       }
     }
 
-    const k = this.key(data.groupId, data.hostDeviceId, data.logicalStreamId);
     const existing = this.streams.get(k);
     if (existing && !existing.stopped) {
       // Validate heartbeat sequence — reject stale updates
-      const lastSeq = this.heartbeatSequences.get(data.logicalStreamId) ?? -1;
+      const lastSeq = this.heartbeatSequences.get(k) ?? -1;
       if (data.heartbeatSequence <= lastSeq) {
         return; // stale
       }
       existing.announcement = { ...data };
       existing.lastHeartbeatAt = Date.now();
-      this.heartbeatSequences.set(data.logicalStreamId, data.heartbeatSequence);
+      this.heartbeatSequences.set(k, data.heartbeatSequence);
       this.emit({ type: "updated", stream: data });
       return;
     }
@@ -111,7 +112,7 @@ export class ActiveStreamRegistry {
       lastHeartbeatAt: Date.now(),
       stopped: false,
     });
-    this.heartbeatSequences.set(data.logicalStreamId, data.heartbeatSequence);
+    this.heartbeatSequences.set(k, data.heartbeatSequence);
     this.emit({ type: "new", stream: data });
   }
 
@@ -123,29 +124,27 @@ export class ActiveStreamRegistry {
     heartbeatSequence: number;
     appliedSettingsRevision?: number;
   }): void {
+    const k = this.key(heartbeat.groupId, heartbeat.hostDeviceId, heartbeat.logicalStreamId);
+
     // Check tombstone — if stream is dead, ignore heartbeat (no resurrection)
-    if (this.stopTombstones.has(heartbeat.logicalStreamId)) {
+    if (this.stopTombstones.has(k)) {
       return;
     }
 
     // Validate sequence number — reject stale heartbeats
-    const lastSeq = this.heartbeatSequences.get(heartbeat.logicalStreamId) ?? -1;
+    const lastSeq = this.heartbeatSequences.get(k) ?? -1;
     if (heartbeat.heartbeatSequence <= lastSeq) {
       return;
     }
 
-    for (const [k, s] of this.streams) {
-      if (!s.stopped &&
-          s.announcement.groupId === heartbeat.groupId &&
-          s.announcement.hostDeviceId === heartbeat.hostDeviceId &&
-          s.announcement.logicalStreamId === heartbeat.logicalStreamId) {
-        s.lastHeartbeatAt = Date.now();
-        s.announcement.heartbeatSequence = heartbeat.heartbeatSequence;
-        this.heartbeatSequences.set(heartbeat.logicalStreamId, heartbeat.heartbeatSequence);
-        if (heartbeat.appliedSettingsRevision !== undefined) {
-          s.announcement.appliedSettingsRevision = heartbeat.appliedSettingsRevision;
-        }
-        return;
+    // Direct composite key lookup instead of iteration
+    const existing = this.streams.get(k);
+    if (existing && !existing.stopped) {
+      existing.lastHeartbeatAt = Date.now();
+      existing.announcement.heartbeatSequence = heartbeat.heartbeatSequence;
+      this.heartbeatSequences.set(k, heartbeat.heartbeatSequence);
+      if (heartbeat.appliedSettingsRevision !== undefined) {
+        existing.announcement.appliedSettingsRevision = heartbeat.appliedSettingsRevision;
       }
     }
   }
@@ -155,18 +154,20 @@ export class ActiveStreamRegistry {
     hostDeviceId: string;
     logicalStreamId: string;
   }): void {
-    for (const [k, s] of this.streams) {
-      if (!s.stopped &&
-          s.announcement.groupId === stop.groupId &&
-          s.announcement.hostDeviceId === stop.hostDeviceId &&
-          s.announcement.logicalStreamId === stop.logicalStreamId) {
-        s.stopped = true;
-        // Add to tombstone map to prevent resurrection
-        this.stopTombstones.set(stop.logicalStreamId, Date.now());
-        this.emit({ type: "stopped", stream: { ...s.announcement } });
-        return;
-      }
+    const k = this.key(stop.groupId, stop.hostDeviceId, stop.logicalStreamId);
+
+    // Direct composite key lookup
+    const existing = this.streams.get(k);
+    if (existing && !existing.stopped) {
+      // Delete active entry
+      this.streams.delete(k);
+      // Remove heartbeat state
+      this.heartbeatSequences.delete(k);
+      // Create bounded tombstone to prevent resurrection
+      this.stopTombstones.set(k, Date.now());
+      this.emit({ type: "stopped", stream: { ...existing.announcement } });
     }
+    // If no active entry, silently ignore (idempotent)
   }
 
   getStreamsByGroup(groupId: string): StreamAnnouncement[] {
@@ -188,13 +189,10 @@ export class ActiveStreamRegistry {
   }
 
   getStream(key: { groupId: string; hostDeviceId: string; logicalStreamId: string }): StreamAnnouncement | null {
-    for (const s of this.streams.values()) {
-      if (!s.stopped &&
-          s.announcement.groupId === key.groupId &&
-          s.announcement.hostDeviceId === key.hostDeviceId &&
-          s.announcement.logicalStreamId === key.logicalStreamId) {
-        return { ...s.announcement };
-      }
+    const k = this.key(key.groupId, key.hostDeviceId, key.logicalStreamId);
+    const existing = this.streams.get(k);
+    if (existing && !existing.stopped) {
+      return { ...existing.announcement };
     }
     return null;
   }
@@ -212,20 +210,92 @@ export class ActiveStreamRegistry {
     return result;
   }
 
+  // ── Local registration ───────────────────────────────────────────────────────
+
+  /**
+   * Register a local stream so it exists in the registry before any broadcasts.
+   * Used by StreamSessionManager before announcing to peers.
+   *
+   * - Idempotent: calling with the same composite key updates the existing entry.
+   * - Does NOT check tombstones (the local session manager controls lifecycle).
+   */
+  registerLocalStream(announcement: StreamAnnouncement): void {
+    const k = this.key(announcement.groupId, announcement.hostDeviceId, announcement.logicalStreamId);
+
+    const existing = this.streams.get(k);
+    if (existing) {
+      // Update existing entry
+      existing.announcement = { ...announcement };
+      existing.lastHeartbeatAt = Date.now();
+      this.heartbeatSequences.set(k, announcement.heartbeatSequence);
+      this.emit({ type: "updated", stream: { ...announcement } });
+      return;
+    }
+
+    this.streams.set(k, {
+      announcement,
+      lastHeartbeatAt: Date.now(),
+      stopped: false,
+    });
+    this.heartbeatSequences.set(k, announcement.heartbeatSequence);
+    this.emit({ type: "new", stream: { ...announcement } });
+  }
+
   // Snapshot recovery after reconnect
   handleSnapshot(streams: StreamAnnouncement[]): void {
     const now = Date.now();
     for (const stream of streams) {
       const k = this.key(stream.groupId, stream.hostDeviceId, stream.logicalStreamId);
+
+      // 1. Reject tombstoned streams — do not resurrect explicit stops
+      if (this.stopTombstones.has(k)) {
+        continue;
+      }
+
+      // 2. Reject records whose streamRevision is too old relative to tombstone
+      //    cutoff — the data is stale beyond any possible recovery window.
+      //    Use tombstoneMaxAgeMs as the upper bound for how far back we trust
+      //    snapshot data.  This prevents zombie records from hours ago while
+      //    allowing valid long-running streams (up to 5 min since startedAt).
+      if (stream.startedAt < now - this.tombstoneMaxAgeMs) {
+        continue;
+      }
+
       const existing = this.streams.get(k);
-      if (!existing || existing.stopped || existing.lastHeartbeatAt < now - this.expiryMs) {
+      if (existing && !existing.stopped) {
+        // 3. Reject lower streamRevision
+        if (stream.streamRevision < existing.announcement.streamRevision) {
+          continue;
+        }
+        // 4. Reject lower heartbeatSequence (same revision but stale heartbeat)
+        if (stream.heartbeatSequence <= existing.announcement.heartbeatSequence) {
+          continue;
+        }
+        // 5. Avoid duplicate events for unchanged state
+        if (
+          stream.streamRevision === existing.announcement.streamRevision &&
+          stream.heartbeatSequence === existing.announcement.heartbeatSequence &&
+          stream.mediaSessionId === existing.announcement.mediaSessionId
+        ) {
+          continue;
+        }
+
+        // Update existing entry and emit updated
+        existing.announcement = { ...stream };
+        existing.lastHeartbeatAt = now;
+        this.heartbeatSequences.set(k, stream.heartbeatSequence);
+        this.emit({ type: "updated", stream: { ...stream } });
+      } else if (!existing) {
+        // New stream
         this.streams.set(k, {
           announcement: stream,
           lastHeartbeatAt: now,
           stopped: false,
         });
+        this.heartbeatSequences.set(k, stream.heartbeatSequence);
         this.emit({ type: "new", stream: { ...stream } });
       }
+      // If existing.stopped is true (pre-Stage-3 entry): do not resurrect
     }
   }
 
@@ -244,8 +314,12 @@ export class ActiveStreamRegistry {
       const expireBefore = now - this.expiryMs;
       for (const [k, s] of this.streams) {
         if (!s.stopped && s.lastHeartbeatAt < expireBefore) {
-          s.stopped = true;
-          this.stopTombstones.set(s.announcement.logicalStreamId, now);
+          // Delete active entry
+          this.streams.delete(k);
+          // Remove heartbeat state
+          this.heartbeatSequences.delete(k);
+          // Create tombstone with composite key
+          this.stopTombstones.set(k, now);
           this.emit({ type: "stopped", stream: { ...s.announcement } });
         }
       }
