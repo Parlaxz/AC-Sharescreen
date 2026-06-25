@@ -38,8 +38,8 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
-import { useStore, type GroupNavPage } from "@/stores/main-store";
+import { cn, getInitials } from "@/lib/utils";
+import { useStore, type GroupNavPage, type Page } from "@/stores/main-store";
 import { UserDock } from "./UserDock.js";
 import { AnimatedCountBadge } from "@/components/primitives/AnimatedCountBadge";
 import { InviteDialog } from "@/components/workspace/InviteDialog";
@@ -81,14 +81,6 @@ export function GroupDashboard() {
   // ── Dialog/sheet state ────────────────────────────────────────────
   const [inviteOpen, setInviteOpen] = useState(false);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
-
-  const initials = (name: string) =>
-    name
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase();
 
   // ── Menu action handlers (Section 6.1 / 3.7C) ────────────────────
 
@@ -137,12 +129,11 @@ export function GroupDashboard() {
     id: GroupNavPage;
     label: string;
     icon: React.ReactNode;
+    page: Page;
   }[] = [
-    { id: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
-    { id: "active-shares", label: "Active shares", icon: <Radio className="h-4 w-4" /> },
-    { id: "members", label: "Members", icon: <Users className="h-4 w-4" /> },
-    { id: "presets", label: "Presets", icon: <SlidersHorizontal className="h-4 w-4" /> },
-    { id: "group-settings", label: "Group settings", icon: <Settings className="h-4 w-4" /> },
+    { id: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" />, page: "overview" },
+    { id: "group-presets", label: "Presets", icon: <SlidersHorizontal className="h-4 w-4" />, page: "group-presets" },
+    { id: "group-settings", label: "Group settings", icon: <Settings className="h-4 w-4" />, page: "group-settings" },
   ];
 
   return (
@@ -153,7 +144,7 @@ export function GroupDashboard() {
           <>
             <Avatar className="h-8 w-8 rounded-lg flex-shrink-0">
               <AvatarFallback className="rounded-lg bg-surface-3 text-xs font-semibold">
-                {initials(group.name)}
+                {getInitials(group.name)}
               </AvatarFallback>
             </Avatar>
             <div className="flex-1 min-w-0">
@@ -199,7 +190,10 @@ export function GroupDashboard() {
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
-                  onClick={() => setGroupNavPage("group-settings")}
+                  onClick={() => {
+                    setGroupNavPage("group-settings");
+                    navigate("group-settings");
+                  }}
                 >
                   <Settings className="h-4 w-4" />
                   Group settings
@@ -234,10 +228,10 @@ export function GroupDashboard() {
             Select or create a group
           </p>
           <div className="flex flex-col gap-2 w-full max-w-[160px]">
-            <Button size="sm" onClick={() => useStore.getState().navigate("groups")}>
+            <Button size="sm" onClick={() => navigate("home")}>
               Create group
             </Button>
-            <Button variant="outline" size="sm" onClick={() => useStore.getState().navigate("groups")}>
+            <Button variant="outline" size="sm" onClick={() => navigate("home")}>
               Join group
             </Button>
           </div>
@@ -260,6 +254,7 @@ export function GroupDashboard() {
                   )}
                   onClick={() => {
                     setGroupNavPage(item.id);
+                    navigate(item.page);
                   }}
                 >
                   {/* Animated selection indicator */}
@@ -308,7 +303,7 @@ export function GroupDashboard() {
                       >
                         <Avatar className="h-6 w-6 rounded-md flex-shrink-0">
                           <AvatarFallback className="rounded-md text-[10px] bg-surface-3">
-                            {initials(share.hostDisplayName)}
+                            {getInitials(share.hostDisplayName)}
                           </AvatarFallback>
                         </Avatar>
                         <div className="flex-1 min-w-0">

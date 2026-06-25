@@ -40,6 +40,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { useStore } from "@/stores/main-store";
+import { getInitials } from "@/lib/utils";
 import { MembersList } from "./MembersList.js";
 
 /**
@@ -69,14 +70,6 @@ export function GroupsWorkspace() {
   const groups = groupOrder
     .map((id) => groupsById[id])
     .filter((g): g is NonNullable<typeof g> => g !== undefined);
-
-  const initials = (name: string) =>
-    name
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase();
 
   const handleCreate = useCallback(async () => {
     setError(null);
@@ -272,7 +265,7 @@ export function GroupsWorkspace() {
                       <div className="flex items-start gap-3">
                         <Avatar className="h-10 w-10 rounded-lg flex-shrink-0">
                           <AvatarFallback className="rounded-lg bg-surface-3 text-xs font-semibold">
-                            {initials(g.name)}
+                            {getInitials(g.name)}
                           </AvatarFallback>
                         </Avatar>
                         <div className="flex-1 min-w-0">

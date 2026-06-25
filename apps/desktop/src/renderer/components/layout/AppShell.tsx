@@ -59,11 +59,14 @@ interface AppShellProps {
 
 export function AppShell({ children, className }: AppShellProps) {
   const isViewing = useStore((s) => s.isViewing);
+  const isSharing = useStore((s) => s.isSharing);
   const focusMode = useStore((s) => s.focusMode);
+  const isContextPanelOpen = useStore((s) => s.showContextPanel);
 
   const showRail = !focusMode;
   const showDashboard = !isViewing && !focusMode;
-  const showContextPanel = !isViewing && !focusMode;
+  const isContextPanelEligible = !isViewing && !focusMode && isSharing;
+  const showContextPanel = isContextPanelEligible && isContextPanelOpen;
 
   return (
     <div
@@ -75,8 +78,8 @@ export function AppShell({ children, className }: AppShellProps) {
       {/* ─── Title Bar (Section 4.2) ──────────────────────── */}
       <TitleBar />
 
-      {/* ─── Main area ─────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* ─── Main area — full-height content row ─────────────── */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* ─── Group Rail (Section 5) ──────────────────────── */}
         <AnimatePresence>
           {showRail ? (
@@ -118,7 +121,7 @@ export function AppShell({ children, className }: AppShellProps) {
         {showDashboard && <Separator orientation="vertical" />}
 
         {/* ─── Primary Workspace ─────────────────────────── */}
-        <ResizablePanel className="flex-1 min-w-[560px] bg-canvas overflow-hidden">
+        <ResizablePanel className="flex-1 min-w-[560px] min-h-0 bg-canvas overflow-hidden">
           {isViewing ? (
             <ViewerWorkspace />
           ) : (

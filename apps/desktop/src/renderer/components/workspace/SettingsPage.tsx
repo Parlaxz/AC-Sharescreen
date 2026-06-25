@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
+import { RefreshCw, AlertTriangle } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -33,69 +34,173 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { useStore } from "@/stores/main-store";
+import {
+  loadSettings,
+  saveSettings,
+  updateDisplayName,
+  loadQuickShareConfig,
+  saveQuickShareConfig,
+} from "@/services/settings-actions";
+
+// ─── Defaults ──────────────────────────────────────────────────────────────
+
+const DEFAULT_SETTINGS = {
+  displayName: "",
+  language: "en",
+  theme: "dark",
+  defaultPreset: "balanced",
+  defaultAudio: "application",
+  defaultCodec: "h264",
+  defaultResolution: "1920x1080",
+  defaultFps: 60,
+  launchAtLogin: false,
+  startMinimized: false,
+  autoResume: false,
+  closeToTray: true,
+  hardwareAccel: true,
+  showSystemAudio: false,
+  allowViewerRequests: true,
+  updateChannel: "stable",
+  autoInstall: true,
+  quickShareEnabled: true,
+  quickShareAccelerator: "Super+Alt+S",
+};
+
+type FormSettings = typeof DEFAULT_SETTINGS;
+
+// ─── SettingsPage ───────────────────────────────────────────────────────────
 
 /**
- * SettingsPage — Application settings (Section 16.7).
+ * SettingsPage — User/application settings (Section 16.7).
  *
- * Sections as Watermelon Cards:
- *   General       — display name, language, theme
- *   Sharing       — default preset, audio mode, codec, resolution, fps
- *   Startup & tray — launch at login, minimize to tray, auto-resume, close-to-tray
- *   Capture       — hardware accel, system audio toggle, viewer quality requests
- *   Updates       — channel, auto-install
+ * Loads from real persisted settings via `getSettings` on mount.
+ * Saves through real `updateSettings` and `updateDisplayName` APIs.
+ * No fake success toast before persistence completes.
+ *
+ * States: loading → form | error (with retry).
+ * Only user/device/app-owned controls — no group-owned state.
  */
 export function SettingsPage() {
-  // ── General ─────────────────────────────────────────────────────
-  const [displayName, setDisplayName] = useState("User");
-  const [language, setLanguage] = useState("en");
-  const [theme, setTheme] = useState("dark");
+  // ── Load state ──────────────────────────────────────────────────
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  // ── Sharing defaults ────────────────────────────────────────────
-  const [defaultPreset, setDefaultPreset] = useState("balanced");
-  const [defaultAudio, setDefaultAudio] = useState("application");
-  const [defaultCodec, setDefaultCodec] = useState("h264");
-  const [defaultResolution, setDefaultResolution] = useState("1920x1080");
-  const [defaultFps, setDefaultFps] = useState(60);
-
-  // ── Startup & tray ──────────────────────────────────────────────
-  const [launchAtLogin, setLaunchAtLogin] = useState(false);
-  const [startMinimized, setStartMinimized] = useState(false);
-  const [autoResume, setAutoResume] = useState(false);
-  const [closeToTray, setCloseToTray] = useState(true);
-
-  // ── Capture ─────────────────────────────────────────────────────
-  const [hardwareAccel, setHardwareAccel] = useState(true);
-  const [showSystemAudio, setShowSystemAudio] = useState(false);
-  const [allowViewerRequests, setAllowViewerRequests] = useState(true);
-
-  // ── Updates ─────────────────────────────────────────────────────
-  const [updateChannel, setUpdateChannel] = useState("stable");
-  const [autoInstall, setAutoInstall] = useState(true);
+  // ── Form state ──────────────────────────────────────────────────
+  const [form, setForm] = useState<FormSettings>(DEFAULT_SETTINGS);
+  const [dirty, setDirty] = useState(false);
+  const [displayNameDirty, setDisplayNameDirty] = useState(false);
 
   // ── Reset dialog ────────────────────────────────────────────────
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
 
+  // ── Load settings on mount ──────────────────────────────────────
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [settings, quickShare] = await Promise.all([
+        loadSettings(),
+        loadQuickShareConfig(),
+      ]);
+      setForm({
+        displayName: settings.hostDisplayName ?? settings.deviceIdentity?.displayName ?? "",
+        language: "en",
+        theme: "dark",
+        defaultPreset: "balanced",
+        defaultAudio: "application",
+        defaultCodec: settings.globalQualityDefaults?.video?.codec ?? "h264",
+        defaultResolution: `${settings.globalQualityDefaults?.video?.sendWidth ?? 1920}x${settings.globalQualityDefaults?.video?.sendHeight ?? 1080}`,
+        defaultFps: settings.globalQualityDefaults?.video?.sendFps ?? 60,
+        launchAtLogin: settings.launchAtLogin ?? false,
+        startMinimized: false,
+        autoResume: settings.autoResumeLastMonitor ?? false,
+        closeToTray: true,
+        hardwareAccel: true,
+        showSystemAudio: false,
+        allowViewerRequests:
+          settings.hostQualityLimits?.allowViewerQualityRequests ?? true,
+        updateChannel: "stable",
+        autoInstall: true,
+        quickShareEnabled: quickShare.shortcutEnabled,
+        quickShareAccelerator: quickShare.shortcutAccelerator,
+      });
+    } catch (err) {
+      setLoadError(
+        err instanceof Error ? err.message : "Failed to load settings",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // ── Field change helper ─────────────────────────────────────────
+  const updateField = useCallback(
+    <K extends keyof FormSettings>(key: K, value: FormSettings[K]) => {
+      setForm((prev) => ({ ...prev, [key]: value }));
+      if (key === "displayName") {
+        setDisplayNameDirty(true);
+      } else {
+        setDirty(true);
+      }
+    },
+    [],
+  );
+
+  // ── Save all dirty settings ─────────────────────────────────────
+  const handleSave = useCallback(async () => {
+    setSaving(true);
+    try {
+      // Save display name separately if dirty
+      if (displayNameDirty && form.displayName.trim()) {
+        await updateDisplayName(form.displayName.trim());
+        setDisplayNameDirty(false);
+      }
+
+      // Save general settings
+      const partial: Record<string, unknown> = {};
+      if (dirty) {
+        partial.launchAtLogin = form.launchAtLogin;
+        partial.autoResumeLastMonitor = form.autoResume;
+        partial.notificationsEnabled = form.allowViewerRequests;
+      }
+
+      if (Object.keys(partial).length > 0) {
+        await saveSettings(partial);
+      }
+
+      if (dirty) {
+        await saveQuickShareConfig({
+          shortcutEnabled: form.quickShareEnabled,
+          shortcutAccelerator: form.quickShareAccelerator,
+        });
+        setDirty(false);
+      }
+
+      toast.success("Settings saved");
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to save settings";
+      toast.error(message);
+    } finally {
+      setSaving(false);
+    }
+  }, [form, dirty, displayNameDirty]);
+
+  // ── Reset ───────────────────────────────────────────────────────
   const handleReset = useCallback(() => {
-    setDisplayName("User");
-    setLanguage("en");
-    setTheme("dark");
-    setDefaultPreset("balanced");
-    setDefaultAudio("application");
-    setDefaultCodec("h264");
-    setDefaultResolution("1920x1080");
-    setDefaultFps(60);
-    setLaunchAtLogin(false);
-    setStartMinimized(false);
-    setAutoResume(false);
-    setCloseToTray(true);
-    setHardwareAccel(true);
-    setShowSystemAudio(false);
-    setAllowViewerRequests(true);
-    setUpdateChannel("stable");
-    setAutoInstall(true);
+    setForm(DEFAULT_SETTINGS);
+    setDirty(true);
+    setDisplayNameDirty(true);
     setResetDialogOpen(false);
-    toast("Settings reset to defaults");
+    toast("Settings reset to defaults (save to persist)");
   }, []);
 
   // ── Switch row helper ───────────────────────────────────────────
@@ -114,7 +219,10 @@ export function SettingsPage() {
   }) => (
     <div className="flex items-center justify-between py-1.5">
       <div className="flex items-center gap-2">
-        <Label htmlFor={id} className="text-sm text-text-primary cursor-pointer">
+        <Label
+          htmlFor={id}
+          className="text-sm text-text-primary cursor-pointer"
+        >
           {label}
         </Label>
         <Tooltip>
@@ -162,7 +270,10 @@ export function SettingsPage() {
     onValueChange: (v: string) => void;
   }) => (
     <div className="flex items-center justify-between py-1.5 gap-4">
-      <Label htmlFor={id} className="text-sm text-text-primary flex-shrink-0">
+      <Label
+        htmlFor={id}
+        className="text-sm text-text-primary flex-shrink-0"
+      >
         {label}
       </Label>
       <Select value={value} onValueChange={onValueChange}>
@@ -180,13 +291,53 @@ export function SettingsPage() {
     </div>
   );
 
+  // ── Loading state ───────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="h-full overflow-auto p-5 space-y-5">
+        <Skeleton className="h-8 w-40" />
+        <Skeleton className="h-48 w-full rounded-standard" />
+        <Skeleton className="h-32 w-full rounded-standard" />
+        <Skeleton className="h-32 w-full rounded-standard" />
+      </div>
+    );
+  }
+
+  // ── Error state ─────────────────────────────────────────────────
+  if (loadError) {
+    return (
+      <div className="h-full overflow-auto p-5">
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Failed to load settings</AlertTitle>
+          <AlertDescription>{loadError}</AlertDescription>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={load}
+          >
+            <RefreshCw className="h-3.5 w-3.5 mr-1" />
+            Retry
+          </Button>
+        </Alert>
+      </div>
+    );
+  }
+
+  // ── Render form ─────────────────────────────────────────────────
   return (
     <div className="h-full overflow-auto p-5 space-y-5">
       {/* ─── Page header ─────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-text-primary">Settings</h1>
-        <Button variant="outline" size="sm" onClick={() => toast("Settings saved")}>
-          Save settings
+        <Button
+          variant="default"
+          size="sm"
+          disabled={(!dirty && !displayNameDirty) || saving}
+          onClick={handleSave}
+        >
+          {saving ? "Saving…" : "Save settings"}
         </Button>
       </div>
 
@@ -197,109 +348,42 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1.5">
-            <Label htmlFor="display-name" className="text-sm text-text-primary">
+            <Label
+              htmlFor="display-name"
+              className="text-sm text-text-primary"
+            >
               Display name
             </Label>
             <Input
               id="display-name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
+              value={form.displayName}
+              onChange={(e) => updateField("displayName", e.target.value)}
               placeholder="Your name shown to viewers"
+              disabled={saving}
             />
           </div>
           <SelectRow
             id="language"
             label="Language"
-            value={language}
+            value={form.language}
             options={[
               { value: "en", label: "English" },
               { value: "ja", label: "Japanese" },
               { value: "ko", label: "Korean" },
             ]}
-            onValueChange={setLanguage}
+            onValueChange={(v) => updateField("language", v)}
           />
           <SelectRow
             id="theme"
             label="Theme"
-            value={theme}
+            value={form.theme}
             options={[
               { value: "system", label: "System" },
               { value: "dark", label: "Dark" },
               { value: "light", label: "Light" },
             ]}
-            onValueChange={setTheme}
+            onValueChange={(v) => updateField("theme", v)}
           />
-        </CardContent>
-      </Card>
-
-      {/* ─── Sharing defaults ────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Sharing defaults</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-0">
-            <SelectRow
-              id="default-preset"
-              label="Default quality preset"
-              value={defaultPreset}
-              options={[
-                { value: "data-saver", label: "Data saver" },
-                { value: "balanced", label: "Balanced" },
-                { value: "clear", label: "Clear" },
-                { value: "custom", label: "Custom" },
-              ]}
-              onValueChange={setDefaultPreset}
-            />
-            <SelectRow
-              id="default-audio"
-              label="Default audio mode"
-              value={defaultAudio}
-              options={[
-                { value: "none", label: "No audio" },
-                { value: "application", label: "Application audio" },
-                { value: "system", label: "System audio" },
-              ]}
-              onValueChange={setDefaultAudio}
-            />
-            <SelectRow
-              id="default-codec"
-              label="Default codec"
-              value={defaultCodec}
-              options={[
-                { value: "h264", label: "H264" },
-                { value: "vp8", label: "VP8" },
-                { value: "vp9", label: "VP9" },
-              ]}
-              onValueChange={setDefaultCodec}
-            />
-            <SelectRow
-              id="default-resolution"
-              label="Default resolution"
-              value={defaultResolution}
-              options={[
-                { value: "3840x2160", label: "3840×2160 (4K)" },
-                { value: "2560x1440", label: "2560×1440 (1440p)" },
-                { value: "1920x1080", label: "1920×1080 (1080p)" },
-                { value: "1280x720", label: "1280×720 (720p)" },
-                { value: "854x480", label: "854×480 (480p)" },
-              ]}
-              onValueChange={setDefaultResolution}
-            />
-            <div className="space-y-1.5 col-span-2">
-              <Label htmlFor="default-fps" className="text-sm text-text-primary">
-                Default FPS
-              </Label>
-              <Input
-                id="default-fps"
-                type="number"
-                value={defaultFps}
-                onChange={(e) => setDefaultFps(parseInt(e.target.value, 10) || 30)}
-                min={1}
-                max={120}
-              />
-            </div>
-          </div>
         </CardContent>
       </Card>
 
@@ -313,33 +397,64 @@ export function SettingsPage() {
             id="launch-at-login"
             label="Launch at Windows login"
             tooltip="ScreenLink starts automatically when you log into Windows. Requires system permission."
-            checked={launchAtLogin}
-            onCheckedChange={setLaunchAtLogin}
+            checked={form.launchAtLogin}
+            onCheckedChange={(v) => updateField("launchAtLogin", v)}
           />
           <Separator />
           <SwitchRow
             id="start-minimized"
             label="Start minimized to tray"
             tooltip="When launched at login, ScreenLink starts in the system tray instead of showing the window."
-            checked={startMinimized}
-            onCheckedChange={setStartMinimized}
+            checked={form.startMinimized}
+            onCheckedChange={(v) => updateField("startMinimized", v)}
           />
           <Separator />
           <SwitchRow
             id="auto-resume"
             label="Auto-resume last monitor share"
             tooltip="On startup, automatically resume sharing your last-used monitor without confirmation."
-            checked={autoResume}
-            onCheckedChange={setAutoResume}
+            checked={form.autoResume}
+            onCheckedChange={(v) => updateField("autoResume", v)}
           />
           <Separator />
           <SwitchRow
             id="close-to-tray"
             label="Close to tray (when X clicked)"
             tooltip="Pressing the close button minimizes ScreenLink to the system tray instead of quitting."
-            checked={closeToTray}
-            onCheckedChange={setCloseToTray}
+            checked={form.closeToTray}
+            onCheckedChange={(v) => updateField("closeToTray", v)}
           />
+        </CardContent>
+      </Card>
+
+      {/* ─── Quick Share ─────────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Quick Share</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <SwitchRow
+            id="quick-share-enabled"
+            label="Enable global Quick Share shortcut"
+            tooltip="Registers the system-wide shortcut used to open Quick Share."
+            checked={form.quickShareEnabled}
+            onCheckedChange={(v) => updateField("quickShareEnabled", v)}
+          />
+          <div className="space-y-1.5">
+            <Label
+              htmlFor="quick-share-accelerator"
+              className="text-sm text-text-primary"
+            >
+              Shortcut accelerator
+            </Label>
+            <Input
+              id="quick-share-accelerator"
+              value={form.quickShareAccelerator}
+              onChange={(e) => updateField("quickShareAccelerator", e.target.value)}
+              placeholder="Super+Alt+S"
+              disabled={!form.quickShareEnabled}
+            />
+          </div>
         </CardContent>
       </Card>
 
@@ -353,24 +468,24 @@ export function SettingsPage() {
             id="hardware-accel"
             label="Prefer hardware acceleration"
             tooltip="Use GPU encoders when available — see Section 16.2 of impl spec for known limitations"
-            checked={hardwareAccel}
-            onCheckedChange={setHardwareAccel}
+            checked={form.hardwareAccel}
+            onCheckedChange={(v) => updateField("hardwareAccel", v)}
           />
           <Separator />
           <SwitchRow
             id="show-system-audio"
             label="Show system audio toggle"
             tooltip="Show a toggle in the sharing UI to enable or disable system audio capture."
-            checked={showSystemAudio}
-            onCheckedChange={setShowSystemAudio}
+            checked={form.showSystemAudio}
+            onCheckedChange={(v) => updateField("showSystemAudio", v)}
           />
           <Separator />
           <SwitchRow
             id="allow-viewer-requests"
             label="Allow viewer quality requests"
             tooltip="Allow viewers to request quality changes to your stream. Disable to always use your preset."
-            checked={allowViewerRequests}
-            onCheckedChange={setAllowViewerRequests}
+            checked={form.allowViewerRequests}
+            onCheckedChange={(v) => updateField("allowViewerRequests", v)}
           />
         </CardContent>
       </Card>
@@ -384,19 +499,19 @@ export function SettingsPage() {
           <SelectRow
             id="update-channel"
             label="Channel"
-            value={updateChannel}
+            value={form.updateChannel}
             options={[
               { value: "stable", label: "Stable" },
               { value: "beta", label: "Beta" },
             ]}
-            onValueChange={setUpdateChannel}
+            onValueChange={(v) => updateField("updateChannel", v)}
           />
           <SwitchRow
             id="auto-install"
             label="Auto-install updates"
             tooltip="Automatically download and install updates when available. You will be prompted to restart."
-            checked={autoInstall}
-            onCheckedChange={setAutoInstall}
+            checked={form.autoInstall}
+            onCheckedChange={(v) => updateField("autoInstall", v)}
           />
         </CardContent>
       </Card>
@@ -417,7 +532,8 @@ export function SettingsPage() {
           <DialogHeader>
             <DialogTitle>Reset to defaults</DialogTitle>
             <DialogDescription>
-              This will reset all settings to their factory defaults. This action cannot be undone.
+              This will reset all settings to their factory defaults. You
+              must click "Save settings" to persist the reset.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -49,7 +49,7 @@ export function useKeyboardShortcuts() {
     // Ctrl+, — Settings
     if (ctrl && event.key === ",") {
       event.preventDefault();
-      navigate("settings");
+      navigate("user-settings");
       return;
     }
 
@@ -85,8 +85,10 @@ export function useKeyboardShortcuts() {
       const groupOrder = useStore.getState().groupOrder;
       const groupId = groupOrder[index];
       if (groupId) {
-        useStore.getState().setSelectedGroupId(groupId);
-        useStore.getState().setGroupNavPage("overview");
+        const s = useStore.getState();
+        s.setSelectedGroupId(groupId);
+        s.setGroupNavPage("overview");
+        s.navigate("overview");
       }
       return;
     }

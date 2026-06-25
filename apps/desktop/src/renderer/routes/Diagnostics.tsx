@@ -109,7 +109,7 @@ export function Diagnostics() {
     <div className="diagnostics">
       <div className="page-header">
         <h1>Diagnostics</h1>
-        <button className="ghost" onClick={() => navigate("dashboard" as Page)}>
+        <button className="ghost" onClick={() => navigate("home" as Page)}>
           &larr; Back
         </button>
       </div>

@@ -28,6 +28,7 @@ export interface TrayMenuActions {
   onShareWindow: () => void;
   onStopSharing: () => void;
   onStopWatching: () => void;
+  onQuickShare: () => void;
   onToggleLaunchAtLogin: (checked: boolean) => void;
   onToggleAutoResume: (checked: boolean) => void;
   onShowDiagnostics: () => void;
@@ -118,9 +119,7 @@ export class TrayManager {
     if (this.isSharing) {
       template.push({ label: "Stop Streaming", click: () => this.actions.onStopSharing() });
     } else {
-      // Phase 3: idle should open the app, not directly start a stream,
-      // because the user must choose a source and a group from Dashboard.
-      template.push({ label: "Open ScreenLink to share", enabled: false });
+      template.push({ label: "Quick Share…", click: () => this.actions.onQuickShare() });
     }
 
     if (this.isViewing) {

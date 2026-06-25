@@ -1,4 +1,4 @@
-import { BrowserWindow, app } from "electron";
+import { BrowserWindow, Menu, app } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -25,6 +25,8 @@ export class WindowManager {
       minWidth: 720,
       minHeight: 500,
       show: false,
+      frame: false,
+      autoHideMenuBar: true,
       icon: path.join(__dirname, "../../assets/icon.png"),
       webPreferences: {
         preload: this.preloadPath,
@@ -35,6 +37,9 @@ export class WindowManager {
         allowRunningInsecureContent: false,
       },
     });
+
+    // Hide native menu (frameless with custom title bar)
+    Menu.setApplicationMenu(null);
 
     // Close-to-tray: hide instead of quit
     this.window.on("close", (event) => {
@@ -52,8 +57,13 @@ export class WindowManager {
       this.window.loadURL("screenlink://app/index.html");
     }
 
-    // Open DevTools in development
-    if (process.env.NODE_ENV === "development" || devServerUrl) {
+    // Open DevTools only when explicitly requested — not merely because
+    // a dev server URL is present. Gate on SCREENLINK_OPEN_DEVTOOLS env
+    // var or --devtools command-line flag.
+    const shouldOpenDevTools =
+      process.env.SCREENLINK_OPEN_DEVTOOLS === "1" ||
+      process.argv.includes("--devtools");
+    if (shouldOpenDevTools) {
       this.window.webContents.openDevTools({ mode: "bottom" });
     }
 
@@ -62,6 +72,14 @@ export class WindowManager {
 
   show(): void {
     this.window?.show();
+  }
+
+  /** Show, restore if minimized, and focus the window. */
+  showRestoreOrFocus(): void {
+    if (!this.window) return;
+    if (this.window.isMinimized()) this.window.restore();
+    this.window.show();
+    this.window.focus();
   }
 
   hide(): void {

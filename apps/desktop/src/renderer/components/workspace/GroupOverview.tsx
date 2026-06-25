@@ -57,15 +57,6 @@ function formatLiveDuration(startedAt: number): string {
 
 // ─── Initials helper ────────────────────────────────────────────────────
 
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase();
-}
-
 // ─── Props ────────────────────────────────────────────────────────────────
 
 interface GroupOverviewProps {
@@ -107,7 +98,7 @@ function ActiveShareCard({ share, onWatch }: ActiveShareCardProps) {
           <div className="flex items-start gap-3">
             <Avatar className="h-10 w-10 rounded-lg flex-shrink-0">
               <AvatarFallback className="rounded-lg bg-surface-3 text-xs font-semibold">
-                {initials(share.hostDisplayName)}
+                {getInitials(share.hostDisplayName)}
               </AvatarFallback>
             </Avatar>
 

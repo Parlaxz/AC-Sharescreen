@@ -413,14 +413,14 @@ export function Dashboard() {
               </p>
             )}
             <div className="actions" style={{ marginTop: "0.5rem" }}>
-              <button onClick={() => navigate("source-picker" as Page)}>Change Source</button>
+              <button onClick={() => navigate("share-setup")}>Change Source</button>
             </div>
           </>
         ) : (
           <>
             <p className="dim">No source selected.</p>
             <div className="actions" style={{ marginTop: "0.5rem" }}>
-              <button onClick={() => navigate("source-picker" as Page)}>Select Source</button>
+              <button onClick={() => navigate("share-setup")}>Select Source</button>
             </div>
           </>
         )}
@@ -445,189 +445,12 @@ export function Dashboard() {
         ) : (
           <p className="dim">
             No groups available.{" "}
-            <a className="link" onClick={() => navigate("groups" as Page)}>
+            <a className="link" onClick={() => navigate("home")}>
               Create or join a group
             </a>{" "}
             to start streaming.
           </p>
         )}
-      </div>
-
-      {/* 3. Start/Stop Stream */}
-      <div className="card">
-        <h3>Stream Control</h3>
-        <div className="status-bar">
-          <div className={`status-indicator ${lifecycleClass[localShareState] || "idle"}`} />
-          <span>{lifecycleLabel[localShareState] || localShareState}</span>
-        </div>
-        <div className="actions" style={{ marginTop: "0.75rem" }}>
-          {!isStreamActive && localShareState !== "stopping" ? (
-            <button onClick={handleStartStream} disabled={!canStartStream}>
-              {localShareState === "starting" ? "Starting..." : "Start Stream"}
-            </button>
-          ) : (
-            <button className="danger" onClick={handleStopStream} disabled={localShareState === "stopping"}>
-              {localShareState === "stopping" ? "Stopping..." : "Stop Stream"}
-            </button>
-          )}
-        </div>
-        {!canStartStream && localShareState === "idle" && (
-          <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-            {!sourceId
-              ? "Select a source first."
-              : !selectedGroupId
-                ? "Select a target group."
-                : !audioOptionsReady
-                  ? "Audio options loading..."
-                  : ""}
-          </p>
-        )}
-      </div>
-
-      {/* 4. Local Stream Card */}
-      {isStreamActive && (
-        <div className="card">
-          <h3>Local Stream</h3>
-          <div className="detail-row">
-            <span className="label">Group:</span> {selectedGroupName ?? selectedGroupId ?? "N/A"}
-          </div>
-          <div className="detail-row">
-            <span className="label">Source:</span> {sourceName || "Unknown"}
-          </div>
-          <div className="detail-row">
-            <span className="label">State:</span>{" "}
-            <span className={`status-indicator ${isDegraded ? "degraded" : "sharing"}`} />{" "}
-            {isDegraded ? "Degraded" : "Active"}
-          </div>
-          {localStreamSession && (
-            <div className="detail-row">
-              <span className="label">Session ID:</span>{" "}
-              <code style={{ fontSize: "0.7rem" }}>{localStreamSession.sessionId.slice(0, 8)}...</code>
-            </div>
-          )}
-          {viewerCount > 0 && (
-            <div className="detail-row">
-              <span className="label">Viewers:</span> {viewerCount}
-            </div>
-          )}
-          <div className="actions" style={{ marginTop: "0.75rem" }}>
-            <button className="danger" onClick={handleStopStream}>Stop Stream</button>
-          </div>
-        </div>
-      )}
-
-      {/* 5. Available Group Streams (Stage 5: Watch button) */}
-      {availableGroupStreams.length > 0 && (
-        <div className="card">
-          <h3>Available Group Streams</h3>
-          {availableGroupStreams.map(([groupId, streams]) => {
-            const groupName = groupsById[groupId]?.name ?? groupId;
-            return (
-              <div key={groupId} style={{ marginBottom: "0.75rem" }}>
-                <h4 style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>{groupName}</h4>
-                {streams.map((s) => (
-                  <div
-                    key={s.logicalStreamId}
-                    className="card"
-                    style={{ padding: "0.5rem", marginBottom: "0.25rem" }}
-                  >
-                    <div className="detail-row">
-                      <span className="label">Host:</span> {s.hostDisplayName || s.hostDeviceId}
-                    </div>
-                    <div className="detail-row">
-                      <span className="label">Source:</span> {s.sourceName || s.sourceKind}
-                    </div>
-                    <div className="detail-row">
-                      <span className="label">Kind:</span> {s.sourceKind}
-                    </div>
-                    {watchedStreamsBySessionId[s.mediaSessionId] ? (
-                      <div className="actions" style={{ marginTop: "0.25rem" }}>
-                        <button className="danger" onClick={() => handleStopWatching(s.mediaSessionId)}>
-                          Stop Watching
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="actions" style={{ marginTop: "0.25rem" }}>
-                        <button
-                          onClick={() => handleWatchStream(groupId, s.hostDeviceId, s.logicalStreamId, s.mediaSessionId, s.hostDisplayName || s.hostDeviceId)}
-                          disabled={isViewing}
-                        >
-                          {isViewing ? "Joining..." : "Watch"}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* 6. Watched Streams */}
-      {watchedEntries.length > 0 && (
-        <div className="card">
-          <h3>Watched Streams</h3>
-          {watchedEntries.map(([sessionId, w]) => (
-            <div key={sessionId} className="card" style={{ padding: "0.5rem", marginBottom: "0.25rem" }}>
-              <div className="detail-row">
-                <span className="label">Host:</span> {w.hostName || w.hostDeviceId}
-              </div>
-              <div className="detail-row">
-                <span className="label">Started:</span> {new Date(w.startedAt).toLocaleTimeString()}
-              </div>
-              {/* Media rendering: video element for the watched stream */}
-              <div style={{ marginTop: "0.5rem", marginBottom: "0.5rem" }}>
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  style={{
-                    width: "100%",
-                    maxHeight: "300px",
-                    borderRadius: "8px",
-                    backgroundColor: "#000",
-                  }}
-                />
-              </div>
-              <div className="actions" style={{ marginTop: "0.25rem" }}>
-                <button className="danger" onClick={() => handleStopWatching(sessionId)}>
-                  Stop Watching
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 7. Connected Viewers */}
-      {viewerCount > 0 && (
-        <div className="card">
-          <h3>Connected Viewers ({viewerCount})</h3>
-          {viewers.map((v) => (
-            <div key={v.peerUuid} className="detail-row" style={{ marginBottom: "0.25rem" }}>
-              <span>{v.displayName || v.viewerDeviceId}</span>
-              <span className="dim" style={{ marginLeft: "0.5rem", fontSize: "0.75rem" }}>
-                {new Date(v.connectedAt).toLocaleTimeString()}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* View Status Indicator */}
-      {isViewing && viewStatus && (
-        <div className="card">
-          <p className="dim">{viewStatus}</p>
-        </div>
-      )}
-
-      {/* Diagnostics link */}
-      <div className="card" style={{ textAlign: "center" }}>
-        <a className="link" onClick={() => navigate("diagnostics" as Page)}>
-          Diagnostics
-        </a>
       </div>
     </div>
   );

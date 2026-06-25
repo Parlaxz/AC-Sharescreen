@@ -34,6 +34,14 @@ export interface StartStreamInput {
     displayId: string | null;
     fingerprint: string | null;
   };
+  /**
+   * Explicit audio mode from ShareSetup.
+   * - `"none"` skips audio setup entirely
+   * - `"monitor"` uses filtered monitor audio (screen)
+   * - `"application"` uses application audio (window)
+   * When omitted, source-derived mode is used (backward compat).
+   */
+  audioMode?: "none" | "monitor" | "application";
 }
 
 export interface VdoSessionConfig {
@@ -74,6 +82,7 @@ export class StreamSessionManager {
   private _sourceKind: "screen" | "window" | null = null;
   private _developerMode = false;
   private _audioModeOverride: AudioMode | null = null;
+  private _explicitAudioMode: "none" | "monitor" | "application" | null = null;
   private _isAudioDegraded = false;
 
   constructor(
@@ -278,6 +287,7 @@ export class StreamSessionManager {
     this.heartbeatSeq = 0;
     this._sourceId = input.source.id;
     this._sourceKind = input.source.kind;
+    this._explicitAudioMode = input.audioMode ?? null;
     this._isAudioDegraded = false;
 
     try {
@@ -350,14 +360,25 @@ export class StreamSessionManager {
         captureFps,
       });
 
-      // 3. Source-derived audio setup
-      // Normal mode: screen → Filtered Monitor Audio, window → Application Audio
-      // If audio setup fails, mark degraded and continue with video only
-      try {
-        await this.setupSourceAudio(input.source.id, input.source.kind);
-      } catch (err) {
-        console.warn("[SSM] Audio setup failed, continuing with video only:", err);
-        this._isAudioDegraded = true;
+      // 3. Audio setup respecting user's explicit choice
+      // - audioMode === "none" → skip audio entirely (no degrade, user chose no audio)
+      // - audioMode === "monitor" | "application" → use that mode explicitly
+      // - audioMode omitted → source-derived mode (backward compat)
+      if (input.audioMode === "none") {
+        // User explicitly chose no audio — skip setupSourceAudio entirely
+      } else {
+        try {
+          await this.setupSourceAudio(
+            input.source.id,
+            input.source.kind,
+            input.audioMode === "monitor" ? "screen" as const
+              : input.audioMode === "application" ? "window" as const
+              : input.source.kind,
+          );
+        } catch (err) {
+          console.warn("[SSM] Audio setup failed, continuing with video only:", err);
+          this._isAudioDegraded = true;
+        }
       }
 
       // 4. Publish via PublisherManager with effective quality from group defaults
@@ -591,11 +612,16 @@ export class StreamSessionManager {
         captureFps,
       });
 
-      // 6. Re-setup source-derived audio
+      // 6. Re-setup source-derived or explicit audio
       this._isAudioDegraded = false;
-      if (oldSourceId && oldSourceKind) {
+      if (oldSourceId && oldSourceKind && this._explicitAudioMode !== "none") {
         try {
-          await this.setupSourceAudio(oldSourceId, oldSourceKind);
+          const restartEffectiveKind = this._explicitAudioMode === "monitor"
+            ? "screen"
+            : this._explicitAudioMode === "application"
+              ? "window"
+              : oldSourceKind;
+          await this.setupSourceAudio(oldSourceId, oldSourceKind, restartEffectiveKind);
         } catch (err) {
           console.warn("[SSM] Audio setup failed during restart:", err);
           this._isAudioDegraded = true;
@@ -730,7 +756,7 @@ export class StreamSessionManager {
    * video capture, set isAudioDegraded, and preserve a sanitized
    * failure reason. No partial helper ownership may remain.
    */
-  private async setupSourceAudio(sourceId: string, sourceKind: "screen" | "window"): Promise<void> {
+  private async setupSourceAudio(sourceId: string, sourceKind: "screen" | "window", effectiveKind?: "screen" | "window"): Promise<void> {
     const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
     if (!api) return;
     if (!this.publisherManager) return;
@@ -774,7 +800,9 @@ export class StreamSessionManager {
       // 5) Start the selected native capture mode and capture the
       //    stream generation the helper hands back. (This is what
       //    allows us to align the ring buffer with the capture epoch.)
-      if (sourceKind === "screen") {
+      //    Use effectiveKind when provided (from user's audio mode choice).
+      const audioKind = effectiveKind ?? sourceKind;
+      if (audioKind === "screen") {
         const result = await api.startFilteredMonitorAudio({
           excludeDiscord: true,
           excludeScreenLink: true,
@@ -784,7 +812,7 @@ export class StreamSessionManager {
         }
         streamGeneration = result.streamGeneration;
         this._sourceKind = "screen";
-      } else if (sourceKind === "window") {
+      } else if (audioKind === "window") {
         const result = await api.startApplicationAudio({ sourceId });
         if (!result?.success) {
           throw new Error(`startApplicationAudio failed: ${result?.error ?? "unknown"}`);
@@ -910,6 +938,7 @@ export class StreamSessionManager {
     this.captureStream = null;
     this.vdoConfig = null;
     this._sourceId = null;
+    this._explicitAudioMode = null;
     this.actualCaptureWidth = 0;
     this.actualCaptureHeight = 0;
     this.actualCaptureFps = 0;

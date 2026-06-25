@@ -84,6 +84,7 @@ export function registerIpcHandlers(
   trayManager: TrayManager,
   groupStore?: GroupStore,
   presetStore?: QualityPresetStore,
+  onQuickShareConfigUpdated?: (enabled: boolean, accelerator: string) => void,
 ): void {
   // ── VDO session credentials (for LAN testing) ─────────────────────────
 
@@ -356,6 +357,37 @@ export function registerIpcHandlers(
       presetStore.import(exportString),
     );
   }
+
+  // ── Quick Share config ──────────────────────────────────────────────────
+
+  ipcMain.handle("get-quick-share-config", () => {
+    const s = settings.get();
+    return {
+      shortcutEnabled: s.quickShareShortcutEnabled ?? false,
+      shortcutAccelerator: s.quickShareShortcutAccelerator ?? "Alt+Shift+S",
+      lastGroupId: s.lastQuickShareGroupId ?? null,
+      lastSourceKind: s.lastQuickShareSourceKind ?? null,
+      lastPresetId: s.lastQuickSharePresetId ?? null,
+    };
+  });
+
+  ipcMain.handle(
+    "update-quick-share-config",
+    (_event, partial: Record<string, unknown>) => {
+      const mapped: Partial<Record<string, unknown>> = {};
+      if ("shortcutEnabled" in partial) mapped.quickShareShortcutEnabled = partial.shortcutEnabled;
+      if ("shortcutAccelerator" in partial) mapped.quickShareShortcutAccelerator = partial.shortcutAccelerator;
+      if ("lastGroupId" in partial) mapped.lastQuickShareGroupId = partial.lastGroupId;
+      if ("lastSourceKind" in partial) mapped.lastQuickShareSourceKind = partial.lastSourceKind;
+      if ("lastPresetId" in partial) mapped.lastQuickSharePresetId = partial.lastPresetId;
+      settings.update(mapped as never);
+      const next = settings.get();
+      onQuickShareConfigUpdated?.(
+        next.quickShareShortcutEnabled ?? true,
+        next.quickShareShortcutAccelerator ?? "Super+Alt+S",
+      );
+    },
+  );
 
   // ── Application info ─────────────────────────────────────────────────────
 

@@ -89,6 +89,34 @@ const api: ScreenLinkAPI = {
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),
   restartAndInstallUpdate: () => ipcRenderer.invoke("updates:install"),
 
+  // ── Quick Share ──────────────────────────────────────────────────
+  getQuickShareConfig: () => ipcRenderer.invoke("get-quick-share-config"),
+  updateQuickShareConfig: (partial) => ipcRenderer.invoke("update-quick-share-config", partial),
+  onQuickShareOpen: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("quick-share:open", handler);
+    return () => { ipcRenderer.removeListener("quick-share:open", handler); };
+  },
+
+  // ── Tray-originated main→renderer events ──────────────────────────
+  onOpenSourcePicker: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("open-source-picker", handler);
+    return () => { ipcRenderer.removeListener("open-source-picker", handler); };
+  },
+
+  onStopSharing: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("stop-sharing", handler);
+    return () => { ipcRenderer.removeListener("stop-sharing", handler); };
+  },
+
+  onOpenDiagnostics: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("open-diagnostics", handler);
+    return () => { ipcRenderer.removeListener("open-diagnostics", handler); };
+  },
+
   onUpdateStatusChanged: (callback) => {
     const handler = (_event: Electron.IpcRendererEvent, status: any) => callback(status);
     ipcRenderer.on("updates:status-changed", handler);

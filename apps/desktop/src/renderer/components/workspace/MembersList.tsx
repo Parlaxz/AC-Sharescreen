@@ -24,6 +24,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { useStore } from "@/stores/main-store";
+import { getInitials } from "@/lib/utils";
 
 /**
  * MembersList — renders members of the selected group (Section 15).
@@ -125,14 +126,6 @@ export function MembersList({
   }
 
   // ── Helpers ──────────────────────────────────────────────────────
-  const initials = (name: string) =>
-    name
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase();
-
   // ── Success: member rows ─────────────────────────────────────────
   return (
     <ScrollArea className="max-h-[400px]">
@@ -150,7 +143,7 @@ export function MembersList({
             >
               <Avatar className="h-8 w-8 flex-shrink-0">
                 <AvatarFallback className="text-[11px] bg-surface-3">
-                  {initials(member.displayName)}
+                  {getInitials(member.displayName)}
                 </AvatarFallback>
               </Avatar>
 

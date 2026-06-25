@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Minus, Maximize2, Minimize2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,7 @@ import {
 import { cn } from "@/lib/utils";
 import { UpdateIndicator } from "@/components/layout/UpdateIndicator";
 import type { ScreenLinkAPI } from "../../../preload/api-types.js";
+import { useStore } from "@/stores/main-store";
 
 /**
  * TitleBar — Compact custom Electron title bar (Section 4.2).
@@ -25,7 +26,26 @@ import type { ScreenLinkAPI } from "../../../preload/api-types.js";
  */
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
-  const [workspaceName] = useState("ScreenLink");
+  const currentPage = useStore((s) => s.currentPage);
+  const selectedGroupId = useStore((s) => s.selectedGroupId);
+  const groupsById = useStore((s) => s.groupsById);
+
+  const workspaceName = useMemo(() => {
+    if (selectedGroupId && groupsById[selectedGroupId]) {
+      return groupsById[selectedGroupId]!.name;
+    }
+    switch (currentPage) {
+      case "home": return "Home";
+      case "user-settings": return "User Settings";
+      case "group-settings": return "Group Settings";
+      case "group-presets": return "Group Presets";
+      case "diagnostics": return "Diagnostics";
+      case "about": return "About";
+      case "host": return "Host Workspace";
+      case "viewer": return "Viewer Workspace";
+      default: return "ScreenLink";
+    }
+  }, [currentPage, selectedGroupId, groupsById]);
 
   const api = (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink;
 
@@ -79,10 +99,11 @@ export function TitleBar() {
         </span>
       </div>
 
-      {/* ─── Drag region ──────────────────────────────────── */}
+      {/* ─── Drag region (double-click to toggle maximize) ──── */}
       <div
         className="flex-1 h-full"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        onDoubleClick={handleToggleMaximize}
       />
 
       {/* ─── Update indicator (Section 8) ──────────────────── */}

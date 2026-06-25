@@ -75,9 +75,16 @@ export interface PersistedSettings {
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
+  /** Quick Share global shortcut configuration */
+  quickShareShortcutEnabled: boolean;
+  quickShareShortcutAccelerator: string;
+  /** Persisted last selections for Quick Share dialog */
+  lastQuickShareGroupId: string | null;
+  lastQuickShareSourceKind: "screen" | "window" | null;
+  lastQuickSharePresetId: string | null;
 }
 
-const CURRENT_VERSION = 2;
+const CURRENT_VERSION = 3;
 
 const DEFAULT_HOST_LIMITS: PersistedSettings["hostQualityLimits"] = {
   maxVideoBitrateKbps: 5000,
@@ -143,7 +150,44 @@ function getDefaults(): PersistedSettings {
     notificationsEnabled: true,
     localTransportPolicy: {},
     lastAudioMode: "none",
+    quickShareShortcutEnabled: true,
+    quickShareShortcutAccelerator: "Super+Alt+S",
+    lastQuickShareGroupId: null,
+    lastQuickShareSourceKind: null,
+    lastQuickSharePresetId: null,
   };
+}
+
+function applyMigrations(raw: unknown): PersistedSettings {
+  const v1 = (raw ?? {}) as Record<string, unknown>;
+  const inputVersion = typeof v1.version === "number" ? v1.version : 1;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let s: any;
+
+  if (inputVersion < 2) {
+    s = migrateFromPhase2G(raw);
+  } else {
+    s = v1;
+  }
+
+  // Then migrate to v3 (add quick share fields)
+  if (inputVersion < 3) {
+    s = {
+      ...s,
+      version: CURRENT_VERSION,
+      quickShareShortcutEnabled: s.quickShareShortcutEnabled ?? true,
+      quickShareShortcutAccelerator: s.quickShareShortcutAccelerator ?? "Super+Alt+S",
+      lastQuickShareGroupId: s.lastQuickShareGroupId ?? null,
+      lastQuickShareSourceKind: s.lastQuickShareSourceKind ?? null,
+      lastQuickSharePresetId: s.lastQuickSharePresetId ?? null,
+    };
+  }
+
+  // Normalize audio mode for current version
+  if (s.lastAudioMode !== undefined) {
+    s.lastAudioMode = normalizeAudioMode(s.lastAudioMode);
+  }
+  return s as PersistedSettings;
 }
 
 /**
@@ -164,7 +208,8 @@ function migrateFromPhase2G(raw: unknown): PersistedSettings {
     (typeof r.hostDisplayName === "string" ? (r.hostDisplayName as string) : "Host");
   const createdAt = (dev?.createdAt as number | undefined) ?? Date.now();
 
-  return {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result: any = {
     version: CURRENT_VERSION,
     deviceIdentity: {
       deviceId,
@@ -190,6 +235,7 @@ function migrateFromPhase2G(raw: unknown): PersistedSettings {
       ? normalizeAudioMode(r.lastAudioMode as string)
       : "none",
   };
+  return result;
 }
 
 /**
@@ -233,7 +279,7 @@ export class SettingsStore {
     const obj = raw as Record<string, unknown>;
     const v = typeof obj.version === "number" ? obj.version : 1;
     if (v < CURRENT_VERSION) {
-      const migrated = migrateFromPhase2G(raw);
+      const migrated = applyMigrations(raw);
       try {
         this.writeAtomic(migrated);
       } catch {
@@ -241,7 +287,7 @@ export class SettingsStore {
       }
       return migrated;
     }
-    // Already current — normalize audio mode and return
+    // Already current — normalize audio mode
     const s = obj as unknown as PersistedSettings;
     if (s.lastAudioMode !== undefined) {
       s.lastAudioMode = normalizeAudioMode(s.lastAudioMode);

@@ -463,7 +463,7 @@ export function Settings() {
       <div className="settings">
         <div className="page-header">
           <h1>Settings</h1>
-          <button className="ghost" onClick={() => navigate("dashboard" as Page)}>&larr; Back</button>
+          <button className="ghost" onClick={() => navigate("home" as Page)}>&larr; Back</button>
         </div>
         <p className="dim">Loading settings...</p>
       </div>
@@ -474,7 +474,7 @@ export function Settings() {
     <div className="settings">
       <div className="page-header">
         <h1>Settings</h1>
-        <button className="ghost" onClick={() => navigate("dashboard" as Page)}>&larr; Back</button>
+        <button className="ghost" onClick={() => navigate("home" as Page)}>&larr; Back</button>
       </div>
 
       {/* ── Profile ────────────────────────────────────────────────── */}

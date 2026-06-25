@@ -3,12 +3,15 @@ import { useStore, type Page } from "./stores/main-store.js";
 import { GroupOverview } from "@/components/workspace/GroupOverview";
 import { HostDashboard } from "@/components/workspace/HostDashboard";
 import { ShareSetup } from "@/components/workspace/ShareSetup";
-import { Dashboard } from "./routes/Dashboard.js";
-import { SourcePicker } from "./routes/SourcePicker.js";
+import { CreateGroupDialog } from "@/components/workspace/CreateGroupDialog";
+import { JoinGroupDialog } from "@/components/workspace/JoinGroupDialog";
+import { HomePage } from "./routes/HomePage.js";
 import { GroupsWorkspace } from "@/components/workspace/GroupsWorkspace";
 import { QualityPresetsPage } from "@/components/workspace/QualityPresetsPage";
 import { SettingsPage } from "@/components/workspace/SettingsPage";
+import { GroupSettingsPage } from "@/components/workspace/GroupSettingsPage";
 import { DiagnosticsPage } from "@/components/workspace/DiagnosticsPage";
+import { QuickShareDialog } from "@/components/workspace/QuickShareDialog";
 import { About } from "./routes/About.js";
 import { ComponentGallery } from "./routes/ComponentGallery.js";
 import { CommandPalette } from "@/components/CommandPalette";
@@ -16,6 +19,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
+import { usePreloadEvents } from "@/hooks/use-preload-events";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 import type { SyncPersistenceAdapter } from "./services/group-sync-service.js";
 import { acquirePhase3Runtime, releasePhase3Runtime } from "./services/phase3-runtime.js";
@@ -32,7 +36,10 @@ import type { ScreenLinkAPI } from "../preload/api-types.js";
  * Exported for testability. App.tsx calls this inside its mount effect
  * and handles cancellation via the returned runtime's lifecycle.
  */
-export async function initializeAppRuntime(api: ScreenLinkAPI): Promise<void> {
+export async function initializeAppRuntime(
+  api: ScreenLinkAPI,
+  shouldAbort: () => boolean = () => false,
+): Promise<void> {
   // Wire SyncPersistenceAdapter using preload API methods
   const persistence: SyncPersistenceAdapter = {
     persistState: (groupId: string, state: GroupSharedState) =>
@@ -59,12 +66,20 @@ export async function initializeAppRuntime(api: ScreenLinkAPI): Promise<void> {
     lastClock: HybridTimestamp;
   }>;
 
+  if (shouldAbort()) {
+    return;
+  }
+
   // Step 4: Populate normalized store BEFORE starting any connections.
   // This ensures Groups.tsx (store-driven) has data immediately.
   const store = useStore.getState();
   const groupsById: Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }> = {};
   const groupOrder: string[] = [];
   for (const r of records) {
+    if (shouldAbort()) {
+      return;
+    }
+
     groupsById[r.groupId] = {
       id: r.groupId,
       name: r.sharedState.name.value,
@@ -86,25 +101,33 @@ export async function initializeAppRuntime(api: ScreenLinkAPI): Promise<void> {
 
   // Step 5: Start runtime connections for all groups
   for (const r of records) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    const config = (await api.getGroupConnectionConfig(r.groupId)) as {
-      groupId: string;
-      controlRoomId: string;
-      groupSecret: string;
-      nodeId: string;
-    } | null;
-    if (config) {
-      await runtime.addGroup(
-        {
-          groupId: config.groupId,
-          controlRoomId: config.controlRoomId,
-          groupSecret: config.groupSecret,
-          nodeId: identity.deviceId,
-          displayName: identity.displayName,
-        },
-        r.sharedState as GroupSharedState,
-        r.lastClock as HybridTimestamp,
-      );
+    if (shouldAbort()) {
+      return;
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
+      const config = (await api.getGroupConnectionConfig(r.groupId)) as {
+        groupId: string;
+        controlRoomId: string;
+        groupSecret: string;
+        nodeId: string;
+      } | null;
+      if (config) {
+        await runtime.addGroup(
+          {
+            groupId: config.groupId,
+            controlRoomId: config.controlRoomId,
+            groupSecret: config.groupSecret,
+            nodeId: identity.deviceId,
+            displayName: identity.displayName,
+          },
+          r.sharedState as GroupSharedState,
+          r.lastClock as HybridTimestamp,
+        );
+      }
+    } catch (err) {
+      console.warn(`[App] Failed to initialize group ${r.groupId}:`, err);
     }
   }
 }
@@ -122,9 +145,23 @@ export function App() {
 
   // Command palette state (Ctrl+K)
   const [commandOpen, setCommandOpen] = useState(false);
+  const [quickShareOpen, setQuickShareOpen] = useState(false);
 
   // Activate keyboard shortcuts
   useKeyboardShortcuts();
+
+  // Subscribe to main-process tray events
+  usePreloadEvents();
+
+  // Listen for quick-share:open event from global shortcut or tray
+  useEffect(() => {
+    const api = (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink;
+    if (!api) return;
+    const unsub = api.onQuickShareOpen(() => {
+      setQuickShareOpen(true);
+    });
+    return unsub;
+  }, []);
 
   // Listen for custom Ctrl+K toggle event from the hook
   useEffect(() => {
@@ -134,6 +171,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
     // Expose store for audit harness (browser-only, dev)
     if ((window as unknown as { __SCREENLINK_AUDIT_MODE__?: boolean }).__SCREENLINK_AUDIT_MODE__) {
       (window as unknown as { __SCREENLINK_STORE__?: typeof useStore }).__SCREENLINK_STORE__ = useStore;
@@ -144,37 +183,47 @@ export function App() {
       console.warn("[App] screenlink API not available – running outside Electron?");
       return;
     }
-    void initializeAppRuntime(api).catch((err: unknown) => {
+    void initializeAppRuntime(api, () => cancelled).catch((err: unknown) => {
+      if (cancelled) {
+        return;
+      }
       console.error("[App] Runtime startup failed:", err);
       void releasePhase3Runtime();
     });
     return () => {
+      cancelled = true;
       void releasePhase3Runtime();
     };
   }, []);
 
   const renderPage = () => {
     switch (currentPage) {
-      case "dashboard":
-        // When sharing, render HostDashboard instead of GroupOverview (Section 8.4)
+      case "home":
+        return <HomePage />;
+      case "overview":
+        // When sharing, render HostDashboard instead of GroupOverview
         if (isSharing) {
           return <HostDashboard />;
         }
         return <GroupOverview />;
-      case "source-picker":
-        return <SourcePicker />;
-      case "groups":
+      case "host":
+        return <HostDashboard />;
+      case "viewer":
         return <GroupsWorkspace />;
-      case "quality-presets":
+      case "share-setup":
+        return <ShareSetup />;
+      case "group-presets":
         return <QualityPresetsPage />;
-      case "settings":
+      case "group-settings":
+        return <GroupSettingsPage />;
+      case "user-settings":
         return <SettingsPage />;
       case "diagnostics":
         return <DiagnosticsPage />;
       case "about":
         return <About />;
       default:
-        return <GroupOverview />;
+        return <HomePage />;
     }
   };
 
@@ -187,8 +236,12 @@ export function App() {
       {/* ShareSetup dialog — rendered at root level so it can be
           triggered from GroupOverview, UserDock, and SourcePicker */}
       <ShareSetup />
+      <CreateGroupDialog />
+      <JoinGroupDialog />
       {/* Command palette (Ctrl+K, Section 14) */}
       <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
+      {/* Quick Share dialog */}
+      <QuickShareDialog open={quickShareOpen} onOpenChange={setQuickShareOpen} />
       {/* Accessibility live regions (Section 14) */}
       <div
         aria-live="polite"

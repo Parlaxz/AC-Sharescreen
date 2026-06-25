@@ -51,6 +51,7 @@ import { cn } from "@/lib/utils";
 import {
   useStore,
 } from "@/stores/main-store";
+import { stopShare } from "@/services/share-coordinator";
 import { AnimatedNumber } from "@/components/primitives/AnimatedNumber";
 import { AnimatedCountBadge } from "@/components/primitives/AnimatedCountBadge";
 import { notifyRemoteRequest, type RemoteRequest } from "./RemoteRequestToast.js";
@@ -222,9 +223,8 @@ export function HostDashboard({
   const localShareState = useStore((s) => s.localShareState);
 
   const group = selectedGroupId ? groupsById[selectedGroupId] : null;
-  const liveSeconds = useLiveDuration(isSharing ? Date.now() - (sessionDuration > 0 ? Date.now() - sessionDuration * 1000 : 0) : null);
-  // Use the store sessionDuration as the baseline; liveSeconds for real-time display
-  const effectiveDuration = sessionDuration > 0 ? sessionDuration + (Date.now() - (Date.now() - sessionDuration * 1000)) / 1000 : liveSeconds;
+  const liveSeconds = useLiveDuration(isSharing ? Date.now() - sessionDuration * 1000 : null);
+  const effectiveDuration = liveSeconds;
 
   // ── Local state ──────────────────────────────────────────────────────
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
@@ -319,14 +319,15 @@ export function HostDashboard({
   }, []);
 
   // ── Stop sharing handler ─────────────────────────────────────────────
-  const handleStopSharing = useCallback(() => {
-    // Call the existing stop service — currently store-based
-    // TODO: Full integration with StreamSessionManager.stopStream()
-    setIsSharing(false);
-    setLocalShareState("idle");
+  const handleStopSharing = useCallback(async () => {
     setStopConfirmOpen(false);
-    toast.success("Sharing stopped");
-  }, [setIsSharing, setLocalShareState]);
+    try {
+      await stopShare();
+      toast.success("Sharing stopped");
+    } catch {
+      toast.error("Failed to stop sharing");
+    }
+  }, []);
 
   // ── Control button handlers ──────────────────────────────────────────
   const handleChangeSource = useCallback(() => {

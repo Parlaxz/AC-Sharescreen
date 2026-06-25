@@ -33,14 +33,11 @@ function stubActions(): TrayMenuActions {
     onQuit: vi.fn(),
     onShareScreen: vi.fn(),
     onShareWindow: vi.fn(),
+    onQuickShare: vi.fn(),
     onStopSharing: vi.fn(),
-    onWatchFriend: vi.fn(),
     onStopWatching: vi.fn(),
-    onSelectPreset: vi.fn(),
     onToggleLaunchAtLogin: vi.fn(),
     onToggleAutoResume: vi.fn(),
-    onToggleAllowRemoteQuality: vi.fn(),
-    onToggleAutoWatch: vi.fn(),
     onShowDiagnostics: vi.fn(),
   };
 }

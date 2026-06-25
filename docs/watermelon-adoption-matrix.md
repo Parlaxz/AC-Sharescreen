@@ -40,17 +40,24 @@
 
 | ScreenLink Surface | Watermelon Building Blocks | Notes |
 |---|---|---|
+| Home page | `Card` + `CardContent` + `Button` + `Badge` + `Skeleton` + `Alert` + `Separator` + `motion.div` | Group grid, presets section, create/join buttons; all primitives |
 | Group rail item | `Avatar` + `Tooltip` + `Badge` + animated `motion.div` | Compose from primitives; no custom `GroupRailItem` |
 | Group navigation row | `NavigationMenu` or animated `Button` + `Badge` | Shared selection indicator |
 | User dock | `Card` + `Avatar` + `Badge` + `Button` (icon) + `DropdownMenu` | All children from Watermelon |
 | Active-share card | `Card` + `Avatar` + `Badge` + `Button` + animated layout via `motion.div` | Product composition only |
 | Source category switcher | `Tabs` (animated) | Watermelon indicator |
 | Source tile | `Card` + `RadioGroup`/selectable + `Skeleton` + `Tooltip` | Product composition; visual parts from Watermelon |
-| Audio mode picker | `RadioGroup` with styled cards or `Tabs` | Selectable primitive |
+| Audio mode picker | `RadioGroup` with styled cards or `Button` toggle group | Source-kind-aware; Screen → No Audio / Filtered Monitor, Window → No Audio / Application |
 | Quality preset picker | `RadioGroup` with styled cards or `Tabs` | Selectable primitive |
 | Quality controls (custom) | `Slider` + `Select` + `Switch` + animated `Disclosure` pattern | All primitives from Watermelon |
-| Invite flow | `Dialog` + `Input` + `Button` + `Toaster` | Standard dialog pattern |
-| Settings pages | `Tabs` + form components (`Input`, `Switch`, `Select`, `Button`) + `Sheet` | Watermelon primitives only |
+| Invite flow (InviteDialog) | `Dialog` + `Input` + `Button` + `Toaster` | Standard dialog pattern |
+| Create Group dialog | `Dialog` + `Input` + `Button` + `Label` | Shared dialog; real `createGroup` API |
+| Join Group dialog | `Dialog` + `Input` + `Button` + `Label` | Shared dialog; real `joinGroup` API |
+| Quick Share dialog | `Dialog` + `Select` + `Button` + `Label` | Groups, source kind, source, preset, audio; uses `startShare` coordinator |
+| Settings page (user) | `Card` + `Input` + `Switch` + `Select` + `Separator` + `Skeleton` + `Alert` | Loads from `getSettings`, saves via `updateSettings`/`updateDisplayName` |
+| Group settings page | `Card` + `Button` + `Switch` + `Separator` + `Dialog` + `Label` | Group info, copy invite, notifications toggle, leave group |
+| Quality Presets page | `Card` + `Sheet` + `Dialog` + `Button` + `Input` + `Select` + `Switch` + `Skeleton` + `Alert` + `Separator` | Real CRUD via preload API; loading/error/empty states |
+| ShareSetup dialog | `Dialog` + `Tabs` + `Card` + `RadioGroup` + `Select` + `Slider` + `Button` + `Skeleton` + `Alert` + `ScrollArea` | Source selection, audio mode, quality preset, start |
 | Context panel | `ResizablePanel` + `ResizableHandle` + `Tabs` + `ScrollArea` + animated presence | No custom pane system |
 | Viewer controls | `Button` (icon) + `Slider` + `Popover` + `Tooltip` + animated presence | Native video element is only non-Watermelon part |
 | Notification system | `Toaster` (Sonner) | Shared status language |

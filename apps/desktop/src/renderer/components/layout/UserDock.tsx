@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Settings, MoreHorizontal, Wifi, WifiOff, Monitor, Eye, Loader2, RefreshCw, Download } from "lucide-react";
 // Monitor is used in the overflow menu for "Start sharing"
 import { motion, AnimatePresence } from "motion/react";
@@ -17,7 +17,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+import { cn, getInitials } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 import { SettingsSheet } from "@/components/workspace/SettingsSheet";
 
@@ -50,26 +50,17 @@ export function UserDock() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoResume, setAutoResume] = useState(false);
+  const [displayName, setDisplayName] = useState("User");
 
-  const displayName = useStore((s) => {
-    const groups = s.groupsById;
-    for (const gId of s.groupOrder) {
-      const g = groups[gId];
-      if (g) {
-        for (const member of Object.values(g.members)) {
-          if (member.displayName) return member.displayName;
-        }
-      }
-    }
-    return "User";
-  });
-
-  const initials = (name: string) => {
-    if (!name || name.trim() === "") return "?";
-    // Take first character of first word, uppercase
-    const first = name.trim().split(/\s+/)[0]?.[0];
-    return first ? first.toUpperCase() : "?";
-  };
+  useEffect(() => {
+    const api = (window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    if (!api) return;
+    void api.getSettings().then((settings) => {
+      setDisplayName(settings.hostDisplayName ?? settings.deviceIdentity?.displayName ?? "User");
+      setLaunchAtLogin(settings.launchAtLogin ?? false);
+      setAutoResume(settings.autoResumeLastMonitor ?? false);
+    }).catch(() => {});
+  }, []);
 
   const statusConfig = useCallback((status: UserStatus) => {
     switch (status) {
@@ -97,7 +88,7 @@ export function UserDock() {
       {/* ─── Avatar ────────────────────────────────────── */}
       <Avatar className="h-8 w-8 rounded-lg flex-shrink-0">
         <AvatarFallback className="rounded-lg text-xs font-semibold bg-surface-3">
-          {initials(displayName)}
+          {getInitials(displayName, 1)}
         </AvatarFallback>
       </Avatar>
 
@@ -191,7 +182,13 @@ export function UserDock() {
             <span className="text-sm text-text-primary">Launch at login</span>
             <Switch
               checked={launchAtLogin}
-              onCheckedChange={setLaunchAtLogin}
+              onCheckedChange={(checked) => {
+                setLaunchAtLogin(checked);
+                const api = (window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+                if (api) {
+                  void api.updateSettings({ launchAtLogin: checked }).catch(() => {});
+                }
+              }}
               aria-label="Toggle launch at login"
             />
           </div>
@@ -199,7 +196,13 @@ export function UserDock() {
             <span className="text-sm text-text-primary">Auto-resume last share</span>
             <Switch
               checked={autoResume}
-              onCheckedChange={setAutoResume}
+              onCheckedChange={(checked) => {
+                setAutoResume(checked);
+                const api = (window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+                if (api) {
+                  void api.updateSettings({ autoResumeLastMonitor: checked }).catch(() => {});
+                }
+              }}
               aria-label="Toggle auto-resume"
             />
           </div>

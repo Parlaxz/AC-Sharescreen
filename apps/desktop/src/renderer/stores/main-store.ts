@@ -2,22 +2,33 @@ import { create } from "zustand";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
+/**
+ * Global page routing.
+ * - `home`            — landing / aggregate view of all groups
+ * - `overview`        — group-specific overview (requires selectedGroupId)
+ * - `host`            — host dashboard (active share)
+ * - `viewer`          — viewer experience
+ * - `share-setup`     — source/quality configuration before sharing
+ * - `group-presets`   — quality presets scoped to the selected group
+ * - `group-settings`  — settings scoped to the selected group
+ * - `user-settings`   — application-wide user settings
+ * - `diagnostics`     — diagnostics / debugging
+ * - `about`           — version & attribution
+ */
 export type Page =
-  | "dashboard"
-  | "groups"
-  | "quality-presets"
-  | "source-picker"
-  | "settings"
+  | "home"
+  | "overview"
+  | "host"
+  | "viewer"
+  | "share-setup"
+  | "group-presets"
+  | "group-settings"
+  | "user-settings"
   | "diagnostics"
   | "about";
 
 /** Group dashboard internal nav pages (Section 6.2) */
-export type GroupNavPage =
-  | "overview"
-  | "active-shares"
-  | "members"
-  | "presets"
-  | "group-settings";
+export type GroupNavPage = "overview" | "group-presets" | "group-settings";
 
 export interface ViewerInfo {
   peerUuid: string;
@@ -100,6 +111,14 @@ export interface AppState {
   // Share setup dialog (Stage 3.7D)
   openShareSetup: boolean;
 
+  // Unified Create/Join Group dialog state
+  openCreateGroupDialog: boolean;
+  openJoinGroupDialog: boolean;
+
+  // Last audio mode per source kind (persisted across dialog opens)
+  lastScreenAudioMode: "none" | "monitor";
+  lastWindowAudioMode: "none" | "application";
+
   // Local streaming state
   localShareState: LocalShareState;
   localStreamSession: { sessionId: string; streamId: string; password: string } | null;
@@ -107,6 +126,12 @@ export interface AppState {
 
   // Actions
   setOpenShareSetup: (open: boolean) => void;
+  setOpenCreateGroupDialog: (open: boolean) => void;
+  setOpenJoinGroupDialog: (open: boolean) => void;
+  /** Convenience: select a group and navigate to its overview. */
+  selectGroup: (groupId: string) => void;
+  /** Convenience: navigate to home without clearing selectedGroupId. */
+  homeNavigate: () => void;
   toggleFocusMode: () => void;
   setIsSharing: (sharing: boolean) => void;
   setIsDegraded: (degraded: boolean) => void;
@@ -121,6 +146,8 @@ export interface AppState {
   setSelectedGroupId: (id: string | null) => void;
   setQualityPresets: (presets: unknown[]) => void;
   reset: () => void;
+  setLastScreenAudioMode: (mode: "none" | "monitor") => void;
+  setLastWindowAudioMode: (mode: "none" | "application") => void;
   setLocalShareState: (state: LocalShareState) => void;
   setLocalStreamSession: (s: { sessionId: string; streamId: string; password: string } | null) => void;
   setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }> | ((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>)) => void;
@@ -141,7 +168,7 @@ export type LocalShareState =
   | "error";
 
 const initialState = {
-  currentPage: "dashboard" as Page,
+  currentPage: "home" as Page,
   showContextPanel: false,
   groupNavPage: "overview" as GroupNavPage,
   isSharing: false,
@@ -170,6 +197,10 @@ const initialState = {
   activeStreamsByGroup: {} as Record<string, StreamAnnouncement[]>,
   watchedStreamsBySessionId: {} as Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>,
   openShareSetup: false,
+  openCreateGroupDialog: false,
+  openJoinGroupDialog: false,
+  lastScreenAudioMode: "none" as "none" | "monitor",
+  lastWindowAudioMode: "none" as "none" | "application",
   localShareState: "idle" as LocalShareState,
   localStreamSession: null as { sessionId: string; streamId: string; password: string } | null,
   qualityPresets: [] as unknown[],
@@ -182,32 +213,32 @@ export const useStore = create<AppState>((set, get) => ({
 
   toggleContextPanel: () => set((s) => ({ showContextPanel: !s.showContextPanel })),
   setGroupNavPage: (page) => {
+    // Only set the group nav indicator — no longer maps to currentPage.
+    // Navigation to group pages is driven by explicit navigate() calls.
     set({ groupNavPage: page });
-    // Map group nav pages to the global page for routing (Section 6.2)
-    switch (page) {
-      case "overview":
-      case "active-shares":
-        set({ currentPage: "dashboard" });
-        break;
-      case "members":
-        set({ currentPage: "groups" });
-        break;
-      case "presets":
-        set({ currentPage: "quality-presets" });
-        break;
-      case "group-settings":
-        set({ currentPage: "settings" });
-        break;
-    }
   },
 
   setOpenShareSetup: (open) => set({ openShareSetup: open }),
+  setOpenCreateGroupDialog: (open) => set({ openCreateGroupDialog: open }),
+  setOpenJoinGroupDialog: (open) => set({ openJoinGroupDialog: open }),
+  selectGroup: (groupId) =>
+    set({ selectedGroupId: groupId, currentPage: "overview" }),
+  homeNavigate: () => {
+    // Navigate to home without clearing selectedGroupId
+    set({ currentPage: "home" });
+  },
   setIsSharing: (sharing) => set({ isSharing: sharing }),
   setIsDegraded: (degraded) => set({ isDegraded: degraded }),
 
   setSource: (input, name) => {
     if (typeof input === "string") {
-      set({ sourceId: input, sourceName: name ?? "" });
+      set({
+        sourceId: input,
+        sourceName: name ?? "",
+        sourceKind: null,
+        sourceDisplayId: null,
+        sourceFingerprint: null,
+      });
     } else {
       set({
         sourceId: input.id,
@@ -231,6 +262,8 @@ export const useStore = create<AppState>((set, get) => ({
   setSelectedGroupId: (id) => set({ selectedGroupId: id }),
   setQualityPresets: (presets) => set({ qualityPresets: presets }),
 
+  setLastScreenAudioMode: (mode) => set({ lastScreenAudioMode: mode }),
+  setLastWindowAudioMode: (mode) => set({ lastWindowAudioMode: mode }),
   setLocalShareState: (state) => set({ localShareState: state }),
   setLocalStreamSession: (s) => set({ localStreamSession: s }),
   setWatchedStreams: (s) => set({ watchedStreamsBySessionId: typeof s === "function" ? s(get().watchedStreamsBySessionId) : s }),

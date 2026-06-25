@@ -11,3 +11,15 @@ import { twMerge } from "tailwind-merge";
 export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
+
+
+export function getInitials(name: string, maxParts = 2): string {
+  if (!name || name.trim() == "") return "?";
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, maxParts)
+    .map((part) => part[0] ?? "")
+    .join("")
+    .toUpperCase() || "?";
+}

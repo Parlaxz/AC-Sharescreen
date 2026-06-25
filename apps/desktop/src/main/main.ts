@@ -7,6 +7,7 @@ import { setupSingleInstance, getDevProfile } from "./app-lifecycle.js";
 import { WindowManager } from "./window-manager.js";
 import { TrayManager } from "./tray-manager.js";
 import type { TrayMenuActions } from "./tray-manager.js";
+import { QuickShareShortcutManager } from "./quick-share-shortcut-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
 import { registerIpcHandlers } from "./ipc-handlers.js";
 import { registerPermissionHandler } from "./permissions.js";
@@ -60,6 +61,7 @@ let loginItemManager: LoginItemManager;
 let groupStore: GroupStore;
 let presetStore: QualityPresetStore;
 let updateManager: UpdateManager | null = null;
+let quickShareShortcutManager: QuickShareShortcutManager | null = null;
 
 app.whenReady().then(() => {
   if (isMultiInstance && !devProfile) {
@@ -118,6 +120,16 @@ app.whenReady().then(() => {
   registerDisplayMediaHandler(mainWindow);
   registerPermissionHandler(mainWindow);
 
+  // ── Quick Share shortcut manager ─────────────────────────────────────
+  quickShareShortcutManager = new QuickShareShortcutManager(
+    () => mainWindow,
+    {
+      getQuickShareEnabled: () => settingsStore.get().quickShareShortcutEnabled ?? false,
+      getQuickShareAccelerator: () => settingsStore.get().quickShareShortcutAccelerator ?? "Alt+Shift+S",
+    },
+  );
+  quickShareShortcutManager.register();
+
   // ── Single instance ────────────────────────────────────────────────────
   setupSingleInstance(windowManager);
 
@@ -135,6 +147,10 @@ app.whenReady().then(() => {
     },
     onStopWatching: () => {
       mainWindow.webContents.send("stop-watching");
+    },
+    onQuickShare: () => {
+      windowManager.showRestoreOrFocus();
+      mainWindow.webContents.send("quick-share:open");
     },
     onToggleLaunchAtLogin: (checked: boolean) => {
       loginItemManager.setEnabled(checked);
@@ -234,7 +250,17 @@ app.whenReady().then(() => {
   }
 
   // ── IPC handlers ──────────────────────────────────────────────────────
-  registerIpcHandlers(mainWindow, settingsStore, secureStore, trayManager, groupStore, presetStore);
+  registerIpcHandlers(
+    mainWindow,
+    settingsStore,
+    secureStore,
+    trayManager,
+    groupStore,
+    presetStore,
+    (enabled, accelerator) => {
+      quickShareShortcutManager?.updateConfig(enabled, accelerator);
+    },
+  );
 
   // ── Startup visibility ─────────────────────────────────────────────────
   if (process.argv.includes("--hidden")) {
@@ -254,8 +280,12 @@ app.on("window-all-closed", () => {
   // Don't quit — tray keeps the app alive
 });
 
-// Clean up update manager on quit
+// Clean up on quit
 app.on("before-quit", () => {
+  if (quickShareShortcutManager) {
+    quickShareShortcutManager.destroy();
+    quickShareShortcutManager = null;
+  }
   if (updateManager) {
     updateManager.destroy();
     updateManager = null;

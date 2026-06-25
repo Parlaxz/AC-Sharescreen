@@ -100,12 +100,32 @@ export interface ScreenLinkAPI {
   getMixerDiagnostics: () => Promise<HelperResponse<FilteredMonitorDiagnostics>>;
   getPipelineSnapshot: () => Promise<PipelineSnapshotWithDiagnostics>;
 
+  // Quick Share
+  getQuickShareConfig: () => Promise<QuickShareConfigDTO>;
+  updateQuickShareConfig: (partial: Partial<QuickShareConfigDTO>) => Promise<void>;
+  onQuickShareOpen: (callback: () => void) => () => void;
+
+  // Tray-originated main→renderer events
+  onOpenSourcePicker: (callback: () => void) => () => void;
+  onStopSharing: (callback: () => void) => () => void;
+  onOpenDiagnostics: (callback: () => void) => () => void;
+
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;
   checkForUpdates: () => Promise<UpdateStatusDTO>;
   downloadUpdate: () => Promise<UpdateStatusDTO>;
   restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
+}
+
+// ─── Quick Share types ───────────────────────────────────────────────────────
+
+export interface QuickShareConfigDTO {
+  shortcutEnabled: boolean;
+  shortcutAccelerator: string;
+  lastGroupId: string | null;
+  lastSourceKind: "screen" | "window" | null;
+  lastPresetId: string | null;
 }
 
 // ─── Update types ─────────────────────────────────────────────────────────

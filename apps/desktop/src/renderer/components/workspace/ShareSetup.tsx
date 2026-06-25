@@ -10,7 +10,6 @@ import {
   VolumeX,
   Volume2,
   Headphones,
-  Radio,
   Check,
   RefreshCw,
   AlertTriangle,
@@ -55,13 +54,14 @@ import {
   useStore,
   type Page,
 } from "@/stores/main-store";
+import { startShare } from "@/services/share-coordinator";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-type SourceTab = "screen" | "window" | "application";
+type SourceTab = "screen" | "window";
 
-type AudioModeValue = "none" | "application" | "monitor" | "system";
+type AudioModeValue = "none" | "monitor" | "application";
 
 type PresetKind = "data-saver" | "balanced" | "clear" | "custom";
 
@@ -70,50 +70,56 @@ interface AudioModeOption {
   value: AudioModeValue;
   label: string;
   description: string;
-  supported: boolean;
-  reason?: string;
   icon: React.ReactNode;
 }
 
-const AUDIO_MODES: AudioModeOption[] = [
-  {
-    value: "none",
-    label: "No audio",
-    description: "No system audio will be shared",
-    supported: true,
-    icon: <VolumeX className="h-4 w-4" />,
-  },
-  {
-    value: "application",
-    label: "Application audio",
-    description:
-      "Captures audio from the selected source if available",
-    icon: <Volume2 className="h-4 w-4" />,
-    supported: true,
-    reason: "Captures audio from the selected source if available",
-  },
-  {
-    value: "monitor",
-    label: "Filtered monitor audio",
-    description:
-      "Audio from your speakers/headphones, filtered to remove echo",
-    icon: <Headphones className="h-4 w-4" />,
-    supported: true,
-    reason:
-      "Audio from your speakers/headphones, filtered to remove echo",
-  },
-  {
-    value: "system",
-    label: "System audio",
-    description:
-      "Captures all system audio on Windows",
-    icon: <Radio className="h-4 w-4" />,
-    supported: navigator.platform.includes("Win"), // only Windows
-    reason: navigator.platform.includes("Win")
-      ? undefined
-      : "System audio capture is only supported on Windows",
-  },
-];
+/**
+ * Get audio mode options valid for the given source kind.
+ * Screen: No Audio / Filtered Monitor Audio
+ * Window: No Audio / Application Audio
+ */
+function getAudioModes(sourceKind: SourceTab): AudioModeOption[] {
+  const modes: AudioModeOption[] = [
+    {
+      value: "none",
+      label: "No audio",
+      description: "No system audio will be shared",
+      icon: <VolumeX className="h-4 w-4" />,
+    },
+  ];
+  if (sourceKind === "screen") {
+    modes.push({
+      value: "monitor",
+      label: "Filtered monitor audio",
+      description:
+        "Audio from your speakers/headphones, filtered to remove echo",
+      icon: <Headphones className="h-4 w-4" />,
+    });
+  } else {
+    modes.push({
+      value: "application",
+      label: "Application audio",
+      description:
+        "Captures audio from the selected source if available",
+      icon: <Volume2 className="h-4 w-4" />,
+    });
+  }
+  return modes;
+}
+
+/** Resolve the audio mode for the given source kind, falling back to stored last mode. */
+function resolveAudioMode(
+  sourceKind: SourceTab,
+  currentAudio: AudioModeValue,
+  lastScreen: "none" | "monitor",
+  lastWindow: "none" | "application",
+): AudioModeValue {
+  const validModes: AudioModeValue[] =
+    sourceKind === "screen" ? ["none", "monitor"] : ["none", "application"];
+  if (validModes.includes(currentAudio)) return currentAudio;
+  // Invalid for new source kind — fall back to stored default for this kind
+  return sourceKind === "screen" ? lastScreen : lastWindow;
+}
 
 /** Standard preset definitions (4 slots per Section 8.3). */
 const STANDARD_PRESETS: {
@@ -205,6 +211,8 @@ export function ShareSetup() {
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
   const qualityPresets = useStore((s) => s.qualityPresets);
   const navigate = useStore((s) => s.navigate);
+  const lastScreenAudioMode = useStore((s) => s.lastScreenAudioMode);
+  const lastWindowAudioMode = useStore((s) => s.lastWindowAudioMode);
 
   // ── Form state ────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState<SourceTab>("screen");
@@ -212,7 +220,9 @@ export function ShareSetup() {
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [loadingSources, setLoadingSources] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
-  const [audioMode, setAudioMode] = useState<AudioModeValue>("none");
+  const [audioMode, setAudioMode] = useState<AudioModeValue>(() =>
+    resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode),
+  );
   const [selectedPresetKind, setSelectedPresetKind] = useState<PresetKind | null>(
     null,
   );
@@ -226,12 +236,18 @@ export function ShareSetup() {
 
   // Derived: sources filtered by active tab
   const filteredSources = useMemo(() => {
-    if (activeTab === "application") {
-      // "Application" tab maps to "window" kind (Electron only returns screen/window)
-      return sources.filter((s) => s.kind === "window");
-    }
     return sources.filter((s) => s.kind === activeTab);
   }, [sources, activeTab]);
+
+  // Resolve current audio mode options based on active source kind
+  const audioModeOptions = useMemo(() => getAudioModes(activeTab), [activeTab]);
+
+  // When source kind changes, reset audio if no longer valid
+  useEffect(() => {
+    setAudioMode((prev) =>
+      resolveAudioMode(activeTab, prev, lastScreenAudioMode, lastWindowAudioMode),
+    );
+  }, [activeTab, lastScreenAudioMode, lastWindowAudioMode]);
 
   // ── Fetch sources ─────────────────────────────────────────────────────
   const fetchSources = useCallback(async () => {
@@ -268,7 +284,7 @@ export function ShareSetup() {
     if (!openShareSetup) {
       setActiveTab("screen");
       setSelectedSourceId(null);
-      setAudioMode("none");
+      setAudioMode(resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode));
       setSelectedPresetKind(null);
       setSourceError(null);
       setStartingShare(false);
@@ -307,47 +323,32 @@ export function ShareSetup() {
         return;
       }
 
-      // Resolve quality values
-      let width = 854;
-      let height = 480;
-      let fps = 15;
+      // Resolve display bitrate from preset before coordinator starts
       let bitrate = 650;
       if (selectedPresetKind === "custom") {
-        width = customWidth;
-        height = customHeight;
-        fps = customFps;
         bitrate = customBitrate;
       } else {
-        // Map preset kind to known values
-        const presetMap: Record<
-          PresetKind,
-          { w: number; h: number; f: number; b: number }
-        > = {
-          "data-saver": { w: 640, h: 360, f: 10, b: 400 },
-          balanced: { w: 854, h: 480, f: 15, b: 650 },
-          clear: { w: 1280, h: 720, f: 24, b: 1500 },
-          custom: { w: customWidth, h: customHeight, f: customFps, b: customBitrate },
+        const presetMap: Record<PresetKind, { b: number }> = {
+          "data-saver": { b: 400 },
+          balanced: { b: 650 },
+          clear: { b: 1500 },
+          custom: { b: customBitrate },
         };
-        const preset = presetMap[selectedPresetKind!];
-        width = preset.w;
-        height = preset.h;
-        fps = preset.f;
-        bitrate = preset.b;
+        bitrate = presetMap[selectedPresetKind!].b;
       }
 
-      // Update store with source and settings
-      const store = useStore.getState();
-      store.setSource({
+      // Start the real stream via the coordinator (uses SSM internally)
+      await startShare({
         id: source.id,
         name: source.name,
         kind: source.kind,
-        displayId: source.displayId ?? "",
+        displayId: source.displayId ?? null,
         fingerprint: null,
+        audioMode: audioMode === "none" ? "none" : audioMode,
       });
-      store.setCaptureInfo(width, height, fps);
-      store.setCaptureBitrate(bitrate);
-      store.setIsSharing(true);
-      store.setLocalShareState("sharing");
+
+      // Set bitrate display value after coordinator has started the stream
+      useStore.getState().setCaptureBitrate(bitrate);
 
       // Persist source selection
       const api = getApi();
@@ -361,7 +362,7 @@ export function ShareSetup() {
 
       toast.success("Sharing started");
       setOpenShareSetup(false);
-      navigate("dashboard" as Page);
+      navigate("overview" as Page);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Unknown error";
@@ -375,12 +376,13 @@ export function ShareSetup() {
     sources,
     selectedSourceId,
     selectedPresetKind,
-    customWidth,
-    customHeight,
-    customFps,
     customBitrate,
     setOpenShareSetup,
     navigate,
+    audioMode,
+    audioModeOptions,
+    lastScreenAudioMode,
+    lastWindowAudioMode,
   ]);
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -417,10 +419,6 @@ export function ShareSetup() {
                   <TabsTrigger value="window" className="flex-1 gap-1.5">
                     <Monitor className="h-3.5 w-3.5" />
                     Window
-                  </TabsTrigger>
-                  <TabsTrigger value="application" className="flex-1 gap-1.5">
-                    <Monitor className="h-3.5 w-3.5" />
-                    Application
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -473,11 +471,9 @@ export function ShareSetup() {
                       <Info className="h-4 w-4" />
                       <AlertTitle>No sources found</AlertTitle>
                       <AlertDescription>
-                        {activeTab === "application"
-                          ? "No windows available. Open an application window first."
-                          : activeTab === "screen"
-                            ? "No screens detected. Make sure screen recording is permitted."
-                            : "No windows available to share."}
+                        {activeTab === "screen"
+                          ? "No screens detected. Make sure screen recording is permitted."
+                          : "No windows available to share."}
                       </AlertDescription>
                       <Button
                         variant="outline"
@@ -585,49 +581,31 @@ export function ShareSetup() {
                 onValueChange={(v) => setAudioMode(v as AudioModeValue)}
                 className="grid grid-cols-1 sm:grid-cols-2 gap-2"
               >
-                {AUDIO_MODES.map((mode) => {
+                {audioModeOptions.map((mode) => {
                   const isSelected = audioMode === mode.value;
-                  const disabled = !mode.supported;
                   return (
-                    <Tooltip key={mode.value}>
-                      <TooltipTrigger asChild>
-                        <label
-                          className={cn(
-                            "relative flex items-start gap-3 rounded-standard border p-3 cursor-pointer transition-colors",
-                            isSelected
-                              ? "border-accent bg-accent-muted/20 ring-1 ring-accent"
-                              : "border-border-subtle bg-surface-2 hover:bg-surface-hover",
-                            disabled && "opacity-50 cursor-not-allowed",
-                          )}
-                        >
-                          <RadioGroupItem
-                            value={mode.value}
-                            disabled={disabled}
-                            className="mt-0.5"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-text-primary text-sm font-medium">
-                                {mode.label}
-                              </span>
-                              {!mode.supported && (
-                                <Badge variant="secondary" className="text-[10px]">
-                                  Unavailable
-                                </Badge>
-                              )}
-                            </div>
-                            <p className="text-xs text-text-secondary mt-0.5">
-                              {mode.description}
-                            </p>
-                          </div>
-                        </label>
-                      </TooltipTrigger>
-                      {!mode.supported && mode.reason && (
-                        <TooltipContent side="top" className="max-w-[200px]">
-                          {mode.reason}
-                        </TooltipContent>
+                    <label
+                      key={mode.value}
+                      className={cn(
+                        "relative flex items-start gap-3 rounded-standard border p-3 cursor-pointer transition-colors",
+                        isSelected
+                          ? "border-accent bg-accent-muted/20 ring-1 ring-accent"
+                          : "border-border-subtle bg-surface-2 hover:bg-surface-hover",
                       )}
-                    </Tooltip>
+                    >
+                      <RadioGroupItem
+                        value={mode.value}
+                        className="mt-0.5"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <span className="text-text-primary text-sm font-medium">
+                          {mode.label}
+                        </span>
+                        <p className="text-xs text-text-secondary mt-0.5">
+                          {mode.description}
+                        </p>
+                      </div>
+                    </label>
                   );
                 })}
               </RadioGroup>
@@ -834,7 +812,7 @@ export function ShareSetup() {
                     </span>
                     {audioMode !== "none" &&
                       ` with ${
-                        AUDIO_MODES.find((m) => m.value === audioMode)
+                        audioModeOptions.find((m) => m.value === audioMode)
                           ?.label ?? "audio"
                       }`}
                   </p>

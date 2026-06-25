@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import { Plus, Home } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
@@ -22,7 +22,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+import { cn, getInitials } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 
 /**
@@ -46,12 +46,13 @@ export function GroupRail() {
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const navigate = useStore((s) => s.navigate);
 
-  const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const setOpenCreateGroupDialog = useStore((s) => s.setOpenCreateGroupDialog);
+  const setOpenJoinGroupDialog = useStore((s) => s.setOpenJoinGroupDialog);
 
   const handleGroupClick = useCallback(
     (groupId: string) => {
       setSelectedGroupId(groupId);
-      navigate("dashboard");
+      navigate("overview");
     },
     [setSelectedGroupId, navigate],
   );
@@ -79,15 +80,6 @@ export function GroupRail() {
     toast("Left group (local state only — full leave flow coming in a later stage)");
   }, []);
 
-  const initials = (name: string) => {
-    return name
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase();
-  };
-
   return (
     <div className="flex flex-col items-center w-16 flex-shrink-0 bg-rail border-r border-border-subtle py-2 gap-1">
       {/* ─── Home/Product button ──────────────────────────── */}
@@ -98,7 +90,7 @@ export function GroupRail() {
             size="icon"
             className="h-10 w-10 rounded-lg text-text-secondary hover:text-text-primary"
             aria-label="Home"
-            onClick={() => navigate("dashboard")}
+            onClick={() => navigate("home")}
           >
             <Home className="h-5 w-5" />
           </Button>
@@ -160,7 +152,7 @@ export function GroupRail() {
                         >
                           <Avatar className="w-12 h-12 rounded-xl">
                             <AvatarFallback className="rounded-xl bg-inherit text-xs font-semibold">
-                              {initials(group.name)}
+                              {getInitials(group.name)}
                             </AvatarFallback>
                           </Avatar>
                         </button>
@@ -207,7 +199,7 @@ export function GroupRail() {
       </div>
 
       {/* ─── Create/Join action ──────────────────────────── */}
-      <DropdownMenu open={createMenuOpen} onOpenChange={setCreateMenuOpen}>
+      <DropdownMenu>
         <Tooltip>
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild>
@@ -227,16 +219,14 @@ export function GroupRail() {
         <DropdownMenuContent side="right" align="end">
           <DropdownMenuItem
             onClick={() => {
-              setCreateMenuOpen(false);
-              /* TODO 3.7C: create group dialog */
+              setOpenCreateGroupDialog(true);
             }}
           >
             Create group
           </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {
-              setCreateMenuOpen(false);
-              /* TODO 3.7C: join group dialog */
+              setOpenJoinGroupDialog(true);
             }}
           >
             Join group
