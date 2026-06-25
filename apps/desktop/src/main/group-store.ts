@@ -24,6 +24,7 @@ const LocalGroupRecordSchema = z.object({
   lastClock: HybridTimestampSchema,
   joinedAt: z.number().int().positive(),
   notificationsEnabled: z.boolean(),
+  creatorDeviceId: z.string().optional(),
 });
 
 export interface LocalGroupRecord {
@@ -34,6 +35,7 @@ export interface LocalGroupRecord {
   lastClock: HybridTimestamp;
   joinedAt: number;
   notificationsEnabled: boolean;
+  creatorDeviceId?: string;
 }
 
 export interface GroupConnectionConfig {
@@ -176,6 +178,7 @@ export class GroupStore {
     nodeId: string;
     groupName: string;
     joinedAt?: number;
+    displayName?: string;
   }): Promise<LocalGroupRecord> {
     if (this.records.has(input.groupId)) {
       return this.records.get(input.groupId)!;
@@ -198,6 +201,13 @@ export class GroupStore {
       ),
       members: {},
     };
+    // Add creator as a member
+    sharedState.members[input.nodeId] = {
+      deviceId: input.nodeId,
+      displayName: input.displayName ?? input.nodeId,
+      firstSeenAt: joinedAt,
+      profileStamp: initialStamp,
+    };
     const encrypted = this.secureStore.encrypt(input.groupSecret);
     if (!encrypted) {
       throw new Error("Secure storage unavailable — cannot store group secret");
@@ -210,6 +220,7 @@ export class GroupStore {
       lastClock: initialStamp,
       joinedAt,
       notificationsEnabled: true,
+      creatorDeviceId: input.nodeId,
     };
     this.records.set(input.groupId, record);
     this.persist();
@@ -225,6 +236,7 @@ export class GroupStore {
       bootstrapNameStamp: HybridTimestamp;
       bootstrapSettings: ReturnType<typeof createDefaultGroupQualitySettings>;
       bootstrapSettingsStamp: HybridTimestamp;
+      bootstrapCreator: GroupInviteV1["bootstrapCreator"];
     };
     nodeId: string;
     displayName: string;
@@ -250,6 +262,16 @@ export class GroupStore {
       ),
       members: {},
     };
+    // Add bootstrap creator from invite as a member
+    if (input.invite.bootstrapCreator) {
+      const bc = input.invite.bootstrapCreator;
+      sharedState.members[bc.deviceId] = {
+        deviceId: bc.deviceId,
+        displayName: bc.displayName,
+        firstSeenAt: bc.firstSeenAt,
+        profileStamp: bc.profileStamp,
+      };
+    }
     // Add self as a member
     sharedState.members[input.nodeId] = {
       deviceId: input.nodeId,
@@ -334,6 +356,37 @@ export class GroupStore {
       const buf = Buffer.from(record.encryptedGroupSecret, "base64");
       const groupSecret = this.secureStore.decrypt(buf);
       if (!groupSecret) return null;
+      // Resolve bootstrap creator from stored creatorDeviceId
+      let bootstrapCreator: GroupInviteV1["bootstrapCreator"];
+      const creatorId = record.creatorDeviceId;
+      const creatorMember = creatorId ? record.sharedState.members[creatorId] : undefined;
+      if (creatorMember) {
+        bootstrapCreator = {
+          deviceId: creatorMember.deviceId,
+          displayName: creatorMember.displayName,
+          firstSeenAt: creatorMember.firstSeenAt,
+          profileStamp: creatorMember.profileStamp,
+        };
+      } else {
+        // Fallback: use first member or empty (should not happen after migration)
+        const firstMember = Object.values(record.sharedState.members)[0];
+        if (firstMember) {
+          bootstrapCreator = {
+            deviceId: firstMember.deviceId,
+            displayName: firstMember.displayName,
+            firstSeenAt: firstMember.firstSeenAt,
+            profileStamp: firstMember.profileStamp,
+          };
+        } else {
+          bootstrapCreator = {
+            deviceId: "",
+            displayName: "",
+            firstSeenAt: 0,
+            profileStamp: { wallTimeMs: 0, counter: 0, nodeId: "" },
+          };
+        }
+      }
+
       const invite: GroupInviteV1 = {
         version: 1,
         groupId: record.groupId,
@@ -343,12 +396,7 @@ export class GroupStore {
         bootstrapNameStamp: record.sharedState.name.stamp,
         bootstrapSettings: record.sharedState.defaultQuality.value,
         bootstrapSettingsStamp: record.sharedState.defaultQuality.stamp,
-        bootstrapCreator: {
-          deviceId: "",
-          displayName: "",
-          firstSeenAt: 0,
-          profileStamp: { wallTimeMs: 0, counter: 0, nodeId: "" },
-        },
+        bootstrapCreator,
       };
       return formatGroupInviteLink(invite);
     } catch {

@@ -180,7 +180,7 @@ export function registerIpcHandlers(
         input: { groupName: string; groupId?: string; nowMs?: number },
       ) => {
         const identity = settings.get().deviceIdentity;
-        const { createGroupInvite } = await import("@screenlink/shared");
+        const { createGroupInvite, formatGroupInviteLink } = await import("@screenlink/shared");
         const invite = createGroupInvite({
           groupName: input.groupName,
           displayName: identity.displayName,
@@ -194,8 +194,10 @@ export function registerIpcHandlers(
           groupSecret: invite.groupSecret,
           nodeId: identity.deviceId,
           groupName: input.groupName,
+          displayName: identity.displayName,
         });
-        return { record, invite };
+        const link = formatGroupInviteLink(invite);
+        return { record, invite, link };
       },
     );
 

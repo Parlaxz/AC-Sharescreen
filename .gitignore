@@ -54,3 +54,6 @@ coverage/
 .screenlink/
 launch1.err
 launch1.log
+
+# Deepwork session state
+.slim/deepwork/

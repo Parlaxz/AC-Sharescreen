@@ -184,6 +184,29 @@ export class GroupControlConnection {
     });
   }
 
+  /**
+   * Check whether the sender identity on an envelope matches the established
+   * mapping for this peer UUID.
+   *
+   * Rules:
+   * - If the peer UUID is NOT yet mapped, allow the message (identity not yet
+   *   established).
+   * - If the peer UUID IS mapped, the envelope's senderDeviceId must match
+   *   the mapped deviceId.  This applies to ALL message types, including
+   *   hello/hello.response (preventing remap attacks).
+   *
+   * Returns `true` to allow the message, `false` to reject it.
+   */
+  private checkSenderIdentity(peerUuid: string, envelope: GroupControlEnvelope): boolean {
+    const mappedDeviceId = this.peerToDevice.get(peerUuid);
+    if (!mappedDeviceId) {
+      // Peer UUID not yet mapped – identity not yet established, allow.
+      return true;
+    }
+    // Peer UUID IS mapped.  The senderDeviceId MUST match.
+    return envelope.senderDeviceId === mappedDeviceId;
+  }
+
   private setState(s: ConnectionState): void {
     if (this._state !== s) {
       this._state = s;
@@ -222,6 +245,16 @@ export class GroupControlConnection {
         const result = await validateEnvelope(data, this.opts.groupId, this.opts.groupSecret, this.dedupSet);
         if (!result.ok) return;
         const validatedEnvelope = result.data;
+
+        // Authenticated control-peer identity enforcement (Stage 15):
+        // After a peer UUID is mapped to a device ID via hello/hello.response,
+        // every later envelope from that peer must satisfy
+        // envelope.senderDeviceId === mappedDeviceId or be rejected.
+        // Also prevents hello/hello.response remapping a peer UUID to a
+        // different device ID without disconnect.
+        if (!this.checkSenderIdentity(peerUuid, validatedEnvelope)) {
+          return;
+        }
 
         // Handle hello messages (B13)
         if (validatedEnvelope.type === "group.hello") {
