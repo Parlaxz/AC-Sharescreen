@@ -290,7 +290,25 @@ describe("StreamSessionManager (Stage 4)", () => {
    * fake stream containing one video track.
    */
   function mockGetDisplayMediaResolve(): void {
-    const fakeTrack = { kind: "video", label: "Screen", id: crypto.randomUUID(), enabled: true, stop: vi.fn() } as unknown as MediaStreamTrack;
+    const fakeTrack = {
+      kind: "video",
+      label: "Screen",
+      id: crypto.randomUUID(),
+      enabled: true,
+      stop: vi.fn(),
+      // Gate 4.4 capture readback
+      getCapabilities: vi.fn().mockReturnValue({
+        width: { min: 1, max: 4096 },
+        height: { min: 1, max: 4096 },
+        frameRate: { min: 1, max: 60 },
+      }),
+      getSettings: vi.fn().mockReturnValue({
+        width: 1920,
+        height: 1080,
+        frameRate: 30,
+      }),
+      applyConstraints: vi.fn().mockResolvedValue(undefined),
+    } as unknown as MediaStreamTrack;
     const fakeStream = {
       getVideoTracks: () => [fakeTrack],
       getAudioTracks: () => [],

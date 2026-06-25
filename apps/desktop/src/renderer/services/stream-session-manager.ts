@@ -566,6 +566,23 @@ export class StreamSessionManager {
       }
       this.currentTrack = videoTracks[0];
 
+      // 7. Read group defaults for publication quality FIRST so
+      // captureWidth/Height/Fps are available for the constraint
+      // application below.
+      const syncState = this.runtime.getSyncService().getSyncState(oldGroupId);
+      const quality = syncState?.state?.defaultQuality?.value ?? null;
+      const videoBitrate = quality?.video?.videoBitrateKbps ?? 650;
+      const videoWidth = quality?.video?.sendWidth ?? 854;
+      const videoHeight = quality?.video?.sendHeight ?? 480;
+      const videoFps = quality?.video?.sendFps ?? 15;
+      // Stage 17: Additional fields from group defaults
+      const codec = quality?.video?.codec ?? "auto";
+      const contentHint = quality?.video?.contentHint ?? "detail";
+      const degradationPreference = quality?.video?.degradationPreference ?? "maintain-resolution";
+      const captureWidth = quality?.video?.captureWidth ?? 854;
+      const captureHeight = quality?.video?.captureHeight ?? 480;
+      const captureFps = quality?.video?.captureFps ?? 15;
+
       // Gate 4.4: apply capture constraints and read back actual
       // dimensions so downstream code operates on real values.
       await this.applyCaptureConstraints(this.currentTrack, {
@@ -584,21 +601,6 @@ export class StreamSessionManager {
           this._isAudioDegraded = true;
         }
       }
-
-      // 7. Read group defaults for publication quality
-      const syncState = this.runtime.getSyncService().getSyncState(oldGroupId);
-      const quality = syncState?.state?.defaultQuality?.value ?? null;
-      const videoBitrate = quality?.video?.videoBitrateKbps ?? 650;
-      const videoWidth = quality?.video?.sendWidth ?? 854;
-      const videoHeight = quality?.video?.sendHeight ?? 480;
-      const videoFps = quality?.video?.sendFps ?? 15;
-      // Stage 17: Additional fields from group defaults
-      const codec = quality?.video?.codec ?? "auto";
-      const contentHint = quality?.video?.contentHint ?? "detail";
-      const degradationPreference = quality?.video?.degradationPreference ?? "maintain-resolution";
-      const captureWidth = quality?.video?.captureWidth ?? 854;
-      const captureHeight = quality?.video?.captureHeight ?? 480;
-      const captureFps = quality?.video?.captureFps ?? 15;
 
       // 8. Publish with new credentials
       await this.publisherManager.startPublishing(this.captureStream, {

@@ -731,7 +731,7 @@ describe("StreamSessionManager Phase 3 — stopStream cleanup", () => {
         configurable: true,
       });
     }
-    const fakeTrack = { kind: "video", label: "Screen", stop: vi.fn(), enabled: true, id: "track-1" } as unknown as MediaStreamTrack;
+    const fakeTrack = { kind: "video", label: "Screen", stop: vi.fn(), enabled: true, id: "track-1", getCapabilities: vi.fn().mockReturnValue({}), getSettings: vi.fn().mockReturnValue({ width: 1920, height: 1080, frameRate: 30 }), applyConstraints: vi.fn().mockResolvedValue(undefined) } as unknown as MediaStreamTrack;
     const fakeStream = { getVideoTracks: () => [fakeTrack], getAudioTracks: () => [], getTracks: () => [fakeTrack] } as unknown as MediaStream;
     (globalThis.navigator as any).mediaDevices.getDisplayMedia = vi.fn().mockResolvedValue(fakeStream);
 
@@ -799,7 +799,7 @@ describe("StreamSessionManager Phase 3 — sendHeartbeat error handling", () => 
         configurable: true,
       });
     }
-    const fakeTrack = { kind: "video", label: "Screen", stop: vi.fn(), enabled: true, id: "track-1" } as unknown as MediaStreamTrack;
+    const fakeTrack = { kind: "video", label: "Screen", stop: vi.fn(), enabled: true, id: "track-1", getCapabilities: vi.fn().mockReturnValue({}), getSettings: vi.fn().mockReturnValue({ width: 1920, height: 1080, frameRate: 30 }), applyConstraints: vi.fn().mockResolvedValue(undefined) } as unknown as MediaStreamTrack;
     const fakeStream = { getVideoTracks: () => [fakeTrack], getAudioTracks: () => [], getTracks: () => [fakeTrack] } as unknown as MediaStream;
     (globalThis.navigator as any).mediaDevices.getDisplayMedia = vi.fn().mockResolvedValue(fakeStream);
 
@@ -886,7 +886,7 @@ describe("StreamSessionManager Phase 3 — identity wiring", () => {
         configurable: true,
       });
     }
-    const fakeTrack = { kind: "video", label: "Screen", stop: vi.fn(), enabled: true, id: "track-1" } as unknown as MediaStreamTrack;
+    const fakeTrack = { kind: "video", label: "Screen", stop: vi.fn(), enabled: true, id: "track-1", getCapabilities: vi.fn().mockReturnValue({}), getSettings: vi.fn().mockReturnValue({ width: 1920, height: 1080, frameRate: 30 }), applyConstraints: vi.fn().mockResolvedValue(undefined) } as unknown as MediaStreamTrack;
     const fakeStream = { getVideoTracks: () => [fakeTrack], getAudioTracks: () => [], getTracks: () => [fakeTrack] } as unknown as MediaStream;
     (globalThis.navigator as any).mediaDevices.getDisplayMedia = vi.fn().mockResolvedValue(fakeStream);
 
