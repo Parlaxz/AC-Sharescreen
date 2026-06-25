@@ -66,6 +66,10 @@ export class StreamSessionManager {
   private publisherManager: PublisherManager | null = null;
   private vdoConfig: VdoSessionConfig | null = null;
   private captureStream: MediaStream | null = null;
+  /** Gate 4.4 — actual capture dimensions read back from the track. */
+  private actualCaptureWidth: number = 0;
+  private actualCaptureHeight: number = 0;
+  private actualCaptureFps: number = 0;
   private _sourceId: string | null = null;
   private _sourceKind: "screen" | "window" | null = null;
   private _developerMode = false;
@@ -162,6 +166,18 @@ export class StreamSessionManager {
    */
   getSourceId(): string | null {
     return this._sourceId;
+  }
+
+  /**
+   * Gate 4.4 — read back the actual capture dimensions and FPS from
+   * the current video track. Returns zeros if no track is active.
+   */
+  getActualCaptureDimensions(): { width: number; height: number; fps: number } {
+    return {
+      width: this.actualCaptureWidth,
+      height: this.actualCaptureHeight,
+      fps: this.actualCaptureFps,
+    };
   }
 
   /**
@@ -324,6 +340,15 @@ export class StreamSessionManager {
         throw new Error("No video track in captured stream");
       }
       this.currentTrack = videoTracks[0];
+
+      // Gate 4.4: apply capture constraints and read back actual
+      // dimensions so downstream code (host-limit clamping, scale
+      // calculation) operates on real values, not requested values.
+      await this.applyCaptureConstraints(this.currentTrack, {
+        captureWidth,
+        captureHeight,
+        captureFps,
+      });
 
       // 3. Source-derived audio setup
       // Normal mode: screen → Filtered Monitor Audio, window → Application Audio
@@ -540,6 +565,14 @@ export class StreamSessionManager {
         throw new Error("No video track in captured stream during restart");
       }
       this.currentTrack = videoTracks[0];
+
+      // Gate 4.4: apply capture constraints and read back actual
+      // dimensions so downstream code operates on real values.
+      await this.applyCaptureConstraints(this.currentTrack, {
+        captureWidth,
+        captureHeight,
+        captureFps,
+      });
 
       // 6. Re-setup source-derived audio
       this._isAudioDegraded = false;
@@ -826,6 +859,40 @@ export class StreamSessionManager {
 
   // ── Private ──────────────────────────────────────────────────
 
+  /**
+   * Gate 4.4: Apply the requested capture constraints to a video
+   * track where the underlying getDisplayMedia track supports them.
+   * After applying, read back the actual settings and store them
+   * so the rest of the pipeline never has to guess at the real
+   * capture dimensions. Capture constraints that the source does
+   * not support are silently dropped (the readback reflects
+   * reality).
+   */
+  private async applyCaptureConstraints(
+    track: MediaStreamTrack,
+    requested: { captureWidth: number; captureHeight: number; captureFps: number },
+  ): Promise<void> {
+    const caps = (track.getCapabilities?.() ?? {}) as MediaTrackCapabilities & {
+      width?: { max?: number; min?: number };
+      height?: { max?: number; min?: number };
+      frameRate?: { max?: number; min?: number };
+    };
+    const constraints: MediaTrackConstraints = {};
+    if (caps.width) constraints.width = { ideal: requested.captureWidth };
+    if (caps.height) constraints.height = { ideal: requested.captureHeight };
+    if (caps.frameRate) constraints.frameRate = { ideal: requested.captureFps };
+    try {
+      await track.applyConstraints(constraints);
+    } catch {
+      // Source does not accept these constraints; readback will
+      // report whatever the source actually produced.
+    }
+    const settings = track.getSettings();
+    this.actualCaptureWidth = settings.width ?? 0;
+    this.actualCaptureHeight = settings.height ?? 0;
+    this.actualCaptureFps = settings.frameRate ?? 0;
+  }
+
   private resetSessionState(): void {
     this.groupId = null;
     this.logicalStreamId = null;
@@ -835,6 +902,9 @@ export class StreamSessionManager {
     this.captureStream = null;
     this.vdoConfig = null;
     this._sourceId = null;
+    this.actualCaptureWidth = 0;
+    this.actualCaptureHeight = 0;
+    this.actualCaptureFps = 0;
   }
 
   private async cleanupPublisher(): Promise<void> {
