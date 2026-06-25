@@ -160,6 +160,26 @@ export function registerIpcHandlers(
     window.hide();
   });
 
+  // ── Window controls (Stage 3.7B custom title bar) ─────────────────────────
+
+  ipcMain.handle("window:minimize", () => {
+    window.minimize();
+  });
+
+  ipcMain.handle("window:toggle-maximize", () => {
+    const newState = !window.isMaximized();
+    if (newState) {
+      window.maximize();
+    } else {
+      window.unmaximize();
+    }
+    return newState;
+  });
+
+  ipcMain.handle("window:close", () => {
+    window.close();
+  });
+
   // ── Device identity ──────────────────────────────────────────────────────
 
   ipcMain.handle("safe-storage-available", () => {

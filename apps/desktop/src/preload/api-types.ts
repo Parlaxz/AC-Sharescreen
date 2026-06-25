@@ -70,6 +70,13 @@ export interface ScreenLinkAPI {
    */
   clipboardWriteText: (text: string) => Promise<{ success: boolean; length: number }>;
 
+  // Window controls (Stage 3.7B)
+  windowControls: {
+    minimize: () => Promise<void>;
+    toggleMaximize: () => Promise<boolean>;
+    close: () => Promise<void>;
+  };
+
   // Audio capabilities
   getAudioCapabilities: () => Promise<{
     success: boolean;
@@ -92,6 +99,13 @@ export interface ScreenLinkAPI {
   getMixerState: () => Promise<any>;
   getMixerDiagnostics: () => Promise<HelperResponse<FilteredMonitorDiagnostics>>;
   getPipelineSnapshot: () => Promise<PipelineSnapshotWithDiagnostics>;
+
+  // Updates
+  getUpdateStatus: () => Promise<UpdateStatusDTO>;
+  checkForUpdates: () => Promise<UpdateStatusDTO>;
+  downloadUpdate: () => Promise<UpdateStatusDTO>;
+  restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
+  onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 
 // ─── Update types ─────────────────────────────────────────────────────────

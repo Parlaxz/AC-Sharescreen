@@ -3,6 +3,13 @@ import type { ScreenLinkAPI } from "./api-types.js";
 
 const api: ScreenLinkAPI = {
   getSources: () => ipcRenderer.invoke("get-sources"),
+
+  // ── Window controls (Stage 3.7B) ──────────────────────────────────────────
+  windowControls: {
+    minimize: () => ipcRenderer.invoke("window:minimize"),
+    toggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
+    close: () => ipcRenderer.invoke("window:close"),
+  },
   setSource: (sourceId) => ipcRenderer.invoke("set-source", sourceId),
   getSourceFingerprint: (sourceId) => ipcRenderer.invoke("get-source-fingerprint", sourceId),
 
