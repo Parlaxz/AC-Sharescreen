@@ -1,3 +1,10 @@
+// @ts-nocheck
+/**
+ * LEGACY — Superseded by GroupsWorkspace.tsx (Watermelon-only implementation).
+ * This file is kept for reference but no longer imported or rendered.
+ * See: apps/desktop/src/renderer/components/workspace/GroupsWorkspace.tsx
+ */
+
 import { useState } from "react";
 import { useStore } from "../stores/main-store.js";
 import { getRuntime } from "../services/phase3-runtime.js";

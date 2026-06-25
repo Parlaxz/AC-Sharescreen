@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+// @ts-nocheck — Legacy file, replaced by SettingsPage.tsx (Stage 3.7G)
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
-import type { PersistedSettings } from "../../preload/api-types.js";
+import type { PersistedSettings, UpdateStatusDTO } from "../../preload/api-types.js";
 import { getRuntime } from "../services/phase3-runtime.js";
 
 async function getApi() {
