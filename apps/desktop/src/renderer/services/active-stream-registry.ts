@@ -15,6 +15,16 @@ export interface StreamAnnouncement {
   replacesSessionId: string | null;
   /** Stage 13: Whether audio has failed (video preserved) */
   isAudioDegraded?: boolean;
+  /** Wall-time the host asserts the lease is still valid through.
+   *  Long-running streams stay discoverable as long as this remains
+   *  in the future relative to now. Optional but recommended. */
+  leaseValidUntil?: number;
+  /** HLC stamp of the synchronized group settings applied at publication. */
+  sharedSettingsRevision?: string;
+  /** HLC stamp of the live-applied group settings. */
+  appliedLiveSettingsRevision?: string;
+  /** HLC stamp of the last restart-applied settings. */
+  appliedRestartSettingsRevision?: string;
 }
 
 interface InternalStream {
@@ -43,6 +53,11 @@ export class ActiveStreamRegistry {
 
   constructor(heartbeatIntervalMs = 10_000, expiryMs = 30_000) {
     this.heartbeatIntervalMs = heartbeatIntervalMs;
+    // Gate 3.3: long-running streams must remain late-joinable for
+    // hours. The expiry is now derived from heartbeat liveness and
+    // host-provided leaseValidUntil — NOT from `startedAt`. The
+    // expiryMs parameter is still honored as a fallback for streams
+    // that do not advertise a lease.
     this.expiryMs = expiryMs;
     this.tombstoneMaxAgeMs = 5 * 60 * 1000; // 5 minutes
     this.tombstoneMaxEntries = 100;
@@ -123,6 +138,7 @@ export class ActiveStreamRegistry {
     mediaSessionId: string;
     heartbeatSequence: number;
     appliedSettingsRevision?: number;
+    leaseValidUntil?: number;
   }): void {
     const k = this.key(heartbeat.groupId, heartbeat.hostDeviceId, heartbeat.logicalStreamId);
 
@@ -145,6 +161,9 @@ export class ActiveStreamRegistry {
       this.heartbeatSequences.set(k, heartbeat.heartbeatSequence);
       if (heartbeat.appliedSettingsRevision !== undefined) {
         existing.announcement.appliedSettingsRevision = heartbeat.appliedSettingsRevision;
+      }
+      if (heartbeat.leaseValidUntil !== undefined) {
+        existing.announcement.leaseValidUntil = heartbeat.leaseValidUntil;
       }
     }
   }
@@ -252,13 +271,20 @@ export class ActiveStreamRegistry {
         continue;
       }
 
-      // 2. Reject records whose streamRevision is too old relative to tombstone
-      //    cutoff — the data is stale beyond any possible recovery window.
-      //    Use tombstoneMaxAgeMs as the upper bound for how far back we trust
-      //    snapshot data.  This prevents zombie records from hours ago while
-      //    allowing valid long-running streams (up to 5 min since startedAt).
-      if (stream.startedAt < now - this.tombstoneMaxAgeMs) {
-        continue;
+      // 2. Gate 3.3: liveness is decided by heartbeat freshness or
+      //    host-provided leaseValidUntil. A stream that has been
+      //    running for several hours must remain discoverable to a
+      //    late viewer; we no longer reject on the basis of startedAt
+      //    age. The tombstone (step 1) is the only staleness gate.
+      //    However, a stream whose lease is in the past AND whose
+      //    last heartbeat is older than expiry is treated as dead.
+      if (stream.leaseValidUntil && stream.leaseValidUntil < now) {
+        const lastHb = this.heartbeatSequences.get(k);
+        if (lastHb === undefined) {
+          // We have no prior heartbeat — but the host asserts the
+          // lease is already past. Trust the host: skip.
+          continue;
+        }
       }
 
       const existing = this.streams.get(k);

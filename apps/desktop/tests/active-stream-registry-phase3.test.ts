@@ -253,10 +253,12 @@ describe("ActiveStreamRegistry Phase 3 — snapshot validation", () => {
     expect(updates).toHaveLength(0);
   });
 
-  it("snapshot rejects records beyond tombstone max age", () => {
-    // A record whose startedAt is older than tombstoneMaxAgeMs (5 min) is rejected
-    // as stale zombie data, even though it would otherwise be a valid new stream.
-    const oldStartedAt = Date.now() - 310_000; // ~5.1 min ago, beyond 5 min tombstoneMaxAgeMs
+  it("snapshot accepts long-running streams regardless of startedAt age (Gate 3.3)", () => {
+    // Gate 3.3: liveness is decided by heartbeat freshness or
+    // host-provided leaseValidUntil. A stream that has been running
+    // for several hours must remain discoverable to a late viewer;
+    // we no longer reject on the basis of startedAt age.
+    const oldStartedAt = Date.now() - 6 * 60 * 60 * 1000; // 6 hours ago
     const updates: string[] = [];
     registry.onUpdate((u) => updates.push(u.type));
 
@@ -268,11 +270,12 @@ describe("ActiveStreamRegistry Phase 3 — snapshot validation", () => {
         startedAt: oldStartedAt,
         heartbeatSequence: 1,
         streamRevision: 1,
+        leaseValidUntil: Date.now() + 30_000,
       }),
     ]);
 
-    expect(updates).toHaveLength(0);
-    expect(registry.getAllStreams()).toHaveLength(0);
+    expect(updates).toEqual(["new"]);
+    expect(registry.getAllStreams()).toHaveLength(1);
   });
 
   it("snapshot accepts long-running streams with old startedAt but within tombstone window", () => {
