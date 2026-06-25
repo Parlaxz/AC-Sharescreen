@@ -44,6 +44,7 @@ export class PublisherManager {
   private static nextId = 0;
   private readonly instanceId: number;
   private appliedAudioMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
+  private mediaBindHandler: ((peerUuid: string, token: string) => void) | null = null;
 
   constructor(events: PublisherEvents) {
     PublisherManager.nextId++;
@@ -74,6 +75,15 @@ export class PublisherManager {
 
   getInstanceId(): number {
     return this.instanceId;
+  }
+
+  /**
+   * Register a handler for media.bind messages received via the VDO data channel.
+   * Stage 5: Uses the actual media peer UUID from the VDO SDK callback, not the
+   * group control envelope senderDeviceId.
+   */
+  setOnMediaBind(handler: (peerUuid: string, token: string) => void): void {
+    this.mediaBindHandler = handler;
   }
 
   setAudioController(controller: ProcessAudioController, mode: 'system' | 'application' | 'monitor' | 'test-tone'): void {
@@ -216,6 +226,25 @@ export class PublisherManager {
 
     console.log('[PublisherManager] Connecting publisher...');
     await publisher.createAndConnect({ password: config.password });
+
+    // Register dataReceived handler for media.bind messages (Stage 5)
+    // Uses the actual media peer UUID from the VDO SDK callback.
+    if (this.mediaBindHandler) {
+      const sdk = publisher.getSDK();
+      if (sdk) {
+        sdk.on("dataReceived", (data: unknown, peerUuid: string) => {
+          // data is the raw payload received via the VDO data channel
+          // Only forward messages with type "media.bind" to prevent
+          // processing non-bind messages as bind payloads.
+          if (data && typeof data === "object") {
+            const msg = data as Record<string, unknown>;
+            if (msg.type === "media.bind" && msg.token && typeof msg.token === "string") {
+              this.mediaBindHandler!(peerUuid, msg.token);
+            }
+          }
+        });
+      }
+    }
 
     console.log('[PublisherManager] Publishing stream...');
     await publisher.publish(stream, {

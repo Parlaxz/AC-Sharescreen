@@ -13,7 +13,7 @@ import {
   type AudioAvailabilityMap,
 } from "../audio/audio-hydration-helper.js";
 import { getRuntime } from "../services/phase3-runtime.js";
-import { PublisherManager } from "../services/publisher-manager.js";
+import { ViewerClient } from "@screenlink/vdo-adapter";
 
 export function Dashboard() {
   const {
@@ -32,20 +32,24 @@ export function Dashboard() {
     viewerCount, viewers,
     // Capture settings
     captureWidth, captureHeight, captureFps, captureBitrate,
+    // View mode
+    isViewing, viewStatus,
     // Navigation
     navigate,
     // Actions
     setLocalShareState, setLocalStreamSession,
     setSelectedGroupId, setIsSharing, setIsDegraded,
+    setIsViewing, setViewStatus,
+    setWatchedStreams,
   } = useStore();
 
-  // ── Audio derived mode display (text only, no radio buttons) ──
+  // ── Audio derived mode display ──────────────────────────────
   const [audioMode, setAudioMode] = useState<AudioMode>('none');
   const [audioOptionsReady, setAudioOptionsReady] = useState(false);
   const [audioInitError, setAudioInitError] = useState<string | null>(null);
 
-  // Publisher manager ref (stream lifecycle)
-  const publisherManagerRef = useRef<PublisherManager | null>(null);
+  // Viewer client ref for active watch session
+  const viewerClientRef = useRef<ViewerClient | null>(null);
 
   // Load settings + capabilities, derive audio mode
   useEffect(() => {
@@ -102,7 +106,7 @@ export function Dashboard() {
 
   const isStreamActive = localShareState === "sharing";
 
-  // ── Start Stream ─────────────────────────────────────────────────
+  // ── Start Stream (Stage 4: via StreamSessionManager) ───────────
 
   const handleStartStream = useCallback(async () => {
     if (!sourceId || !selectedGroupId) return;
@@ -116,64 +120,44 @@ export function Dashboard() {
         return;
       }
 
-      // 1. Generate VDO credentials
-      const vdoStreamId = generateVdoStreamId();
-      const vdoPassword = generateVdoPassword();
-      const sessionId = crypto.randomUUID();
+      const ssm = runtime.getStreamSessionManager();
 
-      // 2. Create PublisherManager
-      const mgr = new PublisherManager({
-        onStateChange: () => { /* state sync via store */ },
-        onStats: () => { /* stats flow through store in future */ },
-        onError: (err) => console.error("Publisher error:", err),
-        onTrackEnded: () => { handleStopStream(); },
-      });
-      publisherManagerRef.current = mgr;
-
-      // 3. Capture and publish via PublisherManager
-      const stream = await mgr.startCapture({
-        sourceId,
-        password: vdoPassword,
-        streamId: vdoStreamId,
-        videoBitrate: captureBitrate,
-        videoWidth: captureWidth,
-        videoHeight: captureHeight,
-        videoFps: captureFps,
-      });
-      await mgr.startPublishing(stream, {
-        sourceId,
-        password: vdoPassword,
-        streamId: vdoStreamId,
-        videoBitrate: captureBitrate,
-        videoWidth: captureWidth,
-        videoHeight: captureHeight,
-        videoFps: captureFps,
-      });
-
-      const videoTrack = stream.getVideoTracks()[0]!;
-
-      // 4. Start StreamSessionManager (control plane)
-      await runtime.getStreamSessionManager().startStream({
+      // 1. Start stream via StreamSessionManager (handles capture, publish, register, heartbeat)
+      await ssm.startStream({
         groupId: selectedGroupId,
-        sourceId,
-        sourceName: sourceName || "Screen",
-        sourceKind: sourceKind ?? "screen",
-        track: videoTrack,
+        source: {
+          id: sourceId,
+          name: sourceName || "Screen",
+          kind: sourceKind ?? "screen",
+          displayId: null,
+          fingerprint: null,
+        },
       });
 
-      // 5. Store local session credentials
-      setLocalStreamSession({ sessionId, streamId: vdoStreamId, password: vdoPassword });
+      // 2. Store local session credentials from SSM
+      const vdoConfig = ssm.getCurrentVdoConfig();
+      if (vdoConfig) {
+        setLocalStreamSession({
+          sessionId: crypto.randomUUID(),
+          streamId: vdoConfig.streamId,
+          password: vdoConfig.password,
+        });
+      }
+
+      // 3. Audio setup (if audio mode is active)
+      // Audio controller is set via ssm.setAudioController() if available
+      // This is handled separately via IPC calls to the audio helper.
+      // For now, audio is optional and can be set after stream starts.
+
       setLocalShareState("sharing");
       setIsSharing(true);
     } catch (err) {
       console.error("Start stream failed:", err);
       setLocalShareState("error");
-      publisherManagerRef.current?.stopCapture().catch(() => {});
-      publisherManagerRef.current = null;
     }
   }, [sourceId, sourceName, sourceKind, selectedGroupId, localShareState, captureWidth, captureHeight, captureFps, captureBitrate, setLocalShareState, setLocalStreamSession, setIsSharing]);
 
-  // ── Stop Stream ──────────────────────────────────────────────────
+  // ── Stop Stream (Stage 4: via StreamSessionManager) ────────────
 
   const handleStopStream = useCallback(async () => {
     setLocalShareState("stopping");
@@ -182,8 +166,6 @@ export function Dashboard() {
       if (runtime) {
         await runtime.getStreamSessionManager().stopStream();
       }
-      await publisherManagerRef.current?.stopCapture();
-      publisherManagerRef.current = null;
 
       // Stop audio helper if active
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -202,22 +184,170 @@ export function Dashboard() {
     }
   }, [setLocalShareState, setLocalStreamSession, setIsSharing, setIsDegraded]);
 
-  // ── Watch Stream (placeholder — join flow not fully wired) ───────
+  // ── Watch Stream (Stage 5: real join flow) ─────────────────────
 
   const handleWatchStream = useCallback(async (
-    _groupId: string,
-    _hostDeviceId: string,
-    _logicalStreamId: string,
-    _mediaSessionId: string,
-    _hostName: string,
+    groupId: string,
+    hostDeviceId: string,
+    logicalStreamId: string,
+    mediaSessionId: string,
+    hostName: string,
   ) => {
-    console.log("[Dashboard] Watch stream:", { _groupId, _hostDeviceId, _logicalStreamId, _mediaSessionId, _hostName });
-    // TODO Phase 3.5: Full join flow
-    // 1. Send stream.join.request via group control
-    // 2. Receive token from host
-    // 3. Create ViewerClient and call view() with credentials
-    alert(`Watching stream from ${_hostName} is not yet implemented in this build.`);
-  }, []);
+    if (isViewing) return;
+    setIsViewing(true);
+    setViewStatus("requesting join...");
+
+    try {
+      const runtime = getRuntime();
+      if (!runtime) {
+        setViewStatus("error: runtime not initialized");
+        setIsViewing(false);
+        return;
+      }
+
+      const connManager = runtime.getConnectionManager();
+      const conn = connManager.getConnection(groupId);
+      if (!conn) {
+        setViewStatus("error: not connected to group");
+        setIsViewing(false);
+        return;
+      }
+
+      // 1. Send stream.join.request via group control with requestId
+      const peerUuid = conn.peerForDevice(hostDeviceId);
+      if (!peerUuid) {
+        setViewStatus("error: host not connected");
+        setIsViewing(false);
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      await conn.sendToPeer(peerUuid, {
+        type: "stream.join.request",
+        logicalStreamId,
+        viewerDeviceId: runtime.deviceId ?? "unknown",
+        viewerDisplayName: runtime.displayName ?? "Viewer",
+        requestId,
+      });
+
+      // 2. Wait for stream.join.response via the message router
+      setViewStatus("waiting for host response...");
+      const response = await runtime.waitForJoinResponse(requestId, 30_000);
+
+      if (!response.accepted) {
+        setViewStatus(`join rejected: ${response.reason ?? "unknown reason"}`);
+        setIsViewing(false);
+        return;
+      }
+
+      // 3. Response accepted — extract media credentials from response
+      const joinToken = response.mediaJoinMetadata;
+      const responseMediaSessionId = response.mediaSessionId ?? mediaSessionId;
+      if (!joinToken) {
+        setViewStatus("error: no join token in response");
+        setIsViewing(false);
+        return;
+      }
+
+      setViewStatus("connecting to media...");
+
+      // 4. Create ViewerClient and connect to media stream
+      // The viewer connects to the VDO stream using the host's VDO credentials
+      // returned in the join response (streamId for view(), password for createAndConnect()).
+      const viewerClient = new ViewerClient();
+
+      // Register event handler for receiving media
+      viewerClient.on("remoteAdded", (/* peerUuid: string */) => {
+        // Media has been received — update UI state
+        setWatchedStreams((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => ({
+          ...prev,
+          [responseMediaSessionId]: {
+            hostDeviceId,
+            hostName,
+            startedAt: Date.now(),
+          },
+        }));
+        setViewStatus("watching");
+      });
+
+      // Connect to VDO using the VDO password from the join response.
+      // Fall back to mediaSessionId only if password was not provided
+      // (backward compat with older hosts not yet sending credentials).
+      const vdoPassword = response.password ?? responseMediaSessionId;
+      await viewerClient.createAndConnect(vdoPassword);
+
+      // View the stream using the VDO stream ID from the join response.
+      // Fall back to logicalStreamId only if streamId was not provided.
+      const vdoStreamId = response.streamId ?? logicalStreamId;
+      await viewerClient.view(vdoStreamId, runtime.displayName ?? "Viewer");
+
+      // 5. Send media.bind via the media SDK data channel so the host
+      // receives it with the actual media peer UUID
+      const sdk = viewerClient.getSDK();
+      if (sdk && joinToken) {
+        // Find the publisher's peer UUID in the SDK connections
+        for (const [publisherUuid] of sdk.connections) {
+          try {
+            await viewerClient.sendMediaBind(publisherUuid, joinToken, responseMediaSessionId);
+          } catch { /* one will succeed */ }
+        }
+      }
+
+      // Store the viewer client for cleanup
+      viewerClientRef.current = viewerClient;
+
+      // If media already arrived before we finished setup, update state
+      if (sdk) {
+        setWatchedStreams((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => {
+          if (prev[responseMediaSessionId]) return prev; // already set by event handler
+          return {
+            ...prev,
+            [responseMediaSessionId]: {
+              hostDeviceId,
+              hostName,
+              startedAt: Date.now(),
+            },
+          };
+        });
+        setViewStatus("watching");
+      }
+    } catch (err) {
+      console.error("[Dashboard] Watch stream failed:", err);
+      setViewStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+      setIsViewing(false);
+      // Clean up viewer client if created
+      if (viewerClientRef.current) {
+        try {
+          viewerClientRef.current.stopViewing().catch(() => {});
+          viewerClientRef.current.disconnect().catch(() => {});
+        } catch { /* ignore */ }
+        viewerClientRef.current = null;
+      }
+    }
+  }, [isViewing, setIsViewing, setViewStatus, setWatchedStreams]);
+
+  // ── Stop Watching ──────────────────────────────────────────────
+
+  const handleStopWatching = useCallback(async (sessionId: string) => {
+    // Disconnect ViewerClient if active
+    if (viewerClientRef.current) {
+      try {
+        await viewerClientRef.current.stopViewing();
+        await viewerClientRef.current.disconnect();
+      } catch (err) {
+        console.warn("[Dashboard] ViewerClient disconnect error:", err);
+      }
+      viewerClientRef.current = null;
+    }
+
+    // Clean up watched state
+    const updated = { ...watchedStreamsBySessionId };
+    delete updated[sessionId];
+    setWatchedStreams(updated);
+
+    setIsViewing(false);
+    setViewStatus("");
+  }, [watchedStreamsBySessionId, setWatchedStreams, setIsViewing, setViewStatus]);
 
   // ── Format helpers ───────────────────────────────────────────────
 
@@ -368,7 +498,7 @@ export function Dashboard() {
         </div>
       )}
 
-      {/* 5. Available Group Streams */}
+      {/* 5. Available Group Streams (Stage 5: Watch button) */}
       {availableGroupStreams.length > 0 && (
         <div className="card">
           <h3>Available Group Streams</h3>
@@ -393,11 +523,18 @@ export function Dashboard() {
                       <span className="label">Kind:</span> {s.sourceKind}
                     </div>
                     {watchedStreamsBySessionId[s.mediaSessionId] ? (
-                      <p className="dim" style={{ fontSize: "0.75rem" }}>Already watching</p>
+                      <div className="actions" style={{ marginTop: "0.25rem" }}>
+                        <button className="danger" onClick={() => handleStopWatching(s.mediaSessionId)}>
+                          Stop Watching
+                        </button>
+                      </div>
                     ) : (
                       <div className="actions" style={{ marginTop: "0.25rem" }}>
-                        <button onClick={() => handleWatchStream(groupId, s.hostDeviceId, s.logicalStreamId, s.mediaSessionId, s.hostDisplayName || s.hostDeviceId)}>
-                          Watch
+                        <button
+                          onClick={() => handleWatchStream(groupId, s.hostDeviceId, s.logicalStreamId, s.mediaSessionId, s.hostDisplayName || s.hostDeviceId)}
+                          disabled={isViewing}
+                        >
+                          {isViewing ? "Joining..." : "Watch"}
                         </button>
                       </div>
                     )}
@@ -421,6 +558,11 @@ export function Dashboard() {
               <div className="detail-row">
                 <span className="label">Started:</span> {new Date(w.startedAt).toLocaleTimeString()}
               </div>
+              <div className="actions" style={{ marginTop: "0.25rem" }}>
+                <button className="danger" onClick={() => handleStopWatching(sessionId)}>
+                  Stop Watching
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -438,6 +580,13 @@ export function Dashboard() {
               </span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* View Status Indicator */}
+      {isViewing && viewStatus && (
+        <div className="card">
+          <p className="dim">{viewStatus}</p>
         </div>
       )}
 
