@@ -51,6 +51,10 @@ export {
   getReceiverVideoCapabilities,
   getCommonVideoCodecCapabilities,
   applyCodecPreferences,
+  intersectSenderAndReceiverCodecs,
+  applyCodecPreferencesToTransceiverBeforeOffer,
+  getAutoCodecOrder,
 } from "./codec-capabilities.js";
+export type { CodecPreferenceRecord } from "./codec-capabilities.js";
 
 export { pollStats } from "./media-stats.js";

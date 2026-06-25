@@ -1,6 +1,7 @@
 import { CompatibilityError } from "@screenlink/shared";
 import type { VDONinjaSDK, PublishOptions, SDKEvent } from "./sdk-types.js";
 import { getSDKConstructor } from "./sdk-version.js";
+import { applyCodecPreferencesToTransceiverBeforeOffer } from "./codec-capabilities.js";
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -20,11 +21,15 @@ export interface HostPublisherOptions {
   debug?: boolean;
   maxReconnectAttempts?: number;
   reconnectDelay?: number;
+  /** Stage 8: Requested video codec ("auto", "VP9", "H264", "VP8", "AV1") */
+  requestedCodec?: string;
 }
 
 export class HostPublisher {
   private sdk: VDONinjaSDK | null = null;
   private pendingHandlers = new Map<SDKEvent, Set<(...args: unknown[]) => void>>();
+  /** Stage 8: Tracked requested codec for applying preferences on new connections */
+  private _requestedCodec: string = "auto";
 
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
@@ -75,14 +80,39 @@ export class HostPublisher {
       }
     }
 
+    // Stage 8: Register peerConnected handler to apply codec preferences
+    // on new viewer connections as they are established.
+    this._requestedCodec = options.requestedCodec ?? "auto";
+    this.sdk.on("peerConnected", (_uuid: unknown) => {
+      this.applyCodecPreferencesOnExistingConnections();
+    });
+
     await withTimeout(this.sdk.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
 
     console.log('[HostPublisher] SDK connected, sdk still set:', this.sdk !== null);
   }
 
+  /**
+   * Publish a MediaStream and apply codec preferences before the offer is generated.
+   * Stage 8: Passes videoCodec hint to SDK and applies codec preferences to any
+   * existing publisher transceivers immediately after publish.
+   */
   async publish(stream: MediaStream, options: PublishOptions): Promise<void> {
     if (!this.sdk) throw new CompatibilityError("Not connected");
-    await withTimeout(this.sdk.publish(stream, options), 10000, "SDK publish timed out");
+
+    // Stage 8: Apply codec preferences to any pre-existing publisher transceivers.
+    this.applyCodecPreferencesOnExistingConnections();
+
+    await withTimeout(this.sdk.publish(stream, {
+      ...options,
+      // Pass videoCodec hint if requested, so the SDK can prefer it
+      // during initial offer generation.
+      videoCodec: this._requestedCodec !== "auto" ? this._requestedCodec : undefined,
+    }), 10000, "SDK publish timed out");
+
+    // Stage 8: Apply preferences again after publish to catch transceivers
+    // created during the publish call.
+    this.applyCodecPreferencesOnExistingConnections();
   }
 
   async stopPublishing(): Promise<void> {
@@ -98,5 +128,33 @@ export class HostPublisher {
 
   getSDK(): VDONinjaSDK | null {
     return this.sdk;
+  }
+
+  /**
+   * Apply codec preferences on all existing publisher transceivers.
+   * Stage 8: Uses sender/receiver intersection with auto-order.
+   * Called from peerConnected handler AND after publish/view to catch
+   * connections created during the initial setup.
+   */
+  private applyCodecPreferencesOnExistingConnections(): void {
+    if (!this.sdk) return;
+    try {
+      for (const [, group] of this.sdk.connections) {
+        const pc = group.publisher?.pc;
+        if (!pc) continue;
+        const transceivers = pc.getTransceivers();
+        for (const t of transceivers) {
+          if (t.receiver?.track?.kind === "video") {
+            try {
+              applyCodecPreferencesToTransceiverBeforeOffer(t, this._requestedCodec);
+            } catch {
+              // Browser may reject empty/unsupported codec lists
+            }
+          }
+        }
+      }
+    } catch {
+      // Best effort — codec preferences are optional
+    }
   }
 }
