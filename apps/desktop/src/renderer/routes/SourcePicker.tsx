@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import type { CaptureSourceDTO } from "../../preload/api-types.js";
 
@@ -21,7 +21,7 @@ export function SourcePicker() {
       // Restore previous selection via fingerprint matching
       if (list.length > 0) {
         try {
-          const settings = await api.getSettings() as Record<string, unknown>;
+          const settings = await api.getSettings() as unknown as Record<string, unknown>;
           const lastSourceId = settings.lastSourceId as string | undefined;
           const rawFingerprint = settings.lastSourceFingerprint as string | undefined;
 
@@ -84,8 +84,8 @@ const getApi = () =>
           id,
           name,
           kind,
-          displayId,
-          fingerprint: fingerprint ?? null,
+          displayId: displayId ?? "",
+          fingerprint: fingerprint ? JSON.stringify(fingerprint) : null,
         });
 
         // Persist fingerprint for auto-resume
@@ -190,3 +190,4 @@ const getApi = () =>
     </div>
   );
 }
+

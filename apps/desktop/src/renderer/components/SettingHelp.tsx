@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useId, useCallback } from "react";
+import { useState, useRef, useEffect, useId, useCallback } from "react";
 import type { HelpEntry } from "../quality-setting-help.js";
 
 interface Props {

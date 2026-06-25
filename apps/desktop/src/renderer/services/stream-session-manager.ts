@@ -818,7 +818,7 @@ export class StreamSessionManager {
       // Roll back partial audio ownership. The video pipeline stays
       // untouched.
       if (controller) {
-        try { controller.destroy(); } catch { /* best effort */ }
+        try { (controller as { destroy?: () => void }).destroy?.(); } catch { /* best effort */ }
       }
       // Best-effort stop of any started capture.
       try { await api.stopAudio(); } catch { /* best effort */ }
@@ -842,7 +842,9 @@ export class StreamSessionManager {
     return new Promise((resolve, reject) => {
       const handler = (event: MessageEvent) => {
         if (event.data?.type === "pcm:port") {
-          window.removeEventListener("message", handler);
+          if (typeof window !== "undefined" && window.removeEventListener) {
+            window.removeEventListener("message", handler);
+          }
           const port = event.ports?.[0];
           if (port) {
             resolve(port);
@@ -851,9 +853,13 @@ export class StreamSessionManager {
           }
         }
       };
-      window.addEventListener("message", handler);
+      if (typeof window !== "undefined" && window.addEventListener) {
+        window.addEventListener("message", handler);
+      }
       setTimeout(() => {
-        window.removeEventListener("message", handler);
+        if (typeof window !== "undefined" && window.removeEventListener) {
+          window.removeEventListener("message", handler);
+        }
         reject(new Error("pcm:port wait timeout"));
       }, timeoutMs);
     });

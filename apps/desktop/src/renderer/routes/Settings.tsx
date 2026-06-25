@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import type { PersistedSettings } from "../../preload/api-types.js";
 import { getRuntime } from "../services/phase3-runtime.js";
@@ -41,6 +41,9 @@ export function Settings() {
 
   // Local transport policy (JSON blob)
   const [localTransportJson, setLocalTransportJson] = useState("{}");
+
+  // Dirty marker — must exist before the clamp handlers reference it.
+  const markDirty = useCallback(() => setDirty(true), []);
 
   // ── Clamp helpers — ensure invalid input (NaN, negative, out-of-range)
   //    does not silently become 0.
@@ -99,8 +102,6 @@ export function Settings() {
   useEffect(() => {
     void reloadSettings();
   }, [reloadSettings]);
-
-  const markDirty = useCallback(() => setDirty(true), []);
 
   const handleSave = useCallback(async () => {
     if (!settings) return;

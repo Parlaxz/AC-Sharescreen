@@ -249,14 +249,15 @@ export class PublisherManager {
     if (this.mediaBindHandler) {
       const sdk = publisher.getSDK();
       if (sdk) {
-        sdk.on("dataReceived", (data: unknown, peerUuid: string) => {
+        sdk.on("dataReceived", (data: unknown, peerUuid: unknown) => {
+          const pUuid = String(peerUuid);
           // data is the raw payload received via the VDO data channel
           // Only forward messages with type "media.bind" to prevent
           // processing non-bind messages as bind payloads.
           if (data && typeof data === "object") {
             const msg = data as Record<string, unknown>;
             if (msg.type === "media.bind" && msg.token && typeof msg.token === "string") {
-              this.mediaBindHandler!(peerUuid, msg.token);
+              this.mediaBindHandler!(pUuid, msg.token);
             }
           }
         });
@@ -297,9 +298,9 @@ export class PublisherManager {
             if (!sender) continue;
             const params = sender.getParameters();
             if (params) {
-              params.degradationPreference = config.degradationPreference as RTCDegradationPreference;
+              (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
               if (params.encodings?.[0]) {
-                params.encodings[0].degradationPreference = config.degradationPreference as RTCDegradationPreference;
+                (params.encodings[0] as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
               }
               try {
                 await sender.setParameters(params);
@@ -344,7 +345,8 @@ export class PublisherManager {
   async stopCapture(): Promise<void> {
     // Return existing promise if already stopping (awaitable idempotency)
     if (this.stopping_) {
-      return this.stopPromise_;
+      await this.stopPromise_;
+      return;
     }
     this.stopping_ = true;
     this.setState("stopping");

@@ -437,8 +437,8 @@ export class MediaStatsPoller {
           inboundStats.set("fractionLost", s.fractionLost as number);
         }
 
-        if (s.type === "candidate-pair" && (s as RTCIceCandidatePairStats).selected) {
-          const pair = s as RTCIceCandidatePairStats;
+        if (s.type === "candidate-pair" && (s as unknown as { selected?: boolean }).selected) {
+          const pair = s as unknown as RTCIceCandidatePairStats;
           snapshot.currentRtt = pair.currentRoundTripTime || 0;
           snapshot.availableOutgoingBitrate = (pair.availableOutgoingBitrate || 0) / 1000;
           selectedPairLocalId = pair.localCandidateId;
@@ -706,8 +706,8 @@ export class MediaStatsPoller {
           inboundStats.set("fractionLost", s.fractionLost as number);
         }
 
-        if (s.type === "candidate-pair" && (s as RTCIceCandidatePairStats).selected) {
-          const pair = s as RTCIceCandidatePairStats;
+        if (s.type === "candidate-pair" && (s as unknown as { selected?: boolean }).selected) {
+          const pair = s as unknown as RTCIceCandidatePairStats;
           snapshot.currentRtt = pair.currentRoundTripTime || 0;
           snapshot.availableOutgoingBitrate = (pair.availableOutgoingBitrate || 0) / 1000;
           selectedPairLocalId = pair.localCandidateId;
@@ -861,3 +861,4 @@ export class MediaStatsPoller {
     }
   }
 }
+

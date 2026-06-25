@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import type { ScreenLinkAPI } from "../../preload/api-types.js";
 
@@ -6,7 +6,7 @@ interface AppInfo {
   version: string;
   electronVersion: string;
   chromeVersion: string;
-  nodeVersion: string;
+  nodeVersion?: string;
 }
 
 export function About() {

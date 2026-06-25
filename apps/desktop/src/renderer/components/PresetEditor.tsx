@@ -125,7 +125,7 @@ export function PresetEditor({
   };
 
   const getVideoValue = (field: string): number | string => {
-    const v = settings.video as Record<string, unknown>;
+    const v = settings.video as unknown as Record<string, unknown>;
     const val = v[field];
     if (typeof val === "boolean") return val ? "true" : "false";
     if (val === null || val === undefined) return "";
@@ -133,7 +133,7 @@ export function PresetEditor({
   };
 
   const getAudioValue = (field: string): number | string => {
-    const a = settings.audio as Record<string, unknown>;
+    const a = settings.audio as unknown as Record<string, unknown>;
     const val = a[field];
     if (typeof val === "boolean") return val ? "true" : "false";
     return String(val);
@@ -145,7 +145,7 @@ export function PresetEditor({
     } else if (field === "preserveAspectRatio" || field === "preventUpscale") {
       updateVideo(field, rawValue === "true");
     } else if (field === "scalabilityMode") {
-      updateVideo(field, rawValue || null);
+      updateVideo(field, rawValue || (null as unknown as string));
     } else {
       updateVideo(field, rawValue);
     }
@@ -274,3 +274,4 @@ export function PresetEditor({
     </div>
   );
 }
+

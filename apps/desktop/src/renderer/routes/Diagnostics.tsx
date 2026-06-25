@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import type {
   ScreenLinkAPI,
@@ -11,7 +11,7 @@ interface AppInfo {
   version: string;
   electronVersion: string;
   chromeVersion: string;
-  nodeVersion: string;
+  nodeVersion?: string;
 }
 
 interface HelperProvenance {
@@ -54,7 +54,7 @@ export function Diagnostics() {
       ).screenlink;
       if (api) {
         api.getAudioState().then(state => setAudioDiag(state)).catch(() => {});
-        api.getMixerDiagnostics().then(diag => setMixerDiag(diag)).catch(() => {});
+        api.getMixerDiagnostics().then(diag => setMixerDiag(diag as unknown as FilteredMonitorDiagnostics)).catch(() => {});
         api.getPipelineSnapshot().then(snap => setPipelineSnapshot(snap)).catch(() => {});
       }
     })();
@@ -212,30 +212,30 @@ export function Diagnostics() {
       </div>
 
       {/* System Audio Diagnostics (endpoint pipeline) */}
-      {pipelineSnapshot?.endpointPacketsCaptured !== undefined && (
+      {(pipelineSnapshot as unknown as { endpointPacketsCaptured?: number } | null)?.endpointPacketsCaptured !== undefined && pipelineSnapshot && (
         <div className="card">
           <h3>System Audio Diagnostics</h3>
           <table className="info-table">
             <tbody>
               <tr><td>Pipeline Type</td><td className="mono">Endpoint Direct</td></tr>
-              <tr><td>Endpoint Active</td><td className="mono">{pipelineSnapshot.endpointDiagnostics?.endpointActive === false ? 'No' : (pipelineSnapshot.endpointPacketsCaptured ?? 0) > 0 ? 'Yes' : 'Yes (starting)'}</td></tr>
-              <tr><td>Packets Captured</td><td className="mono">{pipelineSnapshot.endpointPacketsCaptured?.toLocaleString() ?? '—'}</td></tr>
-              <tr><td>Nonzero Packets</td><td className="mono">{pipelineSnapshot.endpointNonZeroPackets?.toLocaleString() ?? '—'}</td></tr>
-              <tr><td>Silent Packets</td><td className="mono">{pipelineSnapshot.endpointSilentPackets?.toLocaleString() ?? '—'}</td></tr>
-              <tr><td>Stream Generation</td><td className="mono">{pipelineSnapshot.streamGeneration ?? '—'}</td></tr>
-              <tr><td>Helper State</td><td className="mono">{pipelineSnapshot.helperState ?? '—'}</td></tr>
-              <tr><td>Helper Uptime</td><td className="mono">{pipelineSnapshot.helperUptimeMs ? `${(pipelineSnapshot.helperUptimeMs / 1000).toFixed(1)}s` : '—'}</td></tr>
-              <tr><td>Parser Invalid Headers</td><td className="mono">{pipelineSnapshot.parserInvalidHeaders ?? '—'}</td></tr>
-              <tr><td>Pipe Write Failures</td><td className="mono">{pipelineSnapshot.pcmPipeWriteFailures ?? '—'}</td></tr>
-              <tr><td>Bridge Dropped (wrong gen)</td><td className="mono">{pipelineSnapshot.bridge?.droppedWrongGeneration ?? '—'}</td></tr>
-              <tr><td>Bridge Post Errors</td><td className="mono">{pipelineSnapshot.bridge?.postErrors ?? '—'}</td></tr>
-              <tr><td>Bridge Last Error</td><td className="mono" style={{ fontSize: "0.7rem" }}>{pipelineSnapshot.bridge?.lastError ?? 'none'}</td></tr>
+              <tr><td>Endpoint Active</td><td className="mono">{(pipelineSnapshot as unknown as { endpointDiagnostics?: { endpointActive?: boolean } }).endpointDiagnostics?.endpointActive === false ? 'No' : ((pipelineSnapshot as unknown as { endpointPacketsCaptured?: number }).endpointPacketsCaptured ?? 0) > 0 ? 'Yes' : 'Yes (starting)'}</td></tr>
+              <tr><td>Packets Captured</td><td className="mono">{(pipelineSnapshot as unknown as { endpointPacketsCaptured?: number }).endpointPacketsCaptured?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Nonzero Packets</td><td className="mono">{(pipelineSnapshot as unknown as { endpointNonZeroPackets?: number }).endpointNonZeroPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Silent Packets</td><td className="mono">{(pipelineSnapshot as unknown as { endpointSilentPackets?: number }).endpointSilentPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Stream Generation</td><td className="mono">{pipelineSnapshot?.streamGeneration ?? '—'}</td></tr>
+              <tr><td>Helper State</td><td className="mono">{pipelineSnapshot?.helperState ?? '—'}</td></tr>
+              <tr><td>Helper Uptime</td><td className="mono">{pipelineSnapshot?.helperUptimeMs ? `${(pipelineSnapshot.helperUptimeMs / 1000).toFixed(1)}s` : '—'}</td></tr>
+              <tr><td>Parser Invalid Headers</td><td className="mono">{(pipelineSnapshot as unknown as { parserInvalidHeaders?: number }).parserInvalidHeaders ?? '—'}</td></tr>
+              <tr><td>Pipe Write Failures</td><td className="mono">{(pipelineSnapshot as unknown as { pcmPipeWriteFailures?: number }).pcmPipeWriteFailures ?? '—'}</td></tr>
+              <tr><td>Bridge Dropped (wrong gen)</td><td className="mono">{(pipelineSnapshot as unknown as { bridge?: { droppedWrongGeneration?: number } }).bridge?.droppedWrongGeneration ?? '—'}</td></tr>
+              <tr><td>Bridge Post Errors</td><td className="mono">{(pipelineSnapshot as unknown as { bridge?: { postErrors?: number } }).bridge?.postErrors ?? '—'}</td></tr>
+              <tr><td>Bridge Last Error</td><td className="mono" style={{ fontSize: "0.7rem" }}>{(pipelineSnapshot as unknown as { bridge?: { lastError?: string } }).bridge?.lastError ?? 'none'}</td></tr>
             </tbody>
           </table>
-          {pipelineSnapshot.endpointDiagnostics && (
+          {Boolean((pipelineSnapshot as unknown as { endpointDiagnostics?: unknown }).endpointDiagnostics) && (
             <>
               <h4 style={{ marginTop: "0.5rem" }}>Endpoint Diagnostics</h4>
-              <pre className="log-box" style={{ fontSize: "0.7rem" }}>{JSON.stringify(pipelineSnapshot.endpointDiagnostics, null, 2)}</pre>
+              <pre className="log-box" style={{ fontSize: "0.7rem" }}>{JSON.stringify((pipelineSnapshot as unknown as { endpointDiagnostics: unknown }).endpointDiagnostics, null, 2)}</pre>
             </>
           )}
         </div>
@@ -250,11 +250,11 @@ export function Diagnostics() {
               <tr><td>Pipeline Type</td><td className="mono">Dynamic Process Mix</td></tr>
               <tr><td>Stream Generation</td><td className="mono">{pipelineSnapshot.streamGeneration ?? '—'}</td></tr>
               <tr><td>Helper State</td><td className="mono">{pipelineSnapshot.helperState ?? '—'}</td></tr>
-              <tr><td>Mixer Feed Packets</td><td className="mono">{pipelineSnapshot.mixerFeedPackets?.toLocaleString() ?? '—'}</td></tr>
-              <tr><td>Mixer Output Packets</td><td className="mono">{pipelineSnapshot.mixerOutputPackets?.toLocaleString() ?? '—'}</td></tr>
-              <tr><td>Mixer Nonzero Output</td><td className="mono">{pipelineSnapshot.mixerNonZeroOutputPackets?.toLocaleString() ?? '—'}</td></tr>
-              <tr><td>Capture Accepted</td><td className="mono">{pipelineSnapshot.onCaptureAccepted === undefined ? '—' : pipelineSnapshot.onCaptureAccepted ? 'Yes' : 'No'}</td></tr>
-              <tr><td>Capture Rejected State</td><td className="mono">{pipelineSnapshot.onCaptureRejectedState ?? '—'}</td></tr>
+              <tr><td>Mixer Feed Packets</td><td className="mono">{(pipelineSnapshot as unknown as { mixerFeedPackets?: number }).mixerFeedPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Mixer Output Packets</td><td className="mono">{(pipelineSnapshot as unknown as { mixerOutputPackets?: number }).mixerOutputPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Mixer Nonzero Output</td><td className="mono">{(pipelineSnapshot as unknown as { mixerNonZeroOutputPackets?: number }).mixerNonZeroOutputPackets?.toLocaleString() ?? '—'}</td></tr>
+              <tr><td>Capture Accepted</td><td className="mono">{(pipelineSnapshot as unknown as { onCaptureAccepted?: boolean }).onCaptureAccepted === undefined ? '—' : (pipelineSnapshot as unknown as { onCaptureAccepted?: boolean }).onCaptureAccepted ? 'Yes' : 'No'}</td></tr>
+              <tr><td>Capture Rejected State</td><td className="mono">{(pipelineSnapshot as unknown as { onCaptureRejectedState?: string }).onCaptureRejectedState ?? '—'}</td></tr>
               <tr><td>Active Capture Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.activeCaptureSources ?? '—'}</td></tr>
               <tr><td>Sessions (last scan)</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.totalSessionsLastScan ?? '—'}</td></tr>
               <tr><td>Desired Sources</td><td className="mono">{pipelineSnapshot.filteredMonitorDiagnostics?.desiredSourcesLastScan ?? '—'}</td></tr>

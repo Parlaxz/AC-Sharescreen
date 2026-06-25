@@ -106,7 +106,7 @@ export class GroupSettingsLiveApply {
     const enc = params.encodings[0]!;
     enc.maxBitrate = settings.video.videoBitrateKbps * 1000;
     enc.maxFramerate = settings.video.sendFps;
-    enc.degradationPreference = settings.video.degradationPreference;
+    (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = settings.video.degradationPreference as RTCDegradationPreference;
     if (settings.video.scaleResolutionDownBy >= 1) {
       enc.scaleResolutionDownBy = settings.video.scaleResolutionDownBy;
     }

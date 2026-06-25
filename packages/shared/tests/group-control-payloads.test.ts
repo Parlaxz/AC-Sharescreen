@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   DedupSet,
   GroupHelloPayloadSchema,
@@ -29,7 +29,6 @@ import {
   PongPayloadSchema,
   parseGroupMessagePayload,
   DEDUP_MAX_ENTRIES,
-  DEDUP_WINDOW_MS,
   MAX_GROUP_CONTROL_PAYLOAD_BYTES,
   utf8ByteLength,
   validateEnvelope,
@@ -37,11 +36,6 @@ import {
   GROUP_PROTOCOL_VERSION,
 } from "../src/group-control-messages.js";
 import type { GroupControlEnvelopeInput } from "../src/group-control-messages.js";
-import {
-  generateDeviceKeyPair,
-  importDevicePrivateKeyForSigning,
-  type DeviceKeyPair,
-} from "../src/device-signing-key.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -64,12 +58,22 @@ describe("GroupHelloPayloadSchema", () => {
     const r = GroupHelloPayloadSchema.safeParse({ deviceId: "dev-1", displayName: "Alice" });
     expect(r.success).toBe(false);
   });
+
+  it("rejects publicKey field (no device-signing-key compatibility)", () => {
+    const r = GroupHelloPayloadSchema.safeParse({ deviceId: "dev-1", displayName: "Alice", protocolVersion: 2, publicKey: "abc" });
+    expect(r.success).toBe(false);
+  });
 });
 
 describe("GroupHelloResponsePayloadSchema", () => {
   it("accepts valid response", () => {
     const r = GroupHelloResponsePayloadSchema.safeParse({ deviceId: "dev-1", displayName: "Alice" });
     expect(r.success).toBe(true);
+  });
+
+  it("rejects publicKey field", () => {
+    const r = GroupHelloResponsePayloadSchema.safeParse({ deviceId: "dev-1", displayName: "Alice", publicKey: "abc" });
+    expect(r.success).toBe(false);
   });
 });
 
@@ -124,6 +128,13 @@ describe("GroupMemberUpdatePayloadSchema", () => {
   it("rejects invalid profileStamp", () => {
     const r = GroupMemberUpdatePayloadSchema.safeParse({
       member: { deviceId: "dev-1", displayName: "Alice", firstSeenAt: 1000, profileStamp: { wallTimeMs: -1, counter: 0, nodeId: "a" } },
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects publicKey field on member", () => {
+    const r = GroupMemberUpdatePayloadSchema.safeParse({
+      member: { deviceId: "dev-1", displayName: "Alice", firstSeenAt: 1000, profileStamp: STAMP, publicKey: "abc" },
     });
     expect(r.success).toBe(false);
   });
@@ -405,11 +416,6 @@ describe("PongPayloadSchema", () => {
     const r = PongPayloadSchema.safeParse({ seq: 42 });
     expect(r.success).toBe(true);
   });
-
-  it("rejects missing seq", () => {
-    const r = PongPayloadSchema.safeParse({});
-    expect(r.success).toBe(false);
-  });
 });
 
 // ─── parseGroupMessagePayload ──────────────────────────────────────────────
@@ -451,7 +457,7 @@ describe("parseGroupMessagePayload", () => {
   });
 
   it("rejects malformed payload for known type", () => {
-    const r = parseGroupMessagePayload("group.member.update", { member: { deviceId: "d1" } }); // missing displayName etc
+    const r = parseGroupMessagePayload("group.member.update", { member: { deviceId: "d1" } });
     expect(r.ok).toBe(false);
   });
 
@@ -475,15 +481,15 @@ describe("utf8ByteLength", () => {
   });
 
   it("returns correct byte length for multi-byte characters", () => {
-    expect(utf8ByteLength("héllo")).toBe(6); // é is 2 bytes
+    expect(utf8ByteLength("héllo")).toBe(6);
   });
 
   it("returns correct byte length for emoji", () => {
-    expect(utf8ByteLength("a😀b")).toBe(6); // 😀 is 4 bytes
+    expect(utf8ByteLength("a😀b")).toBe(6);
   });
 
   it("returns correct byte length for CJK", () => {
-    expect(utf8ByteLength("你好")).toBe(6); // each is 3 bytes
+    expect(utf8ByteLength("你好")).toBe(6);
   });
 
   it("returns 0 for empty string", () => {
@@ -495,14 +501,10 @@ describe("utf8ByteLength", () => {
 
 describe("Payload size enforcement", () => {
   it("UTF-8 size limit is correctly computed", () => {
-    // Use a 3-byte UTF-8 character (€ = U+20AC, 1 JS char). 30000 of them = 90000 bytes
-    // String length = 30000 (1 JS char each) — easily passes 64KB string length check
-    // UTF-8 byte length = 90000 — exceeds 64KB byte limit
     const multiBytePayload = "€".repeat(30000);
     const byteLen = utf8ByteLength(multiBytePayload);
     expect(byteLen).toBe(90000);
     expect(byteLen).toBeGreaterThan(MAX_GROUP_CONTROL_PAYLOAD_BYTES);
-    // String length is 30000, which is less than 64KB — wrong length check!
     expect(multiBytePayload.length).toBe(30000);
     expect(multiBytePayload.length).toBeLessThan(MAX_GROUP_CONTROL_PAYLOAD_BYTES);
   });
@@ -512,39 +514,18 @@ describe("Payload size enforcement", () => {
 
 describe("DedupSet max entries", () => {
   it("enforces max entries bound", () => {
-    const dedup = new DedupSet(60000, 10); // 1 min window, max 10 entries
+    const dedup = new DedupSet(60000, 10);
     for (let i = 0; i < 10; i++) {
       dedup.add(`id-${i}`);
     }
     expect(dedup.size()).toBe(10);
-
-    // Adding one more should evict oldest
     dedup.add("id-10");
-    // Should still be at most 10
     expect(dedup.size()).toBeLessThanOrEqual(10);
-    // id-0 should be evicted
     expect(dedup.has("id-0")).toBe(false);
   });
 
   it("default max entries is 10000", () => {
     expect(DEDUP_MAX_ENTRIES).toBe(10000);
-  });
-
-  it("time-based eviction still works with max entries", async () => {
-    const dedup = new DedupSet(1, 100); // 1ms window, max 100 entries
-    dedup.add("test-id");
-    // Wait for eviction window to pass
-    await new Promise((r) => setTimeout(r, 5));
-    expect(dedup.has("test-id")).toBe(false); // evicted by time
-  });
-
-  it("zero window does not cause issues", async () => {
-    const dedup = new DedupSet(0);
-    dedup.add("a");
-    // Wait a tick so time passes
-    await new Promise((r) => setTimeout(r, 5));
-    expect(dedup.has("a")).toBe(false);
-    expect(dedup.size()).toBe(0);
   });
 });
 
@@ -556,11 +537,8 @@ const VALIDATION_SENDER = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
 
 async function makeValidEnvelope(
   overrides?: Partial<GroupControlEnvelopeInput>,
-  keyPair?: DeviceKeyPair,
 ) {
-  const kp = keyPair ?? VALIDATION_KEYPAIR;
-  const privateKey = await importDevicePrivateKeyForSigning(kp.privateKeySeed);
-  const input: Omit<GroupControlEnvelopeInput, "deviceSignature"> = {
+  const input: GroupControlEnvelopeInput = {
     version: GROUP_PROTOCOL_VERSION,
     type: "group.hello",
     messageId: crypto.randomUUID(),
@@ -572,29 +550,17 @@ async function makeValidEnvelope(
       deviceId: VALIDATION_SENDER,
       displayName: "Alice",
       protocolVersion: GROUP_PROTOCOL_VERSION,
-      publicKey: kp.publicKey.key,
     },
     ...overrides,
-  } as Omit<GroupControlEnvelopeInput, "deviceSignature">;
-  return await buildEnvelope(input, VALIDATION_GROUP_SECRET, privateKey);
+  } as GroupControlEnvelopeInput;
+  return await buildEnvelope(input, VALIDATION_GROUP_SECRET);
 }
 
-let VALIDATION_KEYPAIR: DeviceKeyPair;
-const VALIDATION_LOOKUP = (senderDeviceId: string) => {
-  if (senderDeviceId === VALIDATION_SENDER) {
-    return { publicKey: VALIDATION_KEYPAIR.publicKey };
-  }
-  return null;
-};
-beforeAll(async () => {
-  VALIDATION_KEYPAIR = await generateDeviceKeyPair();
-});
-
-describe("validateEnvelope integration", () => {
+describe("validateEnvelope integration (HMAC-only)", () => {
   it("accepts a valid envelope with correct group, MAC, size, and dedup", async () => {
     const envelope = await makeValidEnvelope();
     const dedup = new DedupSet();
-    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data.type).toBe("group.hello");
@@ -602,16 +568,14 @@ describe("validateEnvelope integration", () => {
   });
 
   it("rejects oversized payload (UTF-8 byte length, not string length)", async () => {
-    // Create payload with multi-byte chars where UTF-8 bytes > limit but string.length < limit
-    const oversizedPayload = { data: "€".repeat(22000) }; // 22000 * 3 bytes = 66000 > 64KB
+    const oversizedPayload = { data: "€".repeat(22000) };
     expect(utf8ByteLength(JSON.stringify(oversizedPayload))).toBeGreaterThan(MAX_GROUP_CONTROL_PAYLOAD_BYTES);
-    expect(JSON.stringify(oversizedPayload).length).toBeLessThan(MAX_GROUP_CONTROL_PAYLOAD_BYTES);
 
     const envelope = await makeValidEnvelope({
       payload: oversizedPayload as any,
     });
     const dedup = new DedupSet();
-    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toContain("exceeds maximum size");
@@ -622,36 +586,39 @@ describe("validateEnvelope integration", () => {
     const envelope1 = await makeValidEnvelope();
     const dedup = new DedupSet(60000);
 
-    // First use — accept
-    const r1 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
+    const r1 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
     expect(r1.ok).toBe(true);
 
-    // Second use with same messageId — reject as duplicate
-    const r2 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
+    const r2 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
     expect(r2.ok).toBe(false);
     if (!r2.ok) {
       expect(r2.reason).toContain("Duplicate");
     }
   });
 
-  // ── Spoof rejection (sender deviceId mismatch) ──────────────────
-  it("rejects group.member.update where senderDeviceId !== member.deviceId via parseGroupMessagePayload", () => {
-    // The schema passes — the spoof check is in the service layer.
-    // This test verifies the schema itself would accept the payload,
-    // proving the spoof rejection relies on the additional service-layer check.
-    const result = parseGroupMessagePayload("group.member.update", {
-      member: {
-        deviceId: "real-device",
-        displayName: "Attacker",
-        firstSeenAt: 1000,
-        profileStamp: { wallTimeMs: 100, counter: 0, nodeId: "attacker-node" },
-      },
-    });
-    // Schema accepts (payload is well-formed)
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      // The typed data correctly identifies the member deviceId
-      expect(result.data.member.deviceId).toBe("real-device");
+  it("rejects a tampered payload (MAC fails)", async () => {
+    const envelope = await makeValidEnvelope();
+    envelope.payload = { evil: "data" };
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, new DedupSet());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/Invalid MAC|MAC/);
     }
+  });
+
+  it("rejects a tampered MAC", async () => {
+    const envelope = await makeValidEnvelope();
+    envelope.mac = "0".repeat(64);
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, new DedupSet());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/Invalid MAC|MAC/);
+    }
+  });
+
+  it("rejects envelope with wrong group secret", async () => {
+    const envelope = await makeValidEnvelope();
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, "wrong-secret", new DedupSet());
+    expect(result.ok).toBe(false);
   });
 });

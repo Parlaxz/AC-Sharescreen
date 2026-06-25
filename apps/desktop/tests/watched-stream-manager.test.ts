@@ -51,7 +51,6 @@ function makeEnvelope(
     groupId,
     logicalStamp: { wallTimeMs: Date.now(), counter: 0, nodeId: senderDeviceId },
     payload,
-    deviceSignature: "0".repeat(128),
     mac,
   };
 }

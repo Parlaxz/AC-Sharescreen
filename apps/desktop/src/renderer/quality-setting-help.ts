@@ -7,8 +7,8 @@ export interface HelpEntry {
   lowerValue: string;
   tradeoff: string;
   bandwidth: "increase" | "decrease" | "none" | "variable";
-  sharpness: "increase" | "decrease" | "none";
-  motion: "increase" | "decrease" | "none";
+  sharpness: "increase" | "decrease" | "none" | "variable";
+  motion: "increase" | "decrease" | "none" | "variable";
   cpu: "increase" | "decrease" | "none";
   latency: "increase" | "decrease" | "none";
   compatibility: "increase" | "decrease" | "none";

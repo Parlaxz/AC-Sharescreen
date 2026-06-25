@@ -101,7 +101,7 @@ export interface AppState {
   reset: () => void;
   setLocalShareState: (state: LocalShareState) => void;
   setLocalStreamSession: (s: { sessionId: string; streamId: string; password: string } | null) => void;
-  setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => void;
+  setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }> | ((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>)) => void;
 
   // Group state actions
   setGroups: (groups: Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>, order: string[]) => void;
@@ -149,7 +149,7 @@ const initialState = {
   qualityPresets: [] as unknown[],
 };
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
   ...initialState,
 
   navigate: (page) => set({ currentPage: page }),
@@ -184,7 +184,7 @@ export const useStore = create<AppState>((set) => ({
 
   setLocalShareState: (state) => set({ localShareState: state }),
   setLocalStreamSession: (s) => set({ localStreamSession: s }),
-  setWatchedStreams: (s) => set({ watchedStreamsBySessionId: s }),
+  setWatchedStreams: (s) => set({ watchedStreamsBySessionId: typeof s === "function" ? s(get().watchedStreamsBySessionId) : s }),
 
   setGroups: (groupsById, groupOrder) => set({ groupsById, groupOrder }),
   setGroupConnectionState: (groupConnectionStateById) => set({ groupConnectionStateById }),

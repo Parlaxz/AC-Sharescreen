@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { useStore } from "../stores/main-store.js";
 import { getRuntime } from "../services/phase3-runtime.js";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
@@ -172,7 +172,9 @@ export function Groups() {
     ];
   };
 
-  const groups = groupOrder.map((id) => groupsById[id]).filter(Boolean);
+  const groups = groupOrder
+    .map((id) => groupsById[id])
+    .filter((g): g is NonNullable<typeof g> => g !== undefined);
 
   return (
     <div className="page">

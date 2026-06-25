@@ -75,8 +75,8 @@ export function startNotificationWatcher(): () => void {
   const seenStreams = new DedupSet();
 
   const unsubscribe = store.subscribe((state, prevState) => {
-    const s = state as Record<string, unknown>;
-    const p = prevState as Record<string, unknown>;
+    const s = state as unknown as Record<string, unknown>;
+    const p = prevState as unknown as Record<string, unknown>;
 
     // Detect new active streams
     const currentStreams = s.activeStreamsByGroup as Record<string, StreamAnnouncement[]> | undefined;
@@ -164,7 +164,7 @@ export function notifyStreamStarted(input: {
   if (seenNotifications.has(key)) return false;
   seenNotifications.add(key);
 
-  const s = useStore.getState() as Record<string, unknown>;
+  const s = useStore.getState() as unknown as Record<string, unknown>;
   if (s.notificationsEnabled === false) return true;
 
   showNotification({
@@ -173,3 +173,4 @@ export function notifyStreamStarted(input: {
   });
   return true;
 }
+

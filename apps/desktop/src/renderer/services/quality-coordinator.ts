@@ -416,7 +416,7 @@ export class QualityCoordinator {
       enc.scaleResolutionDownBy = 1;
     }
 
-    enc.degradationPreference = effective.degradationPreference;
+    (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = effective.degradationPreference as RTCDegradationPreference;
     // Set priority
     enc.priority = "medium";
 

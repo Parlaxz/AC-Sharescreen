@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import {
   generateVdoStreamId,
@@ -260,9 +260,9 @@ export function Dashboard() {
       const viewerClient = new ViewerClient();
 
       // Register event handler for receiving media tracks
-      viewerClient.on("remoteAdded", (/* peerUuid: string */) => {
+      (viewerClient as unknown as { on: (event: string, listener: (...args: unknown[]) => void) => void }).on("remoteAdded", () => {
         // Media has been received — update UI state
-        setWatchedStreams((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => ({
+        setWatchedStreams((prev) => ({
           ...prev,
           [responseMediaSessionId]: {
             hostDeviceId,
@@ -274,8 +274,9 @@ export function Dashboard() {
       });
 
       // Register track event to attach received media to video element
-      viewerClient.on("track", (track: MediaStreamTrack, stream: MediaStream) => {
-        if (track.kind === "video" && videoRef.current) {
+      (viewerClient as unknown as { on: (event: string, listener: (...args: unknown[]) => void) => void }).on("track", (...args: unknown[]) => {
+        const [track, stream] = args as [MediaStreamTrack, MediaStream];
+        if (track?.kind === "video" && videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play().catch(() => {});
         }
@@ -465,7 +466,7 @@ export function Dashboard() {
               {localShareState === "starting" ? "Starting..." : "Start Stream"}
             </button>
           ) : (
-            <button className="danger" onClick={handleStopStream} disabled={localShareState === "stopping" || localShareState === "idle"}>
+            <button className="danger" onClick={handleStopStream} disabled={localShareState === "stopping"}>
               {localShareState === "stopping" ? "Stopping..." : "Stop Stream"}
             </button>
           )}

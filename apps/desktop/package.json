@@ -10,7 +10,7 @@
     "dev": "node scripts/dev-electron.mjs",
     "build": "vite build && tsc -p tsconfig.main.json --outDir dist/main && tsc -p tsconfig.preload.json --outDir dist/preload",
     "build:electron": "electron-builder",
-    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "vitest run",
     "clean": "if exist dist rmdir /s /q dist & if exist out rmdir /s /q out & if exist .vite rmdir /s /q .vite"
   },

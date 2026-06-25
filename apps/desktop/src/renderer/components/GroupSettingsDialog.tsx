@@ -71,8 +71,8 @@ export function GroupSettingsDialog({ groupId, onClose }: Props) {
   useEffect(() => {
     const unsub = useStore.subscribe((state, prevState) => {
       if (!dirty) return;
-      const newGroup = (state as Record<string, unknown>).groupsById as Record<string, { name: string }> | undefined;
-      const oldGroup = (prevState as Record<string, unknown>).groupsById as Record<string, { name: string }> | undefined;
+      const newGroup = (state as unknown as Record<string, unknown>).groupsById as Record<string, { name: string }> | undefined;
+      const oldGroup = (prevState as unknown as Record<string, unknown>).groupsById as Record<string, { name: string }> | undefined;
       const newName = newGroup?.[groupId]?.name;
       const oldName = oldGroup?.[groupId]?.name;
       if (newName && newName !== oldName && newName !== name) {

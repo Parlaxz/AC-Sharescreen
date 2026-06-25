@@ -11,13 +11,6 @@ export interface GroupBootstrapCreator {
   displayName: string;
   firstSeenAt: number;
   profileStamp: HybridTimestamp;
-  /**
-   * base64url-encoded 32-byte Ed25519 public key (Gate 1.2).
-   * The creator MUST include their public key in the invite so that
-   * the joining member can verify their group.hello messages from the
-   * first envelope onwards.
-   */
-  publicKey?: string;
 }
 
 export interface GroupInviteV1 {
@@ -45,7 +38,6 @@ export const GroupBootstrapCreatorSchema: z.ZodType<GroupBootstrapCreator> = z.o
   displayName: z.string().min(1).max(100),
   firstSeenAt: z.number().int().positive(),
   profileStamp: HybridTimestampSchema,
-  publicKey: z.string().min(1).max(512).optional(),
 });
 
 export const GroupInviteV1Schema: z.ZodType<GroupInviteV1> = z.object({
@@ -73,12 +65,6 @@ export interface CreateGroupInviteOpts {
   nodeId: string;
   groupId?: string;
   nowMs?: number;
-  /**
-   * base64url-encoded 32-byte Ed25519 public key for the creator.
-   * Required so the joining member can pin the creator's identity
-   * from the very first hello.
-   */
-  creatorPublicKey?: string;
 }
 
 /**
@@ -115,7 +101,6 @@ export function createGroupInvite(opts: CreateGroupInviteOpts): GroupInviteV1 {
         counter: 0,
         nodeId: opts.nodeId,
       },
-      publicKey: opts.creatorPublicKey,
     },
   };
 

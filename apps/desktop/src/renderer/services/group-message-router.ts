@@ -112,9 +112,11 @@ export class GroupMessageRouter {
   routeMessage(groupId: string, envelope: GroupControlEnvelope): void {
     const type = envelope.type;
 
-    // ── Schema validation for ALL message types ─────────────────────
-    const parsed = parseGroupMessagePayload(type, envelope.payload);
-    if (!parsed.ok) return; // Malformed payload rejected
+    // ── Schema validation for ALL message types — top-level guard.
+    //    Handlers below re-parse with the literal type so the payload
+    //    is correctly narrowed to GroupControlPayloadMap[T] instead of
+    //    a discriminated union.
+    if (!parseGroupMessagePayload(type, envelope.payload).ok) return;
 
     // ── group.state.*, group.member.* → GroupSyncService ──────────
     if (
@@ -139,7 +141,9 @@ export class GroupMessageRouter {
 
     // stream.join.response → resolve pending join request
     if (type === "stream.join.response") {
-      const joinData = parsed.data; // typed via GroupControlPayloadMap
+      const parsed = parseGroupMessagePayload("stream.join.response", envelope.payload);
+      if (!parsed.ok) return;
+      const joinData = parsed.data;
       const requestId = joinData.requestId;
       if (requestId) {
         const resolver = this.joinResponseResolvers.get(requestId);
@@ -166,8 +170,9 @@ export class GroupMessageRouter {
     // stream.leave → ViewerMediaBinding (viewer disconnect cleanup)
     if (type === "stream.leave") {
       if (this.viewerBinding) {
-        const leaveData = parsed.data; // typed via GroupControlPayloadMap
-        const viewerDeviceId = leaveData.viewerDeviceId;
+        const leaveData = parseGroupMessagePayload("stream.leave", envelope.payload);
+        if (!leaveData.ok) return;
+        const viewerDeviceId = leaveData.data.viewerDeviceId;
         if (viewerDeviceId) {
           this.viewerBinding.removeViewer(viewerDeviceId);
         }
@@ -191,16 +196,19 @@ export class GroupMessageRouter {
     // (groupId, hostDeviceId, heartbeatSequence, streamRevision, replacesSessionId, etc.),
     // so handleStarted correctly identifies it as a replacement, not a new stream.
     if (type === "stream.restarted") {
-      void this.streamRegistry.handleStarted(parsed.data as never);
+      const r = parseGroupMessagePayload("stream.restarted", envelope.payload);
+      if (!r.ok) return;
+      void this.streamRegistry.handleStarted(r.data as never);
       return;
     }
 
     // media.bind → ViewerMediaBinding (token consumption via actual media peer UUID)
     if (type === "media.bind") {
       if (this.viewerBinding) {
-        const bindData = parsed.data; // typed via GroupControlPayloadMap
+        const bindData = parseGroupMessagePayload("media.bind", envelope.payload);
+        if (!bindData.ok) return;
         const peerUuid = envelope.senderDeviceId;
-        const token = bindData.token;
+        const token = bindData.data.token;
         if (peerUuid && token) {
           void this.viewerBinding.handleMediaBind(peerUuid, token);
         }
@@ -221,8 +229,9 @@ export class GroupMessageRouter {
 
     // ── ping / pong → connection health tracking ──────────────────
     if (type === "ping") {
-      const pingData = parsed.data; // typed via GroupControlPayloadMap
-      const seq = pingData.seq;
+      const pingData = parseGroupMessagePayload("ping", envelope.payload);
+      if (!pingData.ok) return;
+      const seq = pingData.data.seq;
       this.pingTimestamps.set(`${groupId}:${envelope.senderDeviceId}:${seq}`, Date.now());
       // Respond with pong
       const conn = this.connManager.getConnection(groupId);
@@ -236,15 +245,18 @@ export class GroupMessageRouter {
     }
 
     if (type === "pong") {
-      const pongData = parsed.data; // typed via GroupControlPayloadMap
-      const seq = pongData.seq;
+      const pongData = parseGroupMessagePayload("pong", envelope.payload);
+      if (!pongData.ok) return;
+      const seq = pongData.data.seq;
       this.pongTimestamps.set(`${groupId}:${envelope.senderDeviceId}:${seq}`, Date.now());
       return;
     }
 
     // ── Generic stream.* → ActiveStreamRegistry (lifecycle) ──────
     if (type.startsWith("stream.")) {
-      void this.routeStreamMessage(type, envelope, parsed.data);
+      const r = parseGroupMessagePayload(type, envelope.payload);
+      if (!r.ok) return;
+      void this.routeStreamMessage(type, envelope, r.data);
       return;
     }
   }
@@ -270,31 +282,30 @@ export class GroupMessageRouter {
     type: string,
     envelope: GroupControlEnvelope,
   ): void {
-    const parsed = parseGroupMessagePayload(type as any, envelope.payload);
-    if (!parsed.ok) return;
-
     if (!this.qualityCoordinator) {
       return; // No coordinator configured yet, silently ignore
     }
 
     if (type === "quality.viewer.request") {
-      const data = parsed.data as Record<string, unknown>;
+      const parsed = parseGroupMessagePayload("quality.viewer.request", envelope.payload);
+      if (!parsed.ok) return;
+      const data = parsed.data;
       // The streamSessionId from the quality payload serves as the logicalStreamId
       // for storage key construction.
-      const logicalStreamId = data.streamSessionId as string;
+      const logicalStreamId = data.streamSessionId;
       this.qualityCoordinator.handleViewerRequest(
         groupId,
         logicalStreamId,
         envelope.senderDeviceId,
         {
-          streamSessionId: data.streamSessionId as string,
-          requestId: (data as any).requestId ?? "",
-          revision: (data as any).revision ?? 0,
-          videoBitrateKbps: (data as any).videoBitrateKbps ?? 0,
-          maxWidth: (data as any).maxWidth ?? 0,
-          maxHeight: (data as any).maxHeight ?? 0,
-          maxFps: (data as any).maxFps ?? 0,
-          degradationPreference: (data as any).degradationPreference ?? "balanced",
+          streamSessionId: data.streamSessionId,
+          requestId: data.requestId,
+          revision: data.revision,
+          videoBitrateKbps: data.videoBitrateKbps,
+          maxWidth: data.maxWidth,
+          maxHeight: data.maxHeight,
+          maxFps: data.maxFps,
+          degradationPreference: data.degradationPreference,
         },
       );
 
@@ -334,8 +345,10 @@ export class GroupMessageRouter {
     }
 
     if (type === "quality.viewer.clear") {
-      const data = parsed.data as Record<string, unknown>;
-      const logicalStreamId = data.streamSessionId as string;
+      const parsed = parseGroupMessagePayload("quality.viewer.clear", envelope.payload);
+      if (!parsed.ok) return;
+      const data = parsed.data;
+      const logicalStreamId = data.streamSessionId;
       this.qualityCoordinator.handleViewerClear(
         groupId,
         logicalStreamId,
@@ -397,7 +410,7 @@ export class GroupMessageRouter {
 
       case "stream.state.snapshot": {
         const snapshotPayload = _validatedPayload as { streams: unknown[] };
-        this.streamRegistry.handleSnapshot(snapshotPayload?.streams ?? []);
+        this.streamRegistry.handleSnapshot(snapshotPayload?.streams as never ?? []);
         break;
       }
 

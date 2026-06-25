@@ -1,43 +1,23 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   validateEnvelope,
   signEnvelope,
   verifyEnvelope,
+  buildEnvelope,
   DedupSet,
   GROUP_PROTOCOL_VERSION,
   GroupControlEnvelopeSchema,
-  buildEnvelopeWithDeviceSignature,
+  type GroupControlEnvelopeInput,
 } from "@screenlink/shared";
-import { serializeForDeviceSignature, bytesToHex } from "../src/group-control-messages.js";
-import type { GroupControlEnvelopeInput } from "@screenlink/shared";
-import {
-  generateDeviceKeyPair,
-  importDevicePrivateKeyForSigning,
-  signBytes,
-  type DeviceKeyPair,
-} from "../src/device-signing-key.js";
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
 
 const GROUP_SECRET = "test-group-secret-abcdef123456";
 const GROUP_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const SENDER_ID = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
 
-let kp: DeviceKeyPair;
-let privKey: CryptoKey;
-let pubKeyObj: DeviceKeyPair["publicKey"];
-
-beforeAll(async () => {
-  kp = await generateDeviceKeyPair();
-  privKey = await importDevicePrivateKeyForSigning(kp.privateKeySeed);
-  pubKeyObj = kp.publicKey;
-});
-
 async function makeSigned(
-  overrides?: Partial<Omit<GroupControlEnvelopeInput, "deviceSignature">>,
-  key: CryptoKey = privKey,
-) {
-  const input: Omit<GroupControlEnvelopeInput, "deviceSignature"> = {
+  overrides?: Partial<GroupControlEnvelopeInput>,
+): Promise<GroupControlEnvelopeInput & { mac: string }> {
+  const input: GroupControlEnvelopeInput = {
     version: GROUP_PROTOCOL_VERSION,
     type: "group.hello",
     messageId: crypto.randomUUID(),
@@ -47,34 +27,22 @@ async function makeSigned(
     logicalStamp: { wallTimeMs: Date.now(), counter: 0, nodeId: SENDER_ID },
     payload: { displayName: "Alice" },
     ...overrides,
-  } as Omit<GroupControlEnvelopeInput, "deviceSignature">;
-  const partial: GroupControlEnvelopeInput = {
-    ...input,
-    deviceSignature: "",
-  };
-  const sig = await signBytes(key, serializeForDeviceSignature(partial));
-  const full: Omit<GroupControlEnvelopeInput, "mac"> = {
-    ...input,
-    deviceSignature: bytesToHex(sig),
-  };
-  return await buildEnvelopeWithDeviceSignature(full, GROUP_SECRET);
+  } as GroupControlEnvelopeInput;
+  return await buildEnvelope(input, GROUP_SECRET);
 }
 
-const lookup = () => ({ publicKey: pubKeyObj });
-
-describe("GroupControlMessages", () => {
-  it("buildEnvelope creates a valid envelope with MAC and device signature", async () => {
+describe("GroupControlMessages (HMAC-only)", () => {
+  it("buildEnvelope creates a valid envelope with MAC", async () => {
     const envelope = await makeSigned();
     expect(envelope.version).toBe(GROUP_PROTOCOL_VERSION);
     expect(envelope.type).toBe("group.hello");
     expect(envelope.mac).toMatch(/^[0-9a-f]+$/);
     expect(envelope.mac.length).toBe(64);
-    expect(envelope.deviceSignature.length).toBe(128);
     expect(GroupControlEnvelopeSchema.safeParse(envelope).success).toBe(true);
   });
 
   it("signEnvelope produces a consistent signature for the same input", async () => {
-    const input: Omit<GroupControlEnvelopeInput, "deviceSignature"> = {
+    const input: GroupControlEnvelopeInput = {
       version: GROUP_PROTOCOL_VERSION,
       type: "group.hello",
       messageId: "11111111-1111-4111-1111-111111111111",
@@ -83,10 +51,9 @@ describe("GroupControlMessages", () => {
       groupId: GROUP_ID,
       logicalStamp: { wallTimeMs: 1000, counter: 0, nodeId: SENDER_ID },
       payload: { displayName: "Alice" },
-    } as Omit<GroupControlEnvelopeInput, "deviceSignature">;
-    const partial: GroupControlEnvelopeInput = { ...input, deviceSignature: "abc" };
-    const sig1 = await signEnvelope(partial, GROUP_SECRET);
-    const sig2 = await signEnvelope(partial, GROUP_SECRET);
+    } as GroupControlEnvelopeInput;
+    const sig1 = await signEnvelope(input, GROUP_SECRET);
+    const sig2 = await signEnvelope(input, GROUP_SECRET);
     expect(sig1).toBe(sig2);
   });
 
@@ -114,7 +81,7 @@ describe("GroupControlMessages", () => {
     const envelope = await makeSigned();
     const wrongGroupId = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
     const dedup = new DedupSet();
-    const result = await validateEnvelope(envelope, wrongGroupId, GROUP_SECRET, dedup, lookup);
+    const result = await validateEnvelope(envelope, wrongGroupId, GROUP_SECRET, dedup);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toContain("Wrong group");
@@ -128,7 +95,6 @@ describe("GroupControlMessages", () => {
       GROUP_ID,
       GROUP_SECRET,
       dedup,
-      lookup,
     );
     expect(result.ok).toBe(false);
   });
@@ -136,9 +102,9 @@ describe("GroupControlMessages", () => {
   it("DedupSet prevents duplicate message IDs", async () => {
     const envelope = await makeSigned();
     const dedup = new DedupSet(60000);
-    const r1 = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup, lookup);
+    const r1 = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup);
     expect(r1.ok).toBe(true);
-    const r2 = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup, lookup);
+    const r2 = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup);
     expect(r2.ok).toBe(false);
     if (!r2.ok) {
       expect(r2.reason).toContain("Duplicate");
@@ -155,10 +121,45 @@ describe("GroupControlMessages", () => {
   it("validateEnvelope rejects unsupported version", async () => {
     const envelope = await makeSigned({ version: 99 });
     const dedup = new DedupSet();
-    const result = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup, lookup);
+    const result = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toMatch(/version|Unsupported/);
     }
+  });
+
+  it("validateEnvelope rejects oversized payload", async () => {
+    // Create a payload larger than the 64 KB cap
+    const big = "x".repeat(70 * 1024);
+    const envelope = await makeSigned({ payload: { big } });
+    const dedup = new DedupSet();
+    const result = await validateEnvelope(envelope, GROUP_ID, GROUP_SECRET, dedup);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/Payload|size|exceeds/i);
+    }
+  });
+});
+
+// ─── Compile-only contract: buildEnvelope requires the group secret ────────
+
+describe("buildEnvelope contract (HMAC-only)", () => {
+  it("requires a group secret argument", () => {
+    const input: GroupControlEnvelopeInput = {
+      version: GROUP_PROTOCOL_VERSION,
+      type: "group.hello",
+      messageId: crypto.randomUUID(),
+      sentAt: 1,
+      senderDeviceId: "x",
+      groupId: GROUP_ID,
+      logicalStamp: { wallTimeMs: 1, counter: 0, nodeId: "x" },
+      payload: {},
+    } as GroupControlEnvelopeInput;
+    // @ts-expect-error — buildEnvelope must take a group secret; single arg is invalid.
+    void buildEnvelope(input);
+    // @ts-expect-error — third "device private key" argument is no longer part of the API.
+    void buildEnvelope(input, "secret", {} as CryptoKey);
+    // Correct call: must pass the group secret.
+    void buildEnvelope(input, "secret");
   });
 });

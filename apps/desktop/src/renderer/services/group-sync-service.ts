@@ -117,9 +117,18 @@ export class GroupSyncService {
     this.stopAntiEntropy(groupId);
   }
 
+  /**
+   * Local edits return a *value delta* — only the value field is
+   * required. The service fills in the stamp, hash, and updatedBy
+   * metadata so callers cannot accidentally supply stale stamps.
+   */
   async performLocalEdit(
     groupId: string,
-    updater: (state: GroupSharedState) => Partial<GroupSharedState>,
+    updater: (state: GroupSharedState) => {
+      name?: { value: string };
+      defaultQuality?: { value: GroupQualitySettings };
+      members?: Record<string, GroupMemberRecord>;
+    },
   ): Promise<void> {
     const sync = this.syncStates.get(groupId);
     if (!sync) return;

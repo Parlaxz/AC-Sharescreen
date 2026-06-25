@@ -49,8 +49,20 @@ function makeInput(
   };
 }
 
+// Loose alias for the VDO SDK instance type — the constructor export
+// shape isn't a perfect ConstructorType so the renderer uses this
+// narrower alias for sdk fields and handlers.
+type VDONinjaSDKInstance = {
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  removeAllListeners(): void;
+  on(event: string, listener: (...args: unknown[]) => void): void;
+  sendData(data: unknown, options: unknown): Promise<void>;
+  connections?: Map<string, unknown>;
+};
+
 export class GroupControlConnection {
-  private sdk: ReturnType<ReturnType<typeof getSDKConstructor>> | null = null;
+  private sdk: VDONinjaSDKInstance | null = null;
   private peerToDevice = new Map<string, string>();
   private deviceToPeer = new Map<string, string>();
   private _state: ConnectionState = "idle";
@@ -98,14 +110,16 @@ export class GroupControlConnection {
 
     try {
       const ctor = getSDKConstructor();
-      const sdk = new ctor({
+      // The SDK constructor is loosely typed at this seam; treat the
+      // resulting instance as the renderer's narrow SDK alias.
+      const sdk = new (ctor as unknown as new (opts: unknown) => VDONinjaSDKInstance)({
         host: "https://api.vdo.ninja",
         password: this.opts.controlRoomId,
         salt: this.opts.groupSecret.slice(0, 16),
         debug: false,
         maxReconnectAttempts: 5,
         reconnectDelay: 2000,
-      }) as ReturnType<ReturnType<typeof getSDKConstructor>>;
+      });
 
       this.sdk = sdk;
       this.setupEventHandlers(gen);
@@ -218,9 +232,10 @@ export class GroupControlConnection {
     const sdk = this.sdk;
     if (!sdk) return;
 
-    sdk.on("peerConnected", (peerUuid: string) => {
+    sdk.on("peerConnected", (peerUuid: unknown) => {
+      const pUuid = String(peerUuid);
       if (gen !== this.startGeneration || this.destroyed) return;
-      this.sendToPeer(peerUuid, {
+      this.sendToPeer(pUuid, {
         type: "group.hello",
         deviceId: this.opts.nodeId,
         displayName: this.opts.displayName,
@@ -228,17 +243,19 @@ export class GroupControlConnection {
       }).catch(() => {});
     });
 
-    sdk.on("peerDisconnected", (peerUuid: string) => {
+    sdk.on("peerDisconnected", (peerUuid: unknown) => {
+      const pUuid = String(peerUuid);
       if (gen !== this.startGeneration || this.destroyed) return;
-      const deviceId = this.peerToDevice.get(peerUuid);
+      const deviceId = this.peerToDevice.get(pUuid);
       if (deviceId) {
-        this.peerToDevice.delete(peerUuid);
+        this.peerToDevice.delete(pUuid);
         this.deviceToPeer.delete(deviceId);
         this.opts.onPeerOffline(deviceId);
       }
     });
 
-    sdk.on("dataReceived", async (data: unknown, peerUuid: string) => {
+    sdk.on("dataReceived", async (data: unknown, peerUuid: unknown) => {
+      const pUuid = String(peerUuid);
       if (gen !== this.startGeneration || this.destroyed) return;
       try {
         // Use full validateEnvelope (checks schema, version, group ID, MAC, size, dedup) (B11)
@@ -252,7 +269,7 @@ export class GroupControlConnection {
         // envelope.senderDeviceId === mappedDeviceId or be rejected.
         // Also prevents hello/hello.response remapping a peer UUID to a
         // different device ID without disconnect.
-        if (!this.checkSenderIdentity(peerUuid, validatedEnvelope)) {
+        if (!this.checkSenderIdentity(pUuid, validatedEnvelope)) {
           return;
         }
 
@@ -264,14 +281,14 @@ export class GroupControlConnection {
 
           // Map if not already mapped
           const oldPeer = this.deviceToPeer.get(deviceId);
-          if (!oldPeer || oldPeer !== peerUuid) {
+          if (!oldPeer || oldPeer !== pUuid) {
             if (oldPeer) this.peerToDevice.delete(oldPeer);
-            this.peerToDevice.set(peerUuid, deviceId);
-            this.deviceToPeer.set(deviceId, peerUuid);
+            this.peerToDevice.set(pUuid, deviceId);
+            this.deviceToPeer.set(deviceId, pUuid);
             this.opts.onPeerOnline(deviceId, displayName);
 
             // Send hello.response once
-            this.sendToPeer(peerUuid, {
+            this.sendToPeer(pUuid, {
               type: "group.hello.response",
               deviceId: this.opts.nodeId,
               displayName: this.opts.displayName,
@@ -285,10 +302,10 @@ export class GroupControlConnection {
           if (!deviceId) return;
 
           const oldPeer = this.deviceToPeer.get(deviceId);
-          if (!oldPeer || oldPeer !== peerUuid) {
+          if (!oldPeer || oldPeer !== pUuid) {
             if (oldPeer) this.peerToDevice.delete(oldPeer);
-            this.peerToDevice.set(peerUuid, deviceId);
-            this.deviceToPeer.set(deviceId, peerUuid);
+            this.peerToDevice.set(pUuid, deviceId);
+            this.deviceToPeer.set(deviceId, pUuid);
             this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
           }
           // DO NOT respond to a response

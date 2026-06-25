@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import { useStore, type Page } from "./stores/main-store.js";
 import { Dashboard } from "./routes/Dashboard.js";
 import { SourcePicker } from "./routes/SourcePicker.js";
