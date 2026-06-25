@@ -72,9 +72,23 @@ const getApi = () =>
         const api = getApi();
         await api?.setSource(id);
         setSelectedId(id);
-        setSource(id, name);
-        // Persist fingerprint for auto-resume
+
+        // Find the full source metadata to persist kind, displayId, fingerprint
+        const source = sources.find((s) => s.id === id);
+        const kind = source?.kind ?? "screen";
+        const displayId = source?.displayId ?? null;
+
+        // Persist full source metadata to store (kind, displayId, fingerprint)
         const fingerprint = await api?.getSourceFingerprint(id);
+        setSource({
+          id,
+          name,
+          kind,
+          displayId,
+          fingerprint: fingerprint ?? null,
+        });
+
+        // Persist fingerprint for auto-resume
         const updates: Record<string, unknown> = { lastSourceId: id, lastSourceName: name };
         if (fingerprint) {
           updates.lastSourceFingerprint = JSON.stringify(fingerprint);
@@ -86,7 +100,7 @@ const getApi = () =>
         setError("Failed to select source. Try again.");
       }
     },
-    [setSource, navigate],
+    [setSource, navigate, sources],
   );
 
   return (

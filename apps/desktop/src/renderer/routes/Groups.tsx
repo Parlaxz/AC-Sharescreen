@@ -29,6 +29,7 @@ export function Groups() {
   const setSelectedGroupId = useStore((s) => s.setSelectedGroupId);
   const connectionStateById = useStore((s) => s.groupConnectionStateById);
   const onlineDeviceIdsByGroup = useStore((s) => s.onlineDeviceIdsByGroup);
+  const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
 
   // Helper: add group to store
   const addGroupToStore = (groupId: string, name: string, members: Record<string, { deviceId: string; displayName: string }>) => {
@@ -242,6 +243,15 @@ export function Groups() {
             const onlineIds = onlineDeviceIdsByGroup[g.id] ?? [];
             const connState = connectionStateById[g.id];
             const membersList = Object.values(g.members);
+            // Stage 17: Display current streamers for this group
+            const groupStreams = activeStreamsByGroup[g.id] ?? [];
+            const uniqueStreamers = new Map<string, string>();
+            for (const s of groupStreams) {
+              if (!uniqueStreamers.has(s.hostDeviceId)) {
+                uniqueStreamers.set(s.hostDeviceId, s.hostDisplayName ?? s.hostDeviceId);
+              }
+            }
+            const streamerEntries = Array.from(uniqueStreamers.entries());
             return (
               <div
                 key={g.id}
@@ -252,6 +262,21 @@ export function Groups() {
                 <p className="connection-state">
                   {connState ? connState.state : "idle"} · {onlineIds.length} online · {membersList.length} known user{membersList.length === 1 ? "" : "s"}
                 </p>
+                {/* Stage 17: Active streamers section */}
+                {streamerEntries.length > 0 && (
+                  <div className="streamer-list" style={{ marginBottom: "0.5rem" }}>
+                    <p className="dim" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.25rem" }}>
+                      {streamerEntries.length === 1 ? "Streaming" : "Streaming"}
+                    </p>
+                    <div className="member-list compact">
+                      {streamerEntries.map(([, displayName]) => (
+                        <span key={displayName} className="member-tag online" style={{ background: "var(--success-bg, #d4edda)", color: "var(--success-text, #155724)" }}>
+                          {displayName}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="member-list compact">
                   {sortedMembers(g.members, onlineIds).slice(0, 8).map((m) => (
                     <span key={m.deviceId} className={`member-tag ${onlineIds.includes(m.deviceId) ? "online" : "offline"}`}>

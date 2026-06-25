@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useStore } from "../stores/main-store.js";
 import {
   createDefaultGroupQualitySettings,
@@ -7,6 +7,169 @@ import {
 } from "@screenlink/shared";
 import { PresetEditor } from "../components/PresetEditor.js";
 import { getRuntime } from "../services/phase3-runtime.js";
+
+// ─── Quality Status Display (Stage 17) ─────────────────────────────────────
+
+interface QualityStatusProps {
+  groupId: string;
+  sessionId: string;
+  hostDeviceId: string;
+  hostName: string;
+}
+
+/**
+ * Display requested/effective/observed quality status for the selected
+ * watched target. Reads data from the runtime's QualityCoordinator and
+ * MediaStatsPoller where available.
+ */
+function QualityStatusDisplay({ groupId, sessionId, hostDeviceId, hostName }: QualityStatusProps) {
+  const [observedStats, setObservedStats] = useState<{
+    videoBitrateKbps?: number;
+    codec?: string;
+    fps?: number;
+    width?: number;
+    height?: number;
+    rtt?: number;
+    packetLoss?: number;
+    qualityLimitationReason?: string | null;
+  } | null>(null);
+
+  // Attempt to read per-viewer stats from the runtime
+  useEffect(() => {
+    const runtime = getRuntime();
+    if (!runtime) return;
+
+    const mss = runtime.getMediaStatsService();
+    if (!mss || !mss.getViewerStats) return;
+
+    // The viewer's own device ID is the runtime's deviceId
+    const viewerDeviceId = runtime.deviceId ?? "unknown";
+
+    // Try to find stats for this viewer+target combo.
+    // For the viewer side, getViewerStats uses viewerDeviceId::mediaPeerUuid key.
+    // We iterate known stats by querying the poller's internal map.
+    // If we can resolve the mediaPeerUuid for this target, use it.
+    const viewerBinding = runtime.getViewerMediaBinding();
+    const hostMediaPeerUuid = viewerBinding?.getViewerMediaPeer(hostDeviceId);
+    if (hostMediaPeerUuid) {
+      const stats = mss.getViewerStats(groupId, sessionId, viewerDeviceId, hostMediaPeerUuid);
+      if (stats) {
+        setObservedStats({
+          videoBitrateKbps: stats.videoBitrateKbps,
+          codec: stats.codec,
+          fps: stats.fps,
+          width: stats.width,
+          height: stats.height,
+          rtt: stats.rtt,
+          packetLoss: stats.packetLoss,
+          qualityLimitationReason: stats.qualityLimitationReason,
+        });
+        return;
+      }
+    }
+
+    // Fallback: try without mediaPeerUuid (viewer side — poller uses own deviceId)
+    // The per-viewer poller on the viewer side stores stats keyed by viewerDeviceId::mediaPeerUuid
+    // where viewerDeviceId = hostDeviceId (the host being watched) minus the mediaPeerUuid.
+    // On the viewer side, the stats service was started with the host's media peer UUID.
+    // Try by convention: the viewer's own stats are keyed by runtime.deviceId.
+    const selfDeviceId = runtime.deviceId ?? "unknown";
+    // Try the viewer's own accumulated stats (from legacy poller)
+    const viewerStats = (mss as any).viewerStats as Map<string, unknown> | undefined;
+    if (viewerStats) {
+      // Look for any entry matching this session
+      for (const [, entry] of viewerStats.entries()) {
+        const s = entry as Record<string, unknown>;
+        if (s.viewerDeviceId === selfDeviceId || s.viewerDeviceId === hostDeviceId) {
+          setObservedStats({
+            videoBitrateKbps: s.videoBitrateKbps as number,
+            codec: s.codec as string,
+            fps: s.fps as number,
+            width: s.width as number,
+            height: s.height as number,
+            rtt: s.rtt as number,
+            packetLoss: s.packetLoss as number,
+            qualityLimitationReason: s.qualityLimitationReason as string | null,
+          });
+          return;
+        }
+      }
+    }
+  }, [groupId, sessionId, hostDeviceId]);
+
+  /**
+   * Resolve effective quality from the runtime's QualityCoordinator.
+   * On the viewer side, the coordinator stores requests we've sent
+   * (as seen via group message routing). For our own device, we can
+   * read back the last request sent for this target stream.
+   */
+  const effectiveInfo = useMemo(() => {
+    const runtime = getRuntime();
+    if (!runtime) return null;
+    const qc = runtime.getQualityCoordinator();
+    if (!qc) return null;
+    const viewerDeviceId = runtime.deviceId ?? "unknown";
+    // The coordinator stores requests by groupId, logicalStreamId, viewerDeviceId
+    // On the viewer side, logicalStreamId = sessionId for the watched stream.
+    const request = qc.getViewerRequest(groupId, sessionId, viewerDeviceId);
+    if (!request) return null;
+    return {
+      requestedBitrate: request.videoBitrateKbps,
+      requestedWidth: request.maxWidth,
+      requestedHeight: request.maxHeight,
+      requestedFps: request.maxFps,
+      requestedDegradation: request.degradationPreference,
+      revision: request.revision,
+      requestedAt: request.requestedAt,
+    };
+  }, [groupId, sessionId]);
+
+  return (
+    <div className="quality-status" style={{ marginTop: "0.5rem", fontSize: "0.85rem" }}>
+      <p className="dim" style={{ marginBottom: "0.25rem" }}>
+        <strong>Target:</strong> {hostName} &middot; <span style={{ fontSize: "0.8rem" }}>Session: {sessionId.slice(0, 8)}</span>
+      </p>
+
+      {/* Requested quality (from stored request) */}
+      {effectiveInfo ? (
+        <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
+          <p style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.15rem" }}>Requested</p>
+          <p className="dim" style={{ fontSize: "0.75rem", lineHeight: 1.4 }}>
+            {effectiveInfo.requestedBitrate} kbps &middot; {effectiveInfo.requestedWidth}&times;{effectiveInfo.requestedHeight} @ {effectiveInfo.requestedFps} fps
+            &middot; {effectiveInfo.requestedDegradation}
+          </p>
+        </div>
+      ) : (
+        <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
+          <p className="dim" style={{ fontSize: "0.75rem", fontStyle: "italic" }}>
+            No quality request data available for this target.
+          </p>
+        </div>
+      )}
+
+      {/* Observed stats (from RTC stats pipeline) */}
+      {observedStats ? (
+        <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
+          <p style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.15rem" }}>Observed</p>
+          <p className="dim" style={{ fontSize: "0.75rem", lineHeight: 1.4 }}>
+            {observedStats.videoBitrateKbps ?? "?"} kbps &middot; {observedStats.width ?? "?"}&times;{observedStats.height ?? "?"} @ {observedStats.fps ?? "?"} fps
+            &middot; {observedStats.codec ?? "?"}
+            {observedStats.qualityLimitationReason ? ` &middot; Limited: ${observedStats.qualityLimitationReason}` : ""}
+            {observedStats.rtt !== undefined ? ` &middot; RTT: ${observedStats.rtt}ms` : ""}
+          </p>
+        </div>
+      ) : (
+        <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
+          <p className="dim" style={{ fontSize: "0.75rem", fontStyle: "italic" }}>
+            No observed stats yet. Stats appear after the stream is connected.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Component ────────────────────────────────────────────────────────
 
 export function QualityPresets() {
   const [presets, setPresets] = useState<QualityPreset[]>([]);
@@ -19,6 +182,8 @@ export function QualityPresets() {
   const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  // Stage 17: Selected watched target for quality requests
+  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
 
   const getApi = (): import("../../preload/api-types.js").ScreenLinkAPI | undefined => {
     return (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -97,39 +262,49 @@ export function QualityPresets() {
     }
   };
 
-  /** Get the first watched host in the first group the viewer belongs to. */
-  const resolveFirstWatchedHost = ():
-    | { groupId: string; sessionId: string; hostDeviceId: string; hostName: string }
-    | null =>
-  {
-    const store = useStore.getState();
-    for (const [sessionId, w] of Object.entries(store.watchedStreamsBySessionId)) {
-      // Find the group that has this stream
-      for (const [gid, streams] of Object.entries(store.activeStreamsByGroup)) {
-        for (const s of streams) {
-          if (s.mediaSessionId === sessionId) {
-            return { groupId: gid, sessionId, hostDeviceId: w.hostDeviceId, hostName: w.hostName };
+  /** Subscribe to store for reactive watched hosts */
+  const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
+  const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
+  /** Stage 17: All available watched hosts (computed reactively from store) */
+  const watchedHosts = useMemo<Array<{ id: string; groupId: string; sessionId: string; hostDeviceId: string; hostName: string }>>(() => {
+    const result: Array<{ id: string; groupId: string; sessionId: string; hostDeviceId: string; hostName: string }> = [];
+    for (const [sessionId, w] of Object.entries(watchedStreamsBySessionId)) {
+      for (const [gid, streams] of Object.entries(activeStreamsByGroup)) {
+        for (const stream of streams) {
+          if (stream.mediaSessionId === sessionId) {
+            result.push({
+              id: `${gid}::${sessionId}`,
+              groupId: gid,
+              sessionId,
+              hostDeviceId: w.hostDeviceId,
+              hostName: w.hostName,
+            });
           }
         }
       }
     }
-    return null;
-  };
+    return result;
+  }, [watchedStreamsBySessionId, activeStreamsByGroup]);
+
+  /** Resolve the currently selected target object from selectedTargetId */
+  const selectedTarget = useMemo(() => {
+    if (!selectedTargetId) return null;
+    return watchedHosts.find(t => t.id === selectedTargetId) ?? null;
+  }, [selectedTargetId, watchedHosts]);
 
   /**
    * Production path: dispatch quality.viewer.request over the group control channel.
-   * Uses the runtime connection manager to send the message to every peer in the group
-   * that matches the target host. The remote QualityCoordinator handles the request.
+   * Uses the runtime connection manager to send the message to the selected target.
+   * Stage 17: Uses selectedTarget instead of resolveFirstWatchedHost.
    */
   const onUseThisPreset = async (preset: QualityPreset) => {
     setStatusMessage(null);
-    const target = resolveFirstWatchedHost();
-    if (!target) {
-      setStatusMessage("No watched streams available. Watch a stream first to request quality changes.");
+    if (!selectedTarget) {
+      setStatusMessage("Select a watched stream target first.");
       return;
     }
 
-    const { groupId, sessionId, hostDeviceId } = target;
+    const { groupId, sessionId, hostDeviceId } = selectedTarget;
     const runtime = getRuntime();
     if (!runtime) {
       setStatusMessage("Runtime not initialized.");
@@ -167,16 +342,16 @@ export function QualityPresets() {
    * Production path: dispatch quality.viewer.clear over the group control channel.
    * This tells the host to stop using viewer-specific overrides and revert to
    * the group's default quality settings.
+   * Stage 17: Uses selectedTarget instead of resolveFirstWatchedHost.
    */
   const onUseGroupDefault = async () => {
     setStatusMessage(null);
-    const target = resolveFirstWatchedHost();
-    if (!target) {
-      setStatusMessage("No watched streams available. Watch a stream first to clear quality override.");
+    if (!selectedTarget) {
+      setStatusMessage("Select a watched stream target first.");
       return;
     }
 
-    const { groupId, sessionId, hostDeviceId } = target;
+    const { groupId, sessionId, hostDeviceId } = selectedTarget;
     const runtime = getRuntime();
     if (!runtime) {
       setStatusMessage("Runtime not initialized.");
@@ -281,6 +456,39 @@ export function QualityPresets() {
           onSave={(name, settings) => onUpdate(editingPreset.id, name, settings)}
           onCancel={() => setEditingPresetId(null)}
         />
+      )}
+
+      {/* Target selector — Stage 17: Explicit watched stream selection */}
+      {watchedHosts.length > 0 && (
+        <div className="card" style={{ marginBottom: "0.75rem" }}>
+          <div className="field-row" style={{ alignItems: "center" }}>
+            <label htmlFor="target-select" style={{ marginBottom: 0, whiteSpace: "nowrap" }}>
+              Target Stream:
+            </label>
+            <select
+              id="target-select"
+              value={selectedTargetId ?? ""}
+              onChange={(e) => setSelectedTargetId(e.target.value || null)}
+              style={{ flex: 1 }}
+            >
+              <option value="">-- Select a stream --</option>
+              {watchedHosts.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.hostName} ({t.sessionId.slice(0, 8)})
+                </option>
+              ))}
+            </select>
+          </div>
+          {/* Stage 17: Quality status display for selected target */}
+          {selectedTarget && (
+            <QualityStatusDisplay
+              groupId={selectedTarget.groupId}
+              sessionId={selectedTarget.sessionId}
+              hostDeviceId={selectedTarget.hostDeviceId}
+              hostName={selectedTarget.hostName}
+            />
+          )}
+        </div>
       )}
 
       {/* Status message */}
