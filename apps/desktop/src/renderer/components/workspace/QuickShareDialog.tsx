@@ -20,8 +20,12 @@ import {
 import { useStore } from "@/stores/main-store";
 import { startShare, type ShareSource } from "@/services/share-coordinator";
 import {
-  fetchQualityPresets,
-} from "@/services/group-actions";
+  builtInPresetToOverride,
+  presetSettingsToOverride,
+  type BuiltInPresetKind,
+  type SessionQualityOverride,
+} from "@/services/share-quality";
+import { fetchQualityPresets } from "@/services/group-actions";
 import type { QuickShareConfigDTO, CaptureSourceDTO } from "../../../preload/api-types.js";
 
 // ─── Preload API accessor ────────────────────────────────────────────────
@@ -75,10 +79,21 @@ interface QuickShareDialogProps {
  * QuickShareDialog — Quick one-shot share dialog using the existing pipeline.
  *
  * Allows selecting group → source kind → source → preset → audio mode
- * then starts a share via the normal startShare coordinator.
+ * then starts a share via the shared startShare coordinator (same
+ * coordinator used by the normal Share Setup). Passes the group
+ * explicitly to the coordinator.
  *
- * Handles no-groups and already-sharing states safely.
- * Uses persisted recent selections when valid.
+ * Group precedence:
+ *   1. Currently selected group when valid
+ *   2. Last Quick Share group when still joined
+ *   3. The only group when exactly one group exists
+ *   4. Otherwise no automatic selection (user must choose)
+ *
+ * Multiple groups are never resolved to the first arbitrary group.
+ *
+ * Recent selections are persisted only after a successful start.
+ * Failed Quick Share attempts leave the dialog open and do not
+ * overwrite the saved last-successful selection.
  */
 export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) {
   // ── Store state ─────────────────────────────────────────────────
@@ -99,7 +114,9 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
   const [sourceKind, setSourceKind] = useState<"screen" | "window">("screen");
   const [sources, setSources] = useState<CaptureSourceDTO[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>("");
-  const [presets, setPresets] = useState<Array<{ id: string; name: string }>>([]);
+  const [presets, setPresets] = useState<
+    Array<{ id: string; name: string; settings: unknown }>
+  >([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string>("");
   const [audioMode, setAudioMode] = useState<AudioModeValue>(() => lastScreenAudioMode);
   const [starting, setStarting] = useState(false);
@@ -125,33 +142,41 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
       const api = getApi();
 
       // Load quick share config
+      let config: QuickShareConfigDTO | null = null;
       if (api) {
-        const config = await api.getQuickShareConfig();
+        try {
+          config = await api.getQuickShareConfig();
+        } catch {
+          config = null;
+        }
         if (cancelled) return;
         setSavedConfig(config);
 
-        // Restore last selections if valid
-        if (config.lastGroupId && groupsById[config.lastGroupId]) {
-          setSelectedGroup(config.lastGroupId);
-        } else if (selectedGroupId && groupsById[selectedGroupId]) {
-          setSelectedGroup(selectedGroupId);
-        } else if (groupOrder.length > 0) {
-          setSelectedGroup(groupOrder[0]!);
-        }
-
-        if (config.lastSourceKind) {
+        if (config?.lastSourceKind) {
           setSourceKind(config.lastSourceKind);
         }
-        if (config.lastPresetId) {
+        if (config?.lastPresetId) {
           setSelectedPresetId(config.lastPresetId);
         }
+      }
+
+      // Apply group selection precedence:
+      //   1. Currently selected group when valid
+      //   2. Last Quick Share group when still joined
+      //   3. The only group when exactly one group exists
+      //   4. Otherwise leave empty (user must pick)
+      const validIds = new Set(groupOrder);
+      if (selectedGroupId && validIds.has(selectedGroupId)) {
+        setSelectedGroup(selectedGroupId);
+      } else if (
+        config?.lastGroupId &&
+        validIds.has(config.lastGroupId)
+      ) {
+        setSelectedGroup(config.lastGroupId);
+      } else if (groupOrder.length === 1 && groupOrder[0]) {
+        setSelectedGroup(groupOrder[0]);
       } else {
-        // No API — pick first group if available
-        if (selectedGroupId && groupsById[selectedGroupId]) {
-          setSelectedGroup(selectedGroupId);
-        } else if (groupOrder.length > 0) {
-          setSelectedGroup(groupOrder[0]!);
-        }
+        setSelectedGroup("");
       }
 
       // Load sources
@@ -170,16 +195,20 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
       try {
         const ps = await fetchQualityPresets();
         if (!cancelled) {
-          setPresets(ps as Array<{ id: string; name: string }>);
+          setPresets(
+            ps.map((p) => ({ id: p.id, name: p.name, settings: p.settings })),
+          );
         }
       } catch {
-        // Presets unavailable
+        if (!cancelled) setPresets([]);
       }
     }
 
     void init();
-    return () => { cancelled = true; };
-  }, [open, groupsById, groupOrder, selectedGroupId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, groupOrder, selectedGroupId]);
 
   // ── Reset audio when source kind changes ───────────────────────
   useEffect(() => {
@@ -190,6 +219,28 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
       validModes.includes(prev) ? prev : remembered,
     );
   }, [sourceKind, lastScreenAudioMode, lastWindowAudioMode]);
+
+  // ── Resolve quality override from selected preset id ────────────
+  const resolveQualityOverride = useCallback(
+    (presetId: string): SessionQualityOverride | null => {
+      if (!presetId) return null;
+      // Built-in synthetic IDs are encoded as `builtin:<kind>`.
+      if (presetId.startsWith("builtin:")) {
+        const kind = presetId.slice("builtin:".length) as BuiltInPresetKind;
+        if (kind === "data-saver" || kind === "balanced" || kind === "clear") {
+          return builtInPresetToOverride(kind);
+        }
+        return null;
+      }
+      const preset = presets.find((p) => p.id === presetId);
+      if (!preset) return null;
+      return presetSettingsToOverride(
+        preset.settings as { video?: Record<string, unknown> } | undefined,
+        "balanced",
+      );
+    },
+    [presets],
+  );
 
   // ── Start share ────────────────────────────────────────────────
   const handleStart = useCallback(async () => {
@@ -203,17 +254,17 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
       return;
     }
 
-    // Set group
-    setSelectedGroupId(selectedGroup);
+    if (!groupsById[selectedGroup]) {
+      toast.error("Selected group is no longer available");
+      setStarting(false);
+      return;
+    }
 
-    // Persist quick share config
-    const api = getApi();
-    if (api) {
-      await api.updateQuickShareConfig({
-        lastGroupId: selectedGroup,
-        lastSourceKind: sourceKind,
-        lastPresetId: selectedPresetId,
-      }).catch(() => {});
+    const qualityOverride = resolveQualityOverride(selectedPresetId);
+    if (!qualityOverride) {
+      toast.error("Could not resolve selected quality preset");
+      setStarting(false);
+      return;
     }
 
     try {
@@ -225,19 +276,49 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
         fingerprint: null,
         audioMode,
       };
-      await startShare(shareSource);
+      await startShare({
+        groupId: selectedGroup,
+        source: shareSource,
+        qualityOverride,
+      });
+
+      // Success — persist recent Quick Share selection, select
+      // the group, and navigate to the host view.
+      const api = getApi();
+      if (api) {
+        await api
+          .updateQuickShareConfig({
+            lastGroupId: selectedGroup,
+            lastSourceKind: sourceKind,
+            lastPresetId: selectedPresetId,
+          })
+          .catch(() => {});
+      }
+      setSelectedGroupId(selectedGroup);
       toast.success("Quick share started");
       onOpenChange(false);
-      navigate("overview");
+      navigate("host");
     } catch (err) {
+      // Failure — leave dialog open, do not persist the
+      // failed selection as the last successful Quick Share.
       const msg = err instanceof Error ? err.message : "Quick share failed";
       toast.error(msg);
     } finally {
       setStarting(false);
     }
   }, [
-    canStart, sources, selectedSourceId, selectedGroup, selectedPresetId,
-    sourceKind, audioMode, setSelectedGroupId, onOpenChange, navigate,
+    canStart,
+    sources,
+    selectedSourceId,
+    selectedGroup,
+    selectedPresetId,
+    sourceKind,
+    audioMode,
+    setSelectedGroupId,
+    onOpenChange,
+    navigate,
+    resolveQualityOverride,
+    groupsById,
   ]);
 
   // ── No groups state ────────────────────────────────────────────
@@ -362,7 +443,7 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
               </Select>
             </div>
 
-            {/* Preset */}
+            {/* Preset — built-in slots + personal presets */}
             <div className="space-y-1.5">
               <Label>Quality preset</Label>
               <Select value={selectedPresetId} onValueChange={setSelectedPresetId} disabled={starting}>
@@ -370,6 +451,21 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
                   <SelectValue placeholder="Select a preset" />
                 </SelectTrigger>
                 <SelectContent>
+                  {/* Built-in presets are always present. The actual
+                      SessionQualityOverride for a personal preset is
+                      computed from its settings, so all entries use
+                      the same plumbing. */}
+                  {(["data-saver", "balanced", "clear"] as BuiltInPresetKind[]).map(
+                    (kind) => {
+                      const def = builtInPresetToOverride(kind);
+                      const syntheticId = `builtin:${kind}`;
+                      return (
+                        <SelectItem key={syntheticId} value={syntheticId}>
+                          {`${kind === "data-saver" ? "Data saver" : kind === "balanced" ? "Balanced" : "Clear"} — ${def.sendWidth}×${def.sendHeight} @ ${def.sendFps} fps · ${def.videoBitrateKbps} kbps`}
+                        </SelectItem>
+                      );
+                    },
+                  )}
                   {presets.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
                       {p.name}

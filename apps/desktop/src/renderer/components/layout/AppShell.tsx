@@ -89,9 +89,9 @@ export function AppShell({ children, className }: AppShellProps) {
               animate={{ width: 64, opacity: 1 }}
               exit={{ width: 0, opacity: 0, overflow: "hidden" }}
               transition={focusMode ? reducedCollapse : columnCollapse}
-              className="flex-shrink-0 overflow-hidden"
+              className="h-full min-h-0 flex-shrink-0 overflow-hidden"
             >
-              <div className="w-16">
+              <div className="w-16 h-full min-h-0">
                 <GroupRail />
               </div>
             </motion.div>
@@ -109,9 +109,9 @@ export function AppShell({ children, className }: AppShellProps) {
               animate={{ width: 236, opacity: 1 }}
               exit={{ width: 0, opacity: 0, overflow: "hidden" }}
               transition={columnCollapse}
-              className="flex-shrink-0 overflow-hidden"
+              className="h-full min-h-0 flex-shrink-0 overflow-hidden"
             >
-              <div className="w-[236px]">
+              <div className="w-[236px] h-full min-h-0">
                 <GroupDashboard />
               </div>
             </motion.div>
@@ -121,11 +121,11 @@ export function AppShell({ children, className }: AppShellProps) {
         {showDashboard && <Separator orientation="vertical" />}
 
         {/* ─── Primary Workspace ─────────────────────────── */}
-        <ResizablePanel className="flex-1 min-w-[560px] min-h-0 bg-canvas overflow-hidden">
+        <ResizablePanel className="flex-1 min-w-0 min-h-0 bg-canvas overflow-hidden">
           {isViewing ? (
             <ViewerWorkspace />
           ) : (
-            <main className="h-full overflow-auto">{children}</main>
+            <main className="h-full min-h-0 overflow-auto">{children}</main>
           )}
         </ResizablePanel>
 

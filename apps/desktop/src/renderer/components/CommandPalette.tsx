@@ -32,7 +32,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       items: [
         { label: "Open settings", shortcut: "Ctrl+,", action: () => navigate("user-settings") },
         { label: "Open diagnostics", shortcut: "", action: () => navigate("diagnostics") },
-        { label: "Open group presets", shortcut: "", action: () => navigate("group-presets") },
+        { label: "Open my presets", shortcut: "", action: () => navigate("quality-presets") },
         { label: "Open about", shortcut: "", action: () => navigate("about") },
       ],
     },

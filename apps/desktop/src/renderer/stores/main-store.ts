@@ -21,14 +21,14 @@ export type Page =
   | "host"
   | "viewer"
   | "share-setup"
-  | "group-presets"
+  | "quality-presets"
   | "group-settings"
   | "user-settings"
   | "diagnostics"
   | "about";
 
 /** Group dashboard internal nav pages (Section 6.2) */
-export type GroupNavPage = "overview" | "group-presets" | "group-settings";
+export type GroupNavPage = "overview" | "group-settings";
 
 export interface ViewerInfo {
   peerUuid: string;

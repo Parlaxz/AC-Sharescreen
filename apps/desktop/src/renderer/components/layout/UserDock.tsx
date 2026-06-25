@@ -84,7 +84,7 @@ export function UserDock() {
   const status = statusConfig(userStatus);
 
   return (
-    <div className="flex items-center gap-2 px-2 py-2 border-t border-border-subtle bg-surface-1">
+    <div className="mt-auto flex items-center gap-2 px-2 py-2 border-t border-border-subtle bg-surface-1">
       {/* ─── Avatar ────────────────────────────────────── */}
       <Avatar className="h-8 w-8 rounded-lg flex-shrink-0">
         <AvatarFallback className="rounded-lg text-xs font-semibold bg-surface-3">

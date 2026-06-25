@@ -3,16 +3,13 @@ import {
   LayoutDashboard,
   Radio,
   Users,
-  SlidersHorizontal,
   Settings,
   ChevronDown,
   Copy,
   LogOut,
-  Bell,
   UserPlus,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { toast } from "sonner";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,15 +19,6 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-  DialogClose,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -43,24 +31,23 @@ import { useStore, type GroupNavPage, type Page } from "@/stores/main-store";
 import { UserDock } from "./UserDock.js";
 import { AnimatedCountBadge } from "@/components/primitives/AnimatedCountBadge";
 import { InviteDialog } from "@/components/workspace/InviteDialog";
+import { copyGroupInviteFromUi } from "@/services/invite-copy";
 
 /**
  * GroupDashboard — 240px column for the selected group (Section 6).
  *
- * Composed entirely from Watermelon primitives:
- *  - Avatar (group icon)
- *  - Badge (member count, live badges)
- *  - Button (nav items)
- *  - DropdownMenu (header menu)
- *  - ScrollArea (scrollable content)
- *  - Tooltip (truncated labels)
- *  - motion/AnimatePresence (animated selection indicator, active shares)
+ * Composed entirely from Watermelon primitives.
  *
  * Sections:
  *  - Header: avatar + name + member count + overflow menu
- *  - Navigation: Overview / Active shares / Members / Presets / Group settings
+ *  - Navigation: Overview / Group settings
  *  - Active shares list (compact)
- *  - User/Status dock (user-dock component) at the bottom
+ *  - User/Status dock (user-dock component) at the bottom, pinned
+ *    via `mt-auto` on the dock.
+ *
+ * Group-presets nav item is intentionally absent: there is no
+ * group-owned preset persistence in this pass; the personal
+ * presets page is reached from Home.
  */
 export function GroupDashboard() {
   const selectedGroupId = useStore((s) => s.selectedGroupId);
@@ -78,11 +65,10 @@ export function GroupDashboard() {
     ? (activeStreamsByGroup[selectedGroupId] ?? [])
     : [];
 
-  // ── Dialog/sheet state ────────────────────────────────────────────
+  // ── Dialog state ────────────────────────────────────────────
   const [inviteOpen, setInviteOpen] = useState(false);
-  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
 
-  // ── Menu action handlers (Section 6.1 / 3.7C) ────────────────────
+  // ── Menu action handlers ────────────────────────────────────
 
   const handleInviteMembers = useCallback(() => {
     if (selectedGroupId) {
@@ -92,38 +78,8 @@ export function GroupDashboard() {
 
   const handleCopyInviteLink = useCallback(async () => {
     if (!selectedGroupId) return;
-    try {
-      await navigator.clipboard.writeText(
-        `https://screenlink.app/invite/${selectedGroupId}`,
-      );
-      toast("Invite link copied");
-    } catch {
-      // Fallback
-      const ta = document.createElement("textarea");
-      ta.value = `https://screenlink.app/invite/${selectedGroupId}`;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      toast("Invite link copied");
-    }
+    await copyGroupInviteFromUi(selectedGroupId, "Invite link copied");
   }, [selectedGroupId]);
-
-  const handleNotificationSettings = useCallback(() => {
-    toast("Notification settings coming soon");
-  }, []);
-
-  const handleLeaveGroup = useCallback(() => {
-    setLeaveConfirmOpen(true);
-  }, []);
-
-  const handleConfirmLeave = useCallback(() => {
-    // For now, hide the group via local state — full leave flow out of scope
-    toast("Left group (local state only — full leave flow coming in a later stage)");
-    setLeaveConfirmOpen(false);
-  }, []);
 
   const navItems: {
     id: GroupNavPage;
@@ -131,13 +87,22 @@ export function GroupDashboard() {
     icon: React.ReactNode;
     page: Page;
   }[] = [
-    { id: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" />, page: "overview" },
-    { id: "group-presets", label: "Presets", icon: <SlidersHorizontal className="h-4 w-4" />, page: "group-presets" },
-    { id: "group-settings", label: "Group settings", icon: <Settings className="h-4 w-4" />, page: "group-settings" },
+    {
+      id: "overview",
+      label: "Overview",
+      icon: <LayoutDashboard className="h-4 w-4" />,
+      page: "overview",
+    },
+    {
+      id: "group-settings",
+      label: "Group settings",
+      icon: <Settings className="h-4 w-4" />,
+      page: "group-settings",
+    },
   ];
 
   return (
-    <div className="flex flex-col w-[240px] flex-shrink-0 bg-surface-1 border-r border-border-subtle">
+    <div className="flex flex-col w-[240px] h-full min-h-0 flex-shrink-0 bg-surface-1 border-r border-border-subtle">
       {/* ─── Header (Section 6.1) ─────────────────────────── */}
       <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border-subtle">
         {group ? (
@@ -161,7 +126,7 @@ export function GroupDashboard() {
               </span>
             </div>
 
-            {/* Overflow menu */}
+            {/* Overflow menu — only real actions */}
             <DropdownMenu>
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -197,18 +162,6 @@ export function GroupDashboard() {
                 >
                   <Settings className="h-4 w-4" />
                   Group settings
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={handleNotificationSettings}>
-                  <Bell className="h-4 w-4" />
-                  Notification settings
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  className="text-danger"
-                  onClick={handleLeaveGroup}
-                >
-                  <LogOut className="h-4 w-4" />
-                  Leave group
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -257,7 +210,6 @@ export function GroupDashboard() {
                     navigate(item.page);
                   }}
                 >
-                  {/* Animated selection indicator */}
                   {isActive && (
                     <motion.div
                       layoutId="group-nav-indicator"
@@ -340,38 +292,10 @@ export function GroupDashboard() {
         />
       )}
 
-      {/* ─── Leave group confirm dialog ────────────────────── */}
-      <Dialog open={leaveConfirmOpen} onOpenChange={setLeaveConfirmOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Leave group</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to leave{" "}
-              <span className="font-medium text-text-primary">
-                {group?.name ?? "this group"}
-              </span>
-              ? You'll need a new invite to rejoin.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button variant="outline">Cancel</Button>
-            </DialogClose>
-            <Button
-              variant="destructive"
-              onClick={handleConfirmLeave}
-            >
-              <LogOut className="h-4 w-4" />
-              Leave
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* ─── Spacer (pushed by mt-auto dock) ───────────────── */}
+      <div className="flex-1 min-h-0" />
 
-      {/* ─── Spacer ───────────────────────────────────────── */}
-      <div className="flex-1" />
-
-      {/* ─── User dock (Section 7) ────────────────────────── */}
+      {/* ─── User dock (Section 7) — pinned to bottom ────────── */}
       <UserDock />
     </div>
   );

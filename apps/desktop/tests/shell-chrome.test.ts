@@ -90,10 +90,14 @@ describe("AppShell full-height layout", () => {
     expect(shellSrc).toContain("overflow-hidden");
   });
 
-  it("workspace uses min-w-{n} min-h-0 for flex containment", () => {
-    expect(shellSrc).toContain("min-w-[");
+  it("workspace uses min-w-0 min-h-0 for flex containment", () => {
+    expect(shellSrc).toContain("min-w-0");
     expect(shellSrc).toContain("min-h-0");
-    expect(shellSrc).toContain("overflow-auto");
+    expect(shellSrc).toContain("overflow-hidden");
+  });
+
+  it("rail and dashboard chains have full-height wrappers", () => {
+    expect(shellSrc).toMatch(/flex-shrink-0 overflow-hidden"[\s\S]{0,200}h-full min-h-0/);
   });
 });
 

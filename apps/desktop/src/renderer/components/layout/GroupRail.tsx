@@ -1,7 +1,6 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { Plus, Home } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { toast } from "sonner";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +23,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, getInitials } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
+import { copyGroupInviteFromUi } from "@/services/invite-copy";
 
 /**
  * GroupRail — 64px wide column of group icons (Section 5).
@@ -33,10 +33,14 @@ import { useStore } from "@/stores/main-store";
  *  - Tooltip (on each group for name)
  *  - Button/IconButton (create/join action)
  *  - Badge (live-state indicator)
- *  - ContextMenu (right-click: rename/leave/copy invite)
+ *  - ContextMenu (right-click: copy invite)
  *  - motion (animated active indicator + live pulse ring)
  *
  * Connect to useStore: groupsById, groupOrder, selectedGroupId, setSelectedGroupId.
+ *
+ * Rename and Leave Group are intentionally removed: Rename is not
+ * yet implemented (no fake "coming soon" placeholder) and Leave
+ * Group lives on the Group Settings page only.
  */
 export function GroupRail() {
   const groupsById = useStore((s) => s.groupsById);
@@ -58,30 +62,11 @@ export function GroupRail() {
   );
 
   const handleCopyInviteLink = useCallback(async (groupId: string) => {
-    try {
-      await navigator.clipboard.writeText(
-        `https://screenlink.app/invite/${groupId}`,
-      );
-      toast("Invite link copied");
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = `https://screenlink.app/invite/${groupId}`;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      toast("Invite link copied");
-    }
-  }, []);
-
-  const handleLeaveGroup = useCallback(() => {
-    toast("Left group (local state only — full leave flow coming in a later stage)");
+    await copyGroupInviteFromUi(groupId, "Invite link copied");
   }, []);
 
   return (
-    <div className="flex flex-col items-center w-16 flex-shrink-0 bg-rail border-r border-border-subtle py-2 gap-1">
+    <div className="flex flex-col items-center w-16 h-full min-h-0 flex-shrink-0 bg-rail border-r border-border-subtle py-2 gap-1">
       {/* ─── Home/Product button ──────────────────────────── */}
       <Tooltip>
         <TooltipTrigger asChild>
@@ -99,9 +84,9 @@ export function GroupRail() {
       </Tooltip>
 
       {/* ─── Groups list ──────────────────────────────────── */}
-      <div className="flex-1 flex flex-col items-center gap-1 overflow-y-auto py-1 w-full px-2">
+      <div className="flex-1 min-h-0 flex flex-col items-center gap-1 overflow-y-auto py-1 w-full px-2">
         <AnimatePresence mode="popLayout">
-          {groupOrder.map((groupId, index) => {
+          {groupOrder.map((groupId) => {
             const group = groupsById[groupId];
             if (!group) return null;
             const isSelected = groupId === selectedGroupId;
@@ -130,7 +115,6 @@ export function GroupRail() {
                         transition={{
                           duration: 2,
                           ease: "easeOut",
-                          // Single pulse then settle at 1.0 (Section 5.3)
                         }}
                       />
                     )}
@@ -171,21 +155,8 @@ export function GroupRail() {
                   </div>
                 </ContextMenuTrigger>
 
-                {/* Context menu on right-click */}
+                {/* Context menu on right-click — only the real action */}
                 <ContextMenuContent>
-                  <ContextMenuItem
-                    onClick={() => {
-                      /* TODO 3.7C: rename group */
-                    }}
-                  >
-                    Rename group
-                  </ContextMenuItem>
-                  <ContextMenuItem
-                    onClick={() => handleLeaveGroup()}
-                  >
-                    Leave group
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
                   <ContextMenuItem
                     onClick={() => handleCopyInviteLink(groupId)}
                   >

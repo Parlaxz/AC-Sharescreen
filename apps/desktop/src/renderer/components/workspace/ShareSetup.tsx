@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
-import type { QualityPreset } from "@screenlink/shared";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -49,12 +48,28 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import {
   useStore,
   type Page,
 } from "@/stores/main-store";
 import { startShare } from "@/services/share-coordinator";
+import {
+  BUILT_IN_PRESETS,
+  builtInPresetToOverride,
+  customPresetToOverride,
+  presetSettingsToOverride,
+  type BuiltInPresetKind,
+  type SessionQualityOverride,
+} from "@/services/share-quality";
+import { fetchQualityPresets } from "@/services/group-actions";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -63,7 +78,53 @@ type SourceTab = "screen" | "window";
 
 type AudioModeValue = "none" | "monitor" | "application";
 
-type PresetKind = "data-saver" | "balanced" | "clear" | "custom";
+type PresetKind = BuiltInPresetKind | "custom";
+
+/**
+ * Resolve the user's selected preset + custom slider values into a
+ * SessionQualityOverride. Returns null when no preset is selected.
+ */
+function resolveSelectedQualityOverride(args: {
+  selectedPresetKind: PresetKind | null;
+  selectedPresetId: string | null;
+  presets: Array<{ id: string; settings: unknown }>;
+  customWidth: number;
+  customHeight: number;
+  customFps: number;
+  customBitrate: number;
+}): SessionQualityOverride | null {
+  const {
+    selectedPresetKind,
+    selectedPresetId,
+    presets,
+    customWidth,
+    customHeight,
+    customFps,
+    customBitrate,
+  } = args;
+  if (!selectedPresetKind) return null;
+  if (selectedPresetKind === "custom") {
+    return customPresetToOverride({
+      width: customWidth,
+      height: customHeight,
+      fps: customFps,
+      bitrate: customBitrate,
+    });
+  }
+  // If a personal preset is also selected, prefer the personal
+  // preset's video settings when present, otherwise the built-in
+  // baseline.
+  if (selectedPresetId) {
+    const preset = presets.find((p) => p.id === selectedPresetId);
+    if (preset) {
+      return presetSettingsToOverride(
+        preset.settings as { video?: Record<string, unknown> } | undefined,
+        selectedPresetKind,
+      );
+    }
+  }
+  return builtInPresetToOverride(selectedPresetKind);
+}
 
 /** User-facing audio mode descriptor used for radio cards. */
 interface AudioModeOption {
@@ -121,31 +182,20 @@ function resolveAudioMode(
   return sourceKind === "screen" ? lastScreen : lastWindow;
 }
 
-/** Standard preset definitions (4 slots per Section 8.3). */
+/** Standard preset definitions derived from the shared built-in
+ *  preset table. Custom slot is appended locally. */
 const STANDARD_PRESETS: {
   kind: PresetKind;
   name: string;
   summary: string;
   tags: string[];
 }[] = [
-  {
-    kind: "data-saver",
-    name: "Data saver",
-    summary: "640×360 @ 10 fps · 400 kbps",
-    tags: ["Data saver"],
-  },
-  {
-    kind: "balanced",
-    name: "Balanced",
-    summary: "854×480 @ 15 fps · 650 kbps",
-    tags: [],
-  },
-  {
-    kind: "clear",
-    name: "Clear",
-    summary: "1280×720 @ 24 fps · 1500 kbps",
-    tags: [],
-  },
+  ...BUILT_IN_PRESETS.map((p) => ({
+    kind: p.kind as PresetKind,
+    name: p.name,
+    summary: p.summary,
+    tags: [] as string[],
+  })),
   {
     kind: "custom",
     name: "Custom",
@@ -209,7 +259,6 @@ export function ShareSetup() {
   // Store bindings
   const openShareSetup = useStore((s) => s.openShareSetup);
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
-  const qualityPresets = useStore((s) => s.qualityPresets);
   const navigate = useStore((s) => s.navigate);
   const lastScreenAudioMode = useStore((s) => s.lastScreenAudioMode);
   const lastWindowAudioMode = useStore((s) => s.lastWindowAudioMode);
@@ -231,6 +280,13 @@ export function ShareSetup() {
   const [customFps, setCustomFps] = useState(24);
   const [customBitrate, setCustomBitrate] = useState(1500);
   const [startingShare, setStartingShare] = useState(false);
+  // Personal presets loaded from the persistent quality-preset API.
+  const [personalPresets, setPersonalPresets] = useState<
+    Array<{ id: string; name: string; settings: unknown }>
+  >([]);
+  const [selectedPersonalPresetId, setSelectedPersonalPresetId] = useState<
+    string | null
+  >(null);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -286,6 +342,7 @@ export function ShareSetup() {
       setSelectedSourceId(null);
       setAudioMode(resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode));
       setSelectedPresetKind(null);
+      setSelectedPersonalPresetId(null);
       setSourceError(null);
       setStartingShare(false);
       setCustomWidth(1280);
@@ -293,6 +350,26 @@ export function ShareSetup() {
       setCustomFps(24);
       setCustomBitrate(1500);
     }
+  }, [openShareSetup]);
+
+  // Load personal presets while the dialog is open.
+  useEffect(() => {
+    if (!openShareSetup) return;
+    let cancelled = false;
+    void fetchQualityPresets()
+      .then((list) => {
+        if (cancelled) return;
+        setPersonalPresets(
+          list.map((p) => ({ id: p.id, name: p.name, settings: p.settings })),
+        );
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPersonalPresets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [openShareSetup]);
 
   // ── Validation ─────────────────────────────────────────────────────────
@@ -323,32 +400,43 @@ export function ShareSetup() {
         return;
       }
 
-      // Resolve display bitrate from preset before coordinator starts
-      let bitrate = 650;
-      if (selectedPresetKind === "custom") {
-        bitrate = customBitrate;
-      } else {
-        const presetMap: Record<PresetKind, { b: number }> = {
-          "data-saver": { b: 400 },
-          balanced: { b: 650 },
-          clear: { b: 1500 },
-          custom: { b: customBitrate },
-        };
-        bitrate = presetMap[selectedPresetKind!].b;
+      const groupId = useStore.getState().selectedGroupId;
+      if (!groupId) {
+        toast.error("Sharing failed: no group selected");
+        setStartingShare(false);
+        return;
       }
 
-      // Start the real stream via the coordinator (uses SSM internally)
-      await startShare({
-        id: source.id,
-        name: source.name,
-        kind: source.kind,
-        displayId: source.displayId ?? null,
-        fingerprint: null,
-        audioMode: audioMode === "none" ? "none" : audioMode,
+      const qualityOverride = resolveSelectedQualityOverride({
+        selectedPresetKind,
+        selectedPresetId: selectedPersonalPresetId,
+        presets: personalPresets,
+        customWidth,
+        customHeight,
+        customFps,
+        customBitrate,
       });
+      if (!qualityOverride) {
+        toast.error("Sharing failed: select a quality preset");
+        setStartingShare(false);
+        return;
+      }
 
-      // Set bitrate display value after coordinator has started the stream
-      useStore.getState().setCaptureBitrate(bitrate);
+      // Start the real stream via the coordinator (uses SSM internally).
+      // Explicit groupId + qualityOverride mean the coordinator never
+      // has to discover values from the store.
+      await startShare({
+        groupId,
+        source: {
+          id: source.id,
+          name: source.name,
+          kind: source.kind,
+          displayId: source.displayId ?? null,
+          fingerprint: null,
+          audioMode: audioMode === "none" ? "none" : audioMode,
+        },
+        qualityOverride,
+      });
 
       // Persist source selection
       const api = getApi();
@@ -362,7 +450,7 @@ export function ShareSetup() {
 
       toast.success("Sharing started");
       setOpenShareSetup(false);
-      navigate("overview" as Page);
+      navigate("host" as Page);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Unknown error";
@@ -376,6 +464,11 @@ export function ShareSetup() {
     sources,
     selectedSourceId,
     selectedPresetKind,
+    selectedPersonalPresetId,
+    personalPresets,
+    customWidth,
+    customHeight,
+    customFps,
     customBitrate,
     setOpenShareSetup,
     navigate,
@@ -631,7 +724,10 @@ export function ShareSetup() {
                           isSelected &&
                             "ring-2 ring-accent bg-accent-muted/30",
                         )}
-                        onClick={() => setSelectedPresetKind(preset.kind)}
+                        onClick={() => {
+                          setSelectedPresetKind(preset.kind);
+                          setSelectedPersonalPresetId(null);
+                        }}
                         role="radio"
                         aria-checked={isSelected}
                         tabIndex={0}
@@ -639,6 +735,7 @@ export function ShareSetup() {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             setSelectedPresetKind(preset.kind);
+                            setSelectedPersonalPresetId(null);
                           }
                         }}
                       >
@@ -679,6 +776,37 @@ export function ShareSetup() {
                   );
                 })}
               </div>
+
+              {/* Personal presets (optional override of the chosen built-in) */}
+              {personalPresets.length > 0 && (
+                <div className="mt-3 space-y-1.5">
+                  <Label className="text-xs text-text-secondary">
+                    Personal preset (optional)
+                  </Label>
+                  <Select
+                    value={selectedPersonalPresetId ?? ""}
+                    onValueChange={(v) => {
+                      if (v === "__none__") {
+                        setSelectedPersonalPresetId(null);
+                        return;
+                      }
+                      setSelectedPersonalPresetId(v);
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Use built-in values" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Use built-in values</SelectItem>
+                      {personalPresets.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               {/* Custom preset disclosure (animated height) */}
               <AnimatePresence>

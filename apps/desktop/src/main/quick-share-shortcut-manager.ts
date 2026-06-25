@@ -10,11 +10,25 @@ import { globalShortcut, BrowserWindow } from "electron";
  * - Reports nonfatal conflicts via console.warn
  * - Emits `quick-share:open` event to the renderer when triggered
  * - Shows/restores/focuses existing window (no second BrowserWindow)
+ *
+ * Registration ownership:
+ * - `configuredAccelerator` is the value the manager has been told to
+ *   use. It is updated synchronously by `updateConfig`.
+ * - `registeredAccelerator` is the value that is currently registered
+ *   with the OS. It is null when nothing is registered.
+ * - `registered` is a convenience boolean.
+ *
+ * On update from accelerator A to B:
+ *   - First unregister the exact previously registered accelerator (A).
+ *   - Then register the new accelerator (B).
+ * On disable: unregister the currently registered accelerator.
+ * On failed registration: leave no stale internal registered state.
+ * On destroy: unregister the exact active accelerator.
  */
 export class QuickShareShortcutManager {
-  private registered = false;
-  private accelerator: string = "Super+Alt+S";
+  private configuredAccelerator: string = "Super+Alt+S";
   private enabled = false;
+  private registeredAccelerator: string | null = null;
 
   constructor(
     private getWindow: () => BrowserWindow | null,
@@ -23,8 +37,7 @@ export class QuickShareShortcutManager {
       getQuickShareAccelerator: () => string;
     },
   ) {
-    // Read initial config from settings
-    this.accelerator = settings.getQuickShareAccelerator();
+    this.configuredAccelerator = settings.getQuickShareAccelerator();
     this.enabled = settings.getQuickShareEnabled();
   }
 
@@ -33,9 +46,9 @@ export class QuickShareShortcutManager {
    * Returns a status string for diagnostics.
    */
   register(): { success: boolean; error?: string } {
-    if (this.registered) {
-      this.unregister();
-    }
+    // Always unregister any previously registered accelerator first so
+    // a stale registration is never leaked.
+    this.unregister();
 
     // Skip registration in multi-instance/dev-profile unless env var is set
     const isMultiInstance = process.argv.includes("--multi-instance");
@@ -52,66 +65,75 @@ export class QuickShareShortcutManager {
       return { success: false, error: "Quick share shortcut is disabled in settings" };
     }
 
-    const accel = this.accelerator;
+    const accel = this.configuredAccelerator;
     const ok = globalShortcut.register(accel, () => {
-      // Show/restore/focus existing window
       const win = this.getWindow();
       if (win) {
         if (win.isMinimized()) win.restore();
         win.show();
         win.focus();
-        // Send the quick-share:open event to the renderer
         win.webContents.send("quick-share:open");
       }
     });
 
     if (!ok) {
-      // Check for conflicts
       const isRegistered = globalShortcut.isRegistered(accel);
       const msg = isRegistered
         ? `Shortcut "${accel}" is already registered by another application`
         : `Failed to register shortcut "${accel}"`;
       console.warn(`[QuickShareShortcutManager] ${msg}`);
-      this.registered = false;
+      // Failed registration — clear any stale internal state.
+      this.registeredAccelerator = null;
       return { success: false, error: msg };
     }
 
-    this.registered = true;
+    this.registeredAccelerator = accel;
     return { success: true };
   }
 
   /**
    * Update the shortcut configuration and re-register.
+   * The exact previously registered accelerator (if any) is
+   * unregistered before the new one is registered.
    */
   updateConfig(enabled: boolean, accelerator: string): { success: boolean; error?: string } {
     this.enabled = enabled;
-    this.accelerator = accelerator;
+    this.configuredAccelerator = accelerator;
     return this.register();
   }
 
   /**
-   * Unregister the global shortcut.
+   * Unregister the global shortcut using the exact value that was
+   * registered. This is the only place globalShortcut.unregister is
+   * called, ensuring we always pass the precise string we previously
+   * handed to globalShortcut.register.
    */
   unregister(): void {
-    if (this.registered) {
-      globalShortcut.unregister(this.accelerator);
-      this.registered = false;
+    if (this.registeredAccelerator !== null) {
+      globalShortcut.unregister(this.registeredAccelerator);
+      this.registeredAccelerator = null;
     }
   }
 
   /**
    * Get current registration state for diagnostics.
    */
-  getStatus(): { registered: boolean; accelerator: string; enabled: boolean } {
+  getStatus(): {
+    registered: boolean;
+    accelerator: string;
+    enabled: boolean;
+    registeredAccelerator: string | null;
+  } {
     return {
-      registered: this.registered,
-      accelerator: this.accelerator,
+      registered: this.registeredAccelerator !== null,
+      accelerator: this.configuredAccelerator,
       enabled: this.enabled,
+      registeredAccelerator: this.registeredAccelerator,
     };
   }
 
   /**
-   * Clean up on shutdown.
+   * Clean up on shutdown. Unregisters the exact active accelerator.
    */
   destroy(): void {
     this.unregister();

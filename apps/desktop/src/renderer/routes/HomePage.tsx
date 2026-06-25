@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Users, Radio, Monitor, RefreshCw, AlertTriangle } from "lucide-react";
+import { Users, Radio, SlidersHorizontal, Plus, RefreshCw, AlertTriangle } from "lucide-react";
 import { motion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -76,6 +76,7 @@ export function HomePage() {
   const selectGroup = useStore((s) => s.selectGroup);
   const setOpenCreateGroupDialog = useStore((s) => s.setOpenCreateGroupDialog);
   const setOpenJoinGroupDialog = useStore((s) => s.setOpenJoinGroupDialog);
+  const navigate = useStore((s) => s.navigate);
 
   const hasGroups = groupOrder.length > 0;
 
@@ -248,9 +249,29 @@ export function HomePage() {
       <Separator />
 
       <section>
-        <h2 className="text-sm font-medium text-text-primary mb-4">
-          Personal presets
-        </h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-medium text-text-primary">
+            My presets
+          </h2>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate("quality-presets")}
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5 mr-1" />
+              Manage presets
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => navigate("quality-presets")}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              Create preset
+            </Button>
+          </div>
+        </div>
 
         {presetsLoading ? (
           <div className="flex gap-3 overflow-x-auto pb-2">

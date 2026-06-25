@@ -11,13 +11,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -25,15 +18,6 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-  DialogClose,
-} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { useStore } from "@/stores/main-store";
@@ -44,60 +28,45 @@ import {
   loadQuickShareConfig,
   saveQuickShareConfig,
 } from "@/services/settings-actions";
-
-// ─── Defaults ──────────────────────────────────────────────────────────────
-
-const DEFAULT_SETTINGS = {
-  displayName: "",
-  language: "en",
-  theme: "dark",
-  defaultPreset: "balanced",
-  defaultAudio: "application",
-  defaultCodec: "h264",
-  defaultResolution: "1920x1080",
-  defaultFps: 60,
-  launchAtLogin: false,
-  startMinimized: false,
-  autoResume: false,
-  closeToTray: true,
-  hardwareAccel: true,
-  showSystemAudio: false,
-  allowViewerRequests: true,
-  updateChannel: "stable",
-  autoInstall: true,
-  quickShareEnabled: true,
-  quickShareAccelerator: "Super+Alt+S",
-};
-
-type FormSettings = typeof DEFAULT_SETTINGS;
-
-// ─── SettingsPage ───────────────────────────────────────────────────────────
+import type { PersistedSettings } from "../../../preload/api-types.js";
 
 /**
- * SettingsPage — User/application settings (Section 16.7).
- *
- * Loads from real persisted settings via `getSettings` on mount.
- * Saves through real `updateSettings` and `updateDisplayName` APIs.
- * No fake success toast before persistence completes.
- *
- * States: loading → form | error (with retry).
- * Only user/device/app-owned controls — no group-owned state.
+ * Only the controls that are backed by a real persisted API are
+ * rendered. The save path preserves all other fields in
+ * hostQualityLimits and writes the user's own values to the correct
+ * nested location. Success is reported only after persistence
+ * completes.
  */
+interface FormState {
+  displayName: string;
+  launchAtLogin: boolean;
+  autoResumeLastMonitor: boolean;
+  notificationsEnabled: boolean;
+  allowViewerQualityRequests: boolean;
+  quickShareEnabled: boolean;
+  quickShareAccelerator: string;
+}
+
 export function SettingsPage() {
-  // ── Load state ──────────────────────────────────────────────────
+  // ── Load state ──────────────────────────────────────────
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // ── Form state ──────────────────────────────────────────────────
-  const [form, setForm] = useState<FormSettings>(DEFAULT_SETTINGS);
+  // ── Form state ──────────────────────────────────────────
+  const [form, setForm] = useState<FormState>({
+    displayName: "",
+    launchAtLogin: false,
+    autoResumeLastMonitor: false,
+    notificationsEnabled: true,
+    allowViewerQualityRequests: true,
+    quickShareEnabled: true,
+    quickShareAccelerator: "Super+Alt+S",
+  });
   const [dirty, setDirty] = useState(false);
   const [displayNameDirty, setDisplayNameDirty] = useState(false);
 
-  // ── Reset dialog ────────────────────────────────────────────────
-  const [resetDialogOpen, setResetDialogOpen] = useState(false);
-
-  // ── Load settings on mount ──────────────────────────────────────
+  // ── Load settings on mount ──────────────────────────────
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
@@ -107,24 +76,13 @@ export function SettingsPage() {
         loadQuickShareConfig(),
       ]);
       setForm({
-        displayName: settings.hostDisplayName ?? settings.deviceIdentity?.displayName ?? "",
-        language: "en",
-        theme: "dark",
-        defaultPreset: "balanced",
-        defaultAudio: "application",
-        defaultCodec: settings.globalQualityDefaults?.video?.codec ?? "h264",
-        defaultResolution: `${settings.globalQualityDefaults?.video?.sendWidth ?? 1920}x${settings.globalQualityDefaults?.video?.sendHeight ?? 1080}`,
-        defaultFps: settings.globalQualityDefaults?.video?.sendFps ?? 60,
+        displayName:
+          settings.hostDisplayName ?? settings.deviceIdentity?.displayName ?? "",
         launchAtLogin: settings.launchAtLogin ?? false,
-        startMinimized: false,
-        autoResume: settings.autoResumeLastMonitor ?? false,
-        closeToTray: true,
-        hardwareAccel: true,
-        showSystemAudio: false,
-        allowViewerRequests:
+        autoResumeLastMonitor: settings.autoResumeLastMonitor ?? false,
+        notificationsEnabled: settings.notificationsEnabled ?? true,
+        allowViewerQualityRequests:
           settings.hostQualityLimits?.allowViewerQualityRequests ?? true,
-        updateChannel: "stable",
-        autoInstall: true,
         quickShareEnabled: quickShare.shortcutEnabled,
         quickShareAccelerator: quickShare.shortcutAccelerator,
       });
@@ -141,9 +99,9 @@ export function SettingsPage() {
     void load();
   }, [load]);
 
-  // ── Field change helper ─────────────────────────────────────────
+  // ── Field change helper ─────────────────────────────────
   const updateField = useCallback(
-    <K extends keyof FormSettings>(key: K, value: FormSettings[K]) => {
+    <K extends keyof FormState>(key: K, value: FormState[K]) => {
       setForm((prev) => ({ ...prev, [key]: value }));
       if (key === "displayName") {
         setDisplayNameDirty(true);
@@ -154,36 +112,74 @@ export function SettingsPage() {
     [],
   );
 
-  // ── Save all dirty settings ─────────────────────────────────────
+  // ── Save: build the correct payload and write ───────────
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
-      // Save display name separately if dirty
+      // Display name persists via its own dedicated call.
       if (displayNameDirty && form.displayName.trim()) {
         await updateDisplayName(form.displayName.trim());
         setDisplayNameDirty(false);
       }
 
-      // Save general settings
+      // Build the general-settings partial. The viewer-requests
+      // control is stored under hostQualityLimits, so we must merge
+      // with the existing nested object instead of overwriting it.
       const partial: Record<string, unknown> = {};
-      if (dirty) {
-        partial.launchAtLogin = form.launchAtLogin;
-        partial.autoResumeLastMonitor = form.autoResume;
-        partial.notificationsEnabled = form.allowViewerRequests;
+
+      // Always send the top-level scalar fields when they exist in
+      // the form (cheap, idempotent).
+      partial.launchAtLogin = form.launchAtLogin;
+      partial.autoResumeLastMonitor = form.autoResumeLastMonitor;
+      partial.notificationsEnabled = form.notificationsEnabled;
+
+      // hostQualityLimits.allowViewerQualityRequests: merge with
+      // existing values to preserve the other limits.
+      try {
+        const current: PersistedSettings = await loadSettings();
+        partial.hostQualityLimits = {
+          ...(current.hostQualityLimits ?? {}),
+          allowViewerQualityRequests: form.allowViewerQualityRequests,
+        };
+      } catch {
+        // If we cannot read current settings, write the field with
+        // safe defaults.
+        partial.hostQualityLimits = {
+          maxVideoBitrateKbps: 5000,
+          maxWidth: 1920,
+          maxHeight: 1080,
+          maxFps: 60,
+          allowViewerQualityRequests: form.allowViewerQualityRequests,
+        };
       }
 
-      if (Object.keys(partial).length > 0) {
-        await saveSettings(partial);
+      await saveSettings(partial);
+
+      // Quick share config has its own preload method.
+      await saveQuickShareConfig({
+        shortcutEnabled: form.quickShareEnabled,
+        shortcutAccelerator: form.quickShareAccelerator,
+      });
+
+      // Re-read to confirm persistence. Only show success if the
+      // round-trip reads back the value we wrote.
+      const [confirmed, confirmedQs] = await Promise.all([
+        loadSettings(),
+        loadQuickShareConfig(),
+      ]);
+      const ok =
+        confirmed.launchAtLogin === form.launchAtLogin &&
+        confirmed.autoResumeLastMonitor === form.autoResumeLastMonitor &&
+        confirmed.notificationsEnabled === form.notificationsEnabled &&
+        confirmed.hostQualityLimits?.allowViewerQualityRequests ===
+          form.allowViewerQualityRequests &&
+        confirmedQs.shortcutEnabled === form.quickShareEnabled &&
+        confirmedQs.shortcutAccelerator === form.quickShareAccelerator;
+      if (!ok) {
+        throw new Error("Saved settings could not be verified");
       }
 
-      if (dirty) {
-        await saveQuickShareConfig({
-          shortcutEnabled: form.quickShareEnabled,
-          shortcutAccelerator: form.quickShareAccelerator,
-        });
-        setDirty(false);
-      }
-
+      setDirty(false);
       toast.success("Settings saved");
     } catch (err) {
       const message =
@@ -192,18 +188,9 @@ export function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [form, dirty, displayNameDirty]);
+  }, [form, displayNameDirty]);
 
-  // ── Reset ───────────────────────────────────────────────────────
-  const handleReset = useCallback(() => {
-    setForm(DEFAULT_SETTINGS);
-    setDirty(true);
-    setDisplayNameDirty(true);
-    setResetDialogOpen(false);
-    toast("Settings reset to defaults (save to persist)");
-  }, []);
-
-  // ── Switch row helper ───────────────────────────────────────────
+  // ── Switch row helper ───────────────────────────────────
   const SwitchRow = ({
     id,
     label,
@@ -255,43 +242,7 @@ export function SettingsPage() {
     </div>
   );
 
-  // ── Select row helper ───────────────────────────────────────────
-  const SelectRow = ({
-    id,
-    label,
-    value,
-    options,
-    onValueChange,
-  }: {
-    id: string;
-    label: string;
-    value: string;
-    options: { value: string; label: string }[];
-    onValueChange: (v: string) => void;
-  }) => (
-    <div className="flex items-center justify-between py-1.5 gap-4">
-      <Label
-        htmlFor={id}
-        className="text-sm text-text-primary flex-shrink-0"
-      >
-        {label}
-      </Label>
-      <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger id={id} className="w-44">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {options.map((opt) => (
-            <SelectItem key={opt.value} value={opt.value}>
-              {opt.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-
-  // ── Loading state ───────────────────────────────────────────────
+  // ── Loading state ───────────────────────────────────────
   if (loading) {
     return (
       <div className="h-full overflow-auto p-5 space-y-5">
@@ -303,7 +254,7 @@ export function SettingsPage() {
     );
   }
 
-  // ── Error state ─────────────────────────────────────────────────
+  // ── Error state ─────────────────────────────────────────
   if (loadError) {
     return (
       <div className="h-full overflow-auto p-5">
@@ -325,10 +276,9 @@ export function SettingsPage() {
     );
   }
 
-  // ── Render form ─────────────────────────────────────────────────
+  // ── Render form ─────────────────────────────────────────
   return (
     <div className="h-full overflow-auto p-5 space-y-5">
-      {/* ─── Page header ─────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-text-primary">Settings</h1>
         <Button
@@ -341,10 +291,10 @@ export function SettingsPage() {
         </Button>
       </div>
 
-      {/* ─── General ─────────────────────────────────────────── */}
+      {/* ─── Profile ──────────────────────────────────────── */}
       <Card>
         <CardHeader>
-          <CardTitle>General</CardTitle>
+          <CardTitle>Profile</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1.5">
@@ -362,35 +312,13 @@ export function SettingsPage() {
               disabled={saving}
             />
           </div>
-          <SelectRow
-            id="language"
-            label="Language"
-            value={form.language}
-            options={[
-              { value: "en", label: "English" },
-              { value: "ja", label: "Japanese" },
-              { value: "ko", label: "Korean" },
-            ]}
-            onValueChange={(v) => updateField("language", v)}
-          />
-          <SelectRow
-            id="theme"
-            label="Theme"
-            value={form.theme}
-            options={[
-              { value: "system", label: "System" },
-              { value: "dark", label: "Dark" },
-              { value: "light", label: "Light" },
-            ]}
-            onValueChange={(v) => updateField("theme", v)}
-          />
         </CardContent>
       </Card>
 
-      {/* ─── Startup & tray ──────────────────────────────────── */}
+      {/* ─── Startup ──────────────────────────────────────── */}
       <Card>
         <CardHeader>
-          <CardTitle>Startup &amp; tray</CardTitle>
+          <CardTitle>Startup</CardTitle>
         </CardHeader>
         <CardContent className="space-y-1">
           <SwitchRow
@@ -402,32 +330,48 @@ export function SettingsPage() {
           />
           <Separator />
           <SwitchRow
-            id="start-minimized"
-            label="Start minimized to tray"
-            tooltip="When launched at login, ScreenLink starts in the system tray instead of showing the window."
-            checked={form.startMinimized}
-            onCheckedChange={(v) => updateField("startMinimized", v)}
-          />
-          <Separator />
-          <SwitchRow
             id="auto-resume"
             label="Auto-resume last monitor share"
             tooltip="On startup, automatically resume sharing your last-used monitor without confirmation."
-            checked={form.autoResume}
-            onCheckedChange={(v) => updateField("autoResume", v)}
-          />
-          <Separator />
-          <SwitchRow
-            id="close-to-tray"
-            label="Close to tray (when X clicked)"
-            tooltip="Pressing the close button minimizes ScreenLink to the system tray instead of quitting."
-            checked={form.closeToTray}
-            onCheckedChange={(v) => updateField("closeToTray", v)}
+            checked={form.autoResumeLastMonitor}
+            onCheckedChange={(v) => updateField("autoResumeLastMonitor", v)}
           />
         </CardContent>
       </Card>
 
-      {/* ─── Quick Share ─────────────────────────────────────── */}
+      {/* ─── Notifications ────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Notifications</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1">
+          <SwitchRow
+            id="notifications-enabled"
+            label="Enable general notifications"
+            tooltip="Receive general system notifications from ScreenLink."
+            checked={form.notificationsEnabled}
+            onCheckedChange={(v) => updateField("notificationsEnabled", v)}
+          />
+        </CardContent>
+      </Card>
+
+      {/* ─── Host quality ──────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Host quality</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1">
+          <SwitchRow
+            id="allow-viewer-requests"
+            label="Allow viewer quality requests"
+            tooltip="Allow viewers to request quality changes to your stream. Disable to always use your preset."
+            checked={form.allowViewerQualityRequests}
+            onCheckedChange={(v) => updateField("allowViewerQualityRequests", v)}
+          />
+        </CardContent>
+      </Card>
+
+      {/* ─── Quick Share ──────────────────────────────────── */}
       <Card>
         <CardHeader>
           <CardTitle>Quick Share</CardTitle>
@@ -457,95 +401,6 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
-
-      {/* ─── Capture ─────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Capture</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1">
-          <SwitchRow
-            id="hardware-accel"
-            label="Prefer hardware acceleration"
-            tooltip="Use GPU encoders when available — see Section 16.2 of impl spec for known limitations"
-            checked={form.hardwareAccel}
-            onCheckedChange={(v) => updateField("hardwareAccel", v)}
-          />
-          <Separator />
-          <SwitchRow
-            id="show-system-audio"
-            label="Show system audio toggle"
-            tooltip="Show a toggle in the sharing UI to enable or disable system audio capture."
-            checked={form.showSystemAudio}
-            onCheckedChange={(v) => updateField("showSystemAudio", v)}
-          />
-          <Separator />
-          <SwitchRow
-            id="allow-viewer-requests"
-            label="Allow viewer quality requests"
-            tooltip="Allow viewers to request quality changes to your stream. Disable to always use your preset."
-            checked={form.allowViewerRequests}
-            onCheckedChange={(v) => updateField("allowViewerRequests", v)}
-          />
-        </CardContent>
-      </Card>
-
-      {/* ─── Updates ─────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Updates</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <SelectRow
-            id="update-channel"
-            label="Channel"
-            value={form.updateChannel}
-            options={[
-              { value: "stable", label: "Stable" },
-              { value: "beta", label: "Beta" },
-            ]}
-            onValueChange={(v) => updateField("updateChannel", v)}
-          />
-          <SwitchRow
-            id="auto-install"
-            label="Auto-install updates"
-            tooltip="Automatically download and install updates when available. You will be prompted to restart."
-            checked={form.autoInstall}
-            onCheckedChange={(v) => updateField("autoInstall", v)}
-          />
-        </CardContent>
-      </Card>
-
-      {/* ─── Reset to defaults ───────────────────────────────── */}
-      <div className="flex justify-center pt-2 pb-8">
-        <Button
-          variant="outline"
-          onClick={() => setResetDialogOpen(true)}
-        >
-          Reset to defaults
-        </Button>
-      </div>
-
-      {/* ─── Reset confirmation dialog ───────────────────────── */}
-      <Dialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Reset to defaults</DialogTitle>
-            <DialogDescription>
-              This will reset all settings to their factory defaults. You
-              must click "Save settings" to persist the reset.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button variant="outline">Cancel</Button>
-            </DialogClose>
-            <Button variant="destructive" onClick={handleReset}>
-              Reset all settings
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

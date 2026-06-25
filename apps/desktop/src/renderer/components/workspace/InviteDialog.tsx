@@ -1,6 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Copy, Check, X } from "lucide-react";
-import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
@@ -11,18 +10,13 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { copyGroupInviteFromUi, getInviteCopyDeps } from "@/services/invite-copy";
 
 /**
- * InviteDialog — Watermelon Dialog for sharing an invite link (Section 8.1 / 6.1).
- *
- * Props:
- *   open       — controlled open state
- *   onOpenChange — callback when dialog closes
- *   groupName  — name of the group (for the description)
- *   groupId    — used to construct the invite link
- *
- * Composed from Watermelon: Dialog, Input, Button.
- * Uses navigator.clipboard.writeText with sonner toast feedback.
+ * InviteDialog — Dialog for sharing a real, generated group invite
+ * link. The link is resolved from the preload `getGroupInvite` API
+ * and copied to the clipboard via the preload `clipboardWriteText`
+ * API. The dialog does not fabricate invite URLs.
  */
 interface InviteDialogProps {
   open: boolean;
@@ -37,30 +31,57 @@ export function InviteDialog({
   groupName,
   groupId,
 }: InviteDialogProps) {
-  // Construct the invite link — placeholder until real invite service is wired
-  const inviteLink = `https://screenlink.app/invite/${groupId}`;
-
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [resolved, setResolved] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(inviteLink);
-    } catch {
-      // Fallback for older contexts
-      const ta = document.createElement("textarea");
-      ta.value = inviteLink;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+  // Resolve the real invite link from the preload API when the
+  // dialog opens. The link is never fabricated locally.
+  useEffect(() => {
+    if (!open) {
+      setInviteLink(null);
+      setResolved(false);
+      setResolveError(null);
+      setCopied(false);
+      return;
     }
-    setCopied(true);
-    toast("Invite link copied");
-    // Reset copied state after a moment
-    setTimeout(() => setCopied(false), 2000);
-  }, [inviteLink]);
+    let cancelled = false;
+    const deps = getInviteCopyDeps();
+    if (!deps) {
+      setResolveError("Invite service is unavailable");
+      setResolved(true);
+      return;
+    }
+    deps
+      .getGroupInvite(groupId)
+      .then((invite) => {
+        if (cancelled) return;
+        if (invite && typeof invite.link === "string" && invite.link.length > 0) {
+          setInviteLink(invite.link);
+        } else {
+          setResolveError("No invite available for this group");
+        }
+        setResolved(true);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setResolveError(err instanceof Error ? err.message : "Failed to load invite");
+        setResolved(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, groupId]);
+
+  const handleCopy = useCallback(async () => {
+    if (!inviteLink) return;
+    const result = await copyGroupInviteFromUi(groupId, "Invite link copied");
+    if (result.success) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [groupId, inviteLink]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -76,14 +97,22 @@ export function InviteDialog({
         <div className="flex items-center gap-2 pt-2">
           <Input
             readOnly
-            value={inviteLink}
+            value={
+              inviteLink ??
+              (resolved
+                ? resolveError ?? "Resolving invite…"
+                : "Resolving invite…")
+            }
             aria-label="Invite link"
             className="flex-1"
+            placeholder="Resolving invite…"
+            disabled={!inviteLink}
           />
           <Button
             variant="default"
             size="icon"
             onClick={handleCopy}
+            disabled={!inviteLink}
             aria-label={copied ? "Copied" : "Copy invite link"}
             className="flex-shrink-0"
           >

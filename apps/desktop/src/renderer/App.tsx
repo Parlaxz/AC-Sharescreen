@@ -212,7 +212,7 @@ export function App() {
         return <GroupsWorkspace />;
       case "share-setup":
         return <ShareSetup />;
-      case "group-presets":
+      case "quality-presets":
         return <QualityPresetsPage />;
       case "group-settings":
         return <GroupSettingsPage />;

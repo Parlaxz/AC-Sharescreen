@@ -1,48 +1,66 @@
 import { getRuntime } from "./phase3-runtime.js";
 import { useStore } from "../stores/main-store.js";
+import type {
+  AudioModeValue,
+  SessionQualityOverride,
+  ShareSource,
+} from "./share-quality.js";
+import { validateSessionQualityOverride } from "./share-quality.js";
+
+export type { AudioModeValue, ShareSource, SessionQualityOverride };
 
 /**
- * Source descriptor for starting a share.
- * Aligned with StartStreamInput.source from StreamSessionManager.
+ * Typed input for the shared start transaction. Mirrors StartShareInput
+ * in share-quality.ts but keeps the local type so other renderer
+ * callers don't have to import the type module just to start a share.
  */
-export interface ShareSource {
-  id: string;
-  name: string;
-  kind: "screen" | "window";
-  displayId: string | null;
-  fingerprint: string | null;
-  /** User's audio mode choice. When omitted, source-derived mode is used. */
-  audioMode?: "none" | "monitor" | "application";
+export interface StartShareInput {
+  groupId: string;
+  source: ShareSource;
+  qualityOverride?: SessionQualityOverride;
 }
 
-
 /**
- * Start sharing the given source to the currently selected group.
+ * Start sharing the given source in the given group using the given
+ * optional quality override.
  *
- * Uses the Phase3 runtime's StreamSessionManager for the real stream lifecycle
- * (capture → publish → register → heartbeat). Updates the Zustand store on
- * success/failure. Preserves audio-degrade behavior from StreamSessionManager.
+ * Uses the Phase3 runtime's StreamSessionManager for the real stream
+ * lifecycle (capture → publish → register → heartbeat). Updates the
+ * Zustand store on success/failure. Preserves audio-degrade behavior
+ * from StreamSessionManager.
  *
- * Throws on failure. The caller (ShareSetup) is responsible for showing toasts
- * and closing the dialog.
+ * Throws on failure. Callers (ShareSetup, QuickShareDialog) are
+ * responsible for showing toasts and closing their dialogs.
  */
-export async function startShare(source: ShareSource): Promise<void> {
+export async function startShare(input: StartShareInput): Promise<void> {
   const store = useStore.getState();
 
-  // Validate that a group is selected
-  const groupId = store.selectedGroupId;
-  if (!groupId) {
+  // Validate explicit group ID.
+  if (!input.groupId || typeof input.groupId !== "string") {
     store.setLocalShareState("error");
-    throw new Error("No group selected");
+    throw new Error("Group ID is required to start a share");
   }
 
-  // Optimistically set source info in store before starting
+  if (!input.source || !input.source.id) {
+    store.setLocalShareState("error");
+    throw new Error("Source is required to start a share");
+  }
+
+  if (input.qualityOverride) {
+    const err = validateSessionQualityOverride(input.qualityOverride);
+    if (err) {
+      store.setLocalShareState("error");
+      throw new Error(`Invalid quality override: ${err}`);
+    }
+  }
+
+  // Optimistically set source info in store before starting.
   store.setSource({
-    id: source.id,
-    name: source.name,
-    kind: source.kind,
-    displayId: source.displayId ?? "",
-    fingerprint: source.fingerprint,
+    id: input.source.id,
+    name: input.source.name,
+    kind: input.source.kind,
+    displayId: input.source.displayId ?? "",
+    fingerprint: input.source.fingerprint,
   });
   store.setLocalShareState("starting");
 
@@ -55,66 +73,90 @@ export async function startShare(source: ShareSource): Promise<void> {
   try {
     const ssm = runtime.getStreamSessionManager();
 
-    // Build startStream input with optional audio mode
     const streamInput: {
       groupId: string;
       source: {
-        id: string; name: string; kind: "screen" | "window";
-        displayId: string | null; fingerprint: string | null;
+        id: string;
+        name: string;
+        kind: "screen" | "window";
+        displayId: string | null;
+        fingerprint: string | null;
       };
       audioMode?: "none" | "monitor" | "application";
+      qualityOverride?: SessionQualityOverride;
     } = {
-      groupId,
+      groupId: input.groupId,
       source: {
-        id: source.id,
-        name: source.name,
-        kind: source.kind,
-        displayId: source.displayId ?? null,
-        fingerprint: source.fingerprint,
+        id: input.source.id,
+        name: input.source.name,
+        kind: input.source.kind,
+        displayId: input.source.displayId ?? null,
+        fingerprint: input.source.fingerprint,
       },
     };
-    if (source.audioMode !== undefined) {
-      streamInput.audioMode = source.audioMode;
+    if (input.source.audioMode !== undefined) {
+      streamInput.audioMode = input.source.audioMode;
+    }
+    if (input.qualityOverride) {
+      streamInput.qualityOverride = input.qualityOverride;
     }
 
-    // Start the real stream via StreamSessionManager
     await ssm.startStream(streamInput);
 
-    // Persist last audio mode per source kind
-    if (source.audioMode !== undefined) {
-      if (source.kind === "screen" && (source.audioMode === "none" || source.audioMode === "monitor")) {
-        store.setLastScreenAudioMode(source.audioMode);
+    if (input.source.audioMode !== undefined) {
+      const mode = input.source.audioMode;
+      if (
+        input.source.kind === "screen" &&
+        (mode === "none" || mode === "monitor")
+      ) {
+        store.setLastScreenAudioMode(mode);
       }
-      if (source.kind === "window" && (source.audioMode === "none" || source.audioMode === "application")) {
-        store.setLastWindowAudioMode(source.audioMode);
+      if (
+        input.source.kind === "window" &&
+        (mode === "none" || mode === "application")
+      ) {
+        store.setLastWindowAudioMode(mode);
       }
     }
 
-    // Read back actual capture dimensions from the SSM (Gate 4.4)
     const dims = ssm.getActualCaptureDimensions();
     store.setCaptureInfo(dims.width, dims.height, dims.fps);
 
-    // Propagate audio degrade state
     if (ssm.isAudioDegraded) {
       store.setIsDegraded(true);
     }
 
-    // Mark as actively sharing
     store.setIsSharing(true);
     store.setLocalShareState("sharing");
   } catch (err) {
     store.setLocalShareState("error");
     throw err;
   }
+}
 
+/**
+ * Backward-compatible overload for callers that still pass a
+ * source-only object. The group is read from selectedGroupId; this
+ * is acceptable for in-app flows that have already populated the
+ * store. Quick Share must use the explicit `groupId` overload.
+ */
+export async function startShareLegacy(source: ShareSource): Promise<void> {
+  const store = useStore.getState();
+  const groupId = store.selectedGroupId;
+  if (!groupId) {
+    store.setLocalShareState("error");
+    throw new Error("No group selected");
+  }
+  return startShare({ groupId, source });
 }
 
 /**
  * Stop the active share.
  *
  * Uses the Phase3 runtime's StreamSessionManager.stopStream for clean
- * teardown (broadcast stream.stopped, remove registry entry, close viewer
- * mappings, stop publication/capture). Resets store state on completion.
+ * teardown (broadcast stream.stopped, remove registry entry, close
+ * viewer mappings, stop publication/capture). Resets store state on
+ * completion.
  *
  * Safe to call when no share is active or when runtime is unavailable.
  */
@@ -124,7 +166,6 @@ export async function stopShare(): Promise<void> {
 
   const runtime = getRuntime();
   if (!runtime) {
-    // No runtime — just reset store state
     store.setIsSharing(false);
     store.setLocalShareState("idle");
     store.setIsDegraded(false);

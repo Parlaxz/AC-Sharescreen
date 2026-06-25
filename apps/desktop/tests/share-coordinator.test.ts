@@ -28,11 +28,14 @@ describe("share coordinator", () => {
     const { startShare } = await import("../src/renderer/services/share-coordinator.js");
 
     await startShare({
-      id: "screen:1",
-      name: "Display 1",
-      kind: "screen",
-      displayId: "display-1",
-      fingerprint: null,
+      groupId: "group-1",
+      source: {
+        id: "screen:1",
+        name: "Display 1",
+        kind: "screen",
+        displayId: "display-1",
+        fingerprint: null,
+      },
     });
 
     expect(startStream).toHaveBeenCalledWith({
@@ -55,19 +58,21 @@ describe("share coordinator", () => {
     expect(state.isDegraded).toBe(true);
   });
 
-  it("rejects starting when no group is selected", async () => {
-    useStore.getState().setSelectedGroupId(null);
+  it("rejects starting when no group is provided", async () => {
     const { startShare } = await import("../src/renderer/services/share-coordinator.js");
 
     await expect(
       startShare({
-        id: "screen:1",
-        name: "Display 1",
-        kind: "screen",
-        displayId: "display-1",
-        fingerprint: null,
+        groupId: "",
+        source: {
+          id: "screen:1",
+          name: "Display 1",
+          kind: "screen",
+          displayId: "display-1",
+          fingerprint: null,
+        },
       }),
-    ).rejects.toThrow("No group selected");
+    ).rejects.toThrow(/group id/i);
 
     expect(useStore.getState().localShareState).toBe("error");
     expect(useStore.getState().isSharing).toBe(false);
@@ -79,11 +84,14 @@ describe("share coordinator", () => {
 
     await expect(
       startShare({
-        id: "window:1",
-        name: "App Window",
-        kind: "window",
-        displayId: null,
-        fingerprint: null,
+        groupId: "group-1",
+        source: {
+          id: "window:1",
+          name: "App Window",
+          kind: "window",
+          displayId: null,
+          fingerprint: null,
+        },
       }),
     ).rejects.toThrow("Phase3 runtime not available");
 

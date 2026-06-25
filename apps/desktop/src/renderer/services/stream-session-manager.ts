@@ -8,6 +8,8 @@ import {
   normalizeAudioMode,
 } from "@screenlink/shared";
 import { ProcessAudioController } from "../audio/ProcessAudioController.js";
+import type { SessionQualityOverride } from "./share-quality.js";
+import { validateSessionQualityOverride } from "./share-quality.js";
 
 /**
  * Stream session state machine:
@@ -42,6 +44,13 @@ export interface StartStreamInput {
    * When omitted, source-derived mode is used (backward compat).
    */
   audioMode?: "none" | "monitor" | "application";
+  /**
+   * Per-session quality override. When present, these values
+   * take precedence over the group default for capture and
+   * publication. The override is remembered for the lifetime of
+   * the session and reused on restart.
+   */
+  qualityOverride?: SessionQualityOverride;
 }
 
 export interface VdoSessionConfig {
@@ -84,6 +93,11 @@ export class StreamSessionManager {
   private _audioModeOverride: AudioMode | null = null;
   private _explicitAudioMode: "none" | "monitor" | "application" | null = null;
   private _isAudioDegraded = false;
+  /**
+   * Per-session quality override. Cleared on stop/reset/destroy.
+   * Reused by restart so the same captured values are applied again.
+   */
+  private _sessionQualityOverride: SessionQualityOverride | null = null;
 
   constructor(
     private runtime: Phase3Runtime,
@@ -278,6 +292,13 @@ export class StreamSessionManager {
     if (this._state !== "idle" && this._state !== "failed") return;
     if (this.destroyed) return;
 
+    if (input.qualityOverride) {
+      const err = validateSessionQualityOverride(input.qualityOverride);
+      if (err) {
+        throw new Error(`Invalid quality override: ${err}`);
+      }
+    }
+
     this._state = "starting";
     this.groupId = input.groupId;
     this.logicalStreamId = crypto.randomUUID();
@@ -289,24 +310,39 @@ export class StreamSessionManager {
     this._sourceKind = input.source.kind;
     this._explicitAudioMode = input.audioMode ?? null;
     this._isAudioDegraded = false;
+    this._sessionQualityOverride = input.qualityOverride ?? null;
 
     try {
       // 0. Read group defaults from sync service (Stage 15)
       const syncState = this.runtime.getSyncService().getSyncState(input.groupId);
       const quality = syncState?.state?.defaultQuality?.value ?? null;
 
-      // Derive effective publication settings from group defaults
-      const videoBitrate = quality?.video?.videoBitrateKbps ?? 650;
-      const videoWidth = quality?.video?.sendWidth ?? 854;
-      const videoHeight = quality?.video?.sendHeight ?? 480;
-      const videoFps = quality?.video?.sendFps ?? 15;
-      // Stage 17: Additional fields from group defaults
-      const codec = quality?.video?.codec ?? "auto";
-      const contentHint = quality?.video?.contentHint ?? "detail";
-      const degradationPreference = quality?.video?.degradationPreference ?? "maintain-resolution";
-      const captureWidth = quality?.video?.captureWidth ?? 854;
-      const captureHeight = quality?.video?.captureHeight ?? 480;
-      const captureFps = quality?.video?.captureFps ?? 15;
+      // Derive effective publication settings with this precedence:
+      //   1) session quality override (if any)
+      //   2) group default
+      //   3) hardcoded fallback
+      const ov = this._sessionQualityOverride;
+      const videoBitrate =
+        ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? 650;
+      const videoWidth = ov?.sendWidth ?? quality?.video?.sendWidth ?? 854;
+      const videoHeight = ov?.sendHeight ?? quality?.video?.sendHeight ?? 480;
+      const videoFps = ov?.sendFps ?? quality?.video?.sendFps ?? 15;
+      // Stage 17: Additional fields from group defaults. Codec/content
+      // hint/degradation are taken from the session override only when
+      // explicitly present, otherwise from group defaults. Built-in
+      // presets omit these so the existing defaults remain in effect.
+      const codec = ov?.codec ?? quality?.video?.codec ?? "auto";
+      const contentHint =
+        ov?.contentHint ?? quality?.video?.contentHint ?? "detail";
+      const degradationPreference =
+        ov?.degradationPreference ??
+        quality?.video?.degradationPreference ??
+        "maintain-resolution";
+      const captureWidth =
+        ov?.captureWidth ?? quality?.video?.captureWidth ?? 854;
+      const captureHeight =
+        ov?.captureHeight ?? quality?.video?.captureHeight ?? 480;
+      const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? 15;
 
       // 0. Generate VDO credentials
       const vdoStreamId = generateVdoStreamId();
@@ -589,20 +625,30 @@ export class StreamSessionManager {
 
       // 7. Read group defaults for publication quality FIRST so
       // captureWidth/Height/Fps are available for the constraint
-      // application below.
+      // application below. Precedence remains:
+      //   1) active session quality override (preserved across restart)
+      //   2) group default
+      //   3) hardcoded fallback
       const syncState = this.runtime.getSyncService().getSyncState(oldGroupId);
       const quality = syncState?.state?.defaultQuality?.value ?? null;
-      const videoBitrate = quality?.video?.videoBitrateKbps ?? 650;
-      const videoWidth = quality?.video?.sendWidth ?? 854;
-      const videoHeight = quality?.video?.sendHeight ?? 480;
-      const videoFps = quality?.video?.sendFps ?? 15;
-      // Stage 17: Additional fields from group defaults
-      const codec = quality?.video?.codec ?? "auto";
-      const contentHint = quality?.video?.contentHint ?? "detail";
-      const degradationPreference = quality?.video?.degradationPreference ?? "maintain-resolution";
-      const captureWidth = quality?.video?.captureWidth ?? 854;
-      const captureHeight = quality?.video?.captureHeight ?? 480;
-      const captureFps = quality?.video?.captureFps ?? 15;
+      const ov = this._sessionQualityOverride;
+      const videoBitrate =
+        ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? 650;
+      const videoWidth = ov?.sendWidth ?? quality?.video?.sendWidth ?? 854;
+      const videoHeight = ov?.sendHeight ?? quality?.video?.sendHeight ?? 480;
+      const videoFps = ov?.sendFps ?? quality?.video?.sendFps ?? 15;
+      const codec = ov?.codec ?? quality?.video?.codec ?? "auto";
+      const contentHint =
+        ov?.contentHint ?? quality?.video?.contentHint ?? "detail";
+      const degradationPreference =
+        ov?.degradationPreference ??
+        quality?.video?.degradationPreference ??
+        "maintain-resolution";
+      const captureWidth =
+        ov?.captureWidth ?? quality?.video?.captureWidth ?? 854;
+      const captureHeight =
+        ov?.captureHeight ?? quality?.video?.captureHeight ?? 480;
+      const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? 15;
 
       // Gate 4.4: apply capture constraints and read back actual
       // dimensions so downstream code operates on real values.
@@ -939,6 +985,7 @@ export class StreamSessionManager {
     this.vdoConfig = null;
     this._sourceId = null;
     this._explicitAudioMode = null;
+    this._sessionQualityOverride = null;
     this.actualCaptureWidth = 0;
     this.actualCaptureHeight = 0;
     this.actualCaptureFps = 0;

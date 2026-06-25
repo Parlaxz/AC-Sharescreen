@@ -45,10 +45,9 @@ describe("Navigation store model", () => {
   it("GroupNavPage type excludes active-shares and members", () => {
     const validPages: GroupNavPage[] = [
       "overview",
-      "group-presets",
       "group-settings",
     ];
-    expect(validPages).toHaveLength(3);
+    expect(validPages).toHaveLength(2);
     for (const page of validPages) {
       useStore.getState().setGroupNavPage(page);
       expect(useStore.getState().groupNavPage).toBe(page);
@@ -62,7 +61,7 @@ describe("Navigation store model", () => {
       "host",
       "viewer",
       "share-setup",
-      "group-presets",
+      "quality-presets",
       "group-settings",
       "user-settings",
       "diagnostics",

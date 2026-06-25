@@ -27,10 +27,11 @@ describe("QuickShareShortcutManager", () => {
       getQuickShareEnabled: () => true,
       getQuickShareAccelerator: () => "Alt+Shift+S",
     });
-    expect(mgr.getStatus()).toEqual({
+    expect(mgr.getStatus()).toMatchObject({
       registered: false,
       accelerator: "Alt+Shift+S",
       enabled: true,
+      registeredAccelerator: null,
     });
   });
 

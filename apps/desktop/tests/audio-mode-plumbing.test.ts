@@ -64,15 +64,18 @@ describe("Coordinator audio mode plumbing", () => {
     );
 
     await startShare({
-      id: "src-1",
-      name: "Screen",
-      kind: "screen",
-      displayId: null,
-      fingerprint: null,
-      audioMode: "monitor",
+      groupId: "group-1",
+      source: {
+        id: "src-1",
+        name: "Screen",
+        kind: "screen",
+        displayId: null,
+        fingerprint: null,
+        audioMode: "monitor",
+      },
     });
 
-    expect(_mockSsm.startStream).toHaveBeenCalledWith({
+    expect(_mockSsm.startStream).toHaveBeenLastCalledWith({
       groupId: "group-1",
       source: {
         id: "src-1",
@@ -91,15 +94,18 @@ describe("Coordinator audio mode plumbing", () => {
     );
 
     await startShare({
-      id: "src-2",
-      name: "Window",
-      kind: "window",
-      displayId: null,
-      fingerprint: null,
-      audioMode: "none",
+      groupId: "group-1",
+      source: {
+        id: "src-2",
+        name: "Window",
+        kind: "window",
+        displayId: null,
+        fingerprint: null,
+        audioMode: "none",
+      },
     });
 
-    expect(_mockSsm.startStream).toHaveBeenCalledWith({
+    expect(_mockSsm.startStream).toHaveBeenLastCalledWith({
       groupId: "group-1",
       source: {
         id: "src-2",
@@ -118,12 +124,15 @@ describe("Coordinator audio mode plumbing", () => {
     );
 
     await startShare({
-      id: "src-3",
-      name: "Screen Share",
-      kind: "screen",
-      displayId: null,
-      fingerprint: null,
-      audioMode: "monitor",
+      groupId: "group-1",
+      source: {
+        id: "src-3",
+        name: "Screen Share",
+        kind: "screen",
+        displayId: null,
+        fingerprint: null,
+        audioMode: "monitor",
+      },
     });
 
     expect(useStore.getState().lastScreenAudioMode).toBe("monitor");
@@ -135,12 +144,15 @@ describe("Coordinator audio mode plumbing", () => {
     );
 
     await startShare({
-      id: "src-4",
-      name: "Window Share",
-      kind: "window",
-      displayId: null,
-      fingerprint: null,
-      audioMode: "application",
+      groupId: "group-1",
+      source: {
+        id: "src-4",
+        name: "Window Share",
+        kind: "window",
+        displayId: null,
+        fingerprint: null,
+        audioMode: "application",
+      },
     });
 
     expect(useStore.getState().lastWindowAudioMode).toBe("application");

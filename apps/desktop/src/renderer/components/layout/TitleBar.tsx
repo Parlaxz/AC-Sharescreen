@@ -38,7 +38,7 @@ export function TitleBar() {
       case "home": return "Home";
       case "user-settings": return "User Settings";
       case "group-settings": return "Group Settings";
-      case "group-presets": return "Group Presets";
+      case "quality-presets": return "My presets";
       case "diagnostics": return "Diagnostics";
       case "about": return "About";
       case "host": return "Host Workspace";

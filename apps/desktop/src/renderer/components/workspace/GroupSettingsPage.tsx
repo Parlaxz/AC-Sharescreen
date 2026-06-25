@@ -33,18 +33,20 @@ import {
 } from "@/components/ui/tooltip";
 import { useStore } from "@/stores/main-store";
 import { setGroupNotifications } from "@/services/settings-actions";
+import { leaveGroupAction } from "@/services/group-leave-action";
+import { copyGroupInviteFromUi } from "@/services/invite-copy";
 
 /**
  * GroupSettingsPage — Group-owned settings surface (Section 6.2).
  *
  * Only genuinely supported group-owned controls are shown:
- *  - Group name (read-only)
+ *  - Group info (name + member count)
  *  - Copy invite link
- *  - Notification toggle (if preload API supports it)
- *  - Leave group
+ *  - Notification toggle (real preload `setGroupNotifications`)
+ *  - Leave group (real preload `leaveGroup` + state cleanup)
  *
- * No fake/unsupported controls. User/device settings belong on
- * the user-settings page, not here.
+ * No fake/unsupported controls. Notification settings
+ * "coming soon" has been removed; the toggle is a real control.
  */
 export function GroupSettingsPage() {
   const selectedGroupId = useStore((s) => s.selectedGroupId);
@@ -57,30 +59,15 @@ export function GroupSettingsPage() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [notificationSaving, setNotificationSaving] = useState(false);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   // ── Copy invite link ────────────────────────────────────────────
   const handleCopyInviteLink = useCallback(async () => {
     if (!selectedGroupId) return;
-    try {
-      await navigator.clipboard.writeText(
-        `https://screenlink.app/invite/${selectedGroupId}`,
-      );
-      toast.success("Invite link copied");
-    } catch {
-      // Fallback
-      const ta = document.createElement("textarea");
-      ta.value = `https://screenlink.app/invite/${selectedGroupId}`;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      toast.success("Invite link copied");
-    }
+    await copyGroupInviteFromUi(selectedGroupId, "Invite link copied");
   }, [selectedGroupId]);
 
-  // ── Notification toggle ─────────────────────────────────────────
+  // ── Notification toggle (real) ──────────────────────────────────
   const handleNotificationToggle = useCallback(
     async (enabled: boolean) => {
       if (!selectedGroupId) return;
@@ -102,11 +89,30 @@ export function GroupSettingsPage() {
     [selectedGroupId],
   );
 
-  // ── Leave group ─────────────────────────────────────────────────
-  const handleLeaveGroup = useCallback(() => {
+  // ── Leave group (real) ──────────────────────────────────────────
+  const handleLeaveGroup = useCallback(async () => {
+    if (!selectedGroupId) return;
+    setLeaving(true);
+    const result = await leaveGroupAction(selectedGroupId);
+    setLeaving(false);
     setLeaveConfirmOpen(false);
-    toast("Left group (local state only — full leave flow TBD)");
-  }, []);
+    if (result.success) {
+      toast.success("Left group");
+      // The action's reducer already selected another group or
+      // navigated to home; just ensure we land on a safe page if
+      // we're still in this group.
+      const stillSelected = useStore.getState().selectedGroupId === selectedGroupId;
+      if (stillSelected) {
+        navigate("home");
+      }
+    } else if (result.localOnly) {
+      // No real leave API available — keep the action visible but
+      // surface the limitation honestly.
+      toast.error("Leave Group is not yet supported in this build");
+    } else {
+      toast.error(result.error ?? "Failed to leave group");
+    }
+  }, [selectedGroupId, navigate]);
 
   // ── No group selected ───────────────────────────────────────────
   if (!group) {
@@ -234,11 +240,17 @@ export function GroupSettingsPage() {
           </DialogHeader>
           <DialogFooter>
             <DialogClose asChild>
-              <Button variant="outline">Cancel</Button>
+              <Button variant="outline" disabled={leaving}>
+                Cancel
+              </Button>
             </DialogClose>
-            <Button variant="destructive" onClick={handleLeaveGroup}>
+            <Button
+              variant="destructive"
+              onClick={handleLeaveGroup}
+              disabled={leaving}
+            >
               <LogOut className="h-4 w-4" />
-              Leave
+              {leaving ? "Leaving…" : "Leave"}
             </Button>
           </DialogFooter>
         </DialogContent>

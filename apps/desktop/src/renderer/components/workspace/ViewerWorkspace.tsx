@@ -247,13 +247,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   );
 
   const handleRetry = useCallback(() => {
+    // No simulated viewer reconnect. There is no complete viewer
+    // join operation in this pass; retry simply returns the user
+    // to the connecting state and tells them the viewer is not
+    // yet wired.
     setViewStatus("connecting");
-    // In a real implementation, this would re-establish the WebRTC connection.
-    // For now, simulate connection after a delay.
-    setTimeout(() => {
-      setViewStatus("connected");
-    }, 2000);
-  }, [setViewStatus]);
+    setIsViewing(false);
+  }, [setViewStatus, setIsViewing]);
 
   // ── Status is "connecting" ───────────────────────────────────────
   const status = viewStatus || "connecting";
