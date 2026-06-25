@@ -27,6 +27,31 @@ export interface EffectiveQuality {
   clampReasons: string[];
 }
 
+/**
+ * Result of a request-handling call. Distinct from EffectiveQuality
+ * so that the host can drive "stale / idempotent / conflict / accept"
+ * outcomes through a single decision object.
+ */
+export type ViewerRequestDecision =
+  | { kind: "accepted"; quality: EffectiveQuality }
+  | { kind: "stale"; reason: "lower-revision" }
+  | { kind: "idempotent"; reason: "same-request-id" }
+  | { kind: "conflict"; reason: "same-revision-different-request" }
+  | { kind: "rejected-no-stream"; reason: "host has no active stream" }
+  | { kind: "rejected-no-viewer"; reason: "viewer not bound" }
+  | { kind: "rejected-disabled"; reason: "host disabled viewer requests" };
+
+/**
+ * Stored per-viewer accepted request state. Used to drive revision
+ * ordering and idempotency.
+ */
+export interface AcceptedViewerRequest {
+  requestId: string;
+  revision: number;
+  payload: ViewerQualityRequest;
+  acceptedAt: number;
+}
+
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
 function clamp(v: number, min: number, max: number): number {
@@ -51,6 +76,14 @@ export class QualityCoordinator {
    * Stage 6: Session request storage keyed by groupId + logicalStreamId + viewerDeviceId.
    */
   private viewerRequests = new Map<string, ViewerQualityRequest>();
+
+  /**
+   * Accepted-request state keyed by the same composite key. Holds the
+   * highest accepted revision, the requestId that produced it, and the
+   * full payload — used to drive Gate 6.2 ordering (stale,
+   * idempotent, conflict, accept).
+   */
+  private acceptedRequests = new Map<string, AcceptedViewerRequest>();
 
   /**
    * Index: streamViewerRequestsKey -> Set of composite keys for that group+stream.
@@ -110,6 +143,78 @@ export class QualityCoordinator {
   }
 
   /**
+   * Apply Gate 6.2 revision semantics to a viewer request.
+   *
+   * Outcomes:
+   *   - lower revision  → stale (rejected)
+   *   - same requestId  → idempotent (returns the original payload)
+   *   - same revision, different requestId → conflict (rejected)
+   *   - higher revision → accepted (replaces previous accepted state)
+   */
+  decideViewerRequest(
+    groupId: string,
+    logicalStreamId: string,
+    viewerDeviceId: string,
+    payload: ViewerQualityRequest,
+  ): ViewerRequestDecision {
+    const key = viewerRequestKey(groupId, logicalStreamId, viewerDeviceId);
+    const prior = this.acceptedRequests.get(key);
+
+    if (prior) {
+      // Same requestId is always idempotent — same revision or
+      // otherwise, the request is "this is the same request
+      // re-presented".
+      if (prior.requestId === payload.requestId) {
+        return { kind: "idempotent", reason: "same-request-id" };
+      }
+      if (payload.revision < prior.revision) {
+        return { kind: "stale", reason: "lower-revision" };
+      }
+      if (payload.revision === prior.revision) {
+        return { kind: "conflict", reason: "same-revision-different-request" };
+      }
+    }
+
+    // Higher (or no prior) — accept and store.
+    this.acceptedRequests.set(key, {
+      requestId: payload.requestId,
+      revision: payload.revision,
+      payload,
+      acceptedAt: Date.now(),
+    });
+    this.storeViewerRequest(groupId, logicalStreamId, viewerDeviceId, payload);
+    // The actual effective quality is filled in by the host when it
+    // knows the source dimensions and host limits. The decision here
+    // only attests to revision acceptance.
+    return {
+      kind: "accepted",
+      quality: {
+        requested: null,
+        effective: {
+          videoBitrateKbps: payload.videoBitrateKbps,
+          maxWidth: payload.maxWidth,
+          maxHeight: payload.maxHeight,
+          maxFps: payload.maxFps,
+          degradationPreference: payload.degradationPreference,
+        },
+        configured: null,
+        clampReasons: [],
+      },
+    };
+  }
+
+  /**
+   * Read the accepted request state for a composite key.
+   */
+  getAcceptedRequest(
+    groupId: string,
+    logicalStreamId: string,
+    viewerDeviceId: string,
+  ): AcceptedViewerRequest | null {
+    return this.acceptedRequests.get(viewerRequestKey(groupId, logicalStreamId, viewerDeviceId)) ?? null;
+  }
+
+  /**
    * Store a viewer quality request keyed by composite key.
    */
   storeViewerRequest(
@@ -154,6 +259,7 @@ export class QualityCoordinator {
   ): void {
     const key = viewerRequestKey(groupId, logicalStreamId, viewerDeviceId);
     this.viewerRequests.delete(key);
+    this.acceptedRequests.delete(key);
 
     // Update stream index
     const streamKey = streamViewerRequestsKey(groupId, logicalStreamId);
