@@ -33,6 +33,11 @@ Thumbs.db
 
 # Native helper build directories
 native/**/build/
+CMakeFiles/
+built/
+
+# Audit output (runtime-generated)
+apps/desktop/audit-output/
 
 # Test coverage
 coverage/

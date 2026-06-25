@@ -1,0 +1,113 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   ScreenLink — Application Styles (Tailwind v4 + Design Tokens)
+   ═══════════════════════════════════════════════════════════════════════════
+   GUARDRAIL: This is the canonical stylesheet for ScreenLink UI.
+   Read apps/desktop/docs/UI_GUARDRAILS.md before adding new styles.
+   GUARDRAIL: Never import dashboard blocks — only use Watermelon primitives.
+   GUARDRAIL: Do not add custom design primitives here. Compose from
+   Watermelon components instead (see adoption matrix at
+   docs/watermelon-adoption-matrix.md).
+   GUARDRAIL: All colors, radii, and spacing must use ScreenLink @theme
+   tokens defined below, not inline hex values.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Tell Tailwind v4 which source files to scan for class names in dev mode */
+@source "../**/*.{ts,tsx}";
+@source "../../../desktop/index.html";
+@source "../../../desktop/audit.html";
+
+/* ─── Theme: ScreenLink Design Tokens ───────────────────────────────────── */
+/* Single source of truth for colors, radii, spacing (Sections 10.1, 10.3, 10.4) */
+
+@theme {
+  /* --- Colors (Section 10.1) --- */
+  --color-canvas: #101216;
+  --color-rail: #0C0E12;
+  --color-surface-1: #16191F;
+  --color-surface-2: #1B1F27;
+  --color-surface-3: #222833;
+  --color-surface-hover: #272E3A;
+  --color-border-subtle: #292F39;
+  --color-border-strong: #364050;
+  --color-text-primary: #F1F4F8;
+  --color-text-secondary: #AAB2C0;
+  --color-text-muted: #727D8E;
+  --color-accent: #4C8DFF;
+  --color-accent-hover: #6AA1FF;
+  --color-accent-muted: #1D3154;
+  --color-success: #45B987;
+  --color-warning: #E1A84A;
+  --color-danger: #E15B64;
+
+  /* --- Radius (Section 10.3) --- */
+  --radius-compact: 6px;
+  --radius-standard: 8px;
+  --radius-dialog: 12px;
+
+  /* --- Spacing (Section 10.4) — 4px grid --- */
+  --spacing-0\.5: 0.125rem;
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-5: 1.25rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+
+  /* --- Fonts --- */
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* --- Animation defaults --- */
+  --default-transition-duration: 150ms;
+  --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ─── Base styles ───────────────────────────────────────────────────────── */
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-canvas);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.5;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Tabular numerals for technical values ─────────────────────────────── */
+.font-tnum {
+  font-feature-settings: "tnum" on, "lnum" on;
+}
+
+/* ─── High-DPI / Windows scaling corrections (Section 16.7) ─────────────── */
+@media (min-resolution: 1.5dppx) {
+  .border-thin {
+    border-width: 0.5px;
+  }
+}
+
+/* ─── Reduced motion (Section 11.5) ─────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Preserve essential opacity transitions for status feedback */
+  .motion-safe-only {
+    transform: none !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}
