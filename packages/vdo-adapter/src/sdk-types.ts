@@ -44,6 +44,13 @@ export interface ConnectionEntry {
   streamID?: string;
 }
 
+export interface RTCRtpCodecCapabilityLike {
+  mimeType: string;
+  clockRate?: number;
+  channels?: number;
+  sdpFmtpLine?: string;
+}
+
 export interface PeerGroup {
   viewer?: ConnectionEntry;
   publisher?: ConnectionEntry;

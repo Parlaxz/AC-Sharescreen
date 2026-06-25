@@ -514,22 +514,9 @@ describe('Regression: audio track survives ownership transfer', () => {
     expect(content).toContain('!stream.getAudioTracks().length');
   });
 
-  it('every clearAudioController call in Dashboard is guarded by a condition', () => {
+  it('no clearAudioController calls in Phase 3 Dashboard (audio managed via PublisherManager)', () => {
     const dashboardPath = path.resolve(__dirname, '..', 'src', 'renderer', 'routes', 'Dashboard.tsx');
     const content = fs.readFileSync(dashboardPath, 'utf-8');
-
-    let searchIdx = 0;
-    let occurrencesChecked = 0;
-    while (true) {
-      const idx = content.indexOf('clearAudioController()', searchIdx);
-      if (idx < 0) break;
-
-      const before = content.slice(Math.max(0, idx - 200), idx);
-      expect(/\bif\s*\(/.test(before)).toBe(true);
-
-      searchIdx = idx + 1;
-      occurrencesChecked++;
-    }
-    expect(occurrencesChecked).toBe(3);
+    expect(content).not.toContain('clearAudioController');
   });
 });

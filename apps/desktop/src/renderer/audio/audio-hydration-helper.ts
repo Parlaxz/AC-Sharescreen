@@ -6,7 +6,7 @@
  * process during initialisation.
  */
 
-import { normalizeAudioMode, type AudioMode, AUDIO_MODES } from "@screenlink/shared";
+import { normalizeAudioMode, type AudioMode } from "@screenlink/shared";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,7 +119,7 @@ export function resolveHydrationConflict(options: {
  */
 export function validateSharePreflight(
   audioOptions: PreflightAudioOptions | null,
-  explicitMode: string | null | undefined,
+  _explicitMode: string | null | undefined,
   liveCapabilities: AudioAvailabilityMap,
 ): PreflightResult {
   // Guard: initialization incomplete

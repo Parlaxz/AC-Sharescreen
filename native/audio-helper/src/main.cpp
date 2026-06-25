@@ -1,4 +1,5 @@
 #include "Protocol.h"
+#include "BuildInfo.h"
 #include "WindowsVersion.h"
 #include "AudioCapabilities.h"
 #include "WindowEnumerator.h"
@@ -122,10 +123,19 @@ int main(int argc, char* argv[]) {
       std::cout << "  \"serviceProtocolVersion\": \"" << screenlink::audio::kServiceProtocolVersion << "\",\n";
       std::cout << "  \"build\": \"x64 Windows\",\n";
 #ifdef NDEBUG
-      std::cout << "  \"configuration\": \"release\"\n";
+      std::cout << "  \"configuration\": \"release\",\n";
 #else
-      std::cout << "  \"configuration\": \"debug\"\n";
+      std::cout << "  \"configuration\": \"debug\",\n";
 #endif
+      std::cout << "  \"buildInfo\": {\n";
+      std::cout << "    \"gitCommit\": \"" << screenlink::audio::build::kGitCommit << "\",\n";
+      std::cout << "    \"gitDirty\": " << screenlink::audio::build::kGitDirty << ",\n";
+      std::cout << "    \"gitBranch\": \"" << screenlink::audio::build::kGitBranch << "\",\n";
+      std::cout << "    \"buildTimestamp\": \"" << screenlink::audio::build::kBuildTimestamp << "\",\n";
+      std::cout << "    \"architecture\": \"" << screenlink::audio::build::kArchitecture << "\",\n";
+      std::cout << "    \"buildConfig\": \"" << screenlink::audio::build::kBuildConfig << "\",\n";
+      std::cout << "    \"compilerId\": \"" << screenlink::audio::build::kCompilerId << "\"\n";
+      std::cout << "  }\n";
       std::cout << "}\n";
       return static_cast<int>(screenlink::audio::ExitCode::kSuccess);
     }

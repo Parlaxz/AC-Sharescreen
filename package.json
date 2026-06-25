@@ -26,6 +26,8 @@
 		"desktop:dev": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev",
 		"desktop:dev:alice": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev -- --dev-profile=alice --multi-instance",
 		"desktop:dev:bob": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev -- --dev-profile=bob --multi-instance",
+		"desktop:dev:charlie": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev -- --dev-profile=charlie --multi-instance",
+		"desktop:dev:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./apps/desktop/scripts/launch-three-dev.ps1",
 		"lint": "pnpm -r typecheck"
 	},
 	"engines": {

@@ -9,16 +9,13 @@ import { TrayManager } from "./tray-manager.js";
 import type { TrayMenuActions } from "./tray-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
 import { registerIpcHandlers } from "./ipc-handlers.js";
-// Audio helper lifecycle is managed by IPC handlers via ensureAudioHelper()
-// in ipc-handlers.ts — no direct imports needed here
 import { registerPermissionHandler } from "./permissions.js";
 import { SettingsStore } from "./settings-store.js";
 import { SecureStore } from "./secure-store.js";
 import { LogManager } from "./log-manager.js";
 import { LoginItemManager } from "./login-item-manager.js";
-import { UpdateManager } from "./update-manager.js";
-import type { LoggerAdapter, UpdaterAdapter } from "./update-manager.js";
-import { registerUpdateIpcHandlers, createStatusBroadcast, removeUpdateIpcHandlers } from "./update-ipc.js";
+import { GroupStore } from "./group-store.js";
+import { QualityPresetStore } from "./quality-preset-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,19 +47,16 @@ let settingsStore: SettingsStore;
 let secureStore: SecureStore;
 let logManager: LogManager;
 let loginItemManager: LoginItemManager;
-let updateManager: UpdateManager | null = null;
+let groupStore: GroupStore;
+let presetStore: QualityPresetStore;
 
 app.whenReady().then(() => {
-  // When --dev-profile is set, it handles userData separation — skip the generic
-  // multi-instance suffix so paths stay clean (e.g. {base}-bob not {base}-viewer-bob)
   if (isMultiInstance && !devProfile) {
     const basePath = app.getPath("userData");
     app.setPath("userData", basePath + "-viewer");
     console.log("[ScreenLink] Multi-instance: userData =", app.getPath("userData"));
   }
 
-  // Handle dev profiles — must happen BEFORE services are created so they
-  // write to the correct userData directory
   if (devProfile) {
     const basePath = app.getPath("userData");
     app.setPath("userData", `${basePath}-${devProfile}`);
@@ -80,16 +74,22 @@ app.whenReady().then(() => {
   secureStore = new SecureStore();
   logManager = new LogManager();
   loginItemManager = new LoginItemManager();
+  groupStore = new GroupStore(secureStore);
+  presetStore = new QualityPresetStore();
 
-  // ── Dev profile default display name (runs AFTER settingsStore is ready) ──
+  // ── Dev profile default display name ──
   if (devProfile) {
     try {
-      const existingSettings = settingsStore.get();
-      if (existingSettings && existingSettings.hostDisplayName === "Host") {
+      const existing = settingsStore.get();
+      if (existing.hostDisplayName === "Host") {
         import("@screenlink/shared").then(({ getDefaultDevDisplayName }) => {
           const defaultName = getDefaultDevDisplayName(devProfile);
           if (defaultName) {
-            settingsStore.update({ hostDisplayName: defaultName });
+            const current = settingsStore.get();
+            settingsStore.update({
+              hostDisplayName: defaultName,
+              deviceIdentity: { ...current.deviceIdentity, displayName: defaultName },
+            });
             console.log(`[ScreenLink] Set default display name to "${defaultName}" for profile "${devProfile}"`);
           }
         }).catch((err: unknown) => {
@@ -114,7 +114,7 @@ app.whenReady().then(() => {
   const trayActions: TrayMenuActions = {
     onOpen: () => windowManager.show(),
     onShareScreen: () => {
-      mainWindow.webContents.send("share-screen");
+      mainWindow.webContents.send("open-source-picker");
     },
     onShareWindow: () => {
       mainWindow.webContents.send("open-source-picker");
@@ -122,14 +122,8 @@ app.whenReady().then(() => {
     onStopSharing: () => {
       mainWindow.webContents.send("stop-sharing");
     },
-    onWatchFriend: () => {
-      mainWindow.webContents.send("watch-friend");
-    },
     onStopWatching: () => {
       mainWindow.webContents.send("stop-watching");
-    },
-    onSelectPreset: (presetId: string) => {
-      mainWindow.webContents.send("select-preset", presetId);
     },
     onToggleLaunchAtLogin: (checked: boolean) => {
       loginItemManager.setEnabled(checked);
@@ -137,12 +131,6 @@ app.whenReady().then(() => {
     },
     onToggleAutoResume: (checked: boolean) => {
       settingsStore.update({ autoResumeLastMonitor: checked });
-    },
-    onToggleAllowRemoteQuality: (checked: boolean) => {
-      settingsStore.update({ allowRemoteQualityRequests: checked });
-    },
-    onToggleAutoWatch: (checked: boolean) => {
-      settingsStore.update({ autoWatchFriend: checked });
     },
     onShowDiagnostics: () => {
       mainWindow.webContents.send("open-diagnostics");
@@ -235,7 +223,7 @@ app.whenReady().then(() => {
   }
 
   // ── IPC handlers ──────────────────────────────────────────────────────
-  registerIpcHandlers(mainWindow, settingsStore, secureStore, trayManager);
+  registerIpcHandlers(mainWindow, settingsStore, secureStore, trayManager, groupStore, presetStore);
 
   // ── Startup visibility ─────────────────────────────────────────────────
   if (process.argv.includes("--hidden")) {
@@ -253,7 +241,6 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   // Don't quit — tray keeps the app alive
-  // User must explicitly use "Quit completely" from tray
 });
 
 // Clean up update manager on quit

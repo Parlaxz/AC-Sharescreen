@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "LoopbackCapture.h" // AudioPacket
+#include "ExclusionPolicy.h" // ScreenLinkIdentity
 
 namespace screenlink::audio {
 
@@ -46,6 +47,7 @@ struct FilteredMonitorOptions {
     bool excludeDiscord = true;
     bool excludeScreenLink = true;
     uint32_t screenLinkPid = 0;
+    ScreenLinkIdentity screenLinkIdentity;
 
     std::chrono::milliseconds reconcileInterval{1000};
     std::chrono::milliseconds removalGracePeriod{2000};
@@ -77,6 +79,22 @@ struct FilteredSourcePlan {
     uint32_t screenLinkExcluded = 0;
     uint32_t duplicateRoots = 0;
     uint32_t sourceLimitSkipped = 0;
+
+    // Phase 2G identity/liveness diagnostics
+    uint32_t validatedLiveSessions = 0;
+    uint32_t inconsistentIdentitySessions = 0;
+    uint32_t identityLookupFailures = 0;
+};
+
+/// Diagnostics for one active capture source in filtered monitor mode.
+struct ActiveSourceDiagnostics {
+    uint32_t sessionPid = 0;
+    uint32_t logicalRootPid = 0;
+    uint32_t physicalCaptureTargetPid = 0;
+    std::string executableName;
+    uint64_t inputPackets = 0;
+    uint64_t inputNonZeroPackets = 0;
+    float maximumInputPeak = 0.0f;
 };
 
 /// Thread-safe diagnostics snapshot for FilteredMonitorController.
@@ -107,20 +125,34 @@ struct FilteredMonitorDiagnostics {
     uint32_t screenLinkExcludedLastScan = 0;
     uint32_t duplicateRootsLastScan = 0;
     uint32_t sourceLimitSkippedLastScan = 0;
+    uint32_t validatedLiveSessionsLastScan = 0;
+    uint32_t inconsistentIdentitySessionsLastScan = 0;
+    uint32_t identityLookupFailuresLastScan = 0;
+    // Input energy diagnostics (measured from actual float samples)
     uint64_t mixerInputPackets = 0;
     uint64_t mixerInputNonZeroPackets = 0;
     uint64_t mixerInputZeroPackets = 0;
+    float lastInputPeak = 0.0f;
+    float maximumInputPeak = 0.0f;
+    double lastInputRms = 0.0;
+    double maximumInputRms = 0.0;
+
+    // Output energy diagnostics (measured from actual float samples)
     uint64_t mixerOutputPackets = 0;
     uint64_t mixerOutputNonZeroPackets = 0;
     uint64_t mixerOutputZeroPackets = 0;
-    float lastInputPeak = 0.0f;
-    float maximumInputPeak = 0.0f;
     float lastOutputPeak = 0.0f;
     float maximumOutputPeak = 0.0f;
+    double lastOutputRms = 0.0;
+    double maximumOutputRms = 0.0;
+
     uint64_t lastReconcileDurationMs = 0;
     uint64_t lastSuccessfulInventoryTimestamp = 0;
     std::string lastErrorCode;
     std::string lastErrorMessage;
+
+    // Per-active-source diagnostics (updated each reconciliation)
+    std::vector<ActiveSourceDiagnostics> activeSources;
 };
 
 } // namespace screenlink::audio

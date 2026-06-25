@@ -1,4 +1,4 @@
-import type { Friend, AudioMode } from "@screenlink/shared";
+import type { AudioMode } from "@screenlink/shared";
 
 export interface ScreenLinkAPI {
   // Sources
@@ -21,52 +21,39 @@ export interface ScreenLinkAPI {
   // Window
   minimizeToTray: () => Promise<void>;
 
-  // Pairing
+  // Device identity
+  getDeviceIdentity: () => Promise<{ deviceId: string; displayName: string; createdAt: number }>;
+  updateDisplayName: (displayName: string) => Promise<{ deviceId: string; displayName: string; createdAt: number }>;
   safeStorageAvailable: () => Promise<boolean>;
-  createPairing: (displayName: string) => Promise<{
-    pairingCode: string;
-    pairingLink: string;
-    pairId: string;
-    deviceId: string;
-    displayName: string;
-    exportData: Record<string, unknown>;
-  }>;
-  /** Get the pending pairing link while in PAIR_CREATED_WAITING_FOR_IMPORT state */
-  getPairingLink: () => Promise<string | null>;
-  importPairing: (pairingCode: string) => Promise<{ deviceId: string; remoteName: string }>;
-  getPairingConfig: () => Promise<Record<string, unknown> | null>;
-  getPairSecret: () => Promise<string | null>;
-  updatePairingConfig: (partial: Record<string, unknown>) => Promise<void>;
-  /**
-   * Persist the remote identity (device ID + display name) after a peer.hello
-   * handshake and transition lifecycle accordingly.
-   * Returns the authoritative acceptance result with current lifecycle state.
-   */
-  updateRemoteIdentity: (remoteDeviceId: string, remoteDisplayName: string) => Promise<{
-    accepted: boolean;
-    pairingLifecycle?: string;
-    remoteDeviceId?: string;
-    remoteDisplayName?: string;
-    reason?: string;
-  }>;
-  /** Set the pairing lifecycle in persisted config (e.g. "PAIRED_OFFLINE"). */
-  setPairingLifecycle: (lifecycle: string) => Promise<void>;
-  clearPairing: () => Promise<void>;
-  /** Export the current pairing as a PairingExport object, or null if not available */
-  exportCurrentPairing: () => Promise<Record<string, unknown> | null>;
+
+  // Groups
+  listGroups: () => Promise<unknown[]>;
+  getGroup: (groupId: string) => Promise<unknown | null>;
+  createGroup: (input: { groupName: string }) => Promise<unknown>;
+  joinGroup: (input: { link: string }) => Promise<unknown>;
+  getGroupInvite: (groupId: string) => Promise<{ link: string } | null>;
+  updateGroupSharedState: (groupId: string, state: unknown) => Promise<unknown | null>;
+  updateGroupClock: (groupId: string, stamp: unknown) => Promise<void>;
+  setGroupNotifications: (groupId: string, enabled: boolean) => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  getGroupConnectionConfig: (groupId: string) => Promise<unknown | null>;
+
+  // Quality presets
+  listQualityPresets: () => Promise<unknown[]>;
+  getQualityPreset: (id: string) => Promise<unknown | null>;
+  createQualityPreset: (input: { name: string; settings: unknown }) => Promise<unknown>;
+  updateQualityPreset: (id: string, input: { name?: string; settings?: unknown }) => Promise<unknown | null>;
+  duplicateQualityPreset: (id: string, newName: string) => Promise<unknown | null>;
+  deleteQualityPreset: (id: string) => Promise<boolean>;
+  exportQualityPreset: (id: string) => Promise<string | null>;
+  importQualityPreset: (exportString: string) => Promise<unknown>;
 
   // Tray
   traySetSharing: (sharing: boolean) => void;
   traySetViewing: (viewing: boolean) => void;
-  traySetFriendName: (name: string) => void;
-  traySetFriendSharing: (sharing: boolean) => void;
 
   // Fullscreen (native Electron)
   toggleFullscreen: () => Promise<boolean>;
-  /**
-   * Register a callback for native fullscreen state changes.
-   * Returns a cleanup function to remove the listener.
-   */
   onFullscreenChanged: (callback: (isFullscreen: boolean) => void) => () => void;
 
   // App info
@@ -74,8 +61,14 @@ export interface ScreenLinkAPI {
     version: string;
     electronVersion: string;
     chromeVersion: string;
-    nodeVersion: string;
   }>;
+
+  /**
+   * Write text to the OS clipboard via the main process. Bypasses
+   * the renderer's `navigator.clipboard.writeText` which is often
+   * blocked in Electron with "Write permission denied".
+   */
+  clipboardWriteText: (text: string) => Promise<{ success: boolean; length: number }>;
 
   // Audio capabilities
   getAudioCapabilities: () => Promise<{
@@ -86,6 +79,7 @@ export interface ScreenLinkAPI {
 
   // Audio pipeline
   requestAudioPort: () => Promise<{ success: boolean; error?: string }>;
+  ensureAudioHelper: () => Promise<{ success: boolean; error?: string }>;
   getAudioState: () => Promise<AudioStateDTO>;
   startSyntheticAudio: (mode?: number) => Promise<{ success: boolean; error?: string }>;
   stopAudio: () => Promise<void>;
@@ -96,24 +90,8 @@ export interface ScreenLinkAPI {
   startFilteredMonitorAudio: (options?: { excludeDiscord?: boolean; excludeScreenLink?: boolean }) => Promise<any>;
   startSystemAudio: () => Promise<{ success: boolean; streamGeneration?: number; error?: string }>;
   getMixerState: () => Promise<any>;
-  getMixerDiagnostics: () => Promise<any>;
-  /** Diagnostic pipeline snapshot — collects counters from helper + Electron + bridge */
-  getPipelineSnapshot: () => Promise<any>;
-
-  // ── Updates ─────────────────────────────────────────────────────────
-  /** Get the current authoritative update status from the main process. */
-  getUpdateStatus: () => Promise<UpdateStatusDTO>;
-  /** Manually check for an update. */
-  checkForUpdates: () => Promise<UpdateStatusDTO>;
-  /** Download the available update. */
-  downloadUpdate: () => Promise<UpdateStatusDTO>;
-  /** Restart and install the downloaded update. */
-  restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
-  /**
-   * Subscribe to update status changes.
-   * Returns an unsubscribe function.
-   */
-  onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
+  getMixerDiagnostics: () => Promise<HelperResponse<FilteredMonitorDiagnostics>>;
+  getPipelineSnapshot: () => Promise<PipelineSnapshotWithDiagnostics>;
 }
 
 // ─── Update types ─────────────────────────────────────────────────────────
@@ -174,20 +152,147 @@ export interface CaptureSourceDTO {
 
 export interface PersistedSettings {
   version: number;
-  shareId: string;
-  hostTokenEncrypted: string;
-  viewerToken: string;
-  viewerBaseUrl: string;
-  workerBaseUrl: string;
+  deviceIdentity: { deviceId: string; displayName: string; createdAt: number };
   hostDisplayName: string;
   launchAtLogin: boolean;
   autoResumeLastMonitor: boolean;
-  lastPresetId: string;
-  lastSourceFingerprint: string;
   previewEnabled: boolean;
-  allowRemoteQualityRequests: boolean;
-  autoWatchFriend: boolean;
-  friends: Friend[];
   windowBounds: { x: number; y: number; width: number; height: number } | null;
+  monitorFingerprint: {
+    displayId: string;
+    label: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    size: { width: number; height: number };
+    scaleFactor: number;
+    internal: boolean;
+  } | null;
+  lastSourceId: string | null;
+  lastSourceName: string | null;
+  lastSourceFingerprint: string | null;
+  developerMode: boolean;
+  hostQualityLimits: {
+    maxVideoBitrateKbps: number;
+    maxWidth: number;
+    maxHeight: number;
+    maxFps: number;
+    allowViewerQualityRequests: boolean;
+  };
+  globalQualityDefaults: {
+    schemaVersion: 1;
+    video: {
+      videoBitrateKbps: number;
+      sendWidth: number;
+      sendHeight: number;
+      sendFps: number;
+      captureWidth: number;
+      captureHeight: number;
+      captureFps: number;
+      preserveAspectRatio: boolean;
+      preventUpscale: boolean;
+      resolutionMode: "target-dimensions" | "scale-factor";
+      scaleResolutionDownBy: number;
+      codec: "auto" | "vp9" | "av1" | "h264" | "vp8";
+      h264Profile: "auto" | "baseline" | "main" | "high";
+      contentHint: "auto" | "text" | "detail" | "motion";
+      degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
+      scalabilityMode: string | null;
+      cursorMode: "always" | "motion" | "never";
+      rtpPriority: "very-low" | "low" | "medium" | "high";
+    };
+    audio: {
+      bitrateKbps: number;
+      channels: "mono" | "stereo";
+      bitrateMode: "vbr" | "cbr";
+      dtx: boolean;
+      fec: boolean;
+      packetDurationMs: 10 | 20 | 40 | 60;
+      redundantAudio: boolean;
+    };
+  };
+  notificationsEnabled: boolean;
+  localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
+}
+
+/** Protocol response envelope for helper IPC calls */
+export interface HelperResponse<T> {
+  protocolVersion: string;
+  requestId: number;
+  sessionId: string;
+  success: boolean;
+  state: string;
+  result?: T;
+  error?: string | null;
+}
+
+/** Diagnostics for one active capture source in filtered monitor mode */
+export interface ActiveSourceDiagnostics {
+  sessionPid: number;
+  logicalRootPid: number;
+  physicalCaptureTargetPid: number;
+  executableName: string;
+  inputPackets: number;
+  inputNonZeroPackets: number;
+  maximumInputPeak: number;
+}
+
+/** Filtered Monitor diagnostics returned by getMixerDiagnostics */
+export interface FilteredMonitorDiagnostics {
+  sourceType: string;
+  pipeline: string;
+  running: boolean;
+  mixerRunning: boolean;
+  totalReconciliations: number;
+  activeCaptureSources: number;
+  sourcesAdded: number;
+  sourcesRemoved: number;
+  totalSessionsLastScan: number;
+  activeSessionsLastScan: number;
+  inactiveSessionsLastScan: number;
+  desiredSourcesLastScan: number;
+  invalidSessionsLastScan: number;
+  expiredSessionsLastScan: number;
+  systemSoundsSkippedLastScan: number;
+  discordExcludedLastScan: number;
+  screenLinkExcludedLastScan: number;
+  duplicateRootsLastScan: number;
+  validatedLiveSessionsLastScan: number;
+  inconsistentIdentitySessionsLastScan: number;
+  identityLookupFailuresLastScan: number;
+  sourceStartAttempts: number;
+  sourceStartFailures: number;
+  sourceRetries: number;
+  sourceUnexpectedStops: number;
+  mixerInputPackets: number;
+  mixerInputNonZeroPackets: number;
+  mixerInputZeroPackets: number;
+  lastInputPeak: number;
+  maximumInputPeak: number;
+  lastInputRms: number;
+  maximumInputRms: number;
+  mixerOutputPackets: number;
+  mixerOutputNonZeroPackets: number;
+  mixerOutputZeroPackets: number;
+  lastOutputPeak: number;
+  maximumOutputPeak: number;
+  lastOutputRms: number;
+  maximumOutputRms: number;
+  lastErrorCode: string;
+  lastErrorMessage: string;
+  activeSources?: ActiveSourceDiagnostics[];
+}
+
+export interface PipelineSnapshotWithDiagnostics {
+  mixerFeedPackets?: number;
+  mixerOutputPackets?: number;
+  mixerNonZeroOutputPackets?: number;
+  filteredMonitorDiagnostics?: FilteredMonitorDiagnostics;
+  endpointDiagnostics?: Record<string, unknown>;
+  bridge: Record<string, unknown>;
+  helperState: string;
+  helperUptimeMs: number;
+  streamGeneration: number;
+  helperBinaryPath?: string;
+  helperBinarySize?: number;
+  helperBinaryMtime?: string;
 }

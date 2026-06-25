@@ -269,11 +269,11 @@ describe('AudioWorklet module', () => {
     });
   });
 
-  describe('Dashboard.tsx - block scoping fix', () => {
-    it('controller declared in outer scope, not inside try', () => {
+  describe('Dashboard.tsx - Phase 3 rewrite', () => {
+    it('Phase 3 Dashboard uses useState for audio mode (text display only), no provisionalController', () => {
       const content = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'renderer', 'routes', 'Dashboard.tsx'), 'utf-8');
-      // Must use let (outer scope), not const inside try
-      expect(content).toContain('let provisionalController');
+      expect(content).toContain('const [audioMode, setAudioMode]');
+      expect(content).not.toContain('provisionalController');
     });
   });
 });

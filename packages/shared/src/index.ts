@@ -57,6 +57,80 @@ export * from "./urls.js";
 export * from "./bitrate.js";
 export * from "./stats.js";
 export * from "./settings.js";
-export * from "./pairing.js";
 export * from "./audio-capabilities.js";
 export * from "./control-messages.js";
+
+// ── Phase 3: Group / Quality / Sync ────────────────────────────────────────
+
+// device-identity.js exports getDefaultDevDisplayName (used by main process for dev profiles)
+export {
+  DeviceIdentitySchema,
+  generateDeviceIdentity,
+  updateDeviceDisplayName,
+  getDefaultDevDisplayName,
+} from "./device-identity.js";
+export type {
+  DeviceIdentity,
+} from "./device-identity.js";
+
+export * from "./hybrid-logical-clock.js";
+export * from "./quality-settings.js";
+export * from "./group-link.js";
+export * from "./groups.js";
+export * from "./quality-presets.js";
+export * from "./group-sync.js";
+
+// group-control-messages.js uses selective re-exports to avoid name conflicts
+// with control-messages.js (DEDUP_WINDOW_MS, buildEnvelope).
+export {
+  GROUP_PROTOCOL_VERSION,
+  GROUP_CONTROL_MESSAGE_TYPES,
+  MAX_GROUP_CONTROL_PAYLOAD_BYTES,
+  DEDUP_WINDOW_MS,
+  DEDUP_MAX_ENTRIES,
+  GroupControlEnvelopeSchema,
+  GroupHelloPayloadSchema,
+  GroupHelloResponsePayloadSchema,
+  GroupStateUpdatePayloadSchema,
+  GroupStateSummaryPayloadSchema,
+  GroupStateSummarySchema,
+  MemberVersionSchema,
+  GroupStateRequestPayloadSchema,
+  GroupMemberUpdatePayloadSchema,
+  GroupPresencePayloadSchema,
+  StreamStateRequestPayloadSchema,
+  StreamStateSnapshotPayloadSchema,
+  StreamStartedPayloadSchema,
+  StreamHeartbeatPayloadSchema,
+  StreamStoppedPayloadSchema,
+  StreamRestartRequestPayloadSchema,
+  StreamRestartedPayloadSchema,
+  StreamRestartResultPayloadSchema,
+  StreamJoinRequestPayloadSchema,
+  StreamJoinResponsePayloadSchema,
+  StreamBindAckPayloadSchema,
+  StreamLeavePayloadSchema,
+  MediaBindPayloadSchema,
+  QualityViewerRequestPayloadSchema,
+  QualityViewerClearPayloadSchema,
+  QualityEffectivePayloadSchema,
+  QualityConfiguredPayloadSchema,
+  QualityObservedPayloadSchema,
+  MAC_KEY_BYTES,
+  deriveMacKey,
+  signEnvelope,
+  verifyEnvelope,
+  serializeForMac,
+  buildEnvelope,
+  validateEnvelope,
+  DedupSet,
+  parseGroupMessagePayload,
+  utf8ByteLength,
+  bytesToHex,
+} from "./group-control-messages.js";
+export type {
+  GroupControlMessageType,
+  GroupControlEnvelope,
+  GroupControlEnvelopeInput,
+  GroupControlPayloadMap,
+} from "./group-control-messages.js";

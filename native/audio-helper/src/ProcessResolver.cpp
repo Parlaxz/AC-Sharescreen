@@ -76,6 +76,34 @@ std::string ExtractFilename(const std::string& path) {
   return path.substr(pos + 1);
 }
 
+// Case-insensitive string comparison.
+bool IEquals(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(a[i])) !=
+        std::tolower(static_cast<unsigned char>(b[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Check if two processes belong to the same executable family.
+// Uses full path comparison when both paths are available.
+// Falls back to basename comparison when at least one path is empty.
+bool SameExecutableFamily(const ProcessInfo& sessionProcess, const ProcessInfo& ancestor, bool& usedFallback) {
+  if (!sessionProcess.processPath.empty() && !ancestor.processPath.empty()) {
+    // Compare normalized full paths case-insensitively.
+    return IEquals(sessionProcess.processPath, ancestor.processPath);
+  }
+  // Fallback: compare basenames case-insensitively.
+  usedFallback = true;
+  if (!sessionProcess.processName.empty() && !ancestor.processName.empty()) {
+    return IEquals(sessionProcess.processName, ancestor.processName);
+  }
+  return false;
+}
+
 } // anonymous namespace
 
 uint64_t GetProcessCreationTime(uint32_t pid) {
@@ -119,17 +147,64 @@ bool IsSystemProcess(const std::string& processName) {
   static const std::vector<std::string> kSystemProcesses = {
     "explorer.exe", "dwm.exe", "csrss.exe", "lsass.exe", "lsm.exe",
     "svchost.exe", "services.exe", "winlogon.exe", "wininit.exe",
+    "userinit.exe",
     "taskhostw.exe", "runtimebroker.exe", "sihost.exe",
     "searchindexer.exe", "ctfmon.exe", "conhost.exe",
     "fontdrvhost.exe", "dllhost.exe", "smss.exe",
     "applicationframehost.exe", "shellexperiencehost.exe",
     "searchui.exe", "taskbar.exe", "startmenuexperiencehost.exe",
+    "system",
+    "idle",
   };
 
   for (const auto& sys : kSystemProcesses) {
     if (lower == sys) return true;
   }
   return false;
+}
+
+uint32_t FindApplicationRootIndex(
+    const std::vector<ProcessInfo>& processes,
+    bool& usedBasenameFallback)
+{
+    usedBasenameFallback = false;
+
+    if (processes.empty()) {
+        return 0;
+    }
+
+    const auto& sessionProc = processes[0];
+    uint32_t rootIndex = 0;
+
+    // Walk upward from the second element (first ancestor, not the target itself).
+    // Index 0 is the session process itself.
+    for (size_t i = 1; i < processes.size(); ++i) {
+        const auto& ancestor = processes[i];
+
+        // Check 1: Known system/shell boundary.
+        if (IsSystemProcess(ancestor.processName)) {
+            break;
+        }
+
+        // Check 2: Valid creation time (PID reuse protection).
+        if (ancestor.creationTimeUtc100ns == 0) {
+            break;
+        }
+
+        // Check 3: Same executable family as the session process.
+        bool fallbackUsedForThisCheck = false;
+        if (!SameExecutableFamily(sessionProc, ancestor, fallbackUsedForThisCheck)) {
+            break;
+        }
+        if (fallbackUsedForThisCheck) {
+            usedBasenameFallback = true;
+        }
+
+        // This ancestor is still in the same executable family. Update root.
+        rootIndex = static_cast<uint32_t>(i);
+    }
+
+    return rootIndex;
 }
 
 ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
@@ -178,6 +253,22 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
   }
 
   // Build ProcessInfo for each PID in the chain.
+  // Preserve szExeFile from Toolhelp as the processName baseline so that
+  // basename fallback works even when full-path query fails.
+  std::unordered_map<uint32_t, std::string> toolhelpNames;
+  {
+    AutoHandle snap2(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (snap2.IsValid()) {
+      PROCESSENTRY32W pe2 = {};
+      pe2.dwSize = sizeof(pe2);
+      if (Process32FirstW(snap2.Get(), &pe2)) {
+        do {
+          toolhelpNames[pe2.th32ProcessID] = WideToUtf8(pe2.szExeFile);
+        } while (Process32NextW(snap2.Get(), &pe2));
+      }
+    }
+  }
+
   for (auto pid : pidChain) {
     ProcessInfo info;
     info.processId = pid;
@@ -188,10 +279,20 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
       info.parentProcessId = it->second;
     }
 
-    // Get executable path.
+    // Get executable path (may be empty if process cannot be opened).
     std::string path = GetProcessPathForPid(pid);
     info.processPath = path;
-    info.processName = ExtractFilename(path);
+
+    // Prefer path-derived name; fall back to Toolhelp szExeFile.
+    std::string pathName = ExtractFilename(path);
+    if (!pathName.empty()) {
+      info.processName = pathName;
+    } else {
+      auto thIt = toolhelpNames.find(pid);
+      if (thIt != toolhelpNames.end() && !thIt->second.empty()) {
+        info.processName = thIt->second;
+      }
+    }
 
     // Get creation time.
     info.creationTimeUtc100ns = GetProcessCreationTime(pid);
@@ -204,30 +305,23 @@ ProcessTreeResult ResolveProcessTree(uint32_t targetPid) {
     result.targetCreationTimeUtc100ns = result.processes[0].creationTimeUtc100ns;
   }
 
-  // Find application root: the highest ancestor that is NOT a system process.
-  // If the target itself is not a system process, it is its own root.
-  // If all ancestors are system processes, the target is the root.
-  {
-    std::string targetName = result.processes.empty() ? "" : result.processes[0].processName;
-    if (targetName.empty() || !IsSystemProcess(targetName)) {
-      // Target is not a system process (or name unknown) -> it is its own root.
-      result.applicationRootPid = result.targetPid;
-      result.applicationRootName = targetName;
-    } else {
-      // Target is a system process; walk the chain to find the first
-      // ancestor that is NOT a system process.
-      uint32_t rootPid = result.targetPid;
-      std::string rootName = targetName;
-      for (const auto& p : result.processes) {
-        if (!IsSystemProcess(p.processName)) {
-          rootPid = p.processId;
-          rootName = p.processName;
-          break;
-        }
-      }
-      result.applicationRootPid = rootPid;
-      result.applicationRootName = rootName;
-    }
+  // ── Find the authoritative application root ──
+  // Delegates to FindApplicationRootIndex for a deterministic, testable
+  // implementation.
+
+  if (!result.processes.empty()) {
+    bool usedFallback = false;
+    uint32_t rootIndex = FindApplicationRootIndex(result.processes, usedFallback);
+    const auto& rootProc = result.processes[rootIndex];
+
+    result.applicationRootPid = rootProc.processId;
+    result.applicationRootCreationTimeUtc100ns = rootProc.creationTimeUtc100ns;
+    result.applicationRootName = rootProc.processName;
+    result.applicationRootPath = rootProc.processPath;
+    result.usedBasenameFallback = usedFallback;
+  } else {
+    result.applicationRootPid = 0;
+    result.applicationRootCreationTimeUtc100ns = 0;
   }
 
   result.succeeded = true;

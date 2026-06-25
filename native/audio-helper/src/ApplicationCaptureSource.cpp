@@ -111,6 +111,12 @@ void ApplicationCaptureSource::CaptureThread(uint32_t pid,
         SignalStartupComplete(AppCaptureStartResult::Success, "");
     };
 
+    std::cerr << "[ProcessLoopback] activate targetPid=" << pid
+              << " mode=include-tree source=filtered-monitor"
+              << " captureRootPid=" << pid
+              << " rootCreationTime=" << creationTimeUtc100ns
+              << std::endl;
+
     auto result = RunCaptureWithPacketCallback(config,
         [this, &onPacket, &firstPacketReceived](const AudioPacket& packet) -> bool {
             // Track first packet for diagnostics only — NOT for startup signaling

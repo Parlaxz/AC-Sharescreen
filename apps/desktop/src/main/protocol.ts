@@ -33,9 +33,10 @@ export function registerAppProtocol(): void {
     if (url.hostname === "app") {
       return serveRenderer(url);
     }
-    if (url.hostname === "pair") {
-      // Deep linking for pairing — the app handles this on startup via argv
-      return new Response("ScreenLink pairing link received", { status: 200 });
+    if (url.hostname === "group") {
+      // Phase 3: deep linking for group invites. The renderer reads the
+      // link from process.argv at startup; we do not log the URL.
+      return new Response("ScreenLink group link received", { status: 200 });
     }
     return new Response("Not Found", { status: 404 });
   });

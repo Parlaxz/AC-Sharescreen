@@ -44,7 +44,7 @@ export class PcmRingBuffer {
 
     // Write samples with wraparound
     for (let i = 0; i < actualSampleCount; i++) {
-      this.buffer[this.writeIndex] = samples[i];
+      this.buffer[this.writeIndex] = samples[i] ?? 0;
       this.writeIndex = (this.writeIndex + 1) % this.buffer.length;
     }
 
@@ -83,7 +83,7 @@ export class PcmRingBuffer {
 
     for (let f = 0; f < actual; f++) {
       for (let ch = 0; ch < this.channels; ch++) {
-        output[ch][f] = this.buffer[this.readIndex];
+        output[ch][f] = this.buffer[this.readIndex] ?? 0;
         this.readIndex = (this.readIndex + 1) % this.buffer.length;
       }
     }

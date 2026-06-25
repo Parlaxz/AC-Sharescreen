@@ -1,36 +1,236 @@
-export function normalizeCodecName(mimeType: string): string {
-  const map: Record<string, string> = {
-    "video/H264": "h264",
-    "video/VP8": "vp8",
-    "video/VP9": "vp9",
-    "video/AV1": "av1",
-    "video/H265": "h265",
-    "video/HEVC": "h265",
-  };
-  return map[mimeType] ?? mimeType.toLowerCase();
+import type { RTCRtpCodecCapabilityLike } from "./sdk-types.js";
+
+// ─── Codec Preference Record ────────────────────────────────────────────────
+// Stage 8: Record requested/preferred/negotiated/observed/fallback reason.
+
+export interface CodecPreferenceRecord {
+  requested: string;
+  preferred: string;
+  negotiated: string | null;
+  observed: string | null;
+  fallbackReason?: string;
 }
 
-export async function getSupportedVideoCodecs(): Promise<string[]> {
-  if (!navigator.mediaCapabilities?.encodingInfo) {
-    return ["h264", "vp8", "vp9"]; // fallback
+// ─── Codec helpers ──────────────────────────────────────────────────────────
+
+function normalizeCodecName(mimeType: string): string {
+  return mimeType.toUpperCase().replace("VIDEO/", "");
+}
+
+/**
+ * Get the auto codec order for codec preference sorting.
+ * Stage 8: Order is exactly VP9, H.264, VP8.
+ * AV1 is NOT included — it must be explicitly requested.
+ */
+export function getAutoCodecOrder(): string[] {
+  return ["VP9", "H264", "VP8"];
+}
+
+// ─── Capability detection ───────────────────────────────────────────────────
+
+export function getSenderVideoCapabilities(): RTCRtpCodecCapabilityLike[] | null {
+  try {
+    return RTCRtpSender.getCapabilities("video")?.codecs ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function getReceiverVideoCapabilities(): RTCRtpCodecCapabilityLike[] | null {
+  try {
+    return RTCRtpReceiver.getCapabilities("video")?.codecs ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Stage 8: Codec intersection ───────────────────────────────────────────
+
+/**
+ * Normalized match key for codec comparison.
+ * Uses mimeType (lowercase), clockRate, channels (default 1), and sdpFmtpLine.
+ */
+function codecMatchKey(codec: RTCRtpCodecCapabilityLike): string {
+  const mime = codec.mimeType?.toLowerCase() ?? "";
+  const clock = codec.clockRate ?? 0;
+  const channels = codec.channels ?? 1;
+  const fmtp = codec.sdpFmtpLine ?? "";
+  return `${mime}|${clock}|${channels}|${fmtp}`;
+}
+
+function toTransceiverCodec(codec: RTCRtpCodecCapabilityLike): RTCRtpCodec {
+  return {
+    mimeType: codec.mimeType,
+    clockRate: codec.clockRate ?? 0,
+    channels: codec.channels,
+    sdpFmtpLine: codec.sdpFmtpLine,
+  };
+}
+
+/**
+ * Compute the intersection of sender and receiver codec capabilities
+ * using normalized mime/clock/channels/fmtp matching.
+ * Stage 8: True sender/receiver codec intersection that preserves H.264
+ * variants (profile-level-id, packetization-mode).
+ */
+export function intersectSenderAndReceiverCodecs(
+  senderCodecs: RTCRtpCodecCapabilityLike[],
+  receiverCodecs: RTCRtpCodecCapabilityLike[],
+): RTCRtpCodecCapabilityLike[] {
+  const receiverKeys = new Set<string>();
+  for (const c of receiverCodecs) {
+    receiverKeys.add(codecMatchKey(c));
+  }
+  return senderCodecs.filter(c => receiverKeys.has(codecMatchKey(c)));
+}
+
+/**
+ * Get common video codec capabilities between sender and receiver,
+ * with auto order applied (VP9, H.264, VP8).
+ * Stage 8: Uses true intersection, not just sender filtering.
+ */
+export function getCommonVideoCodecCapabilities(): RTCRtpCodecCapabilityLike[] {
+  const sender = getSenderVideoCapabilities();
+  const receiver = getReceiverVideoCapabilities();
+  if (!sender || !receiver) return [];
+
+  // Filter to our supported codecs
+  const supportedNames = new Set(["VP9", "H264", "VP8", "AV1"]);
+
+  // Intersect sender and receiver using normalized matching
+  const intersected = intersectSenderAndReceiverCodecs(sender, receiver);
+
+  // Filter to only supported codecs
+  const codecs = intersected.filter(c => {
+    const name = normalizeCodecName(c.mimeType ?? "");
+    return supportedNames.has(name);
+  });
+
+  // Reorder: VP9 -> H.264 -> VP8 (auto order)
+  // AV1 is included only if present but will be placed after auto-ordered codecs
+  const order = getAutoCodecOrder();
+  return [...codecs].sort((a, b) => {
+    const aName = normalizeCodecName(a.mimeType ?? "");
+    const bName = normalizeCodecName(b.mimeType ?? "");
+    const aIdx = order.indexOf(aName);
+    const bIdx = order.indexOf(bName);
+    if (aIdx === -1 && bIdx === -1) return 0;
+    if (aIdx === -1) return 1;
+    if (bIdx === -1) return -1;
+    return aIdx - bIdx;
+  });
+}
+
+// ─── Stage 8: Apply codec preferences before offer ──────────────────────────
+
+/**
+ * Apply codec preferences to a transceiver before offer generation.
+ * Stage 8: Uses the full negotiation pipeline:
+ *   1. Compute sender/receiver intersection
+ *   2. Apply auto order (VP9, H.264, VP8) or explicit codec
+ *   3. Set on transceiver before createOffer
+ *
+ * Returns a CodecPreferenceRecord documenting what was requested, preferred,
+ * negotiated, and any fallback reason.
+ */
+export function applyCodecPreferencesToTransceiverBeforeOffer(
+  transceiver: RTCRtpTransceiver,
+  requestedCodec: string,
+): CodecPreferenceRecord {
+  const capabilities = getSenderVideoCapabilities();
+  if (!capabilities) return { requested: requestedCodec, preferred: "unknown", negotiated: null, observed: null, fallbackReason: "No sender capabilities" };
+
+  const receiverCapabilities = getReceiverVideoCapabilities();
+  let targetCodecs: RTCRtpCodecCapabilityLike[];
+
+  // Compute intersection if we have receiver capabilities
+  if (receiverCapabilities) {
+    targetCodecs = intersectSenderAndReceiverCodecs(capabilities, receiverCapabilities);
+  } else {
+    targetCodecs = capabilities;
   }
 
-  const configs: MediaEncodingConfiguration[] = [
-    { type: "record", video: { contentType: "video/H264", width: 854, height: 480, bitrate: 650000, framerate: 15 } },
-    { type: "record", video: { contentType: "video/VP8", width: 854, height: 480, bitrate: 650000, framerate: 15 } },
-    { type: "record", video: { contentType: "video/VP9", width: 854, height: 480, bitrate: 650000, framerate: 15 } },
-    { type: "record", video: { contentType: "video/AV1", width: 854, height: 480, bitrate: 650000, framerate: 15 } },
-    { type: "record", video: { contentType: "video/H265", width: 854, height: 480, bitrate: 650000, framerate: 15 } },
-  ];
+  // Filter to supported codecs
+  const supportedNames = new Set(["VP9", "H264", "VP8", "AV1"]);
+  targetCodecs = targetCodecs.filter(c => {
+    const name = normalizeCodecName(c.mimeType ?? "");
+    return supportedNames.has(name);
+  });
 
-  const results = await Promise.allSettled(
-    configs.map(c => navigator.mediaCapabilities.encodingInfo(c)),
-  );
+  let fallbackReason: string | undefined;
+  let preferred: string;
 
-  return configs
-    .filter((_, i) => {
-      const result = results[i];
-      return result?.status === "fulfilled" && "value" in result && result.value.supported;
-    })
-    .map(c => normalizeCodecName((c.video as NonNullable<typeof c.video>).contentType));
+  if (requestedCodec === "auto") {
+    // Use auto order: VP9, H.264, VP8
+    const order = getAutoCodecOrder();
+    targetCodecs = [...targetCodecs].sort((a, b) => {
+      const aName = normalizeCodecName(a.mimeType ?? "");
+      const bName = normalizeCodecName(b.mimeType ?? "");
+      const aIdx = order.indexOf(aName);
+      const bIdx = order.indexOf(bName);
+      if (aIdx === -1 && bIdx === -1) return 0;
+      if (aIdx === -1) return 1;
+      if (bIdx === -1) return -1;
+      return aIdx - bIdx;
+    });
+    preferred = targetCodecs[0]?.mimeType ?? "unknown";
+  } else {
+    // Explicit codec requested: find matching codecs
+    const explicitName = requestedCodec.toUpperCase();
+    const matching = targetCodecs.filter(c => normalizeCodecName(c.mimeType ?? "") === explicitName);
+
+    if (matching.length > 0) {
+      // Requested codec available — prefer it
+      targetCodecs = matching;
+      preferred = targetCodecs[0]!.mimeType;
+    } else {
+      // Fallback to auto order
+      const order = getAutoCodecOrder();
+      targetCodecs = [...targetCodecs].sort((a, b) => {
+        const aName = normalizeCodecName(a.mimeType ?? "");
+        const bName = normalizeCodecName(b.mimeType ?? "");
+        const aIdx = order.indexOf(aName);
+        const bIdx = order.indexOf(bName);
+        if (aIdx === -1 && bIdx === -1) return 0;
+        if (aIdx === -1) return 1;
+        if (bIdx === -1) return -1;
+        return aIdx - bIdx;
+      });
+      preferred = targetCodecs[0]?.mimeType ?? "unknown";
+      fallbackReason = `${requestedCodec} unavailable, fell back to auto`;
+    }
+  }
+
+  // Apply to transceiver
+  if (targetCodecs.length > 0) {
+    try {
+      transceiver.setCodecPreferences(targetCodecs.map(toTransceiverCodec));
+    } catch {
+      // Browser may reject empty array or invalid codec list
+    }
+  }
+
+  return {
+    requested: requestedCodec,
+    preferred: normalizeCodecName(preferred),
+    negotiated: targetCodecs[0]?.mimeType ?? null,
+    observed: targetCodecs[0]?.mimeType ?? null,
+    fallbackReason,
+  };
+}
+
+/**
+ * Apply codec preferences to a transceiver.
+ * Legacy API — Stage 8 codebase uses applyCodecPreferencesToTransceiverBeforeOffer
+ * for the full negotiation pipeline.
+ */
+export function applyCodecPreferences(
+  transceiver: RTCRtpTransceiver,
+  requestedCodec: string,
+): { selected: string; fallbackReason?: string } {
+  const result = applyCodecPreferencesToTransceiverBeforeOffer(transceiver, requestedCodec);
+  return {
+    selected: result.negotiated ?? "unknown",
+    fallbackReason: result.fallbackReason,
+  };
 }

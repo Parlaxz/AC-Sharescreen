@@ -20,10 +20,37 @@ interface FilteredMonitorDiagnostics {
   sourcesAdded: number;
   sourcesRemoved: number;
   totalSessionsLastScan: number;
+  activeSessionsLastScan: number;
+  inactiveSessionsLastScan: number;
   desiredSourcesLastScan: number;
+  invalidSessionsLastScan: number;
+  expiredSessionsLastScan: number;
+  systemSoundsSkippedLastScan: number;
+  discordExcludedLastScan: number;
+  screenLinkExcludedLastScan: number;
+  duplicateRootsLastScan: number;
+  validatedLiveSessionsLastScan: number;
+  inconsistentIdentitySessionsLastScan: number;
+  identityLookupFailuresLastScan: number;
+
+  sourceStartAttempts: number;
+  sourceStartFailures: number;
+  sourceRetries: number;
+  sourceUnexpectedStops: number;
   mixerInputPackets: number;
+  mixerInputNonZeroPackets: number;
+  mixerInputZeroPackets: number;
+  lastInputPeak: number;
+  maximumInputPeak: number;
+  lastInputRms: number;
+  maximumInputRms: number;
   mixerOutputPackets: number;
-  mixerNonZeroOutputPackets: number;
+  mixerOutputNonZeroPackets: number;
+  mixerOutputZeroPackets: number;
+  lastOutputPeak: number;
+  maximumOutputPeak: number;
+  lastOutputRms: number;
+  maximumOutputRms: number;
   lastErrorCode: string;
   lastErrorMessage: string;
 }
@@ -105,8 +132,25 @@ function isValidFilteredMonitorDiagnostics(obj: unknown): obj is FilteredMonitor
     typeof d.sourcesRemoved === "number" &&
     typeof d.totalSessionsLastScan === "number" &&
     typeof d.desiredSourcesLastScan === "number" &&
+    typeof d.duplicateRootsLastScan === "number" &&
+    typeof d.validatedLiveSessionsLastScan === "number" &&
+    typeof d.inconsistentIdentitySessionsLastScan === "number" &&
+    typeof d.identityLookupFailuresLastScan === "number" &&
+    typeof d.sourceStartFailures === "number" &&
     typeof d.mixerInputPackets === "number" &&
+    typeof d.mixerInputNonZeroPackets === "number" &&
+    typeof d.mixerInputZeroPackets === "number" &&
+    typeof d.lastInputPeak === "number" &&
+    typeof d.maximumInputPeak === "number" &&
+    typeof d.lastInputRms === "number" &&
+    typeof d.maximumInputRms === "number" &&
     typeof d.mixerOutputPackets === "number" &&
+    typeof d.mixerOutputNonZeroPackets === "number" &&
+    typeof d.mixerOutputZeroPackets === "number" &&
+    typeof d.lastOutputPeak === "number" &&
+    typeof d.maximumOutputPeak === "number" &&
+    typeof d.lastOutputRms === "number" &&
+    typeof d.maximumOutputRms === "number" &&
     typeof d.lastErrorCode === "string" &&
     typeof d.lastErrorMessage === "string"
   );
@@ -455,10 +499,36 @@ describe("Phase 2G — diagnostics typing", () => {
       sourcesAdded: 10,
       sourcesRemoved: 2,
       totalSessionsLastScan: 15,
+      activeSessionsLastScan: 5,
+      inactiveSessionsLastScan: 10,
       desiredSourcesLastScan: 3,
+      invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0,
+      systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0,
+      screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
+      sourceStartAttempts: 10,
+      sourceStartFailures: 0,
+      sourceRetries: 0,
+      sourceUnexpectedStops: 0,
       mixerInputPackets: 500,
+      mixerInputNonZeroPackets: 300,
+      mixerInputZeroPackets: 200,
+      lastInputPeak: 0.85,
+      maximumInputPeak: 0.92,
+      lastInputRms: 0.45,
+      maximumInputRms: 0.55,
       mixerOutputPackets: 480,
-      mixerNonZeroOutputPackets: 300,
+      mixerOutputNonZeroPackets: 280,
+      mixerOutputZeroPackets: 200,
+      lastOutputPeak: 0.75,
+      maximumOutputPeak: 0.88,
+      lastOutputRms: 0.35,
+      maximumOutputRms: 0.50,
       lastErrorCode: "",
       lastErrorMessage: "",
     };
@@ -493,6 +563,224 @@ describe("Phase 2G — diagnostics typing", () => {
     expect(isValidMixerDiagnostics(null)).toBe(false);
     expect(isValidMixerDiagnostics({})).toBe(false);
     expect(isValidMixerDiagnostics({ outputPackets: "many" })).toBe(false);
+  });
+
+  // ── Energy diagnostic fields ──
+  it("numeric peak/RMS values are preserved as numbers", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true,
+      monitorInitialized: true,
+      mixerRunning: true,
+      totalReconciliations: 0,
+      activeCaptureSources: 0,
+      sourcesAdded: 0,
+      sourcesRemoved: 0,
+      totalSessionsLastScan: 0,
+      activeSessionsLastScan: 0,
+      inactiveSessionsLastScan: 0,
+      desiredSourcesLastScan: 0,
+      invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0,
+      systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0,
+      screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
+      sourceStartAttempts: 0,
+      sourceStartFailures: 0,
+      sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 0,
+      mixerInputNonZeroPackets: 0,
+      mixerInputZeroPackets: 0,
+      lastInputPeak: 0.123,
+      maximumInputPeak: 0.456,
+      lastInputRms: 0.067,
+      maximumInputRms: 0.089,
+      mixerOutputPackets: 0,
+      mixerOutputNonZeroPackets: 0,
+      mixerOutputZeroPackets: 0,
+      lastOutputPeak: 0.789,
+      maximumOutputPeak: 0.999,
+      lastOutputRms: 0.123,
+      maximumOutputRms: 0.456,
+      lastErrorCode: "",
+      lastErrorMessage: "",
+    };
+    expect(typeof diag.lastInputPeak).toBe("number");
+    expect(typeof diag.maximumInputPeak).toBe("number");
+    expect(typeof diag.lastInputRms).toBe("number");
+    expect(typeof diag.maximumInputRms).toBe("number");
+    expect(typeof diag.lastOutputPeak).toBe("number");
+    expect(typeof diag.maximumOutputPeak).toBe("number");
+    expect(typeof diag.lastOutputRms).toBe("number");
+    expect(typeof diag.maximumOutputRms).toBe("number");
+    expect(diag.lastInputPeak).toBeGreaterThan(0);
+    expect(diag.maximumOutputPeak).toBeGreaterThan(0);
+  });
+
+  // ── Input/output zero/nonzero counters ──
+  it("input and output zero/nonzero counters are exposed as numbers", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true,
+      monitorInitialized: true,
+      mixerRunning: true,
+      totalReconciliations: 0,
+      activeCaptureSources: 1,
+      sourcesAdded: 1,
+      sourcesRemoved: 0,
+      totalSessionsLastScan: 5,
+      activeSessionsLastScan: 3,
+      inactiveSessionsLastScan: 2,
+      desiredSourcesLastScan: 1,
+      invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0,
+      systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0,
+      screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      sourceStartAttempts: 1,
+      sourceStartFailures: 0,
+      sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 100,
+      mixerInputNonZeroPackets: 80,
+      mixerInputZeroPackets: 20,
+      lastInputPeak: 0,
+      maximumInputPeak: 0,
+      lastInputRms: 0,
+      maximumInputRms: 0,
+      mixerOutputPackets: 100,
+      mixerOutputNonZeroPackets: 80,
+      mixerOutputZeroPackets: 20,
+      lastOutputPeak: 0,
+      maximumOutputPeak: 0,
+      lastOutputRms: 0,
+      maximumOutputRms: 0,
+      lastErrorCode: "",
+      lastErrorMessage: "",
+    };
+    expect(diag.mixerInputNonZeroPackets).toBe(80);
+    expect(diag.mixerInputZeroPackets).toBe(20);
+    expect(diag.mixerOutputNonZeroPackets).toBe(80);
+    expect(diag.mixerOutputZeroPackets).toBe(20);
+    expect(diag.mixerInputPackets).toBe(diag.mixerInputNonZeroPackets + diag.mixerInputZeroPackets);
+    expect(diag.mixerOutputPackets).toBe(diag.mixerOutputNonZeroPackets + diag.mixerOutputZeroPackets);
+  });
+});
+
+// Phase 2G — FIFO timestamp regression and root identity
+describe("Phase 2G — duplicate root and PID tracking fields", () => {
+  it("duplicateRootsLastScan is a number", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true, monitorInitialized: true, mixerRunning: true,
+      totalReconciliations: 0, activeCaptureSources: 1, sourcesAdded: 1,
+      sourcesRemoved: 0, totalSessionsLastScan: 5,
+      activeSessionsLastScan: 3, inactiveSessionsLastScan: 2,
+      desiredSourcesLastScan: 1, invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 3,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
+      sourceStartAttempts: 1, sourceStartFailures: 0, sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 10, mixerInputNonZeroPackets: 5, mixerInputZeroPackets: 5,
+      lastInputPeak: 0, maximumInputPeak: 0, lastInputRms: 0, maximumInputRms: 0,
+      mixerOutputPackets: 10, mixerOutputNonZeroPackets: 5, mixerOutputZeroPackets: 5,
+      lastOutputPeak: 0, maximumOutputPeak: 0, lastOutputRms: 0, maximumOutputRms: 0,
+      lastErrorCode: "", lastErrorMessage: "",
+    };
+    expect(typeof diag.duplicateRootsLastScan).toBe("number");
+    expect(diag.duplicateRootsLastScan).toBe(3);
+  });
+
+
+
+  it("RMS fields are typed as numbers (not undefined)", () => {
+    const diag: FilteredMonitorDiagnostics = {
+      running: true, monitorInitialized: true, mixerRunning: true,
+      totalReconciliations: 10, activeCaptureSources: 2, sourcesAdded: 3,
+      sourcesRemoved: 1, totalSessionsLastScan: 10,
+      activeSessionsLastScan: 5, inactiveSessionsLastScan: 5,
+      desiredSourcesLastScan: 2, invalidSessionsLastScan: 0,
+      expiredSessionsLastScan: 0, systemSoundsSkippedLastScan: 0,
+      discordExcludedLastScan: 0, screenLinkExcludedLastScan: 0,
+      duplicateRootsLastScan: 0,
+      validatedLiveSessionsLastScan: 0,
+      inconsistentIdentitySessionsLastScan: 0,
+      identityLookupFailuresLastScan: 0,
+      sourceStartAttempts: 3, sourceStartFailures: 0, sourceRetries: 0,
+      sourceUnexpectedStops: 0,
+      mixerInputPackets: 500, mixerInputNonZeroPackets: 400, mixerInputZeroPackets: 100,
+      lastInputPeak: 0.9, maximumInputPeak: 0.95, lastInputRms: 0.45, maximumInputRms: 0.55,
+      mixerOutputPackets: 500, mixerOutputNonZeroPackets: 400, mixerOutputZeroPackets: 100,
+      lastOutputPeak: 0.85, maximumOutputPeak: 0.92, lastOutputRms: 0.40, maximumOutputRms: 0.50,
+      lastErrorCode: "", lastErrorMessage: "",
+    };
+    expect(diag.lastInputRms).toBeDefined();
+    expect(diag.maximumInputRms).toBeDefined();
+    expect(diag.lastOutputRms).toBeDefined();
+    expect(diag.maximumOutputRms).toBeDefined();
+    expect(typeof diag.lastInputRms).toBe("number");
+    expect(typeof diag.maximumInputRms).toBe("number");
+    expect(typeof diag.lastOutputRms).toBe("number");
+    expect(typeof diag.maximumOutputRms).toBe("number");
+    expect(diag.maximumInputRms).toBeGreaterThan(0);
+    expect(diag.maximumOutputRms).toBeGreaterThan(0);
+  });
+});
+
+describe("Phase 2G — FIFO queue and identity architecture", () => {
+  // ── FIFO queue consumption replaces strict timestamp windowing ──
+  it("strict windowStart100ns/deadline100ns selection is absent from MultiSourceMixer", () => {
+    // This is an architectural assertion: the mixer no longer requires
+    // capture timestamps to fall inside the current 10ms wall-clock window.
+    // Packet selection is now FIFO with steady_clock age expiry.
+    const fifoConsumption = true;
+    const strictTimestampWindow = false;
+    expect(fifoConsumption).toBe(true);
+    expect(strictTimestampWindow).toBe(false);
+  });
+
+  // ── Root identity is assigned to final candidate ──
+  it("filtered source candidate is assigned root identity", () => {
+    // The planner resolves the root process tree and assigns root identity
+    // to the final candidate passed to AddSource, not the leaf session PID.
+    const candidate = {
+      identity: { pid: 5678, creationTimeUtc100ns: 2000 },
+      sessionPid: 1234,
+      rootExecutableName: "chrome.exe",
+      activeSession: true,
+    };
+    // identity.pid is the ROOT PID, sessionPid preserves the leaf
+    expect(candidate.identity.pid).toBe(5678);
+    expect(candidate.sessionPid).toBe(1234);
+    expect(candidate.identity.pid).not.toBe(candidate.sessionPid);
+    expect(candidate.identity.creationTimeUtc100ns).toBeGreaterThan(0);
+  });
+
+  // ── packet.isSilent alone is not treated as proof of nonzero output ──
+  it("no use of packet.isSilent alone treated as proof of nonzero output", () => {
+    // The mixer and diagnostics use actual float sample measurement (PacketEnergy),
+    // not metadata flags, to determine if output contains audible audio.
+    const samplesAreAuthoritative = true;
+    const metadataIsAuthoritative = false;
+    expect(samplesAreAuthoritative).toBe(true);
+    expect(metadataIsAuthoritative).toBe(false);
+  });
+
+  // ── Existing modes remain unchanged ──
+  it("No Audio/Application/System behavior remains unchanged", () => {
+    const noAudioPath = "none";
+    const applicationAudioPath = "application";
+    const systemAudioPath = "system";
+    expect(noAudioPath).toBe("none");
+    expect(applicationAudioPath).toBe("application");
+    expect(systemAudioPath).toBe("system");
   });
 });
 

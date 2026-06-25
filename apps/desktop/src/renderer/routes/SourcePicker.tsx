@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import type { CaptureSourceDTO } from "../../preload/api-types.js";
 
@@ -21,7 +21,7 @@ export function SourcePicker() {
       // Restore previous selection via fingerprint matching
       if (list.length > 0) {
         try {
-          const settings = await api.getSettings() as Record<string, unknown>;
+          const settings = await api.getSettings() as unknown as Record<string, unknown>;
           const lastSourceId = settings.lastSourceId as string | undefined;
           const rawFingerprint = settings.lastSourceFingerprint as string | undefined;
 
@@ -72,9 +72,23 @@ const getApi = () =>
         const api = getApi();
         await api?.setSource(id);
         setSelectedId(id);
-        setSource(id, name);
-        // Persist fingerprint for auto-resume
+
+        // Find the full source metadata to persist kind, displayId, fingerprint
+        const source = sources.find((s) => s.id === id);
+        const kind = source?.kind ?? "screen";
+        const displayId = source?.displayId ?? null;
+
+        // Persist full source metadata to store (kind, displayId, fingerprint)
         const fingerprint = await api?.getSourceFingerprint(id);
+        setSource({
+          id,
+          name,
+          kind,
+          displayId: displayId ?? "",
+          fingerprint: fingerprint ? JSON.stringify(fingerprint) : null,
+        });
+
+        // Persist fingerprint for auto-resume
         const updates: Record<string, unknown> = { lastSourceId: id, lastSourceName: name };
         if (fingerprint) {
           updates.lastSourceFingerprint = JSON.stringify(fingerprint);
@@ -86,7 +100,7 @@ const getApi = () =>
         setError("Failed to select source. Try again.");
       }
     },
-    [setSource, navigate],
+    [setSource, navigate, sources],
   );
 
   return (
@@ -176,3 +190,4 @@ const getApi = () =>
     </div>
   );
 }
+

@@ -5,55 +5,190 @@ import { normalizeAudioMode, type AudioMode } from "@screenlink/shared";
 
 /**
  * Persisted settings shape matching the IPC contract defined by the preload API.
+ *
+ * Phase 3: removed friends/pairing/share-id/hostTokenEncrypted/viewerToken/workerBaseUrl/viewerBaseUrl.
+ * Quality presets and groups live in their own stores; the device identity is stored here.
  */
 export interface PersistedSettings {
   version: number;
-  shareId: string;
-  hostTokenEncrypted: string;
-  viewerToken: string;
-  viewerBaseUrl: string;
-  workerBaseUrl: string;
+  deviceIdentity: {
+    deviceId: string;
+    displayName: string;
+    createdAt: number;
+  };
   hostDisplayName: string;
   launchAtLogin: boolean;
   autoResumeLastMonitor: boolean;
-  lastPresetId: string;
   previewEnabled: boolean;
-  allowRemoteQualityRequests: boolean;
-  autoWatchFriend: boolean;
-  friends: Array<{ id: string; displayName: string; note: string; preferredPresetId: string; createdAt: number; updatedAt: number }>;
   windowBounds: { x: number; y: number; width: number; height: number } | null;
-  // Extra fields stored for internal use but not exposed via the minimal IPC type
-  monitorFingerprint?: { displayId: string; label: string; bounds: { x: number; y: number; width: number; height: number }; size: { width: number; height: number }; scaleFactor: number; internal: boolean } | null;
-  hostPolicy?: Record<string, unknown>;
-  pairingConfig?: string;
-  encryptedPairSecret?: string;
-  lastSourceId?: string;
-  lastSourceName?: string;
+  monitorFingerprint: {
+    displayId: string;
+    label: string;
+    bounds: { x: number; y: number; width: number; height: number };
+    size: { width: number; height: number };
+    scaleFactor: number;
+    internal: boolean;
+  } | null;
+  lastSourceId: string | null;
+  lastSourceName: string | null;
+  lastSourceFingerprint: string | null;
+  developerMode: boolean;
+  hostQualityLimits: {
+    maxVideoBitrateKbps: number;
+    maxWidth: number;
+    maxHeight: number;
+    maxFps: number;
+    allowViewerQualityRequests: boolean;
+  };
+  globalQualityDefaults: {
+    schemaVersion: 1;
+    video: {
+      videoBitrateKbps: number;
+      sendWidth: number;
+      sendHeight: number;
+      sendFps: number;
+      captureWidth: number;
+      captureHeight: number;
+      captureFps: number;
+      preserveAspectRatio: boolean;
+      preventUpscale: boolean;
+      resolutionMode: "target-dimensions" | "scale-factor";
+      scaleResolutionDownBy: number;
+      codec: "auto" | "vp9" | "av1" | "h264" | "vp8";
+      h264Profile: "auto" | "baseline" | "main" | "high";
+      contentHint: "auto" | "text" | "detail" | "motion";
+      degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
+      scalabilityMode: string | null;
+      cursorMode: "always" | "motion" | "never";
+      rtpPriority: "very-low" | "low" | "medium" | "high";
+    };
+    audio: {
+      bitrateKbps: number;
+      channels: "mono" | "stereo";
+      bitrateMode: "vbr" | "cbr";
+      dtx: boolean;
+      fec: boolean;
+      packetDurationMs: 10 | 20 | 40 | 60;
+      redundantAudio: boolean;
+    };
+  };
+  notificationsEnabled: boolean;
+  localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
 }
 
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
+
+const DEFAULT_HOST_LIMITS: PersistedSettings["hostQualityLimits"] = {
+  maxVideoBitrateKbps: 5000,
+  maxWidth: 1920,
+  maxHeight: 1080,
+  maxFps: 60,
+  allowViewerQualityRequests: true,
+};
+
+const DEFAULT_GLOBAL_DEFAULTS: PersistedSettings["globalQualityDefaults"] = {
+  schemaVersion: 1,
+  video: {
+    videoBitrateKbps: 650,
+    sendWidth: 854,
+    sendHeight: 480,
+    sendFps: 15,
+    captureWidth: 854,
+    captureHeight: 480,
+    captureFps: 15,
+    preserveAspectRatio: true,
+    preventUpscale: true,
+    resolutionMode: "target-dimensions",
+    scaleResolutionDownBy: 1,
+    codec: "vp9",
+    h264Profile: "auto",
+    contentHint: "detail",
+    degradationPreference: "maintain-resolution",
+    scalabilityMode: null,
+    cursorMode: "always",
+    rtpPriority: "medium",
+  },
+  audio: {
+    bitrateKbps: 64,
+    channels: "stereo",
+    bitrateMode: "vbr",
+    dtx: false,
+    fec: true,
+    packetDurationMs: 20,
+    redundantAudio: false,
+  },
+};
 
 function getDefaults(): PersistedSettings {
   return {
     version: CURRENT_VERSION,
-    shareId: "",
-    hostTokenEncrypted: "",
-    viewerToken: "",
-    viewerBaseUrl: "",
-    workerBaseUrl: "",
+    deviceIdentity: {
+      deviceId: crypto.randomUUID(),
+      displayName: "Host",
+      createdAt: Date.now(),
+    },
     hostDisplayName: "Host",
     launchAtLogin: false,
     autoResumeLastMonitor: false,
-    lastPresetId: "egypt-data-saver",
     previewEnabled: false,
-    allowRemoteQualityRequests: true,
-    autoWatchFriend: false,
-    friends: [],
     windowBounds: null,
     monitorFingerprint: null,
-    hostPolicy: {},
-    lastAudioMode: 'none',
+    lastSourceId: null,
+    lastSourceName: null,
+    lastSourceFingerprint: null,
+    developerMode: false,
+    hostQualityLimits: { ...DEFAULT_HOST_LIMITS },
+    globalQualityDefaults: { ...DEFAULT_GLOBAL_DEFAULTS },
+    notificationsEnabled: true,
+    localTransportPolicy: {},
+    lastAudioMode: "none",
+  };
+}
+
+/**
+ * Phase 2G → Phase 3 migration. Preserves user-visible local settings,
+ * drops friends/pairing/share-id/tokens, and writes the migrated form.
+ */
+function migrateFromPhase2G(raw: unknown): PersistedSettings {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const dev = (r.deviceIdentity as Record<string, unknown> | undefined) ?? undefined;
+  const deviceId =
+    (dev?.deviceId as string | undefined) ??
+    (typeof r.shareId === "string" && (r.shareId as string).length > 8
+      ? ((r.shareId as string).slice(0, 8) + "-aaaa-4aaa-aaaa-aaaaaaaaaaaa").slice(0, 36)
+      : null) ??
+    crypto.randomUUID();
+  const displayName =
+    (dev?.displayName as string | undefined) ??
+    (typeof r.hostDisplayName === "string" ? (r.hostDisplayName as string) : "Host");
+  const createdAt = (dev?.createdAt as number | undefined) ?? Date.now();
+
+  return {
+    version: CURRENT_VERSION,
+    deviceIdentity: {
+      deviceId,
+      displayName: String(displayName).slice(0, 100),
+      createdAt,
+    },
+    hostDisplayName: String(displayName).slice(0, 100),
+    launchAtLogin: r.launchAtLogin === true,
+    autoResumeLastMonitor: r.autoResumeLastMonitor === true,
+    previewEnabled: r.previewEnabled === true,
+    windowBounds: (r.windowBounds as PersistedSettings["windowBounds"]) ?? null,
+    monitorFingerprint:
+      (r.monitorFingerprint as PersistedSettings["monitorFingerprint"]) ?? null,
+    lastSourceId: typeof r.lastSourceId === "string" ? (r.lastSourceId as string) : null,
+    lastSourceName: typeof r.lastSourceName === "string" ? (r.lastSourceName as string) : null,
+    lastSourceFingerprint: typeof r.lastSourceFingerprint === "string" ? (r.lastSourceFingerprint as string) : null,
+    developerMode: false,
+    hostQualityLimits: { ...DEFAULT_HOST_LIMITS },
+    globalQualityDefaults: { ...DEFAULT_GLOBAL_DEFAULTS },
+    notificationsEnabled: true,
+    localTransportPolicy: {},
+    lastAudioMode: r.lastAudioMode
+      ? normalizeAudioMode(r.lastAudioMode as string)
+      : "none",
   };
 }
 
@@ -75,40 +210,52 @@ export class SettingsStore {
     this.settings = this.load();
   }
 
-  /**
-   * Load settings from disk, falling back to backup if the main file is corrupt.
-   * Returns defaults if no valid file exists.
-   */
   private load(): PersistedSettings {
+    // Try main file
+    let raw: unknown = null;
     try {
       if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, "utf-8");
-        const data = JSON.parse(raw) as PersistedSettings;
-        if (data.lastAudioMode !== undefined) {
-          data.lastAudioMode = normalizeAudioMode(data.lastAudioMode);
-        }
-        return data;
+        raw = JSON.parse(fs.readFileSync(this.filePath, "utf-8"));
       }
     } catch {
-      // Main file corrupt — try backup
+      raw = null;
     }
-
-    try {
-      if (fs.existsSync(this.backupPath)) {
-        const raw = fs.readFileSync(this.backupPath, "utf-8");
-        const data = JSON.parse(raw) as PersistedSettings;
-        if (data.lastAudioMode !== undefined) {
-          data.lastAudioMode = normalizeAudioMode(data.lastAudioMode);
+    if (!raw) {
+      try {
+        if (fs.existsSync(this.backupPath)) {
+          raw = JSON.parse(fs.readFileSync(this.backupPath, "utf-8"));
         }
-        // Restore backup to main location
-        fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), "utf-8");
-        return data;
+      } catch {
+        raw = null;
       }
-    } catch {
-      // Backup also corrupt
     }
+    if (!raw) return getDefaults();
+    const obj = raw as Record<string, unknown>;
+    const v = typeof obj.version === "number" ? obj.version : 1;
+    if (v < CURRENT_VERSION) {
+      const migrated = migrateFromPhase2G(raw);
+      try {
+        this.writeAtomic(migrated);
+      } catch {
+        // best-effort
+      }
+      return migrated;
+    }
+    // Already current — normalize audio mode and return
+    const s = obj as unknown as PersistedSettings;
+    if (s.lastAudioMode !== undefined) {
+      s.lastAudioMode = normalizeAudioMode(s.lastAudioMode);
+    }
+    return s;
+  }
 
-    return getDefaults();
+  private writeAtomic(s: PersistedSettings): void {
+    const tmpPath = this.filePath + ".tmp";
+    fs.writeFileSync(tmpPath, JSON.stringify(s, null, 2), "utf-8");
+    if (fs.existsSync(this.filePath)) {
+      fs.copyFileSync(this.filePath, this.backupPath);
+    }
+    fs.renameSync(tmpPath, this.filePath);
   }
 
   /**
@@ -116,15 +263,7 @@ export class SettingsStore {
    * Previous version is backed up before overwriting.
    */
   save(): void {
-    const tmpPath = this.filePath + ".tmp";
-    fs.writeFileSync(tmpPath, JSON.stringify(this.settings, null, 2), "utf-8");
-
-    // Backup current file before replacing
-    if (fs.existsSync(this.filePath)) {
-      fs.copyFileSync(this.filePath, this.backupPath);
-    }
-
-    fs.renameSync(tmpPath, this.filePath);
+    this.writeAtomic(this.settings);
   }
 
   /**
@@ -139,17 +278,6 @@ export class SettingsStore {
    */
   update(partial: Partial<PersistedSettings>): void {
     Object.assign(this.settings, partial);
-    this.save();
-  }
-
-  /**
-   * Clear pairing data — deletes the pairingConfig and encryptedPairSecret
-   * keys from the persisted object so they are treated as absent.
-   */
-  clearPairing(): void {
-    const s = this.settings as unknown as Record<string, unknown>;
-    delete s.pairingConfig;
-    delete s.encryptedPairSecret;
     this.save();
   }
 }

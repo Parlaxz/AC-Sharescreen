@@ -2,6 +2,7 @@
 #include "AudioCapabilities.h"
 #include "WindowsVersion.h"
 #include "Protocol.h"
+#include "BuildInfo.h"
 #include "ExclusionPolicy.h"
 #include "ProcessResolver.h"
 #include "SourceMapper.h"
@@ -755,7 +756,16 @@ void ServiceSession::HandleHello(const CommandContext& ctx,
     result += "\"helperVersion\":\"" + std::string(kHelperVersion) + "\",";
     result += "\"protocolVersion\":\"" + std::string(kServiceProtocolVersion) + "\",";
     result += "\"sessionId\":\"" + config_.sessionId + "\",";
-    result += "\"pid\":" + std::to_string(static_cast<uint64_t>(GetCurrentProcessId()));
+    result += "\"pid\":" + std::to_string(static_cast<uint64_t>(GetCurrentProcessId())) + ",";
+    result += "\"buildInfo\":{";
+    result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
+    result += "\"gitDirty\":" + std::string(build::kGitDirty) + ",";
+    result += "\"gitBranch\":\"" + std::string(build::kGitBranch) + "\",";
+    result += "\"buildTimestamp\":\"" + std::string(build::kBuildTimestamp) + "\",";
+    result += "\"architecture\":\"" + std::string(build::kArchitecture) + "\",";
+    result += "\"buildConfig\":\"" + std::string(build::kBuildConfig) + "\",";
+    result += "\"compilerId\":\"" + std::string(build::kCompilerId) + "\"";
+    result += "}";
     result += "}";
 
     SimpleJson resp;
@@ -867,7 +877,7 @@ void ServiceSession::HandleGetState(const CommandContext& ctx,
     result += "\"controlConnected\":true,";
     result += "\"pcmConnected\":true,";
     result += "\"streamGeneration\":" +
-              std::to_string(streamGeneration_.load()) + ",";
+              std::to_string(activeGeneration_.load()) + ",";
     result += "\"totalPackets\":" +
               std::to_string(totalPackets_.load());
     result += "}";
@@ -921,7 +931,8 @@ void ServiceSession::HandleStartSynthetic(const CommandContext& ctx,
     }
 
     state_.store(static_cast<SessionState>(1)); // kStarting
-    uint32_t gen = streamGeneration_.fetch_add(1) + 1;
+    uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1064,7 +1075,8 @@ void ServiceSession::HandleStartProcessCapture(const CommandContext& ctx,
     }
 
     state_.store(static_cast<SessionState>(1)); // kStarting
-    uint32_t gen = streamGeneration_.fetch_add(1) + 1;
+    uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1167,7 +1179,7 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     size_t queueSize = pcmWriter_.Queue().Size();
     size_t written = pcmWriter_.PacketsWritten();
     size_t writeErrors = pcmWriter_.WriteErrors();
-    uint32_t streamGen = streamGeneration_.load();
+    uint32_t streamGen = activeGeneration_.load();
     int currentState = static_cast<int>(state_.load());
 
     std::string activeSrc;
@@ -1192,17 +1204,93 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     result += StateToStr(currentState) + std::string("\",");
     result += "\"streamGeneration\":" + std::to_string(streamGen) + ",";
     result += "\"helperStartCount\":" + std::to_string(helperStartCount_) + ",";
+    result += "\"screenLinkIdentityLookupFailures\":" +
+              std::to_string(screenLinkIdentityLookupFailures_.load()) + ",";
     result += "\"lastErrorTimestamp\":" + std::to_string(lastErrorTimestamp_) + ",";
+    result += "\"buildInfo\":{";
+    result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
+    result += "\"gitDirty\":" + std::string(build::kGitDirty) + ",";
+    result += "\"gitBranch\":\"" + std::string(build::kGitBranch) + "\",";
+    result += "\"buildTimestamp\":\"" + std::string(build::kBuildTimestamp) + "\",";
+    result += "\"architecture\":\"" + std::string(build::kArchitecture) + "\",";
+    result += "\"buildConfig\":\"" + std::string(build::kBuildConfig) + "\",";
+    result += "\"compilerId\":\"" + std::string(build::kCompilerId) + "\"";
+    result += "},";
     result += "\"capturePacketsProduced\":" + std::to_string(capturePacketsProduced_.load()) + ",";
     result += "\"captureBytesProduced\":" + std::to_string(captureBytesProduced_.load()) + ",";
     result += "\"endpointPacketsCaptured\":" + std::to_string(endpointPacketsCaptured_.load()) + ",";
     result += "\"endpointNonZeroPackets\":" + std::to_string(endpointNonZeroPackets_.load()) + ",";
     result += "\"endpointSilentPackets\":" + std::to_string(endpointSilentPackets_.load()) + ",";
-    result += "\"mixerFeedPackets\":" + std::to_string(mixerFeedPackets_.load()) + ",";
-    result += "\"mixerOutputPackets\":" + std::to_string(mixerOutputPackets_.load()) + ",";
-    result += "\"mixerNonZeroOutputPackets\":" + std::to_string(mixerNonZeroOutputPackets_.load()) + ",";
+    // Bridge filtered monitor controller diagnostics when active
+    if (activeSrc == "monitor" && filteredMonitor_) {
+        auto monDiag = filteredMonitor_->GetDiagnostics();
+        result += "\"mixerFeedPackets\":" + std::to_string(monDiag.mixerInputPackets) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(monDiag.mixerOutputPackets) + ",";
+        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(monDiag.mixerOutputNonZeroPackets) + ",";
+    } else {
+        result += "\"mixerFeedPackets\":" + std::to_string(mixerFeedPackets_.load()) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(mixerOutputPackets_.load()) + ",";
+        result += "\"mixerNonZeroOutputPackets\":" + std::to_string(mixerNonZeroOutputPackets_.load()) + ",";
+    }
     result += "\"onCaptureAccepted\":" + std::to_string(onCaptureAccepted_.load()) + ",";
-    result += "\"onCaptureRejectedState\":" + std::to_string(onCaptureRejectedState_.load());
+    result += "\"onCaptureRejectedState\":" + std::to_string(onCaptureRejectedState_.load()) + ",";
+    result += "\"onCaptureRejectedGeneration\":" + std::to_string(onCaptureRejectedGeneration_.load()) + ",";
+    result += "\"activeGeneration\":" + std::to_string(activeGeneration_.load());
+
+    // Include filtered monitor diagnostics inline when active
+    if (activeSrc == "monitor" && filteredMonitor_) {
+        auto monDiag = filteredMonitor_->GetDiagnostics();
+        result += ",\"filteredMonitorDiagnostics\":{";
+        result += "\"running\":" + std::string(monDiag.running ? "true" : "false") + ",";
+        result += "\"monitorInitialized\":" + std::string(monDiag.monitorInitialized ? "true" : "false") + ",";
+        result += "\"activeCaptureSources\":" + std::to_string(monDiag.activeCaptureSources) + ",";
+        result += "\"totalSessionsLastScan\":" + std::to_string(monDiag.totalSessionsLastScan) + ",";
+        result += "\"desiredSourcesLastScan\":" + std::to_string(monDiag.desiredSourcesLastScan) + ",";
+        result += "\"sourcesAdded\":" + std::to_string(monDiag.sourcesAdded) + ",";
+        result += "\"sourcesRemoved\":" + std::to_string(monDiag.sourcesRemoved) + ",";
+        result += "\"sourceStartFailures\":" + std::to_string(monDiag.sourceStartFailures) + ",";
+        result += "\"sourceRetries\":" + std::to_string(monDiag.sourceRetries) + ",";
+        result += "\"duplicateRootsLastScan\":" + std::to_string(monDiag.duplicateRootsLastScan) + ",";
+        result += "\"validatedLiveSessionsLastScan\":" + std::to_string(monDiag.validatedLiveSessionsLastScan) + ",";
+        result += "\"inconsistentIdentitySessionsLastScan\":" + std::to_string(monDiag.inconsistentIdentitySessionsLastScan) + ",";
+        result += "\"identityLookupFailuresLastScan\":" + std::to_string(monDiag.identityLookupFailuresLastScan) + ",";
+        result += "\"mixerInputPackets\":" + std::to_string(monDiag.mixerInputPackets) + ",";
+        result += "\"mixerInputNonZeroPackets\":" + std::to_string(monDiag.mixerInputNonZeroPackets) + ",";
+        result += "\"mixerInputZeroPackets\":" + std::to_string(monDiag.mixerInputZeroPackets) + ",";
+        result += "\"lastInputPeak\":" + std::to_string(static_cast<double>(monDiag.lastInputPeak)) + ",";
+        result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumInputPeak)) + ",";
+        result += "\"lastInputRms\":" + std::to_string(monDiag.lastInputRms) + ",";
+        result += "\"maximumInputRms\":" + std::to_string(monDiag.maximumInputRms) + ",";
+        result += "\"mixerOutputPackets\":" + std::to_string(monDiag.mixerOutputPackets) + ",";
+        result += "\"mixerOutputNonZeroPackets\":" + std::to_string(monDiag.mixerOutputNonZeroPackets) + ",";
+        result += "\"mixerOutputZeroPackets\":" + std::to_string(monDiag.mixerOutputZeroPackets) + ",";
+        result += "\"lastOutputPeak\":" + std::to_string(static_cast<double>(monDiag.lastOutputPeak)) + ",";
+        result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(monDiag.maximumOutputPeak)) + ",";
+        result += "\"lastOutputRms\":" + std::to_string(monDiag.lastOutputRms) + ",";
+        result += "\"maximumOutputRms\":" + std::to_string(monDiag.maximumOutputRms) + ",";
+        result += "\"lastErrorCode\":\"" + monDiag.lastErrorCode + "\",";
+        result += "\"lastErrorMessage\":\"" + monDiag.lastErrorMessage + "\",";
+
+        // Serialize active sources
+        result += "\"activeSources\":[";
+        for (size_t i = 0; i < monDiag.activeSources.size(); ++i) {
+            if (i > 0) result += ",";
+            const auto& src = monDiag.activeSources[i];
+            result += "{";
+            result += "\"sessionPid\":" + std::to_string(src.sessionPid) + ",";
+            result += "\"logicalRootPid\":" + std::to_string(src.logicalRootPid) + ",";
+            result += "\"physicalCaptureTargetPid\":" + std::to_string(src.physicalCaptureTargetPid) + ",";
+            result += "\"executableName\":\"" + src.executableName + "\",";
+            result += "\"inputPackets\":" + std::to_string(src.inputPackets) + ",";
+            result += "\"inputNonZeroPackets\":" + std::to_string(src.inputNonZeroPackets) + ",";
+            result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(src.maximumInputPeak));
+            result += "}";
+        }
+        result += "]";
+
+        result += "}";
+    }
+
     result += "}";
 
     SimpleJson resp;
@@ -1556,7 +1644,8 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     // Bypassing the mixer avoids its 10ms fixed-timestamp-window alignment,
     // which can discard WASAPI packets with different timing.
 
-    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -1566,10 +1655,17 @@ void ServiceSession::HandleStartApplicationAudio(const CommandContext& ctx,
     // Set kCapturing before source Start so OnCapturePacket accepts output.
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
+    std::cerr << "[ProcessLoopback] activate targetPid=" << rootPid
+              << " mode=include-tree source=application"
+              << " sessionPid=" << targetPid
+              << " executableName=" << treeResult.applicationRootName
+              << " gen=" << gen
+              << std::endl;
+
     auto source = std::make_unique<ApplicationCaptureSource>();
     auto startOutcome = source->Start(rootPid, actualCreationTime,
-        [this](const AudioPacket& packet) -> bool {
-            return OnCapturePacket(packet);
+        [this, gen](const AudioPacket& packet) -> bool {
+            return OnCapturePacket(gen, packet);
         });
 
     if (startOutcome.result != AppCaptureStartResult::Success) {
@@ -1620,6 +1716,57 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     uint32_t screenLinkPid = static_cast<uint32_t>(
         SimpleJson::GetUint(payload, "screenLinkPid", 0));
 
+    // Parse structured ScreenLink identity from payload
+    ScreenLinkIdentity screenLinkIdentity;
+    std::string identityJson = SimpleJson::GetObject(payload, "screenLinkIdentity");
+    if (!identityJson.empty()) {
+        screenLinkIdentity.rootPid = static_cast<uint32_t>(
+            SimpleJson::GetUint(identityJson, "rootPid", 0));
+        screenLinkIdentity.rootCreationTimeUtc100ns =
+            SimpleJson::GetUint(identityJson, "rootCreationTimeUtc100ns", 0);
+        screenLinkIdentity.normalizedPackagedPath =
+            SimpleJson::GetString(identityJson, "normalizedPackagedPath");
+        screenLinkIdentity.normalizedInstallationRoot =
+            SimpleJson::GetString(identityJson, "normalizedInstallationRoot");
+        screenLinkIdentity.normalizedDevAppRoot =
+            SimpleJson::GetString(identityJson, "normalizedDevAppRoot");
+        screenLinkIdentity.normalizedDevEntrypoint =
+            SimpleJson::GetString(identityJson, "normalizedDevEntrypoint");
+        screenLinkIdentity.productIdentifier =
+            SimpleJson::GetString(identityJson, "productIdentifier");
+        screenLinkIdentity.helperExePath =
+            SimpleJson::GetString(identityJson, "helperExePath");
+    }
+
+    // ── C: Native PID validation for screenLinkIdentity ──
+    // Independently resolve the creation time from the provided PID.
+    // If creation time cannot be resolved (process gone), we log the event
+    // but do NOT invalidate the entire identity — packaged and development
+    // sibling identity checks remain valid.
+    if (screenLinkIdentity.rootPid != 0) {
+        uint64_t actualCreationTime = GetProcessCreationTime(screenLinkIdentity.rootPid);
+        if (actualCreationTime == 0) {
+            // Process not found (gone already)
+            std::cerr << "[helper] screenLinkIdentity root PID not found: "
+                      << screenLinkIdentity.rootPid
+                      << " — sibling identity (packaged/dev) still valid" << std::endl;
+            screenLinkIdentity.rootPid = 0;
+            screenLinkIdentity.rootCreationTimeUtc100ns = 0;
+            screenLinkIdentityLookupFailures_.fetch_add(1, std::memory_order_relaxed);
+        } else if (screenLinkIdentity.rootCreationTimeUtc100ns == 0) {
+            // Desktop didn't provide creation time — use the natively resolved one
+            screenLinkIdentity.rootCreationTimeUtc100ns = actualCreationTime;
+            std::cerr << "[helper] screenLinkIdentity creation time resolved natively: "
+                      << actualCreationTime << std::endl;
+        } else if (actualCreationTime != screenLinkIdentity.rootCreationTimeUtc100ns) {
+            // Creation time mismatch (PID reused or spoofed)
+            std::cerr << "[helper] screenLinkIdentity root PID creation time mismatch: expected="
+                      << screenLinkIdentity.rootCreationTimeUtc100ns
+                      << " actual=" << actualCreationTime << std::endl;
+            screenLinkIdentityLookupFailures_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     // Lock audio lifecycle mutex to serialize start/stop transitions
     std::lock_guard<std::mutex> lock(audioLifecycleMutex_);
 
@@ -1644,7 +1791,8 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
 
     // Set state to kStarting and allocate stream generation
     state_.store(SessionState::kStarting);
-    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex_);
@@ -1662,11 +1810,12 @@ void ServiceSession::HandleStartFilteredMonitorAudio(const CommandContext& ctx,
     options.excludeDiscord = excludeDiscord;
     options.excludeScreenLink = excludeScreenLink;
     options.screenLinkPid = screenLinkPid;
+    options.screenLinkIdentity = screenLinkIdentity;
 
-    // Start controller with OnCapturePacket callback
+    // Start controller with OnCapturePacket callback (captures gen by value)
     auto outcome = controller->Start(options,
-        [this](const AudioPacket& packet) -> bool {
-            return OnCapturePacket(packet);
+        [this, gen](const AudioPacket& packet) -> bool {
+            return OnCapturePacket(gen, packet);
         });
 
     if (!outcome.success) {
@@ -1759,7 +1908,8 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
 
     // Set state to kStarting and allocate stream generation
     state_.store(SessionState::kStarting);
-    const uint32_t gen = streamGeneration_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const uint32_t gen = AllocateNextGeneration();
+    activeGeneration_.store(gen, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex_);
@@ -1772,9 +1922,9 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
     // Set state to kCapturing before source Start so OnCapturePacket accepts output
     state_.store(SessionState::kCapturing, std::memory_order_release);
 
-    // Start with direct OnCapturePacket callback (no mixer)
+    // Start with direct OnCapturePacket callback (no mixer, captures gen by value)
     auto startOutcome = source->Start(
-        [this](const AudioPacket& p) -> bool {
+        [this, gen](const AudioPacket& p) -> bool {
             // Track endpoint diagnostics
             endpointPacketsCaptured_.fetch_add(1, std::memory_order_relaxed);
 
@@ -1796,7 +1946,7 @@ void ServiceSession::HandleStartEndpointLoopback(const CommandContext& ctx,
             }
 
             // Directly call OnCapturePacket — no mixer
-            return OnCapturePacket(p);
+            return OnCapturePacket(gen, p);
         });
 
     if (startOutcome.result != EndpointStartResult::Success) {
@@ -1930,6 +2080,7 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
 
         result = "{";
         result += "\"sourceType\":\"monitor\",";
+        result += "\"pipeline\":\"dynamic-process-mix\",";
         result += "\"running\":" + std::string(diag.running ? "true" : "false") + ",";
         result += "\"mixerRunning\":" + std::string(diag.mixerRunning ? "true" : "false") + ",";
         result += "\"totalReconciliations\":" + std::to_string(diag.totalReconciliations) + ",";
@@ -1945,6 +2096,10 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
         result += "\"systemSoundsSkippedLastScan\":" + std::to_string(diag.systemSoundsSkippedLastScan) + ",";
         result += "\"discordExcludedLastScan\":" + std::to_string(diag.discordExcludedLastScan) + ",";
         result += "\"screenLinkExcludedLastScan\":" + std::to_string(diag.screenLinkExcludedLastScan) + ",";
+        result += "\"duplicateRootsLastScan\":" + std::to_string(diag.duplicateRootsLastScan) + ",";
+        result += "\"validatedLiveSessionsLastScan\":" + std::to_string(diag.validatedLiveSessionsLastScan) + ",";
+        result += "\"inconsistentIdentitySessionsLastScan\":" + std::to_string(diag.inconsistentIdentitySessionsLastScan) + ",";
+        result += "\"identityLookupFailuresLastScan\":" + std::to_string(diag.identityLookupFailuresLastScan) + ",";
         result += "\"sourceStartAttempts\":" + std::to_string(diag.sourceStartAttempts) + ",";
         result += "\"sourceStartFailures\":" + std::to_string(diag.sourceStartFailures) + ",";
         result += "\"sourceRetries\":" + std::to_string(diag.sourceRetries) + ",";
@@ -1952,20 +2107,37 @@ void ServiceSession::HandleGetMixerDiagnostics(const CommandContext& ctx,
         result += "\"mixerInputPackets\":" + std::to_string(diag.mixerInputPackets) + ",";
         result += "\"mixerInputNonZeroPackets\":" + std::to_string(diag.mixerInputNonZeroPackets) + ",";
         result += "\"mixerInputZeroPackets\":" + std::to_string(diag.mixerInputZeroPackets) + ",";
+        result += "\"lastInputPeak\":" + std::to_string(static_cast<double>(diag.lastInputPeak)) + ",";
+        result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(diag.maximumInputPeak)) + ",";
+        result += "\"lastInputRms\":" + std::to_string(diag.lastInputRms) + ",";
+        result += "\"maximumInputRms\":" + std::to_string(diag.maximumInputRms) + ",";
         result += "\"mixerOutputPackets\":" + std::to_string(diag.mixerOutputPackets) + ",";
         result += "\"mixerOutputNonZeroPackets\":" + std::to_string(diag.mixerOutputNonZeroPackets) + ",";
         result += "\"mixerOutputZeroPackets\":" + std::to_string(diag.mixerOutputZeroPackets) + ",";
-        result += "\"lastInputPeak\":" + std::to_string(static_cast<double>(diag.lastInputPeak)) + ",";
-        result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(diag.maximumInputPeak)) + ",";
         result += "\"lastOutputPeak\":" + std::to_string(static_cast<double>(diag.lastOutputPeak)) + ",";
         result += "\"maximumOutputPeak\":" + std::to_string(static_cast<double>(diag.maximumOutputPeak)) + ",";
-        result += "\"pipeline\":\"dynamic-process-mix\",";
-        result += "\"lastErrorCode\":\"";
-        result += diag.lastErrorCode.empty() ? "" : diag.lastErrorCode;
-        result += "\",";
-        result += "\"lastErrorMessage\":\"";
-        result += diag.lastErrorMessage.empty() ? "" : diag.lastErrorMessage;
-        result += "\"";
+        result += "\"lastOutputRms\":" + std::to_string(diag.lastOutputRms) + ",";
+        result += "\"maximumOutputRms\":" + std::to_string(diag.maximumOutputRms) + ",";
+        result += "\"lastErrorCode\":\"" + diag.lastErrorCode + "\",";
+        result += "\"lastErrorMessage\":\"" + diag.lastErrorMessage + "\",";
+
+        // Serialize active sources
+        result += "\"activeSources\":[";
+        for (size_t i = 0; i < diag.activeSources.size(); ++i) {
+            if (i > 0) result += ",";
+            const auto& src = diag.activeSources[i];
+            result += "{";
+            result += "\"sessionPid\":" + std::to_string(src.sessionPid) + ",";
+            result += "\"logicalRootPid\":" + std::to_string(src.logicalRootPid) + ",";
+            result += "\"physicalCaptureTargetPid\":" + std::to_string(src.physicalCaptureTargetPid) + ",";
+            result += "\"executableName\":\"" + src.executableName + "\",";
+            result += "\"inputPackets\":" + std::to_string(src.inputPackets) + ",";
+            result += "\"inputNonZeroPackets\":" + std::to_string(src.inputNonZeroPackets) + ",";
+            result += "\"maximumInputPeak\":" + std::to_string(static_cast<double>(src.maximumInputPeak));
+            result += "}";
+        }
+        result += "]";
+
         result += "}";
     } else if (activeSrc == "application" && applicationSource_) {
         result = "{";
@@ -2067,8 +2239,9 @@ void ServiceSession::RunSyntheticCapture(SyntheticConfig cfg) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
     SyntheticSource source;
-    source.Run(cfg, [this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
+    uint32_t captureGen = cfg.streamGeneration;
+    source.Run(cfg, [this, captureGen](const AudioPacket& p) -> bool {
+        return OnCapturePacket(captureGen, p);
     });
 
     // Capture finished — reset state back to idle if we were capturing
@@ -2084,8 +2257,9 @@ void ServiceSession::RunSyntheticCapture(SyntheticConfig cfg) {
 void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-    RunCaptureWithPacketCallback(cfg, [this](const AudioPacket& p) -> bool {
-        return OnCapturePacket(p);
+    uint32_t captureGen = activeGeneration_.load(std::memory_order_acquire);
+    RunCaptureWithPacketCallback(cfg, [this, captureGen](const AudioPacket& p) -> bool {
+        return OnCapturePacket(captureGen, p);
     });
 
     // Capture finished — reset state back to idle
@@ -2103,6 +2277,9 @@ void ServiceSession::RunProcessCapture(CaptureConfig cfg) {
 // ========================================================================
 
 void ServiceSession::StopAudioResources() {
+    // Invalidate the generation FIRST so any in-flight callbacks are rejected
+    InvalidateGeneration();
+
     // Stop filtered monitor first (owns its own captures, mixer, and threads)
     if (filteredMonitor_) {
         filteredMonitor_->Stop();
@@ -2129,10 +2306,41 @@ void ServiceSession::StopAudioResources() {
 }
 
 // ========================================================================
-// OnCapturePacket
+// OnCapturePacket — Generation-safe capture callback
 // ========================================================================
 
-bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
+void ServiceSession::InvalidateGeneration() {
+    // Set activeGeneration to zero so any in-flight callbacks are rejected.
+    // Does NOT modify nextGeneration_ — the allocator remains monotonically
+    // increasing across stops.
+    activeGeneration_.store(0, std::memory_order_release);
+}
+
+uint32_t ServiceSession::AllocateNextGeneration() {
+    // Monotonically increasing allocator that never returns zero.
+    // Handles uint32 wrap by skipping zero.
+    uint32_t gen;
+    do {
+        gen = nextGeneration_.fetch_add(1, std::memory_order_acq_rel);
+    } while (gen == 0);
+    return gen;
+}
+
+bool ServiceSession::OnCapturePacket(uint32_t expectedGeneration, const AudioPacket& packet) {
+    // Check 1: expectedGeneration must be non-zero
+    if (expectedGeneration == 0) {
+        onCaptureRejectedGeneration_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Check 2: expectedGeneration must match the active generation
+    uint32_t activeGen = activeGeneration_.load(std::memory_order_acquire);
+    if (expectedGeneration != activeGen) {
+        onCaptureRejectedGeneration_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // Check 3: lifecycle state must be kCapturing
     if (state_.load() != static_cast<SessionState>(2)) { // not kCapturing
         onCaptureRejectedState_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -2160,7 +2368,8 @@ bool ServiceSession::OnCapturePacket(const AudioPacket& packet) {
     hdr.frameCount = packet.frameCount;
     hdr.payloadBytes = packet.frameCount * packet.channels *
                        static_cast<uint32_t>(sizeof(float));
-    hdr.streamGeneration = streamGeneration_.load();
+    // Stamp the expected generation (not current, to avoid TOCTOU)
+    hdr.streamGeneration = expectedGeneration;
 
     // Copy frame data and compute energy diagnostics
     if (packet.frames && packet.frameCount > 0) {

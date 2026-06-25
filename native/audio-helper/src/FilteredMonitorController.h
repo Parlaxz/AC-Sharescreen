@@ -85,6 +85,7 @@ private:
     // Diagnostics helpers
     void RecordFilteredInputPacket(const AudioPacket& packet);
     void RecordFilteredMixerOutput(const AudioPacket& packet);
+    void SnapshotActiveSourceDiagnostics();
 
     /// Wake generation counter: notifications increment this so the
     /// controller-thread wait_until predicate can detect a wake request.

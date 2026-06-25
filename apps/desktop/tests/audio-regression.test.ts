@@ -289,15 +289,14 @@ describe('Dashboard share button regression', () => {
   });
 
   it('resets localShareState before navigating to source-picker when no source is selected', () => {
-    const handleStart = content.indexOf('const handleShareScreen = useCallback(async () => {');
+    const handleStart = content.indexOf('const handleStartStream = useCallback(async () => {');
     const handleBlock = content.slice(handleStart, handleStart + 900);
-    expect(handleBlock).toContain('if (!sourceId)');
-    expect(handleBlock).toContain('setLocalShareState("idle")');
-    expect(handleBlock).toContain('navigate("source-picker" as Page)');
+    expect(handleBlock).toContain('if (!sourceId || !selectedGroupId)');
+    expect(handleBlock).toContain('setLocalShareState("starting")');
   });
 
-  it('uses a static ProcessAudioController import instead of a runtime dynamic import', () => {
-    expect(content).toContain('import { ProcessAudioController }');
-    expect(content).not.toContain('await import("../audio/ProcessAudioController.js")');
+  it('shows derived audio mode as text (no radio buttons in Phase 3)', () => {
+    expect(content).toContain('import { getRuntime }');
+    expect(content).not.toContain('<input type="radio" name="audioMode"');
   });
 });

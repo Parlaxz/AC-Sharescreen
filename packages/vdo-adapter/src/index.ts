@@ -31,6 +31,8 @@ export {
   getViewerConnection,
   getVideoSender,
   getAudioSender,
+  getPeerConnection,
+  getVideoSenderForPeer,
 } from "./connection-access.js";
 
 export {
@@ -45,8 +47,14 @@ export { ViewerClient } from "./viewer-client.js";
 export { sendControlMessage } from "./send-data.js";
 
 export {
-  normalizeCodecName,
-  getSupportedVideoCodecs,
+  getSenderVideoCapabilities,
+  getReceiverVideoCapabilities,
+  getCommonVideoCodecCapabilities,
+  applyCodecPreferences,
+  intersectSenderAndReceiverCodecs,
+  applyCodecPreferencesToTransceiverBeforeOffer,
+  getAutoCodecOrder,
 } from "./codec-capabilities.js";
+export type { CodecPreferenceRecord } from "./codec-capabilities.js";
 
 export { pollStats } from "./media-stats.js";

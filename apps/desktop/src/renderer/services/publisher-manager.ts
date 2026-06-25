@@ -20,6 +20,18 @@ export interface PublisherConfig {
   videoWidth: number;
   videoHeight: number;
   videoFps: number;
+  /** Stage 17: Requested video codec from group defaults ("auto", "vp9", "h264", "vp8", "av1") */
+  codec?: string;
+  /** Stage 17: Content hint from group defaults ("detail", "motion", "text", "auto") */
+  contentHint?: string;
+  /** Stage 17: Degradation preference from group defaults ("balanced", "maintain-resolution", "maintain-framerate") */
+  degradationPreference?: string;
+  /** Stage 17: Capture width from group defaults (informational) */
+  captureWidth?: number;
+  /** Stage 17: Capture height from group defaults (informational) */
+  captureHeight?: number;
+  /** Stage 17: Capture FPS from group defaults (informational) */
+  captureFps?: number;
 }
 
 export interface PublisherEvents {
@@ -44,6 +56,7 @@ export class PublisherManager {
   private static nextId = 0;
   private readonly instanceId: number;
   private appliedAudioMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
+  private mediaBindHandler: ((peerUuid: string, token: string) => void) | null = null;
 
   constructor(events: PublisherEvents) {
     PublisherManager.nextId++;
@@ -74,6 +87,15 @@ export class PublisherManager {
 
   getInstanceId(): number {
     return this.instanceId;
+  }
+
+  /**
+   * Register a handler for media.bind messages received via the VDO data channel.
+   * Stage 5: Uses the actual media peer UUID from the VDO SDK callback, not the
+   * group control envelope senderDeviceId.
+   */
+  setOnMediaBind(handler: (peerUuid: string, token: string) => void): void {
+    this.mediaBindHandler = handler;
   }
 
   setAudioController(controller: ProcessAudioController, mode: 'system' | 'application' | 'monitor' | 'test-tone'): void {
@@ -215,7 +237,32 @@ export class PublisherManager {
     const publisher = new HostPublisher();
 
     console.log('[PublisherManager] Connecting publisher...');
-    await publisher.createAndConnect({ password: config.password });
+    // Stage 17: Pass requested codec from group defaults to HostPublisher
+    // so codec preferences are applied during connection setup.
+    await publisher.createAndConnect({
+      password: config.password,
+      requestedCodec: config.codec ?? "auto",
+    });
+
+    // Register dataReceived handler for media.bind messages (Stage 5)
+    // Uses the actual media peer UUID from the VDO SDK callback.
+    if (this.mediaBindHandler) {
+      const sdk = publisher.getSDK();
+      if (sdk) {
+        sdk.on("dataReceived", (data: unknown, peerUuid: unknown) => {
+          const pUuid = String(peerUuid);
+          // data is the raw payload received via the VDO data channel
+          // Only forward messages with type "media.bind" to prevent
+          // processing non-bind messages as bind payloads.
+          if (data && typeof data === "object") {
+            const msg = data as Record<string, unknown>;
+            if (msg.type === "media.bind" && msg.token && typeof msg.token === "string") {
+              this.mediaBindHandler!(pUuid, msg.token);
+            }
+          }
+        });
+      }
+    }
 
     console.log('[PublisherManager] Publishing stream...');
     await publisher.publish(stream, {
@@ -230,6 +277,43 @@ export class PublisherManager {
       },
       audioBitrate: 64000, // 64 kbps for Opus stereo
     });
+
+    // Stage 17: Apply contentHint to the video track from group defaults
+    if (config.contentHint && config.contentHint !== "auto") {
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack && typeof videoTrack.contentHint !== "undefined") {
+        videoTrack.contentHint = config.contentHint as MediaStreamTrack["contentHint"];
+      }
+    }
+
+    // Stage 17: Apply degradationPreference to sender encoding parameters
+    if (config.degradationPreference) {
+      try {
+        const sdk = publisher.getSDK();
+        if (sdk) {
+          for (const [, group] of sdk.connections) {
+            const pc = group.publisher?.pc;
+            if (!pc) continue;
+            const sender = pc.getSenders().find(s => s.track?.kind === "video");
+            if (!sender) continue;
+            const params = sender.getParameters();
+            if (params) {
+              (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
+              if (params.encodings?.[0]) {
+                (params.encodings[0] as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
+              }
+              try {
+                await sender.setParameters(params);
+              } catch (err) {
+                console.warn("[PublisherManager] Failed to set degradationPreference:", err);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[PublisherManager] Failed to apply degradationPreference:", err);
+      }
+    }
 
     this.publisher = publisher;
     this.config = config;
@@ -261,7 +345,8 @@ export class PublisherManager {
   async stopCapture(): Promise<void> {
     // Return existing promise if already stopping (awaitable idempotency)
     if (this.stopping_) {
-      return this.stopPromise_;
+      await this.stopPromise_;
+      return;
     }
     this.stopping_ = true;
     this.setState("stopping");

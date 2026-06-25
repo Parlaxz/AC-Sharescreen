@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import {
   generateVdoStreamId,
@@ -7,118 +7,65 @@ import {
   normalizeAudioMode,
   type AudioMode,
 } from "@screenlink/shared";
-import { ViewerClient } from "@screenlink/vdo-adapter";
-import { ProcessAudioController } from "../audio/ProcessAudioController.js";
-import { PublisherManager } from "../services/publisher-manager.js";
-import { MediaStatsPoller, type MediaStatsSnapshot } from "../services/media-stats-service.js";
 import {
   buildAvailabilityMap,
   resolveInitialAudioMode,
-  resolveHydrationConflict,
-  validateSharePreflight,
   type AudioAvailabilityMap,
 } from "../audio/audio-hydration-helper.js";
+import { getRuntime } from "../services/phase3-runtime.js";
+import { ViewerClient } from "@screenlink/vdo-adapter";
 
 export function Dashboard() {
   const {
-    // State machine states
-    localShareState, remoteShareState, pairingState,
-    // Friend info
-    friendDisplayName, friendIsSharing,
-    // Media credentials
-    localMediaSessionId, localStreamId, localMediaPassword,
-    remoteStreamId, remoteMediaPassword, remoteMediaSessionId,
-    // Settings
-    autoWatchFriend, sourceId, sourceName,
+    // Source
+    sourceId, sourceName, sourceKind,
+    // Group selection
+    selectedGroupId, groupsById, groupOrder,
+    // Active streams
+    activeStreamsByGroup,
+    // Watched streams
+    watchedStreamsBySessionId,
+    // Local streaming state
+    localShareState, localStreamSession,
+    isSharing, isDegraded,
+    // Viewers
+    viewerCount, viewers,
+    // Capture settings
     captureWidth, captureHeight, captureFps, captureBitrate,
+    // View mode
+    isViewing, viewStatus,
     // Navigation
     navigate,
     // Actions
-    setLocalShareState, setRemoteShareState,
-    setLocalMediaCredentials, clearLocalMediaCredentials, clearRemoteMediaCredentials,
-    setSource,
+    setLocalShareState, setLocalStreamSession,
+    setSelectedGroupId, setIsSharing, setIsDegraded,
+    setIsViewing, setViewStatus,
+    setWatchedStreams,
   } = useStore();
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const viewerRef = useRef<ViewerClient | null>(null);
-  const publisherManagerRef = useRef<PublisherManager | null>(null);
-  const remoteStreamRef = useRef<MediaStream | null>(null);
-  const fullscreenContainerRef = useRef<HTMLDivElement>(null);
-  const autoplayTriedRef = useRef(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [mediaStats, setMediaStats] = useState<MediaStatsSnapshot | null>(null);
-  const [localMediaStats, setLocalMediaStats] = useState<MediaStatsSnapshot | null>(null);
-  const [showIncomingSharePrompt, setShowIncomingSharePrompt] = useState(false);
-  const statsPollerRef = useRef<MediaStatsPoller | null>(null);
-  // Audio state
-  const [audioEnabled, setAudioEnabled] = useState(false);
-  const [remoteMuted, setRemoteMuted] = useState(false);
-  const [remoteVolume, setRemoteVolume] = useState(1);
-  const [showEnableAudioButton, setShowEnableAudioButton] = useState(false);
+  // Refs for media rendering
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // ── Audio derived mode display ──────────────────────────────
   const [audioMode, setAudioMode] = useState<AudioMode>('none');
-  const [appliedAudioMode, setAppliedAudioMode] = useState<AudioMode>('none');
-  const [audioError, setAudioError] = useState<string | null>(null);
-  const [audioIsSynthetic, setAudioIsSynthetic] = useState(false);
-  const [capAudioModes, setCapAudioModes] = useState<AudioAvailabilityMap | null>(null);
   const [audioOptionsReady, setAudioOptionsReady] = useState(false);
-  const [audioInitializationError, setAudioInitializationError] = useState<string | null>(null);
-  const userSelectedAudioModeRef = useRef<AudioMode | null>(null);
-  const audioModeRef = useRef<AudioMode>('none');
-  // Keep ref in sync with state
-  audioModeRef.current = audioMode;
-  // local stats now flow through PublisherManager events
+  const [audioInitError, setAudioInitError] = useState<string | null>(null);
 
-  function formatBitsTransferred(bytes: number): string {
-    const bits = Math.max(0, bytes) * 8;
-    if (bits >= 1_000_000_000) return `${(bits / 1_000_000_000).toFixed(2)} Gb`;
-    if (bits >= 1_000_000) return `${(bits / 1_000_000).toFixed(2)} Mb`;
-    if (bits >= 1_000) return `${(bits / 1_000).toFixed(2)} Kb`;
-    return `${bits.toFixed(0)} b`;
-  }
+  // Viewer client ref for active watch session
+  const viewerClientRef = useRef<ViewerClient | null>(null);
 
-  async function toggleFullscreen() {
-    try {
-      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-      await api?.toggleFullscreen();
-        } catch (err) {
-          console.warn("[Audio] Setup failed, continuing video-only:", err);
-          // Emit pipeline snapshot for diagnostics
-          try {
-            const snapshot = await api?.getPipelineSnapshot?.();
-            console.warn("[Audio-Pipeline] Full snapshot:", JSON.stringify(snapshot));
-          } catch { /* best effort */ }
-          setAudioEnabled(false);
-          try { api?.stopAudio(); } catch { /* ignore */ }
-        }
-  }
-
-  // Load settings + capabilities concurrently, calculate initial audio mode once
+  // Load settings + capabilities, derive audio mode
   useEffect(() => {
     let cancelled = false;
-
     (async () => {
       const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-
-      // Load settings and capabilities concurrently
       const [settingsResult, capsResult] = await Promise.all([
         api?.getSettings().catch(() => null) ?? Promise.resolve(null),
         api?.getAudioCapabilities().catch(() => null) ?? Promise.resolve(null),
       ]);
-
       if (cancelled) return;
-
-      // Restore source
-      if (settingsResult && settingsResult.lastSourceId && settingsResult.lastSourceName) {
-        setSource(settingsResult.lastSourceId, settingsResult.lastSourceName);
-      }
-
-      // Build availability map from capabilities
       let availability: AudioAvailabilityMap = {
-        none: true,
-        system: true,
-        application: true,
-        monitor: true,
-        'test-tone': true,
+        none: true, system: true, application: true, monitor: true, 'test-tone': true,
       };
       try {
         if (capsResult?.success && capsResult.data) {
@@ -126,959 +73,561 @@ export function Dashboard() {
           availability = buildAvailabilityMap(modes);
         }
       } catch { /* best effort */ }
-      setCapAudioModes(availability);
-
-      // Resolve initial mode once
       const persisted = settingsResult?.lastAudioMode ?? null;
       const { resolved, wasDowngraded } = resolveInitialAudioMode(persisted, availability);
-      const hydration = resolveHydrationConflict({
-        persistedMode: persisted,
-        userSelectedMode: userSelectedAudioModeRef.current,
-        capabilities: availability,
-      });
-      const initialMode = hydration.final ?? resolved;
-
       if (!cancelled) {
-        if (userSelectedAudioModeRef.current == null) {
-          setAudioMode(initialMode);
-          audioModeRef.current = initialMode;
-        }
+        setAudioMode(resolved);
         setAudioOptionsReady(true);
         if (wasDowngraded) {
-          setAudioInitializationError(`Saved audio mode "${persisted}" is not available on this system`);
+          setAudioInitError(`Saved audio mode "${persisted}" is not available on this system`);
         }
       }
     })();
-
     return () => { cancelled = true; };
   }, []);
 
-  // Cleanup viewer on unmount
-  useEffect(() => {
-    return () => { viewerRef.current?.disconnect(); };
-  }, []);
+  // ── Derived data ────────────────────────────────────────────────
 
-  // ── Single selectAudioMode handler used by all radio buttons ──
+  const groupList = groupOrder
+    .map((id) => groupsById[id])
+    .filter((g): g is { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> } => !!g);
 
-  function selectAudioMode(mode: AudioMode) {
-    userSelectedAudioModeRef.current = mode;
-    audioModeRef.current = mode;
-    setAudioMode(mode);
-    console.log(`[Audio] selectedMode=${mode}`);
-    // Persist lastAudioMode immediately
-    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-    api?.updateSettings({ lastAudioMode: mode }).catch((error) => {
-      console.warn('[Audio] Failed to persist selected mode', error);
-    });
-  }
+  const selectedGroupName = selectedGroupId ? groupsById[selectedGroupId]?.name ?? "Unknown Group" : null;
 
-  // ── Audio port promise (fresh listener per share attempt) ──
-
-  function waitForNextAudioPort(): Promise<MessagePort> {
-    return new Promise<MessagePort>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        window.removeEventListener('message', handler);
-        reject(new Error('Audio port timeout'));
-      }, 5000);
-
-      const handler = (event: MessageEvent) => {
-        if (event.data?.type !== 'pcm:port' || !event.ports?.[0]) return;
-        clearTimeout(timeout);
-        window.removeEventListener('message', handler);
-        resolve(event.ports[0]);
-      };
-
-      window.addEventListener('message', handler);
-    });
-  }
-
-  // Sync state to tray
-  useEffect(() => {
-    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-    api?.traySetSharing(localShareState === "sharing");
-    api?.traySetViewing(remoteShareState === "viewing");
-    api?.traySetFriendName(friendDisplayName || "");
-    api?.traySetFriendSharing(friendIsSharing);
-  }, [localShareState, remoteShareState, friendDisplayName, friendIsSharing]);
-
-  // Fullscreen change listener (native Electron)
-  useEffect(() => {
-    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-    const cleanup = api?.onFullscreenChanged((isFull) => {
-      setIsFullscreen(isFull);
-    });
-    return () => cleanup?.();
-  }, []);
-
-  // Escape key exits fullscreen
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isFullscreen) {
-        const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-        api?.toggleFullscreen();
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [isFullscreen]);
-
-  // Sync video volume state to element
-  useEffect(() => {
-    const el = videoRef.current;
-    if (el) el.volume = remoteVolume;
-  }, [remoteVolume]);
-
-  // Start/poll WebRTC stats when viewing
-  useEffect(() => {
-    if (remoteShareState === "viewing") {
-      const viewer = viewerRef.current;
-      const sdk = viewer?.getSDK();
-      if (sdk) {
-        const poller = new MediaStatsPoller();
-        statsPollerRef.current = poller;
-        // Get the first peer UUID from the SDK's connections map
-        let peerUuid: string | null = null;
-        for (const [uuid] of sdk.connections) {
-          peerUuid = uuid;
-          break;
-        }
-        poller.start(sdk, peerUuid, (stats) => {
-          setMediaStats(stats);
-        });
-      } else {
-        // SDK not ready yet; show stub so the UI card renders
-        setMediaStats({
-          inboundBitrateKbps: 0,
-          inboundBytes: 0,
-          inboundFps: 0,
-          inboundWidth: 0,
-          inboundHeight: 0,
-          packetsLost: 0,
-          jitter: 0,
-          roundTripTime: 0,
-          framesDropped: 0,
-          freezeCount: 0,
-          outboundBitrateKbps: 0,
-          outboundBytes: 0,
-          outboundFps: 0,
-          outboundWidth: 0,
-          outboundHeight: 0,
-          retransmittedBytes: 0,
-          nackCount: 0,
-          pliCount: 0,
-          qualityLimitation: "",
-          isRelay: false,
-          relayProtocol: "",
-          currentRtt: 0,
-          availableOutgoingBitrate: 0,
-          codecMimeType: "",
-          audioOutboundBytes: 0,
-          audioOutboundPackets: 0,
-          audioOutboundBitrateKbps: 0,
-          audioCodec: "",
-          audioSsrc: 0,
-          audioLevel: 0,
-          totalAudioEnergy: 0,
-          totalSamplesSent: 0,
-          audioInboundBytes: 0,
-          audioInboundPackets: 0,
-          audioInboundBitrateKbps: 0,
-          audioPacketsLost: 0,
-          audioJitter: 0,
-          audioJitterBufferDelay: 0,
-          audioConcealedSamples: 0,
-          audioConcealmentEvents: 0,
-          audioTotalSamplesReceived: 0,
-        });
-      }
-    } else {
-      statsPollerRef.current?.stop();
-      statsPollerRef.current = null;
-      setMediaStats(null);
-    }
-    return () => {
-      statsPollerRef.current?.stop();
-      statsPollerRef.current = null;
-    };
-  }, [remoteShareState]);
-
-  // Local publisher stats now flow through PublisherManager onStats callback
-
-  // ── Remote viewing functions ──────────────────────────────
-
-  async function startViewing() {
-    setRemoteShareState("connecting");
-    try {
-      const viewer = new ViewerClient();
-      viewerRef.current = viewer;
-
-      // Create a persistent stream for this session
-      const sessionStream = new MediaStream();
-      remoteStreamRef.current = sessionStream;
-
-      viewer.on("track", async (event: unknown) => {
-        const payload = (event as CustomEvent).detail as { track?: MediaStreamTrack; streams?: MediaStream[] };
-        if (!payload?.track) return;
-
-        // Add track to persistent stream (don't replace)
-        if (!sessionStream.getTracks().some(t => t.id === payload.track!.id)) {
-          sessionStream.addTrack(payload.track);
-        }
-
-        // Attach to video element
-        if (videoRef.current) {
-          videoRef.current.srcObject = sessionStream;
-        }
-
-        setRemoteShareState("viewing");
-
-        // Attempt play() on every track addition
-        if (videoRef.current && !autoplayTriedRef.current) {
-          autoplayTriedRef.current = true;
-          try {
-            await videoRef.current.play();
-          } catch {
-            setShowEnableAudioButton(true);
-          }
-        }
-      });
-
-      await viewer.createAndConnect(remoteMediaPassword);
-      await viewer.view(remoteStreamId, "Desktop User");
-    } catch (err) {
-      console.error("Remote view failed:", err);
-      setRemoteShareState("error");
-    }
-  }
-
-  async function stopViewing() {
-    await viewerRef.current?.stopViewing();
-    await viewerRef.current?.disconnect();
-    viewerRef.current = null;
-    remoteStreamRef.current = null;
-    autoplayTriedRef.current = false;
-    if (videoRef.current) videoRef.current.srcObject = null;
-    clearRemoteMediaCredentials();
-    setRemoteShareState("remote-online-idle");
-    setShowEnableAudioButton(false);
-    setRemoteMuted(false);
-    setRemoteVolume(1);
-    setAudioEnabled(false);
-  }
-
-  // Show a prompt when remote share becomes available by default.
-  useEffect(() => {
-    if (remoteShareState === "remote-share-available" && remoteStreamId && remoteMediaPassword) {
-      if (autoWatchFriend) {
-        startViewing();
-      } else {
-        setShowIncomingSharePrompt(true);
-      }
-    }
-    if (remoteShareState !== "remote-share-available") {
-      setShowIncomingSharePrompt(false);
-    }
-  }, [remoteShareState, remoteStreamId, remoteMediaPassword, autoWatchFriend]);
-
-  // ── Sharing handlers ──────────────────────────────────────
-
-  /**
-   * Development-only synthetic audio fallback.
-   * Only activates when all conditions are met:
-   * - Running in dev mode (import.meta.env.DEV)
-   * - The user has explicitly enabled useSyntheticAudioFallback in settings
-   * - Real capture just failed
-   * Never activates in production.
-   * Returns 'synthetic' on success, 'none' if fallback not applicable or failed.
-   */
-  async function attemptDevSyntheticFallback(
-    api: import("../../preload/api-types.js").ScreenLinkAPI | undefined | null,
-    captureError: string | undefined,
-  ): Promise<'synthetic' | 'none'> {
-    // Production: never auto-substitute
-    if (!import.meta.env.DEV) return 'none';
-
-    try {
-      const settings = await api?.getSettings();
-      if (!settings || !('useSyntheticAudioFallback' in settings) || !(settings as any).useSyntheticAudioFallback) {
-        return 'none';
-      }
-    } catch {
-      return 'none';
-    }
-
-    console.warn("[Audio] Real capture failed, attempting dev fallback to synthetic:", captureError);
-    const result = await api?.startSyntheticAudio();
-    if (!result || !result.success) {
-      console.warn("[Audio] Dev synthetic fallback also failed:", result?.error);
-      return 'none';
-    }
-    return 'synthetic';
-  }
-
-  const handleShareScreen = useCallback(async () => {
-    if (localShareState === 'starting') {
-      return;
-    }
-
-    setLocalShareState("selecting-source");
-    try {
-      if (!sourceId) {
-        setLocalShareState("idle");
-        navigate("source-picker" as Page);
-        return;
-      }
-
-      // Guard: audio options must be ready before sharing
-      if (!audioOptionsReady) {
-        console.warn("[Audio] Blocking share: audio options not yet ready");
-        setAudioError("Audio options are not ready yet. Please wait.");
-        setLocalShareState("idle");
-        return;
-      }
-
-      setLocalShareState("starting");
-
-      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-      await api?.setSource(sourceId);
-
-      // Generate ephemeral credentials
-      const sessionId = crypto.randomUUID();
-      const streamId = generateVdoStreamId();
-      const password = generateVdoPassword();
-      setLocalMediaCredentials(sessionId, streamId, password);
-
-      const mgr = new PublisherManager({
-        onStateChange: (state) => setLocalShareState(state),
-        onStats: (stats) => setLocalMediaStats(stats),
-        onError: (err) => console.error("Publisher error:", err),
-        onTrackEnded: () => handleStopSharing(),
-      });
-      publisherManagerRef.current = mgr;
-
-      // ── Authoritative share preflight ──────────────────────
-      // Validate the mode selection before any audio setup runs.
-      // This catches stale availability, unsupported modes, and
-      // incomplete initialization  deterministically.
-      const currentAudioMode = normalizeAudioMode(audioModeRef.current);
-      let effectiveAudioMode: AudioMode = currentAudioMode;
-      let unavailableReason: string | null = null;
-      const userSelectedMode = userSelectedAudioModeRef.current;
-      const lastAudioMode = normalizeAudioMode((await api?.getSettings())?.lastAudioMode);
-
-      // Source validation: application audio requires a window source
-      if (currentAudioMode === 'application' && sourceId && !sourceId.startsWith('window:')) {
-        unavailableReason = 'application-audio-requires-window-source';
-        setAudioError(unavailableReason);
-        setLocalShareState('idle');
-        return;
-      } else if (currentAudioMode === 'application' && !sourceId) {
-        unavailableReason = 'application-audio-requires-window-source';
-        setAudioError(unavailableReason);
-        setLocalShareState('idle');
-        return;
-      } else if (currentAudioMode !== 'none' && capAudioModes && capAudioModes[currentAudioMode] === false) {
-        unavailableReason = `${currentAudioMode}-not-supported`;
-      }
-
-      console.log('[Audio] share preflight', {
-        requestedMode: currentAudioMode,
-        reactStateMode: audioMode,
-        audioOptionsReady,
-        userSelectedMode,
-        available: currentAudioMode === 'none' ? true : capAudioModes?.[currentAudioMode] !== false,
-        unavailableReason,
-        lastAudioMode,
-      });
-
-      if (effectiveAudioMode !== 'none' && capAudioModes) {
-        try {
-          const preflight = validateSharePreflight(
-            { mode: effectiveAudioMode, available: capAudioModes },
-            userSelectedAudioModeRef.current,
-            capAudioModes,
-          );
-          console.log("[Audio] Preflight OK:", JSON.stringify(preflight.metadata));
-        } catch (preflightErr) {
-          const msg = preflightErr instanceof Error ? preflightErr.message : String(preflightErr);
-          console.warn("[Audio] Preflight rejected:", msg);
-          // Do not silently downgrade explicit system to none — surface the error
-          if (msg.startsWith('requested-audio-mode-was-discarded:')) {
-            setAudioError(msg);
-            setLocalShareState("idle");
-            return;
-          }
-          // For unsupported modes (application/monitor), fall back to none
-          setAudioError(msg);
-          setLocalShareState('idle');
-          return;
-        }
-      }
-
-      console.log(`[Audio] effectiveMode=${effectiveAudioMode}`);
-
-      // Audio setup (best-effort, failure does not block video-only sharing)
-      let audioConfigured = false;
-      setAudioError(null);
-      setAppliedAudioMode('none');
-      setAudioIsSynthetic(false);
-
-      // ── Test Tone mode: explicit synthetic, no fallback ──────────────
-      // Uses a provisional controller: created, validated, and only attached
-      // to the publisher after priming AND rendering (nonzero output) succeed.
-      if (effectiveAudioMode === 'test-tone') {
-        let provisionalController: ProcessAudioController | null = null;
-        setAudioEnabled(true);
-
-        try {
-          const portPromise = waitForNextAudioPort();
-          const portResult = await api?.requestAudioPort();
-          if (!portResult || !portResult.success) {
-            throw new Error(portResult?.error || 'Audio helper unavailable');
-          }
-          const port = await portPromise;
-
-          provisionalController = new ProcessAudioController();
-          await provisionalController.initialize(port);
-
-          const result = await api?.startSyntheticAudio();
-          if (!result || !result.success) {
-            throw new Error(result?.error ?? 'Test tone could not start');
-          }
-
-          setAudioIsSynthetic(true);
-          setAppliedAudioMode('test-tone');
-
-          // Wait for ring buffer to fill (primed)
-          await provisionalController.waitUntilPrimed();
-          console.log('[Audio] Test tone primed');
-
-          // Wait for nonzero output (rendering) — confirms worklet output path works
-          await provisionalController.waitUntilRendering();
-          console.log('[Audio] Test tone rendering confirmed');
-
-          // Sample analyser to verify nonzero audio in the graph
-          const analyserReading = provisionalController.sampleAnalyser('pre-publish');
-          if (!analyserReading || analyserReading.peak === 0) {
-            console.warn('[Audio] Analyser shows zero peak before publish — Test Tone may be silent');
-          } else {
-            console.log('[Audio] Analyser OK — peak:', analyserReading.peak, 'rms:', analyserReading.rms);
-          }
-
-          // All validation passed — attach controller to publisher
-          const testToneTrack = provisionalController.getTrack();
-          if (!testToneTrack || testToneTrack.readyState !== 'live') {
-            throw new Error('test-tone-output-track-not-live');
-          }
-          console.log('[Audio] transferring controller', {
-            controllerId: provisionalController.getInstanceId(),
-            trackId: testToneTrack.id,
-            trackKind: testToneTrack.kind,
-            trackReadyState: testToneTrack.readyState,
-          });
-          mgr.setAudioController(provisionalController, 'test-tone');
-          provisionalController = null; // ownership transferred
-          console.log('[Audio] provisionalControllerReleased=true');
-          audioConfigured = true;
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          setAudioError(errorMsg);
-          console.warn("[Audio] Test tone setup failed:", err);
-
-          // Full cleanup of provisional controller
-          if (provisionalController) {
-            try { await provisionalController.close(); } catch { /* ignore */ }
-            provisionalController = null;
-            mgr.clearAudioController();
-            try { await api?.stopAudio(); } catch { /* ignore */ }
-          }
-          setAppliedAudioMode('none');
-          setAudioEnabled(false);
-        }
-      }
-
-      // ── Real capture modes: system audio, application, or filtered monitor ──
-      if (effectiveAudioMode !== 'none' && effectiveAudioMode !== 'test-tone') {
-        let provisionalController: ProcessAudioController | null = null;
-        setAudioEnabled(true);
-
-        try {
-          const portPromise = waitForNextAudioPort();
-          const portResult = await api?.requestAudioPort();
-          if (!portResult || !portResult.success) {
-            throw new Error(portResult?.error || 'Audio helper unavailable');
-          }
-          const port = await portPromise;
-
-          provisionalController = new ProcessAudioController();
-          await provisionalController.initialize(port, {
-            onStateChange: (state) => {
-              console.log('[ApplicationAudio/worklet-state]', state);
-            },
-            onStats: (stats) => {
-              console.log('[ApplicationAudio/worklet-stats]', {
-                framesReceived: stats.framesReceived,
-                framesRendered: stats.framesRendered,
-                silentFrames: stats.silentFrames,
-                underrunFrames: stats.underrunFrames,
-                peak: stats.peak,
-                rms: stats.rms,
-                nonZeroSamples: stats.nonZeroSamples,
-              });
-            },
-          });
-          // Sample energy immediately after init
-          provisionalController.sampleAnalyser('application-post-init');
-
-          // Start capture — check result BEFORE priming
-          console.log(`[Audio] requestedMode=${effectiveAudioMode}`);
-          let captureResult: { success: boolean; error?: string; streamGeneration?: number } | undefined;
-
-          // Explicit switch: every audio mode must have its own branch.
-          // NEVER fall through to a default that aliases one mode to another.
-          switch (effectiveAudioMode) {
-            case 'system': {
-              console.log('[Audio] ipcCommand=audio:start-system');
-              captureResult = await api?.startSystemAudio() as { success: boolean; error?: string; streamGeneration?: number } | undefined;
-              console.log(`[Audio] captureResult=`, JSON.stringify(captureResult));
-              break;
-            }
-            case 'application': {
-              captureResult = await api?.startApplicationAudio({ sourceId }) as { success: boolean; error?: string; streamGeneration?: number } | undefined;
-              console.log('[Audio] application captureResult=', JSON.stringify(captureResult));
-              break;
-            }
-            case 'monitor': {
-              captureResult = await api?.startFilteredMonitorAudio({
-                excludeDiscord: true,
-                excludeScreenLink: true,
-              }) as { success: boolean; error?: string; streamGeneration?: number } | undefined;
-              console.log('[Audio] monitor captureResult=', JSON.stringify(captureResult));
-              break;
-            }
-            default:
-              throw new Error(`Unsupported audio mode: ${effectiveAudioMode}`);
-          }
-
-          if (!captureResult || !captureResult.success) {
-            // Real capture failed — development-only synthetic fallback
-            const fallbackResult = await attemptDevSyntheticFallback(api, captureResult?.error);
-            if (fallbackResult === 'synthetic') {
-              setAudioIsSynthetic(true);
-              await provisionalController.waitUntilPrimed();
-              // Real audio does not require waitUntilRendering (source may be legitimately silent)
-              mgr.setAudioController(provisionalController, 'test-tone');
-              provisionalController = null;
-              audioConfigured = true;
-              console.log('[Audio] Using synthetic fallback audio');
-            } else {
-              // Real audio failure with no synthetic fallback — continue video-only
-              console.warn('[Audio] Real audio capture failed, continuing video-only:', captureResult?.error ?? 'unknown');
-              setAppliedAudioMode('none');
-              if (provisionalController) {
-                try { await provisionalController.close(); } catch { /* ignore */ }
-                provisionalController = null;
-              }
-              mgr.clearAudioController();
-              try { await api?.stopAudio(); } catch { /* ignore */ }
-              setAudioEnabled(false);
-              captureResult = undefined;
-            }
-          } else {
-            // Real capture succeeded
-            console.log(`[Audio] appliedMode=${effectiveAudioMode} streamGeneration=${captureResult.streamGeneration ?? '(not set)'}`);
-            setAppliedAudioMode(effectiveAudioMode);
-
-            setAudioIsSynthetic(false);
-            // Real audio (system/application/monitor) does not require waitUntilRendering
-            // because the source may be legitimately silent
-            await provisionalController.waitUntilPrimed();
-
-            const outputTrack = provisionalController.getTrack();
-            if (!outputTrack) {
-              throw new Error('system-audio-output-track-missing');
-            }
-            if (outputTrack.kind !== 'audio') {
-              throw new Error('system-audio-output-track-wrong-kind');
-            }
-            if (outputTrack.readyState !== 'live') {
-              throw new Error(`system-audio-output-track-${outputTrack.readyState}`);
-            }
-            console.log('[Audio] transferring controller', {
-              controllerId: provisionalController.getInstanceId?.() ?? 'unknown',
-              trackId: outputTrack.id,
-              trackKind: outputTrack.kind,
-              trackReadyState: outputTrack.readyState,
-            });
-            mgr.setAudioController(provisionalController, effectiveAudioMode);
-            provisionalController = null;
-            console.log(`[Publisher] audioTracks=${mgr.getAudioTrack() ? 1 : 0}`);
-            console.log('[Audio] provisionalControllerReleased=true');
-            audioConfigured = true;
-          }
-
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          setAudioError(errorMsg);
-          console.warn("[Audio] Setup failed, continuing video-only:", err);
-
-          if (provisionalController) {
-            try { await provisionalController.close(); } catch { /* ignore */ }
-            provisionalController = null;
-            mgr.clearAudioController();
-            try { await api?.stopAudio(); } catch { /* ignore */ }
-          }
-          setAppliedAudioMode('none');
-          setAudioEnabled(false);
-        }
-      }
-
-      // ── Video capture + publishing (regardless of audio success) ────
-      const stream = await mgr.startCapture({
-        sourceId, password, streamId,
-        videoBitrate: captureBitrate,
-        videoWidth: captureWidth,
-        videoHeight: captureHeight,
-        videoFps: captureFps,
-      });
-      await mgr.startPublishing(stream, {
-        sourceId, password, streamId,
-        videoBitrate: captureBitrate,
-        videoWidth: captureWidth,
-        videoHeight: captureHeight,
-        videoFps: captureFps,
-      });
-
-      // Notify remote peer
-      const { getControlConnection } = await import("../services/control-connection.js");
-      getControlConnection().sendShareStarted();
-
-      // Persist audio mode preference (user's intent, not applied mode)
-      try {
-        const settings = await api?.getSettings();
-        if (settings && settings.lastAudioMode !== audioMode) {
-          await api?.updateSettings({ lastAudioMode: audioMode });
-        }
-      } catch { /* ignore */ }
-    } catch (err) {
-      console.error("Share failed:", err);
-      setLocalShareState("error");
-      publisherManagerRef.current?.stopCapture().catch(() => {});
-      publisherManagerRef.current = null;
-      // Also stop audio if it was started
-      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-      api?.stopAudio().catch(() => {});
-    }
-  }, [
-    sourceId,
-    captureWidth,
-    captureHeight,
-    captureFps,
-    captureBitrate,
-    navigate,
-    setLocalMediaCredentials,
-    audioOptionsReady,
-    capAudioModes,
-    localShareState,
-    setAudioError,
-    setAppliedAudioMode,
-    setAudioIsSynthetic,
-  ]);
-
-  const handleShareScreenWithAudio = useCallback(
-    () => handleShareScreen(),
-    [handleShareScreen],
+  const availableGroupStreams = Object.entries(activeStreamsByGroup).filter(
+    ([, streams]) => streams.length > 0,
   );
 
-  const handleShareWindow = useCallback(async () => {
-    navigate("source-picker" as Page);
-  }, [navigate]);
+  const watchedEntries = Object.entries(watchedStreamsBySessionId);
 
-  const handleStopSharing = useCallback(async () => {
-    setLocalShareState("stopping");
-    const { getControlConnection } = await import("../services/control-connection.js");
-    getControlConnection().sendShareStopped();
-    await publisherManagerRef.current?.stopCapture();
-    publisherManagerRef.current = null;
-    clearLocalMediaCredentials();
+  const canStartStream = !!(
+    sourceId &&
+    selectedGroupId &&
+    localShareState === "idle" &&
+    audioOptionsReady
+  );
 
-    // Stop audio helper
-    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-    if (api) {
-      try {
-        await api.stopAudio();
-      } catch { /* ignore */ }
-    }
+  const isStreamActive = localShareState === "sharing";
 
-    setLocalShareState("idle");
-    setAudioError(null);
-    setAppliedAudioMode('none');
-    setAudioIsSynthetic(false);
-  }, [clearLocalMediaCredentials, setAudioError, setAppliedAudioMode, setAudioIsSynthetic]);
+  // ── Start Stream (Stage 4: via StreamSessionManager) ───────────
 
-  async function handleEnableAudio() {
-    if (!videoRef.current) return;
+  const handleStartStream = useCallback(async () => {
+    if (!sourceId || !selectedGroupId) return;
+    if (localShareState !== "idle") return;
+    setLocalShareState("starting");
     try {
-      await videoRef.current.play();
-      setShowEnableAudioButton(false);
-    } catch {
-      // Still blocked
-    }
-  }
+      const runtime = getRuntime();
+      if (!runtime) {
+        console.error("Phase3Runtime not initialized");
+        setLocalShareState("error");
+        return;
+      }
 
-  // ── Render ────────────────────────────────────────────────
+      const ssm = runtime.getStreamSessionManager();
+
+      // 1. Start stream via StreamSessionManager (handles capture, publish, register, heartbeat)
+      await ssm.startStream({
+        groupId: selectedGroupId,
+        source: {
+          id: sourceId,
+          name: sourceName || "Screen",
+          kind: sourceKind ?? "screen",
+          displayId: null,
+          fingerprint: null,
+        },
+      });
+
+      // 2. Store local session credentials from SSM
+      const vdoConfig = ssm.getCurrentVdoConfig();
+      if (vdoConfig) {
+        setLocalStreamSession({
+          sessionId: crypto.randomUUID(),
+          streamId: vdoConfig.streamId,
+          password: vdoConfig.password,
+        });
+      }
+
+      // 3. Audio setup (if audio mode is active)
+      // Audio controller is set via ssm.setAudioController() if available
+      // This is handled separately via IPC calls to the audio helper.
+      // For now, audio is optional and can be set after stream starts.
+
+      setLocalShareState("sharing");
+      setIsSharing(true);
+    } catch (err) {
+      console.error("Start stream failed:", err);
+      setLocalShareState("error");
+    }
+  }, [sourceId, sourceName, sourceKind, selectedGroupId, localShareState, captureWidth, captureHeight, captureFps, captureBitrate, setLocalShareState, setLocalStreamSession, setIsSharing]);
+
+  // ── Stop Stream (Stage 4: via StreamSessionManager) ────────────
+
+  const handleStopStream = useCallback(async () => {
+    setLocalShareState("stopping");
+    try {
+      const runtime = getRuntime();
+      if (runtime) {
+        await runtime.getStreamSessionManager().stopStream();
+      }
+
+      // Stop audio helper if active
+      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+      if (api) {
+        try { await api.stopAudio(); } catch { /* ignore */ }
+      }
+
+      setLocalStreamSession(null);
+      setLocalShareState("idle");
+      setIsSharing(false);
+      setIsDegraded(false);
+    } catch (err) {
+      console.error("Stop stream failed:", err);
+      setLocalShareState("idle");
+      setIsSharing(false);
+    }
+  }, [setLocalShareState, setLocalStreamSession, setIsSharing, setIsDegraded]);
+
+  // ── Watch Stream (Stage 5: real join flow) ─────────────────────
+
+  const handleWatchStream = useCallback(async (
+    groupId: string,
+    hostDeviceId: string,
+    logicalStreamId: string,
+    mediaSessionId: string,
+    hostName: string,
+  ) => {
+    if (isViewing) return;
+    setIsViewing(true);
+    setViewStatus("requesting join...");
+
+    try {
+      const runtime = getRuntime();
+      if (!runtime) {
+        setViewStatus("error: runtime not initialized");
+        setIsViewing(false);
+        return;
+      }
+
+      const connManager = runtime.getConnectionManager();
+      const conn = connManager.getConnection(groupId);
+      if (!conn) {
+        setViewStatus("error: not connected to group");
+        setIsViewing(false);
+        return;
+      }
+
+      // 1. Send stream.join.request via group control with requestId
+      const peerUuid = conn.peerForDevice(hostDeviceId);
+      if (!peerUuid) {
+        setViewStatus("error: host not connected");
+        setIsViewing(false);
+        return;
+      }
+
+      const requestId = crypto.randomUUID();
+      await conn.sendToPeer(peerUuid, {
+        type: "stream.join.request",
+        logicalStreamId,
+        viewerDeviceId: runtime.deviceId ?? "unknown",
+        viewerDisplayName: runtime.displayName ?? "Viewer",
+        requestId,
+      });
+
+      // 2. Wait for stream.join.response via the message router
+      setViewStatus("waiting for host response...");
+      const response = await runtime.waitForJoinResponse(requestId, 30_000);
+
+      if (!response.accepted) {
+        setViewStatus(`join rejected: ${response.reason ?? "unknown reason"}`);
+        setIsViewing(false);
+        return;
+      }
+
+      // 3. Response accepted — extract media credentials from response
+      const joinToken = response.mediaJoinMetadata;
+      const responseMediaSessionId = response.mediaSessionId ?? mediaSessionId;
+      if (!joinToken) {
+        setViewStatus("error: no join token in response");
+        setIsViewing(false);
+        return;
+      }
+
+      setViewStatus("connecting to media...");
+
+      // 4. Create ViewerClient and connect to media stream
+      // The viewer connects to the VDO stream using the host's VDO credentials
+      // returned in the join response (streamId for view(), password for createAndConnect()).
+      const viewerClient = new ViewerClient();
+
+      // Register event handler for receiving media tracks
+      (viewerClient as unknown as { on: (event: string, listener: (...args: unknown[]) => void) => void }).on("remoteAdded", () => {
+        // Media has been received — update UI state
+        setWatchedStreams((prev) => ({
+          ...prev,
+          [responseMediaSessionId]: {
+            hostDeviceId,
+            hostName,
+            startedAt: Date.now(),
+          },
+        }));
+        setViewStatus("watching");
+      });
+
+      // Register track event to attach received media to video element
+      (viewerClient as unknown as { on: (event: string, listener: (...args: unknown[]) => void) => void }).on("track", (...args: unknown[]) => {
+        const [track, stream] = args as [MediaStreamTrack, MediaStream];
+        if (track?.kind === "video" && videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      });
+
+      // Connect to VDO using the VDO password from the join response.
+      // Fall back to mediaSessionId only if password was not provided
+      // (backward compat with older hosts not yet sending credentials).
+      const vdoPassword = response.password ?? responseMediaSessionId;
+      await viewerClient.createAndConnect(vdoPassword);
+
+      // View the stream using the VDO stream ID from the join response.
+      // Fall back to logicalStreamId only if streamId was not provided.
+      const vdoStreamId = response.streamId ?? logicalStreamId;
+      await viewerClient.view(vdoStreamId, runtime.displayName ?? "Viewer");
+
+      // 5. Send media.bind via the media SDK data channel so the host
+      // receives it with the actual media peer UUID
+      const sdk = viewerClient.getSDK();
+      if (sdk && joinToken) {
+        // Find the publisher's peer UUID in the SDK connections
+        for (const [publisherUuid] of sdk.connections) {
+          try {
+            await viewerClient.sendMediaBind(publisherUuid, joinToken, responseMediaSessionId);
+          } catch { /* one will succeed */ }
+        }
+      }
+
+      // Store the viewer client for cleanup
+      viewerClientRef.current = viewerClient;
+
+      // If media already arrived before we finished setup, update state
+      if (sdk) {
+        setWatchedStreams((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => {
+          if (prev[responseMediaSessionId]) return prev; // already set by event handler
+          return {
+            ...prev,
+            [responseMediaSessionId]: {
+              hostDeviceId,
+              hostName,
+              startedAt: Date.now(),
+            },
+          };
+        });
+        setViewStatus("watching");
+      }
+    } catch (err) {
+      console.error("[Dashboard] Watch stream failed:", err);
+      setViewStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+      setIsViewing(false);
+      // Clean up viewer client if created
+      if (viewerClientRef.current) {
+        try {
+          viewerClientRef.current.stopViewing().catch(() => {});
+          viewerClientRef.current.disconnect().catch(() => {});
+        } catch { /* ignore */ }
+        viewerClientRef.current = null;
+      }
+    }
+  }, [isViewing, setIsViewing, setViewStatus, setWatchedStreams]);
+
+  // ── Stop Watching ──────────────────────────────────────────────
+
+  const handleStopWatching = useCallback(async (sessionId: string) => {
+    // Disconnect ViewerClient if active
+    if (viewerClientRef.current) {
+      try {
+        await viewerClientRef.current.stopViewing();
+        await viewerClientRef.current.disconnect();
+      } catch (err) {
+        console.warn("[Dashboard] ViewerClient disconnect error:", err);
+      }
+      viewerClientRef.current = null;
+    }
+
+    // Clean up video element
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+
+    // Clean up watched state
+    const updated = { ...watchedStreamsBySessionId };
+    delete updated[sessionId];
+    setWatchedStreams(updated);
+
+    setIsViewing(false);
+    setViewStatus("");
+  }, [watchedStreamsBySessionId, setWatchedStreams, setIsViewing, setViewStatus]);
+
+  // ── Format helpers ───────────────────────────────────────────────
+
+  const lifecycleLabel: Record<string, string> = {
+    idle: "Not streaming",
+    "selecting-source": "Selecting source...",
+    starting: "Starting...",
+    sharing: "Streaming",
+    stopping: "Stopping...",
+    error: "Error",
+  };
+
+  const lifecycleClass: Record<string, string> = {
+    idle: "idle",
+    "selecting-source": "degraded",
+    starting: "degraded",
+    sharing: "sharing",
+    stopping: "degraded",
+    error: "error",
+  };
+
+  // ── Render ───────────────────────────────────────────────────────
 
   return (
     <div className="dashboard">
       <h1>ScreenLink</h1>
 
-      {/* Connection status */}
+      {/* 1. Selected Source Card */}
       <div className="card">
-        <div className="status-bar">
-          <div className={`status-indicator ${pairingState === "PAIRED_ONLINE" ? "sharing" : pairingState === "error" ? "error" : "idle"}`} />
-          <span>{
-            pairingState === "PAIRED_ONLINE" ? (friendDisplayName || "Online") :
-            pairingState === "PAIRED_OFFLINE" ? (friendDisplayName || "Friend") + " (offline)" :
-            pairingState === "PAIR_CREATED_WAITING_FOR_IMPORT" ? "Waiting for friend to import..." :
-            pairingState === "PAIR_IMPORTED_CONNECTING" ? "Connecting..." :
-            pairingState === "PAIR_CONNECTED_UNCONFIRMED" ? "Connected, handshaking..." :
-            pairingState === "error" ? "Error" :
-            "Not paired"
-          }</span>
-        </div>
-        {(pairingState === "unpaired" || pairingState === "") && (
-          <p className="dim" style={{ marginTop: "0.5rem" }}>Go to <a className="link" onClick={() => navigate("settings" as Page)}>Settings</a> to pair with a friend.</p>
-        )}
-      </div>
-
-      {/* My Sharing */}
-      <div className="card">
-        <h3>My Sharing</h3>
-        <div className="status-bar">
-          <div className={`status-indicator ${localShareState === "sharing" ? "sharing" : localShareState === "error" ? "error" : "idle"}`} />
-          <span>{localShareState === "sharing" ? "Sharing" : localShareState === "starting" ? "Starting..." : localShareState === "stopping" ? "Stopping..." : localShareState === "error" ? "Error" : "Not sharing"}</span>
-        </div>
-        {sourceName && <p className="dim">Source: {sourceName}</p>}
-        <div className="actions" style={{ marginTop: "0.75rem" }}>
-          {localShareState !== "sharing" ? (
-            <>
-              <button onClick={handleShareScreen} disabled={!audioOptionsReady}>Share Screen</button>
-              <button onClick={handleShareWindow}>Share Window</button>
-                <div className="card" style={{ marginTop: "0.5rem", padding: "0.5rem" }}>
-                <h4>Audio</h4>
-                <label>
-                  <input type="radio" name="audioMode" value="none" checked={audioMode === 'none'}
-                    onChange={() => selectAudioMode('none')} /> No Audio
-                </label>
-                <label style={{ marginLeft: "1rem" }}>
-                  <input type="radio" name="audioMode" value="system" checked={audioMode === 'system'}
-                    disabled={capAudioModes?.['system'] === false}
-                    onChange={() => selectAudioMode('system')} /> System Audio
-                </label>
-                <label style={{ marginLeft: "1rem" }}>
-                  <input type="radio" name="audioMode" value="application" checked={audioMode === 'application'}
-                    disabled={capAudioModes?.['application'] === false}
-                    onChange={() => selectAudioMode('application')} /> App Audio (window only)
-                </label>
-                <label style={{ marginLeft: "1rem" }}>
-                  <input type="radio" name="audioMode" value="monitor" checked={audioMode === 'monitor'}
-                    disabled={capAudioModes?.['monitor'] === false}
-                    onChange={() => selectAudioMode('monitor')} /> Filtered Monitor Audio
-                </label>
-                <label style={{ marginLeft: "1rem" }}>
-                  <input type="radio" name="audioMode" value="test-tone" checked={audioMode === 'test-tone'}
-                    disabled={capAudioModes?.['test-tone'] === false}
-                    onChange={() => selectAudioMode('test-tone')} /> Test Tone
-                </label>
-                {audioMode === 'system' && (
-                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Everything playing through the current default output device. This includes Discord and ScreenLink audio.
-                  </p>
-                )}
-                {!audioOptionsReady && (
-                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Loading audio options...
-                  </p>
-                )}
-                {audioInitializationError && (
-                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem", color: "var(--warning, #f59e0b)" }}>
-                    {audioInitializationError}
-                  </p>
-                )}
-                {audioMode === 'application' && (
-                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    {capAudioModes?.['application'] === false
-                      ? 'Application Audio is not available on this system.'
-                      : 'Only the selected application and its process tree.'}
-                  </p>
-                )}
-                {audioMode === 'monitor' && (
-                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    {capAudioModes?.['monitor'] === false
-                      ? 'Filtered Monitor is not available on this system.'
-                      : 'All capturable application audio except Discord and ScreenLink. New apps are detected while sharing. Windows System Sounds and protected audio may not be included.'}
-                  </p>
-                )}
-                {audioMode === 'test-tone' && (
-                  <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-                    Diagnostic 440 Hz sine wave. Does not capture real system audio.
-                  </p>
-                )}
-              </div>
-            </>
-          ) : (
-            <>
-              <button className="danger" onClick={handleStopSharing}>Stop Sharing</button>
-              {audioIsSynthetic && (
-                <p className="dim" style={{ fontSize: "0.7rem", fontStyle: "italic", marginTop: "0.25rem" }}>
-                  Audio: test tone (real capture unavailable on this system)
-                </p>
-              )}
-              {audioError && (
-                <p className="dim" style={{ fontSize: "0.7rem", color: "var(--warning, #f59e0b)", marginTop: "0.25rem" }}>
-                  Audio: {audioError}
-                </p>
-              )}
-            </>
-          )}
-        </div>
-        {localShareState === "sharing" && localMediaStats && (
-          <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.25rem", fontSize: "0.75rem", marginTop: "0.75rem" }}>
-            <span>Bitrate: {(localMediaStats.outboundBitrateKbps || 0).toFixed(0)} kbps</span>
-            <span>Resolution: {localMediaStats.outboundWidth}×{localMediaStats.outboundHeight}</span>
-            <span>FPS: {localMediaStats.outboundFps}</span>
-            <span>Total transferred: {formatBitsTransferred(localMediaStats.outboundBytes || 0)}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Remote viewing */}
-      <div className="card">
-        <h3>Remote Stream {friendDisplayName ? `- ${friendDisplayName}` : ""}</h3>
-        <div className="status-bar">
-          <div className={`status-indicator ${remoteShareState === "viewing" ? "sharing" : remoteShareState === "remote-share-available" ? "degraded" : remoteShareState === "error" ? "error" : "idle"}`} />
-          <span>{
-            remoteShareState === "remote-offline" ? "Friend offline" :
-            remoteShareState === "remote-online-idle" ? "Online, idle" :
-            remoteShareState === "remote-share-available" ? "Share available" :
-            remoteShareState === "connecting" ? "Connecting..." :
-            remoteShareState === "viewing" ? "Viewing" :
-            remoteShareState === "reconnecting" ? "Reconnecting..." :
-            remoteShareState === "error" ? "Error" : "---"
-          }</span>
-        </div>
-        <div className="actions" style={{ marginTop: "0.75rem" }}>
-          {remoteShareState === "remote-share-available" && remoteShareState !== "viewing" && (
-            <button onClick={startViewing}>Watch</button>
-          )}
-          {remoteShareState === "viewing" && (
-            <button className="danger" onClick={stopViewing}>Stop Watching</button>
-          )}
-        </div>
-
-        {showIncomingSharePrompt && remoteShareState === "remote-share-available" && (
-          <div className="card" style={{ marginTop: "0.75rem", border: "1px solid var(--accent, #3b82f6)" }}>
-            <h4>{friendDisplayName || "Your friend"} is streaming</h4>
-            <p className="dim" style={{ marginTop: "0.25rem" }}>Choose whether to start watching.</p>
-            <div className="actions" style={{ marginTop: "0.75rem", display: "flex", gap: "0.5rem" }}>
-              <button onClick={() => { setShowIncomingSharePrompt(false); startViewing(); }}>Watch</button>
-              <button className="ghost" onClick={() => setShowIncomingSharePrompt(false)}>Not now</button>
+        <h3>Selected Source</h3>
+        {sourceName ? (
+          <>
+            <p className="detail-row">
+              <span className="label">Name:</span> {sourceName}
+            </p>
+            <p className="detail-row">
+              <span className="label">Kind:</span> {sourceKind === "screen" ? "Screen" : "Window"}
+            </p>
+            <p className="detail-row">
+              <span className="label">Audio:</span> {audioOptionsReady ? audioMode : "Loading..."}
+            </p>
+            {audioInitError && (
+              <p className="dim" style={{ fontSize: "0.75rem", color: "var(--warning, #f59e0b)" }}>
+                {audioInitError}
+              </p>
+            )}
+            <div className="actions" style={{ marginTop: "0.5rem" }}>
+              <button onClick={() => navigate("source-picker" as Page)}>Change Source</button>
             </div>
-          </div>
+          </>
+        ) : (
+          <>
+            <p className="dim">No source selected.</p>
+            <div className="actions" style={{ marginTop: "0.5rem" }}>
+              <button onClick={() => navigate("source-picker" as Page)}>Select Source</button>
+            </div>
+          </>
         )}
+      </div>
 
-        {/* Video player */}
-        <div ref={fullscreenContainerRef} className="card" style={{
-          padding: 0, overflow: "hidden", position: isFullscreen ? "fixed" : "relative",
-          top: isFullscreen ? 0 : undefined,
-          left: isFullscreen ? 0 : undefined,
-          width: isFullscreen ? "100vw" : undefined,
-          height: isFullscreen ? "100vh" : undefined,
-          zIndex: isFullscreen ? 9999 : undefined,
-          background: "#000",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          marginTop: isFullscreen ? 0 : "0.75rem",
-          borderRadius: isFullscreen ? 0 : undefined,
-          border: isFullscreen ? "none" : undefined,
-        }}>
-          <video ref={videoRef} autoPlay playsInline
-            muted={remoteMuted}
-            onDoubleClick={toggleFullscreen}
-            style={{ width: "100%", height: "100%", display: remoteShareState === "viewing" ? "block" : "none", background: "#000", objectFit: "contain", cursor: "pointer" }} />
-          {remoteShareState === "viewing" && (
-            <button className="ghost" onClick={toggleFullscreen}
-              style={{
-                position: "absolute", top: "0.5rem", right: "0.5rem",
-                background: "rgba(0,0,0,0.6)", color: "#fff",
-                fontSize: "0.75rem", padding: "0.25rem 0.5rem",
-                borderRadius: "4px", border: "none", cursor: "pointer",
-                zIndex: 10,
-              }}>
-              {isFullscreen ? "✕ Exit Fullscreen" : "⛶ Fullscreen"}
+      {/* 2. Group Selector */}
+      <div className="card">
+        <h3>Stream Target Group</h3>
+        {groupList.length > 0 ? (
+          <select
+            value={selectedGroupId ?? ""}
+            onChange={(e) => setSelectedGroupId(e.target.value || null)}
+            style={{ width: "100%", marginTop: "0.25rem" }}
+          >
+            <option value="">-- Select a group --</option>
+            {groupList.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <p className="dim">
+            No groups available.{" "}
+            <a className="link" onClick={() => navigate("groups" as Page)}>
+              Create or join a group
+            </a>{" "}
+            to start streaming.
+          </p>
+        )}
+      </div>
+
+      {/* 3. Start/Stop Stream */}
+      <div className="card">
+        <h3>Stream Control</h3>
+        <div className="status-bar">
+          <div className={`status-indicator ${lifecycleClass[localShareState] || "idle"}`} />
+          <span>{lifecycleLabel[localShareState] || localShareState}</span>
+        </div>
+        <div className="actions" style={{ marginTop: "0.75rem" }}>
+          {!isStreamActive && localShareState !== "stopping" ? (
+            <button onClick={handleStartStream} disabled={!canStartStream}>
+              {localShareState === "starting" ? "Starting..." : "Start Stream"}
+            </button>
+          ) : (
+            <button className="danger" onClick={handleStopStream} disabled={localShareState === "stopping"}>
+              {localShareState === "stopping" ? "Stopping..." : "Stop Stream"}
             </button>
           )}
-          {/* Audio controls (mute/volume) */}
-          {remoteShareState === "viewing" && (
-            <div className="audio-controls" style={{ position: "absolute", bottom: "0.5rem", left: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center", background: "rgba(0,0,0,0.6)", padding: "0.25rem 0.5rem", borderRadius: "4px", zIndex: 10 }}>
-              <button onClick={() => setRemoteMuted(!remoteMuted)} className="ghost" style={{ color: "#fff", fontSize: "0.75rem", padding: "0.25rem 0.5rem", border: "none", cursor: "pointer" }}>
-                {remoteMuted ? "🔇 Unmute" : "🔊 Mute"}
-              </button>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={remoteVolume}
-                onChange={(e) => setRemoteVolume(parseFloat(e.target.value))}
-                style={{ width: "80px" }}
-                aria-label="Volume"
-              />
-              <span style={{ color: "#fff", fontSize: "0.7rem" }}>
-                {Math.round(remoteVolume * 100)}%
+        </div>
+        {!canStartStream && localShareState === "idle" && (
+          <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+            {!sourceId
+              ? "Select a source first."
+              : !selectedGroupId
+                ? "Select a target group."
+                : !audioOptionsReady
+                  ? "Audio options loading..."
+                  : ""}
+          </p>
+        )}
+      </div>
+
+      {/* 4. Local Stream Card */}
+      {isStreamActive && (
+        <div className="card">
+          <h3>Local Stream</h3>
+          <div className="detail-row">
+            <span className="label">Group:</span> {selectedGroupName ?? selectedGroupId ?? "N/A"}
+          </div>
+          <div className="detail-row">
+            <span className="label">Source:</span> {sourceName || "Unknown"}
+          </div>
+          <div className="detail-row">
+            <span className="label">State:</span>{" "}
+            <span className={`status-indicator ${isDegraded ? "degraded" : "sharing"}`} />{" "}
+            {isDegraded ? "Degraded" : "Active"}
+          </div>
+          {localStreamSession && (
+            <div className="detail-row">
+              <span className="label">Session ID:</span>{" "}
+              <code style={{ fontSize: "0.7rem" }}>{localStreamSession.sessionId.slice(0, 8)}...</code>
+            </div>
+          )}
+          {viewerCount > 0 && (
+            <div className="detail-row">
+              <span className="label">Viewers:</span> {viewerCount}
+            </div>
+          )}
+          <div className="actions" style={{ marginTop: "0.75rem" }}>
+            <button className="danger" onClick={handleStopStream}>Stop Stream</button>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Available Group Streams (Stage 5: Watch button) */}
+      {availableGroupStreams.length > 0 && (
+        <div className="card">
+          <h3>Available Group Streams</h3>
+          {availableGroupStreams.map(([groupId, streams]) => {
+            const groupName = groupsById[groupId]?.name ?? groupId;
+            return (
+              <div key={groupId} style={{ marginBottom: "0.75rem" }}>
+                <h4 style={{ fontSize: "0.9rem", marginBottom: "0.25rem" }}>{groupName}</h4>
+                {streams.map((s) => (
+                  <div
+                    key={s.logicalStreamId}
+                    className="card"
+                    style={{ padding: "0.5rem", marginBottom: "0.25rem" }}
+                  >
+                    <div className="detail-row">
+                      <span className="label">Host:</span> {s.hostDisplayName || s.hostDeviceId}
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Source:</span> {s.sourceName || s.sourceKind}
+                    </div>
+                    <div className="detail-row">
+                      <span className="label">Kind:</span> {s.sourceKind}
+                    </div>
+                    {watchedStreamsBySessionId[s.mediaSessionId] ? (
+                      <div className="actions" style={{ marginTop: "0.25rem" }}>
+                        <button className="danger" onClick={() => handleStopWatching(s.mediaSessionId)}>
+                          Stop Watching
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="actions" style={{ marginTop: "0.25rem" }}>
+                        <button
+                          onClick={() => handleWatchStream(groupId, s.hostDeviceId, s.logicalStreamId, s.mediaSessionId, s.hostDisplayName || s.hostDeviceId)}
+                          disabled={isViewing}
+                        >
+                          {isViewing ? "Joining..." : "Watch"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 6. Watched Streams */}
+      {watchedEntries.length > 0 && (
+        <div className="card">
+          <h3>Watched Streams</h3>
+          {watchedEntries.map(([sessionId, w]) => (
+            <div key={sessionId} className="card" style={{ padding: "0.5rem", marginBottom: "0.25rem" }}>
+              <div className="detail-row">
+                <span className="label">Host:</span> {w.hostName || w.hostDeviceId}
+              </div>
+              <div className="detail-row">
+                <span className="label">Started:</span> {new Date(w.startedAt).toLocaleTimeString()}
+              </div>
+              {/* Media rendering: video element for the watched stream */}
+              <div style={{ marginTop: "0.5rem", marginBottom: "0.5rem" }}>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  style={{
+                    width: "100%",
+                    maxHeight: "300px",
+                    borderRadius: "8px",
+                    backgroundColor: "#000",
+                  }}
+                />
+              </div>
+              <div className="actions" style={{ marginTop: "0.25rem" }}>
+                <button className="danger" onClick={() => handleStopWatching(sessionId)}>
+                  Stop Watching
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 7. Connected Viewers */}
+      {viewerCount > 0 && (
+        <div className="card">
+          <h3>Connected Viewers ({viewerCount})</h3>
+          {viewers.map((v) => (
+            <div key={v.peerUuid} className="detail-row" style={{ marginBottom: "0.25rem" }}>
+              <span>{v.displayName || v.viewerDeviceId}</span>
+              <span className="dim" style={{ marginLeft: "0.5rem", fontSize: "0.75rem" }}>
+                {new Date(v.connectedAt).toLocaleTimeString()}
               </span>
             </div>
-          )}
-          {/* Enable Audio button shown when autoplay is blocked */}
-          {showEnableAudioButton && remoteShareState === "viewing" && (
-            <button onClick={handleEnableAudio} className="ghost"
-              style={{ position: "absolute", bottom: "0.5rem", right: "0.5rem", background: "rgba(0,0,0,0.6)", color: "#fff", fontSize: "0.75rem", padding: "0.25rem 0.5rem", borderRadius: "4px", border: "none", cursor: "pointer", zIndex: 10 }}>
-              🔈 Enable Audio
-            </button>
-          )}
-          {remoteShareState !== "viewing" && (
-            <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-dim)" }}>
-              <p>Remote stream will appear here when your friend shares.</p>
-            </div>
-          )}
+          ))}
         </div>
+      )}
 
-        {/* Stream Stats */}
-        {remoteShareState === "viewing" && mediaStats && (
-          <div className="card" style={{ marginTop: "0.75rem" }}>
-            <h4>Stream Stats</h4>
-            <div className="stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.25rem", fontSize: "0.75rem" }}>
-              <span>Bitrate: {(mediaStats.inboundBitrateKbps || 0).toFixed(0)} kbps</span>
-              <span>Resolution: {mediaStats.inboundWidth}×{mediaStats.inboundHeight}</span>
-              <span>FPS: {mediaStats.inboundFps}</span>
-              <span>RTT: {(mediaStats.roundTripTime * 1000 || 0).toFixed(0)} ms</span>
-              <span>Packet loss: {mediaStats.packetsLost}</span>
-              <span>Jitter: {(mediaStats.jitter || 0).toFixed(2)} ms</span>
-              <span>Dropped frames: {mediaStats.framesDropped}</span>
-              <span>Total transferred: {formatBitsTransferred(mediaStats.inboundBytes || 0)}</span>
-              <span>Path: {mediaStats.isRelay ? `TURN Relay (${mediaStats.relayProtocol})` : "Direct P2P/STUN"}</span>
-              <span>Codec: {mediaStats.codecMimeType.replace("video/", "")}</span>
-              {/* Audio stats */}
-              {(mediaStats.audioInboundBitrateKbps || 0) > 0 && (
-                <>
-                  <span>Audio Bitrate: {(mediaStats.audioInboundBitrateKbps || 0).toFixed(0)} kbps</span>
-                  <span>Audio Codec: {(mediaStats.audioCodec || "N/A").replace("audio/", "")}</span>
-                  <span>Audio Jitter: {((mediaStats.audioJitter || 0) * 1000).toFixed(0)} ms</span>
-                  <span>Audio Loss: {mediaStats.audioPacketsLost || 0}</span>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+      {/* View Status Indicator */}
+      {isViewing && viewStatus && (
+        <div className="card">
+          <p className="dim">{viewStatus}</p>
+        </div>
+      )}
+
+      {/* Diagnostics link */}
+      <div className="card" style={{ textAlign: "center" }}>
+        <a className="link" onClick={() => navigate("diagnostics" as Page)}>
+          Diagnostics
+        </a>
       </div>
     </div>
   );

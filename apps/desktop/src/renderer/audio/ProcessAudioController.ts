@@ -225,9 +225,15 @@ export class ProcessAudioController {
     }
 
     const pcmFloat32 = new Float32Array(packet.pcmData);
-    this.workletNode.port.postMessage(
+    // MessagePort's structured-clone overload needs an ArrayBuffer (or
+    // ArrayBufferLike); Float32Array.buffer is shared with the typed
+    // array, but the postMessage signature infers it as ArrayBuffer.
+    const payloadBuffer = packet.pcmData.byteLength > 0
+      ? [packet.pcmData.buffer.slice(0)] as ArrayBuffer[]
+      : undefined;
+    (this.workletNode.port as unknown as { postMessage: (msg: unknown, transfer?: unknown[]) => void }).postMessage(
       { type: 'pcm:data', data: pcmFloat32, frameCount: packet.frameCount },
-      packet.pcmData.byteLength > 0 ? [packet.pcmData] : undefined,
+      payloadBuffer,
     );
   }
 
@@ -270,7 +276,7 @@ export class ProcessAudioController {
     return this.outputShapeOk;
   }
 
-  sampleAnalyser(label?: string): { peak: number; rms: number } | null {
+  sampleAnalyser(_label?: string): { peak: number; rms: number } | null {
     if (!this.analyserNode) return null;
     const samples = new Float32Array(this.analyserNode.fftSize);
     this.analyserNode.getFloatTimeDomainData(samples);
@@ -345,7 +351,7 @@ export class ProcessAudioController {
     if (this.audioContext.state === 'suspended') {
       try {
         await this.audioContext.resume();
-        const ok = this.audioContext.state === 'running';
+        const ok = (this.audioContext.state as string) === 'running';
         if (ok) this.sampleAnalyser('post-resume');
         return ok;
       } catch {

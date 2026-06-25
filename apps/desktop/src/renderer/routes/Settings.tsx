@@ -1,7 +1,7 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
-import type { PersistedSettings, UpdateStatusDTO } from "../../preload/api-types.js";
-import { restartControlConnection } from "../services/control-connection.js";
+import type { PersistedSettings } from "../../preload/api-types.js";
+import { getRuntime } from "../services/phase3-runtime.js";
 
 async function getApi() {
   return (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -308,12 +308,14 @@ function UpdateSection() {
 // ─── Main Settings component ──────────────────────────────────────────────
 
 /**
- * Render the Settings page with pairing lifecycle-driven UI.
+ * Render the Settings page (Phase 3).
  *
- * Key rules:
- * - Never check "does pairingConfig exist" as a proxy for "is paired".
- * - Instead, read `pairingConfig.pairingLifecycle` to determine what to show.
- * - "Paired with: Unknown" is never displayed.
+ * Stage 12: Removed all pairing/friend UI. Now includes:
+ * - Profile (display name, propagates to all groups)
+ * - Behavior (launch at login, auto-resume)
+ * - Host Quality Limits (max bitrate, resolution, fps, viewer requests toggle)
+ * - Local Transport (policy configuration)
+ * - Developer Mode
  */
 export function Settings() {
   const { navigate } = useStore();
@@ -327,215 +329,133 @@ export function Settings() {
   const [displayName, setDisplayName] = useState("");
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [autoResume, setAutoResume] = useState(false);
+  const [developerMode, setDeveloperMode] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
 
-  // Pairing state
-  const [pairingConfig, setPairingConfig] = useState<Record<string, unknown> | null>(null);
-  const [pairingStatus, setPairingStatus] = useState<string | null>(null);
-  const [createdPairingCode, setCreatedPairingCode] = useState<string | null>(null);
-  const [importLinkInput, setImportLinkInput] = useState("");
+  // Host quality limits
+  const [hostMaxBitrate, setHostMaxBitrate] = useState(5000);
+  const [hostMaxWidth, setHostMaxWidth] = useState(1920);
+  const [hostMaxHeight, setHostMaxHeight] = useState(1080);
+  const [hostMaxFps, setHostMaxFps] = useState(60);
+  const [allowViewerRequests, setAllowViewerRequests] = useState(true);
 
-  // ── Derived lifecycle helpers ──────────────────────────────────────
+  // Local transport policy (JSON blob)
+  const [localTransportJson, setLocalTransportJson] = useState("{}");
 
-  /** Get the pairing lifecycle, defaulting to "UNPAIRED" if no config. */
-  function getLifecycle(): string {
-    if (!pairingConfig) return "UNPAIRED";
-    return (pairingConfig as Record<string, unknown>).pairingLifecycle as string || "UNPAIRED";
-  }
+  // Dirty marker — must exist before the clamp handlers reference it.
+  const markDirty = useCallback(() => setDirty(true), []);
 
-  function isPairedLifecycle(): boolean {
-    const lc = getLifecycle();
-    return lc === "PAIRED_ONLINE" || lc === "PAIRED_OFFLINE";
-  }
+  // ── Clamp helpers — ensure invalid input (NaN, negative, out-of-range)
+  //    does not silently become 0.
+  const clampInt = useCallback((raw: string, min: number, max: number, fallback: number): number => {
+    const parsed = parseInt(raw, 10);
+    if (Number.isNaN(parsed) || !Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
+  }, []);
 
-  function getPairedName(): string {
-    if (!pairingConfig) return "";
-    const name = (pairingConfig as Record<string, unknown>).remoteDisplayName as string | undefined;
-    return name || "";
-  }
+  const handleMaxBitrateChange = useCallback((raw: string) => {
+    setHostMaxBitrate(clampInt(raw, 100, 20000, 5000));
+    markDirty();
+  }, [clampInt, markDirty]);
 
-  function getLocalName(): string {
-    if (!pairingConfig) return "";
-    return (pairingConfig as Record<string, unknown>).localDisplayName as string || "";
-  }
+  const handleMaxWidthChange = useCallback((raw: string) => {
+    setHostMaxWidth(clampInt(raw, 320, 3840, 1920));
+    markDirty();
+  }, [clampInt, markDirty]);
 
-  /** True if the creator still has a pending link (not yet confirmed by handshake). */
-  function hasPendingLink(): boolean {
-    if (!pairingConfig) return false;
-    return !!(pairingConfig as Record<string, unknown>).pendingPairingLink;
-  }
+  const handleMaxHeightChange = useCallback((raw: string) => {
+    setHostMaxHeight(clampInt(raw, 180, 2160, 1080));
+    markDirty();
+  }, [clampInt, markDirty]);
 
-  const reloadPairingState = useCallback(async () => {
-    const api = await getApi();
-    const config = await api?.getPairingConfig();
+  const handleMaxFpsChange = useCallback((raw: string) => {
+    setHostMaxFps(clampInt(raw, 1, 60, 60));
+    markDirty();
+  }, [clampInt, markDirty]);
 
-    if (!config) {
-      setPairingConfig(null);
-      setCreatedPairingCode(null);
-      return;
-    }
-
-    setPairingConfig(config as Record<string, unknown>);
-    const lifecycle = (config as Record<string, unknown>).pairingLifecycle as string;
-    const hasPending = !!(config as Record<string, unknown>).pendingPairingLink;
-    if ((lifecycle === "PAIR_CREATED_WAITING_FOR_IMPORT" || lifecycle === "PAIR_CONNECTED_UNCONFIRMED") && hasPending) {
-      const link = await api?.getPairingLink();
-      setCreatedPairingCode(link ?? null);
-    } else {
-      setCreatedPairingCode(null);
+  const reloadSettings = useCallback(async () => {
+    try {
+      const api = await getApi();
+      const s = await api?.getSettings();
+      if (s) {
+        setSettings(s);
+        setDisplayName(s.hostDisplayName);
+        setLaunchAtLogin(s.launchAtLogin);
+        setAutoResume(s.autoResumeLastMonitor);
+        setDeveloperMode(s.developerMode);
+        setNotificationsEnabled(s.notificationsEnabled !== false);
+        setHostMaxBitrate(s.hostQualityLimits.maxVideoBitrateKbps);
+        setHostMaxWidth(s.hostQualityLimits.maxWidth);
+        setHostMaxHeight(s.hostQualityLimits.maxHeight);
+        setHostMaxFps(s.hostQualityLimits.maxFps);
+        setAllowViewerRequests(s.hostQualityLimits.allowViewerQualityRequests);
+        setLocalTransportJson(JSON.stringify(s.localTransportPolicy, null, 2));
+      }
+    } catch (err) {
+      console.error("Failed to load settings:", err);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
-  // Load settings
+  // Load settings on mount
   useEffect(() => {
-    (async () => {
-      try {
-        const api = await getApi();
-        const s = await api?.getSettings();
-        if (s) {
-          setSettings(s);
-          setDisplayName(s.hostDisplayName);
-          setLaunchAtLogin(s.launchAtLogin);
-          setAutoResume(s.autoResumeLastMonitor);
-        }
-        await reloadPairingState();
-      } catch (err) {
-        console.error("Failed to load settings:", err);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [reloadPairingState]);
-
-  useEffect(() => {
-    const onPairingUpdated = () => {
-      reloadPairingState().catch((err) => {
-        console.warn("Failed to refresh pairing state:", err);
-      });
-    };
-
-    window.addEventListener("screenlink:pairing-updated", onPairingUpdated);
-    return () => {
-      window.removeEventListener("screenlink:pairing-updated", onPairingUpdated);
-    };
-  }, [reloadPairingState]);
-
-  const markDirty = useCallback(() => setDirty(true), []);
+    void reloadSettings();
+  }, [reloadSettings]);
 
   const handleSave = useCallback(async () => {
     if (!settings) return;
     setSaving(true);
     try {
       const api = await getApi();
-      await api?.updateSettings({
+      const runtime = getRuntime();
+
+      // Build the partial update
+      const partial: Record<string, unknown> = {
         hostDisplayName: displayName,
         launchAtLogin,
         autoResumeLastMonitor: autoResume,
-      });
+        developerMode,
+        notificationsEnabled,
+        hostQualityLimits: {
+          maxVideoBitrateKbps: hostMaxBitrate,
+          maxWidth: hostMaxWidth,
+          maxHeight: hostMaxHeight,
+          maxFps: hostMaxFps,
+          allowViewerQualityRequests: allowViewerRequests,
+        },
+      };
+
+      // Parse local transport policy JSON
+      try {
+        partial.localTransportPolicy = JSON.parse(localTransportJson);
+      } catch {
+        partial.localTransportPolicy = {};
+      }
+
+      await api?.updateSettings(partial);
+
+      // Propagate display name through all groups if changed
+      if (displayName !== settings.hostDisplayName && runtime) {
+        await api?.updateDisplayName(displayName);
+        const syncService = runtime.getSyncService();
+        const store = useStore.getState();
+        for (const groupId of store.groupOrder) {
+          try {
+            await syncService.updateDisplayName(groupId, displayName);
+          } catch {
+            // Best effort per group
+          }
+        }
+      }
+
       setDirty(false);
     } catch (err) {
       console.error("Failed to save settings:", err);
     } finally {
       setSaving(false);
     }
-  }, [settings, displayName, launchAtLogin, autoResume]);
-
-  // ── Pairing handlers ──────────────────────────────────────────────
-
-  const handleCreatePairing = useCallback(async () => {
-    try {
-      const api = await getApi();
-      const name = displayName.trim() || "ScreenLink User";
-      const result = await api?.createPairing(name);
-      if (result) {
-        setCreatedPairingCode(result.pairingLink);
-        setPairingStatus("Pairing link created! Share it with your friend.");
-        // Reload full config from main process to get the lifecycle state
-        const config = await api?.getPairingConfig();
-        if (config) setPairingConfig(config as Record<string, unknown>);
-        // Restart control connection so creator enters waiting/connected lifecycle
-        await restartControlConnection();
-      }
-    } catch (err) {
-      setPairingStatus(`Failed: ${(err as Error).message}`);
-    }
-  }, [displayName]);
-
-  const handleImportPairing = useCallback(async () => {
-    const raw = importLinkInput.trim();
-    if (!raw) {
-      setPairingStatus("Paste a pairing link or code first.");
-      return;
-    }
-    try {
-      const api = await getApi();
-      // Support both screenlink://pair links and raw base64 codes
-      let code = raw;
-      if (raw.startsWith("screenlink://pair?")) {
-        const url = new URL(raw);
-        const data = url.searchParams.get("data");
-        if (!data) { setPairingStatus("Invalid pairing link: missing data parameter."); return; }
-        code = decodeURIComponent(data);
-      }
-      const result = await api?.importPairing(code.trim());
-      if (result) {
-        setPairingStatus(`Pairing imported. Connecting to ${result.remoteName}...`);
-        setCreatedPairingCode(null);
-        setImportLinkInput("");
-        const config = await api?.getPairingConfig();
-        if (config) setPairingConfig(config as Record<string, unknown>);
-        // Restart control connection so importer connects immediately
-        await restartControlConnection();
-      }
-    } catch (err) {
-      setPairingStatus(`Import failed: ${(err as Error).message}`);
-    }
-  }, [importLinkInput]);
-
-  const handleClearPairing = useCallback(async () => {
-    try {
-      const api = await getApi();
-      await api?.clearPairing();
-      setPairingConfig(null);
-      setPairingStatus("Pairing reset.");
-      setCreatedPairingCode(null);
-      // Restart control connection to tear down stale SDK connections and state
-      await restartControlConnection();
-    } catch (err) {
-      setPairingStatus(`Failed: ${(err as Error).message}`);
-    }
-  }, []);
-
-  const handleRegenerateLink = useCallback(async () => {
-    try {
-      const api = await getApi();
-      const name = displayName.trim() || "ScreenLink User";
-      const result = await api?.createPairing(name);
-      if (result) {
-        setCreatedPairingCode(result.pairingLink);
-        setPairingStatus("New pairing link generated!");
-        const config = await api?.getPairingConfig();
-        if (config) setPairingConfig(config as Record<string, unknown>);
-        // Restart control connection with the regenerated credentials
-        await restartControlConnection();
-      }
-    } catch (err) {
-      setPairingStatus(`Failed: ${(err as Error).message}`);
-    }
-  }, [displayName]);
-
-  const handleExportFile = useCallback(async () => {
-    try {
-      const api = await getApi();
-      const exportData = await api?.exportCurrentPairing();
-      if (exportData) {
-        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url; a.download = "screenlink-pairing.json"; a.click();
-        URL.revokeObjectURL(url);
-      }
-    } catch { /* ignore */ }
-  }, []);
+  }, [settings, displayName, launchAtLogin, autoResume, developerMode, notificationsEnabled, hostMaxBitrate, hostMaxWidth, hostMaxHeight, hostMaxFps, allowViewerRequests, localTransportJson]);
 
   if (loading) {
     return (
@@ -549,187 +469,11 @@ export function Settings() {
     );
   }
 
-  const lifecycle = getLifecycle();
-  const pairedName = getPairedName();
-
   return (
     <div className="settings">
       <div className="page-header">
         <h1>Settings</h1>
         <button className="ghost" onClick={() => navigate("dashboard" as Page)}>&larr; Back</button>
-      </div>
-
-      {/* ── Updates ─────────────────────────────────────────────────── */}
-      <UpdateSection />
-
-      {/* ── Pairing ──────────────────────────────────────────────── */}
-      <div className="card">
-        <h3>Pairing</h3>
-
-        {/* ── PAIR_CREATED_WAITING_FOR_IMPORT: Show the link ───── */}
-        {lifecycle === "PAIR_CREATED_WAITING_FOR_IMPORT" && (
-          <>
-            <p className="dim">Pairing link created. Share it with your friend to complete pairing.</p>
-
-            {createdPairingCode && (
-              <div style={{ marginTop: "0.75rem" }}>
-                <label><span>Pairing Link:</span></label>
-                <div className="link-row" style={{ display: "flex", gap: "0.5rem" }}>
-                  <input type="text" readOnly value={createdPairingCode}
-                    onClick={e => (e.target as HTMLInputElement).select()} style={{ flex: 1, fontSize: "0.75rem" }} />
-                  <button onClick={() => { navigator.clipboard.writeText(createdPairingCode); setPairingStatus("Copied!"); }}>
-                    Copy Pairing Link
-                  </button>
-                </div>
-                <div className="action-row" style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
-                  <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={handleExportFile}>
-                    Export Pairing File
-                  </button>
-                  <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={handleRegenerateLink}>
-                    Regenerate Pairing Link
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {!createdPairingCode && (
-              <p className="dim" style={{ marginTop: "0.5rem" }}>
-                Loading pairing link... <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={async () => {
-                  const api = await getApi();
-                  const link = await api?.getPairingLink();
-                  if (link) setCreatedPairingCode(link);
-                }}>Show Link</button>
-              </p>
-            )}
-
-            {pairingStatus && <p className="dim" style={{ marginTop: "0.5rem" }}>{pairingStatus}</p>}
-
-            <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border)" }} />
-
-            <p className="dim">Instead have a pairing link from your friend?</p>
-            <button className="ghost" style={{ marginTop: "0.25rem", fontSize: "0.8rem" }} onClick={() => {
-              // Clear the current waiting state and show the create/import UI
-              setPairingConfig(null);
-              setCreatedPairingCode(null);
-            }}>
-              Start Over
-            </button>
-          </>
-        )}
-
-        {/* ── PAIR_IMPORTED_CONNECTING: Connecting status ──────── */}
-        {lifecycle === "PAIR_IMPORTED_CONNECTING" && (
-          <>
-            <p className="dim">Pairing imported. Connecting to friend...</p>
-            <p className="dim">Your device: <strong>{getLocalName()}</strong></p>
-            <div className="actions" style={{ marginTop: "0.75rem" }}>
-              <button className="danger" onClick={handleClearPairing}>Reset Pairing</button>
-            </div>
-            {pairingStatus && <p className="dim" style={{ marginTop: "0.5rem" }}>{pairingStatus}</p>}
-          </>
-        )}
-
-        {/* ── PAIR_CONNECTED_UNCONFIRMED: Connected, waiting for hello ── */}
-        {lifecycle === "PAIR_CONNECTED_UNCONFIRMED" && (
-          <>
-            {hasPendingLink() ? (
-              <>
-                <p className="dim">Signal connected — waiting for your friend to import the pairing link.</p>
-                {/* Show the link so the creator can still copy/export/regenerate */}
-                {createdPairingCode && (
-                  <div style={{ marginTop: "0.75rem" }}>
-                    <label><span>Pairing Link:</span></label>
-                    <div className="link-row" style={{ display: "flex", gap: "0.5rem" }}>
-                      <input type="text" readOnly value={createdPairingCode}
-                        onClick={e => (e.target as HTMLInputElement).select()} style={{ flex: 1, fontSize: "0.75rem" }} />
-                      <button onClick={() => { navigator.clipboard.writeText(createdPairingCode); setPairingStatus("Copied!"); }}>
-                        Copy Pairing Link
-                      </button>
-                    </div>
-                    <div className="action-row" style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
-                      <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={handleExportFile}>
-                        Export Pairing File
-                      </button>
-                      <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={handleRegenerateLink}>
-                        Regenerate Pairing Link
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {!createdPairingCode && (
-                  <p className="dim" style={{ marginTop: "0.5rem" }}>
-                    Loading pairing link... <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={async () => {
-                      const api = await getApi();
-                      const link = await api?.getPairingLink();
-                      if (link) setCreatedPairingCode(link);
-                    }}>Show Link</button>
-                  </p>
-                )}
-              </>
-            ) : (
-              <>
-                <p className="dim">Connected — waiting for handshake...</p>
-                <p className="dim">Your device: <strong>{getLocalName()}</strong></p>
-              </>
-            )}
-            <div className="actions" style={{ marginTop: "0.75rem" }}>
-              <button className="danger" onClick={handleClearPairing}>Reset Pairing</button>
-            </div>
-            {pairingStatus && <p className="dim" style={{ marginTop: "0.5rem" }}>{pairingStatus}</p>}
-          </>
-        )}
-
-        {/* ── PAIRED_ONLINE / PAIRED_OFFLINE: Full pairing ────── */}
-        {isPairedLifecycle() && (
-          <>
-            <p className="dim">Your device: <strong>{getLocalName()}</strong></p>
-            {pairedName ? (
-              <p className="dim">Paired with: <strong>{pairedName}</strong></p>
-            ) : (
-              <p className="dim">Paired with a friend</p>
-            )}
-            <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
-              {lifecycle === "PAIRED_ONLINE" ? "Online" : "Offline"}
-            </p>
-            <div className="actions" style={{ marginTop: "0.75rem", display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-              <button className="danger" onClick={handleClearPairing}>Forget Pairing</button>
-              <button className="ghost" style={{ fontSize: "0.8rem" }} onClick={handleClearPairing}>Replace Pairing</button>
-            </div>
-            {pairingStatus && <p className="dim" style={{ marginTop: "0.5rem" }}>{pairingStatus}</p>}
-          </>
-        )}
-
-        {/* ── UNPAIRED (or null config): Create/import UI ─────── */}
-        {(lifecycle === "UNPAIRED" || !pairingConfig) && (
-          <>
-            <p className="dim">Pair two ScreenLink apps so they can find each other automatically.</p>
-            <p className="dim" style={{ marginTop: "0.5rem" }}>One person creates a pairing and shares the link.</p>
-
-            <div className="field" style={{ marginTop: "0.75rem" }}>
-              <span>Your display name</span>
-              <input type="text" value={displayName}
-                onChange={e => setDisplayName(e.target.value)}
-                placeholder="ScreenLink User" />
-            </div>
-
-            <div className="action-row" style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem", flexWrap: "wrap" }}>
-              <button onClick={handleCreatePairing}>Create Pairing</button>
-            </div>
-
-            {pairingStatus && <p className="dim" style={{ marginTop: "0.5rem" }}>{pairingStatus}</p>}
-
-            <hr style={{ margin: "1rem 0", border: "none", borderTop: "1px solid var(--border)" }} />
-
-            <p className="dim">Already have a pairing link from your friend? Paste it here:</p>
-            <div className="link-row" style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
-              <input type="text" value={importLinkInput}
-                onChange={e => setImportLinkInput(e.target.value)}
-                placeholder="screenlink://pair?v=1&data=..."
-                style={{ flex: 1, fontSize: "0.75rem" }} />
-              <button onClick={handleImportPairing}>Import</button>
-            </div>
-          </>
-        )}
       </div>
 
       {/* ── Profile ────────────────────────────────────────────────── */}
@@ -741,9 +485,12 @@ export function Settings() {
             onChange={(e) => { setDisplayName(e.target.value); markDirty(); }}
             placeholder="Your name shown to viewers" />
         </label>
+        <p className="dim" style={{ fontSize: "0.75rem", marginTop: "0.25rem" }}>
+          Saved to all groups you belong to.
+        </p>
       </div>
 
-      {/* ── Behavior ───────────────────────────────────────────────── */}
+      {/* ── Behaviour ───────────────────────────────────────────────── */}
       <div className="card">
         <h3>Behaviour</h3>
         <label className="field toggle-row">
@@ -756,6 +503,77 @@ export function Settings() {
           <input type="checkbox" checked={autoResume}
             onChange={() => { setAutoResume(!autoResume); markDirty(); }} />
         </label>
+        <label className="field toggle-row">
+          <span>Desktop notifications</span>
+          <input type="checkbox" checked={notificationsEnabled}
+            onChange={() => { setNotificationsEnabled(!notificationsEnabled); markDirty(); }} />
+        </label>
+      </div>
+
+      {/* ── Host Quality Limits ────────────────────────────────────── */}
+      <div className="card">
+        <h3>Host Quality Limits</h3>
+        <p className="dim" style={{ fontSize: "0.8rem", marginBottom: "0.75rem" }}>
+          Maximum quality values for your outgoing stream. Applied as a ceiling to preset and viewer requests.
+        </p>
+        <label className="field">
+          <span>Max Video Bitrate (kbps)</span>
+          <input type="number" value={hostMaxBitrate}
+            onChange={(e) => handleMaxBitrateChange(e.target.value)}
+            min={100} max={20000} />
+        </label>
+        <label className="field">
+          <span>Max Width (px)</span>
+          <input type="number" value={hostMaxWidth}
+            onChange={(e) => handleMaxWidthChange(e.target.value)}
+            min={320} max={3840} />
+        </label>
+        <label className="field">
+          <span>Max Height (px)</span>
+          <input type="number" value={hostMaxHeight}
+            onChange={(e) => handleMaxHeightChange(e.target.value)}
+            min={180} max={2160} />
+        </label>
+        <label className="field">
+          <span>Max FPS</span>
+          <input type="number" value={hostMaxFps}
+            onChange={(e) => handleMaxFpsChange(e.target.value)}
+            min={1} max={60} />
+        </label>
+        <label className="field toggle-row">
+          <span>Allow viewer quality requests</span>
+          <input type="checkbox" checked={allowViewerRequests}
+            onChange={() => { setAllowViewerRequests(!allowViewerRequests); markDirty(); }} />
+        </label>
+      </div>
+
+      {/* ── Developer Mode ─────────────────────────────────────────── */}
+      <div className="card">
+        <h3>Developer Mode</h3>
+        <label className="field toggle-row">
+          <span>Enable Developer Mode</span>
+          <input type="checkbox" checked={developerMode}
+            onChange={() => { setDeveloperMode(!developerMode); markDirty(); }} />
+        </label>
+        <p className="dim" style={{ fontSize: "0.75rem" }}>
+          {developerMode
+            ? "Developer Mode is active. Additional audio mode options and diagnostics are available."
+            : "Developer Mode exposes additional audio controls and detailed diagnostics."}
+        </p>
+      </div>
+
+      {/* ── Local Transport ────────────────────────────────────────── */}
+      <div className="card">
+        <h3>Local Transport</h3>
+        <p className="dim" style={{ fontSize: "0.8rem", marginBottom: "0.5rem" }}>
+          Local transport policy configuration (JSON). Used for advanced networking setup.
+        </p>
+        <textarea
+          value={localTransportJson}
+          onChange={(e) => { setLocalTransportJson(e.target.value); markDirty(); }}
+          rows={4}
+          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8rem" }}
+        />
       </div>
 
       {/* ── Save ───────────────────────────────────────────────────── */}

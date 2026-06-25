@@ -11,6 +11,7 @@
 #include <coml2api.h>
 #include <processthreadsapi.h>
 
+#include <cassert>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -208,6 +209,37 @@ public:
 };
 
 } // anonymous namespace
+
+// ── Process identity helpers ──
+
+void ApplyProcessIdentityResult(
+    AudioSessionInfo& info,
+    uint64_t creationTimeUtc100ns) noexcept
+{
+    if (creationTimeUtc100ns != 0) {
+        info.creationTimeUtc100ns = creationTimeUtc100ns;
+        info.identityValidated = true;
+        info.processAlive = true;
+        return;
+    }
+
+    info.creationTimeUtc100ns = 0;
+    info.identityValidated = false;
+    info.processAlive = false;
+}
+
+bool HasConsistentProcessIdentity(
+    const AudioSessionInfo& info) noexcept
+{
+    // Both identityValidated and processAlive must agree:
+    // Valid live: identityValidated=true, processAlive=true, creationTime!=0
+    // Clean invalid: identityValidated=false, processAlive=false, creationTime==0
+    // Any mixed state is inconsistent.
+    if (info.identityValidated) {
+        return info.processAlive && info.creationTimeUtc100ns != 0;
+    }
+    return !info.processAlive && info.creationTimeUtc100ns == 0;
+}
 
 // ========================================================================
 // AudioSessionMonitor
@@ -429,19 +461,19 @@ std::vector<AudioSessionInfo> AudioSessionMonitor::EnumerateSessions() {
             info.executablePath = GetProcessPathForPid(static_cast<DWORD>(info.pid));
             info.executableName = GetNameForPid(info.pid);
 
-            // Get creation time — a successful query proves the process
-            // was alive and queryable during enumeration.
-            const uint64_t creationTime = GetProcessCreationTime(info.pid);
-            if (creationTime != 0) {
-                info.creationTimeUtc100ns = creationTime;
-                info.identityValidated = true;
-                info.processAlive = true;
-            } else {
-                info.processAlive = false;
-                info.identityValidated = false;
-                if (info.errorReason.empty()) {
-                    info.errorReason = "Process identity could not be validated";
-                }
+            // Get creation time and apply identity/liveness result
+            const uint64_t ct = GetProcessCreationTime(info.pid);
+            ApplyProcessIdentityResult(info, ct);
+
+            // Invariant: after ApplyProcessIdentityResult, the state must be
+            // exclusively valid-live or clean-invalid (not mixed).
+            assert(
+                (info.processAlive && info.identityValidated && info.creationTimeUtc100ns != 0) ||
+                (!info.processAlive && !info.identityValidated && info.creationTimeUtc100ns == 0));
+
+            // Set error reason when creation-time lookup fails for a nonzero PID
+            if (ct == 0 && info.pid != 0 && info.errorReason.empty()) {
+                info.errorReason = "Process creation time could not be queried";
             }
         }
 

@@ -11,6 +11,12 @@
 
 namespace screenlink::audio {
 
+FilteredSourcePlanner::FilteredSourcePlanner(
+    ResolveProcessTreeFn resolver)
+    : resolveProcessTree_(std::move(resolver))
+{
+}
+
 namespace {
 
 /// Case-insensitive string lowercase conversion.
@@ -45,20 +51,49 @@ bool FilteredSourcePlanner::IsScreenLinkSession(
     const AudioSessionInfo& session,
     const FilteredMonitorOptions& options) const
 {
-    // Check via ExclusionPolicy name/path matching
+    const auto& identity = options.screenLinkIdentity;
+
+    // 1. Current-process identity check (PID + creation time)
+    if (identity.HasCurrentProcessIdentity()) {
+        // Check by exact PID + creation time match
+        if (identity.IsCurrentRoot(session.pid, session.creationTimeUtc100ns)) {
+            return true;
+        }
+        if (session.rootPid != 0 &&
+            identity.IsCurrentRoot(session.rootPid, session.rootCreationTimeUtc100ns)) {
+            return true;
+        }
+    }
+
+    // 2. Packaged or development sibling identity check
+    // Only applies when current-process identity is absent or the session
+    // doesn't match by PID. Uses application identity paths (packaged path,
+    // installation root, dev app root, dev entrypoint).
+    if (!session.executablePath.empty() &&
+        identity.IsScreenLinkApplication(session.executablePath)) {
+        return true;
+    }
+
+    // 3. Basename fallback (last resort)
     if (IsScreenLinkProcess(session.executableName, session.executablePath)) {
         return true;
     }
-    // Check if PID matches the known ScreenLink PID
-    if (options.screenLinkPid != 0) {
-        if (session.pid == options.screenLinkPid) {
-            return true;
-        }
-        // Check if resolved root PID matches
-        if (session.rootPid != 0 && session.rootPid == options.screenLinkPid) {
-            return true;
+
+    // 4. Legacy single-PID fallback: only used when no structured identity
+    // is present at all (backward compatibility)
+    if (!identity.HasCurrentProcessIdentity() &&
+        !identity.HasPackagedIdentity() &&
+        !identity.HasDevelopmentIdentity()) {
+        if (options.screenLinkPid != 0) {
+            if (session.pid == options.screenLinkPid) {
+                return true;
+            }
+            if (session.rootPid != 0 && session.rootPid == options.screenLinkPid) {
+                return true;
+            }
         }
     }
+
     return false;
 }
 
@@ -84,6 +119,25 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
             continue;
         }
 
+        // --- Identity/liveness diagnostics for non-system sessions ---
+
+        // identityLookupFailures: clean invalid state from failed lookup
+        if (!session.identityValidated && !session.processAlive &&
+            session.creationTimeUtc100ns == 0) {
+            plan.identityLookupFailures++;
+        }
+
+        // inconsistentIdentity: any contradictory combination
+        if (!HasConsistentProcessIdentity(session)) {
+            plan.inconsistentIdentitySessions++;
+        }
+
+        // validatedLive: fully validated live process
+        if (session.processAlive && session.identityValidated &&
+            session.creationTimeUtc100ns != 0) {
+            plan.validatedLiveSessions++;
+        }
+
         // --- Step 2: Skip expired sessions (process no longer alive) ---
         if (!session.processAlive) {
             plan.expiredSessions++;
@@ -104,7 +158,7 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
         }
 
         // --- Step 5: Resolve process tree ---
-        ProcessTreeResult tree = ResolveProcessTree(session.pid);
+        ProcessTreeResult tree = resolveProcessTree_(session.pid);
         if (!tree.succeeded || tree.applicationRootPid == 0) {
             plan.invalidSessions++;
             continue;
@@ -112,46 +166,80 @@ FilteredSourcePlan FilteredSourcePlanner::Plan(
 
         // --- Build candidate ---
         CandidateEntry entry;
-        entry.candidate.identity.pid = session.pid;
-        entry.candidate.identity.creationTimeUtc100ns = session.creationTimeUtc100ns;
+
+        // Step 5a: Set candidate identity to the AUTHORITATIVE application root
+        // from ProcessResolver, NOT tree.processes.back() or session.pid.
+        entry.candidate.identity.pid = tree.applicationRootPid;
+        entry.candidate.identity.creationTimeUtc100ns = tree.applicationRootCreationTimeUtc100ns;
         entry.candidate.sessionPid = session.pid;
         entry.candidate.executableName = session.executableName;
         entry.candidate.executablePath = session.executablePath;
         entry.candidate.activeSession = (session.sessionState == 1); // AudioSessionStateActive
+        entry.candidate.rootExecutableName = tree.applicationRootName;
+        entry.candidate.rootExecutablePath = tree.applicationRootPath;
 
-        // Extract root process info from the resolved tree (last element = root)
-        if (!tree.processes.empty()) {
-            const auto& rootProc = tree.processes.back();
-            entry.candidate.rootExecutableName = rootProc.processName;
-            entry.candidate.rootExecutablePath = rootProc.processPath;
-            entry.rootIdentity.pid = rootProc.processId;
-            entry.rootIdentity.creationTimeUtc100ns = rootProc.creationTimeUtc100ns;
-        } else {
-            // Fallback: tree succeeded but processes vector is empty – use fields directly
-            entry.candidate.rootExecutableName = tree.applicationRootName;
-            entry.rootIdentity.pid = tree.applicationRootPid;
-            entry.rootIdentity.creationTimeUtc100ns = GetProcessCreationTime(tree.applicationRootPid);
-        }
+        // rootIdentity is the same as candidate.identity (both are the
+        // authoritative application root from ProcessResolver).
+        entry.rootIdentity = entry.candidate.identity;
 
-        // --- Step 5b: Validate root identity and use it as the capture identity ---
-        // The candidate must be keyed by the process-tree root, not the leaf session
-        // PID, so that all sessions from one browser/Electron tree produce one capture.
         if (!entry.rootIdentity.IsValid()) {
             plan.invalidSessions++;
             continue;
         }
-        entry.candidate.identity = entry.rootIdentity;
 
-        // --- Step 6: Apply Discord exclusion ---
-        if (options.excludeDiscord && IsDiscordSession(session)) {
-            plan.discordExcluded++;
-            continue;
+        // --- Step 6: Apply Discord exclusion (check both session AND root level) ---
+        if (options.excludeDiscord) {
+            bool discordExcluded = false;
+            // Session-level check
+            if (IsDiscordSession(session)) {
+                discordExcluded = true;
+            }
+            // Root-level check
+            if (!discordExcluded && IsDiscordProcess(tree.applicationRootName)) {
+                discordExcluded = true;
+            }
+            // Root-level Update.exe + Discord path check
+            if (!discordExcluded) {
+                std::string rootNameLower = ToLower(tree.applicationRootName);
+                if (rootNameLower == "update.exe") {
+                    std::string rootPathLower = ToLower(tree.applicationRootPath);
+                    if (rootPathLower.find("discord") != std::string::npos) {
+                        discordExcluded = true;
+                    }
+                }
+            }
+            if (discordExcluded) {
+                plan.discordExcluded++;
+                continue;
+            }
         }
 
-        // --- Step 7: Apply ScreenLink exclusion ---
-        if (options.excludeScreenLink && IsScreenLinkSession(session, options)) {
-            plan.screenLinkExcluded++;
-            continue;
+        // --- Step 7: Apply ScreenLink exclusion (check both session AND root level) ---
+        if (options.excludeScreenLink) {
+            bool slExcluded = false;
+            // Session-level check using structured identity
+            if (IsScreenLinkSession(session, options)) {
+                slExcluded = true;
+            }
+            // Root-level check using structured identity
+            if (!slExcluded) {
+                // Check via CheckExclusionV2 for the root identity
+                auto rootMatch = CheckExclusionV2(
+                    tree.applicationRootName,
+                    tree.applicationRootPath,
+                    options.screenLinkIdentity);
+                if (rootMatch.isScreenLink) {
+                    slExcluded = true;
+                }
+            }
+            // Fallback root-level basename check
+            if (!slExcluded && IsScreenLinkProcess(tree.applicationRootName, tree.applicationRootPath)) {
+                slExcluded = true;
+            }
+            if (slExcluded) {
+                plan.screenLinkExcluded++;
+                continue;
+            }
         }
 
         entries.push_back(std::move(entry));
