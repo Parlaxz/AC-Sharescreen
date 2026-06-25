@@ -2,6 +2,7 @@ import type {
   GroupSharedState,
   GroupMemberRecord,
   HybridTimestamp,
+  HybridClock,
   GroupControlEnvelope,
   LwwRegister,
   GroupQualitySettings,
@@ -13,10 +14,10 @@ import {
   createHybridClock,
   tickLocal,
   mergeRemote,
-  makeLww,
   canonicalJsonHash,
   createDefaultGroupQualitySettings,
   compareHybridTimestamp,
+  parseGroupMessagePayload,
 } from "@screenlink/shared";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
 
@@ -38,7 +39,7 @@ export interface GroupStateSummary {
 export interface SyncState {
   groupId: string;
   state: GroupSharedState;
-  clock: HybridTimestamp;
+  clock: HybridClock;
   lastSyncAt: number;
   isSynchronized: boolean;
 }
@@ -65,17 +66,19 @@ export class GroupSyncService {
     return this.syncStates.get(groupId) ?? null;
   }
 
-  initializeGroup(
+  async initializeGroup(
     groupId: string,
     initialState: GroupSharedState,
     persistedStamp: HybridTimestamp | undefined,
     localDeviceId: string,
     localDisplayName: string,
-  ): void {
+  ): Promise<void> {
     const clock = createHybridClock(localDeviceId, persistedStamp);
+    let memberInserted = false;
 
     // If the local device is not yet in the member records, add it
     if (!initialState.members[localDeviceId]) {
+      memberInserted = true;
       const stamp = tickLocal(clock);
       initialState = {
         ...initialState,
@@ -94,10 +97,17 @@ export class GroupSyncService {
     this.syncStates.set(groupId, {
       groupId,
       state: initialState,
-      clock: clock as unknown as HybridTimestamp,
+      clock,
       lastSyncAt: Date.now(),
       isSynchronized: true,
     });
+
+    // Persist the updated state and clock when a local member was freshly
+    // inserted, completing BEFORE the caller starts the connection (B5).
+    if (this.persistence && memberInserted) {
+      await this.persistence.persistState(groupId, initialState);
+      await this.persistence.persistClock(groupId, clock);
+    }
 
     this.startAntiEntropy(groupId);
   }
@@ -115,8 +125,8 @@ export class GroupSyncService {
     if (!sync) return;
 
     const now = Date.now();
-    const localTick = tickLocal(sync.clock as any, now);
-    sync.clock = mergeRemote(sync.clock as any, localTick, now) as unknown as HybridTimestamp;
+    // Exactly one HLC tick per local edit (no mergeRemote)
+    const localTick = tickLocal(sync.clock, now);
 
     const delta = updater(sync.state);
     const patches: Partial<GroupSharedState> = {};
@@ -153,7 +163,8 @@ export class GroupSyncService {
     if (!sync) return;
     const nodeId = sync.clock.nodeId;
     const now = Date.now();
-    const stamp = tickLocal(sync.clock as any, now);
+    // Exactly one HLC tick per local edit (no mergeRemote)
+    const stamp = tickLocal(sync.clock, now);
 
     const existingMember = sync.state.members[nodeId];
     const updatedMember: GroupMemberRecord = {
@@ -175,7 +186,6 @@ export class GroupSyncService {
 
     sync.state = newState;
     sync.lastSyncAt = now;
-    sync.clock = mergeRemote(sync.clock as any, stamp, now) as unknown as HybridTimestamp;
 
     this.onStateUpdated?.(groupId, newState);
     await this.broadcastDelta(
@@ -207,18 +217,45 @@ export class GroupSyncService {
     const now = Date.now();
 
     if (type === "group.state.update") {
-      const remoteState = envelope.payload?.state as Partial<GroupSharedState> | undefined;
-      if (!remoteState) return;
+      // ── Schema validation (typed via GroupControlPayloadMap) ──────
+      const parsed = parseGroupMessagePayload("group.state.update", envelope.payload);
+      if (!parsed.ok) return;
+      const partialState = parsed.data.state as Partial<GroupSharedState> | undefined;
+      if (!partialState) return;
 
-      // Apply remote state update
+      // Build a full GroupSharedState from the partial + local fallbacks
+      const remoteState: GroupSharedState = {
+        schemaVersion: 1,
+        groupId: partialState.groupId ?? sync.state.groupId,
+        name: partialState.name ?? sync.state.name,
+        defaultQuality: partialState.defaultQuality ?? sync.state.defaultQuality,
+        members: partialState.members ?? sync.state.members,
+      };
+
+      // Apply remote state update using mergeGroupSharedState
       try {
         const oldState = sync.state;
-        const result = mergeGroupSharedState(oldState, remoteState as GroupSharedState);
+        const result = mergeGroupSharedState(oldState, remoteState);
         if (result.changed) {
-          // Advance clock past remote stamp (B6)
-          if (logicalStamp) {
-            sync.clock = mergeRemote(sync.clock as any, logicalStamp, now) as unknown as HybridTimestamp;
+          // Advance clock past envelope logical stamp and all nested timestamps (B6)
+          // Find max timestamp across name, defaultQuality, and members
+          let maxNestedStamp = logicalStamp;
+          if (partialState.name?.stamp && compareHybridTimestamp(partialState.name.stamp, maxNestedStamp) > 0) {
+            maxNestedStamp = partialState.name.stamp;
           }
+          if (partialState.defaultQuality?.stamp && compareHybridTimestamp(partialState.defaultQuality.stamp, maxNestedStamp) > 0) {
+            maxNestedStamp = partialState.defaultQuality.stamp;
+          }
+          if (partialState.members) {
+            for (const m of Object.values(partialState.members)) {
+              const member = m as GroupMemberRecord;
+              if (member.profileStamp && compareHybridTimestamp(member.profileStamp, maxNestedStamp) > 0) {
+                maxNestedStamp = member.profileStamp;
+              }
+            }
+          }
+
+          mergeRemote(sync.clock, maxNestedStamp, now);
 
           // Persist (B5)
           if (this.persistence) {
@@ -243,7 +280,10 @@ export class GroupSyncService {
           }
         } else if (logicalStamp) {
           // Even if nothing changed, advance clock to stay monotonic
-          sync.clock = mergeRemote(sync.clock as any, logicalStamp, now) as unknown as HybridTimestamp;
+          mergeRemote(sync.clock, logicalStamp, now);
+          if (this.persistence) {
+            await this.persistence.persistClock(groupId, sync.clock);
+          }
         }
       } catch {
         // Ignore invalid state updates
@@ -251,12 +291,16 @@ export class GroupSyncService {
     }
 
     if (type === "group.state.summary") {
-      const summary = envelope.payload?.summary as GroupStateSummary | undefined;
+      // ── Schema validation (typed via GroupControlPayloadMap) ──────
+      const parsed = parseGroupMessagePayload("group.state.summary", envelope.payload);
+      if (!parsed.ok) return;
+      const summary = parsed.data.summary;
       if (!summary) return;
+
       const conn = this.connManager.getConnection(groupId);
       if (!conn) return;
 
-      // Compare lightweight summary fields
+      // Compare lightweight summary fields (typed via GroupStateSummarySchema)
       let needsFullSync = false;
       const ourState = sync.state;
 
@@ -316,18 +360,105 @@ export class GroupSyncService {
     }
 
     if (type === "group.member.update") {
-      const memberRecord = envelope.payload?.member as GroupMemberRecord | undefined;
-      if (!memberRecord || !memberRecord.deviceId) return;
+      // ── Schema validation (typed via GroupControlPayloadMap) ──────
+      const parsed = parseGroupMessagePayload("group.member.update", envelope.payload);
+      if (!parsed.ok) return;
+      const memberRecord = parsed.data.member;
+
+      // ── Sender authenticity check ─────────────────────────────────
+      if (memberRecord.deviceId !== envelope.senderDeviceId) return;
 
       const existing = sync.state.members[memberRecord.deviceId];
-      if (!existing || memberRecord.profileStamp.wallTimeMs > existing.profileStamp.wallTimeMs) {
+      if (!existing) {
+        // New member — always accept
+        mergeRemote(sync.clock, memberRecord.profileStamp, now);
         sync.state = applyGroupStateDelta(sync.state, {
           members: { [memberRecord.deviceId]: memberRecord },
         });
+
+        // Persist
+        if (this.persistence) {
+          await this.persistence.persistState(groupId, sync.state);
+          await this.persistence.persistClock(groupId, sync.clock);
+        }
         sync.lastSyncAt = now;
         this.onStateUpdated?.(groupId, sync.state);
+
+        // Rebroadcast accepted delta once
+        await this.broadcastDelta(
+          groupId,
+          { members: { [memberRecord.deviceId]: memberRecord } },
+          memberRecord.profileStamp,
+        );
+      } else {
+        // Compare logical time only (wallTimeMs + counter), ignoring nodeId.
+        // This matches the compareLogicalTime logic in mergeGroupSharedState.
+        const logicalCmp = this.compareLogicalTimeOnly(memberRecord.profileStamp, existing.profileStamp);
+        if (logicalCmp > 0) {
+          // Remote is strictly newer — accept
+          mergeRemote(sync.clock, memberRecord.profileStamp, now);
+          sync.state = applyGroupStateDelta(sync.state, {
+            members: { [memberRecord.deviceId]: memberRecord },
+          });
+
+          // Persist
+          if (this.persistence) {
+            await this.persistence.persistState(groupId, sync.state);
+            await this.persistence.persistClock(groupId, sync.clock);
+          }
+          sync.lastSyncAt = now;
+          this.onStateUpdated?.(groupId, sync.state);
+
+          // Rebroadcast accepted delta once
+          await this.broadcastDelta(
+            groupId,
+            { members: { [memberRecord.deviceId]: memberRecord } },
+            memberRecord.profileStamp,
+          );
+        } else if (logicalCmp === 0 && memberRecord.displayName !== existing.displayName) {
+          // Equal logical time, different value — deterministic tiebreaker
+          // Lower nodeId wins (same rule as mergeGroupSharedState)
+          if (memberRecord.profileStamp.nodeId < existing.profileStamp.nodeId) {
+            mergeRemote(sync.clock, memberRecord.profileStamp, now);
+            sync.state = applyGroupStateDelta(sync.state, {
+              members: { [memberRecord.deviceId]: memberRecord },
+            });
+
+            if (this.persistence) {
+              await this.persistence.persistState(groupId, sync.state);
+              await this.persistence.persistClock(groupId, sync.clock);
+            }
+            sync.lastSyncAt = now;
+            this.onStateUpdated?.(groupId, sync.state);
+
+            await this.broadcastDelta(
+              groupId,
+              { members: { [memberRecord.deviceId]: memberRecord } },
+              memberRecord.profileStamp,
+            );
+          }
+        }
+        // logicalCmp < 0: local is newer — ignore
       }
     }
+  }
+
+  /**
+   * Compare two timestamps by logical time only (wallTimeMs + counter),
+   * ignoring nodeId. Returns -1, 0, or 1. This matches the internal
+   * compareLogicalTime used by mergeGroupSharedState in groups.ts.
+   */
+  private compareLogicalTimeOnly(
+    a: HybridTimestamp,
+    b: HybridTimestamp,
+  ): number {
+    if (a.wallTimeMs !== b.wallTimeMs) {
+      return a.wallTimeMs < b.wallTimeMs ? -1 : 1;
+    }
+    if (a.counter !== b.counter) {
+      return a.counter < b.counter ? -1 : 1;
+    }
+    return 0;
   }
 
   private async broadcastDelta(
@@ -365,7 +496,8 @@ export class GroupSyncService {
   private async runAntiEntropy(groupId: string): Promise<void> {
     const sync = this.syncStates.get(groupId);
     if (!sync) return;
-    sync.lastSyncAt = Date.now();
+    const now = Date.now();
+    sync.lastSyncAt = now;
     const conn = this.connManager.getConnection(groupId);
     if (conn && conn.state === "connected") {
       const memberVersions: Record<string, { profileStamp: HybridTimestamp; displayName: string }> = {};
@@ -375,6 +507,8 @@ export class GroupSyncService {
           displayName: member.displayName,
         };
       }
+      // Compute hash of complete canonical shared state (not just nameHash)
+      const stateHash = await canonicalJsonHash(sync.state);
       const summary: GroupStateSummary = {
         groupId,
         nameStamp: sync.state.name.stamp,
@@ -382,7 +516,7 @@ export class GroupSyncService {
         qualityStamp: sync.state.defaultQuality.stamp,
         qualityHash: sync.state.defaultQuality.valueHash,
         memberVersions,
-        stateHash: sync.state.name.valueHash,
+        stateHash,
       };
       await conn.broadcast({
         type: "group.state.summary",

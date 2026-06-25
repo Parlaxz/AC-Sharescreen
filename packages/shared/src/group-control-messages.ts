@@ -40,7 +40,16 @@ export type GroupControlMessageType =
 
 export const MAX_GROUP_CONTROL_PAYLOAD_BYTES = 64 * 1024; // 64 KB
 export const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+export const DEDUP_MAX_ENTRIES = 10_000;
 export const MAC_KEY_BYTES = 32;
+
+/**
+ * Compute the UTF-8 byte length of a string.
+ * Uses TextEncoder which is available in modern JS runtimes.
+ */
+export function utf8ByteLength(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -203,9 +212,9 @@ export async function validateEnvelope(
     return { ok: false, reason: "Wrong group ID" };
   }
 
-  // Payload size check
+  // Payload size check (UTF-8 byte length, not string length)
   const payloadJson = JSON.stringify(data.payload);
-  if (payloadJson.length > MAX_GROUP_CONTROL_PAYLOAD_BYTES) {
+  if (utf8ByteLength(payloadJson) > MAX_GROUP_CONTROL_PAYLOAD_BYTES) {
     return {
       ok: false,
       reason: `Payload exceeds maximum size of ${MAX_GROUP_CONTROL_PAYLOAD_BYTES} bytes`,
@@ -247,8 +256,23 @@ export const GroupStateUpdatePayloadSchema = z.object({
   stamp: HybridTimestampSchema.optional(),
 });
 
+export const MemberVersionSchema = z.object({
+  profileStamp: HybridTimestampSchema,
+  displayName: z.string(),
+});
+
+export const GroupStateSummarySchema = z.object({
+  nameStamp: HybridTimestampSchema.nullable().optional(),
+  nameHash: z.string().nullable().optional(),
+  qualityStamp: HybridTimestampSchema.nullable().optional(),
+  qualityHash: z.string().nullable().optional(),
+  memberVersions: z.record(z.string(), MemberVersionSchema).optional(),
+  stateHash: z.string().optional(),
+  groupId: z.string().optional(),
+});
+
 export const GroupStateSummaryPayloadSchema = z.object({
-  summary: z.record(z.unknown()),
+  summary: GroupStateSummarySchema,
 });
 
 export const GroupStateRequestPayloadSchema = z.object({
@@ -264,6 +288,257 @@ export const GroupMemberUpdatePayloadSchema = z.object({
   }),
 });
 
+export const GroupPresencePayloadSchema = z.object({
+  deviceId: z.string(),
+  displayName: z.string().optional(),
+  status: z.enum(["online", "away", "busy", "offline"]),
+});
+
+// ─── Stream payload schemas ────────────────────────────────────────────────
+
+export const StreamStateRequestPayloadSchema = z.object({
+  type: z.literal("stream.state.request").optional(),
+});
+
+export const StreamStateSnapshotPayloadSchema = z.object({
+  streams: z.array(z.record(z.unknown())),
+});
+
+export const StreamStartedPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  mediaSessionId: z.string(),
+  groupId: z.string(),
+  hostDeviceId: z.string(),
+  hostDisplayName: z.string(),
+  sourceKind: z.string(),
+  sourceName: z.string(),
+  startedAt: z.number(),
+  appliedSettingsRevision: z.number(),
+  heartbeatSequence: z.number(),
+  streamRevision: z.number(),
+  mediaJoinMetadata: z.string(),
+  replacesSessionId: z.string().nullable(),
+});
+
+export const StreamHeartbeatPayloadSchema = z.object({
+  groupId: z.string(),
+  hostDeviceId: z.string(),
+  logicalStreamId: z.string(),
+  mediaSessionId: z.string(),
+  heartbeatSequence: z.number(),
+  appliedSettingsRevision: z.number().optional(),
+});
+
+export const StreamStoppedPayloadSchema = z.object({
+  groupId: z.string(),
+  hostDeviceId: z.string(),
+  logicalStreamId: z.string(),
+});
+
+export const StreamRestartRequestPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  reason: z.string().optional(),
+});
+
+export const StreamRestartedPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  mediaSessionId: z.string(),
+  groupId: z.string(),
+  hostDeviceId: z.string(),
+  hostDisplayName: z.string(),
+  sourceKind: z.string(),
+  sourceName: z.string(),
+  startedAt: z.number(),
+  appliedSettingsRevision: z.number(),
+  heartbeatSequence: z.number(),
+  streamRevision: z.number(),
+  mediaJoinMetadata: z.string(),
+  /** Links to the previous media session this restarted stream replaces. */
+  previousMediaSessionId: z.string().optional(),
+  /** Used by ActiveStreamRegistry.handleStarted to identify replacement entries.
+   * Required non-empty string to trigger replacement logic; null means no prior session
+   * (should not happen for restart, but schema allows it for forward compat). */
+  replacesSessionId: z.string().nullable(),
+});
+
+export const StreamRestartResultPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  success: z.boolean(),
+  mediaSessionId: z.string().optional(),
+  error: z.string().optional(),
+});
+
+export const StreamJoinRequestPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  viewerDeviceId: z.string(),
+  viewerDisplayName: z.string().optional(),
+  requestId: z.string().optional(),
+});
+
+export const StreamJoinResponsePayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  accepted: z.boolean(),
+  mediaJoinMetadata: z.string().optional(),
+  reason: z.string().optional(),
+  viewerDeviceId: z.string(),
+  requestId: z.string().optional(),
+  mediaSessionId: z.string().optional(),
+  /** VDO stream ID the viewer uses to call ViewerClient.view() */
+  streamId: z.string().optional(),
+  /** VDO password the viewer uses to call ViewerClient.createAndConnect() */
+  password: z.string().optional(),
+  /** Binding token for media.bind channel (same as mediaJoinMetadata, explicit) */
+  bindingToken: z.string().optional(),
+});
+
+export const StreamLeavePayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  viewerDeviceId: z.string(),
+});
+
+// ─── Media bind payload schema ─────────────────────────────────────────────
+
+export const MediaBindPayloadSchema = z.object({
+  token: z.string(),
+  mediaSessionId: z.string().optional(),
+});
+
+// ─── Quality payload schemas ───────────────────────────────────────────────
+
+export const QualityViewerRequestPayloadSchema = z.object({
+  streamSessionId: z.string(),
+  requestId: z.string(),
+  revision: z.number().int().nonnegative(),
+  videoBitrateKbps: z.number().int().nonnegative(),
+  maxWidth: z.number().int().nonnegative(),
+  maxHeight: z.number().int().nonnegative(),
+  maxFps: z.number().int().nonnegative(),
+  degradationPreference: z.string(),
+});
+
+export const QualityViewerClearPayloadSchema = z.object({
+  streamSessionId: z.string(),
+});
+
+export const QualityEffectivePayloadSchema = z.object({
+  streamSessionId: z.string(),
+  videoBitrateKbps: z.number().optional(),
+});
+
+export const QualityConfiguredPayloadSchema = z.object({
+  streamSessionId: z.string(),
+  videoBitrateKbps: z.number().optional(),
+});
+
+export const QualityObservedPayloadSchema = z.object({
+  streamSessionId: z.string(),
+  videoBitrateKbps: z.number().optional(),
+});
+
+// ─── Ping / Pong ───────────────────────────────────────────────────────────
+
+export const PingPayloadSchema = z.object({
+  seq: z.number(),
+});
+
+export const PongPayloadSchema = z.object({
+  seq: z.number(),
+});
+
+// ─── Payload Schema Map ────────────────────────────────────────────────────
+
+/**
+ * Type-level mapping from GroupControlMessageType to the inferred Zod output
+ * type of its payload schema. Callers can use parseGroupMessagePayload with a
+ * concrete literal type and get correctly typed data without casts.
+ */
+export type GroupControlPayloadMap = {
+  "group.hello": z.infer<typeof GroupHelloPayloadSchema>;
+  "group.hello.response": z.infer<typeof GroupHelloResponsePayloadSchema>;
+  "group.state.summary": z.infer<typeof GroupStateSummaryPayloadSchema>;
+  "group.state.request": z.infer<typeof GroupStateRequestPayloadSchema>;
+  "group.state.update": z.infer<typeof GroupStateUpdatePayloadSchema>;
+  "group.member.update": z.infer<typeof GroupMemberUpdatePayloadSchema>;
+  "group.presence": z.infer<typeof GroupPresencePayloadSchema>;
+  "stream.state.request": z.infer<typeof StreamStateRequestPayloadSchema>;
+  "stream.state.snapshot": z.infer<typeof StreamStateSnapshotPayloadSchema>;
+  "stream.started": z.infer<typeof StreamStartedPayloadSchema>;
+  "stream.heartbeat": z.infer<typeof StreamHeartbeatPayloadSchema>;
+  "stream.stopped": z.infer<typeof StreamStoppedPayloadSchema>;
+  "stream.restart.request": z.infer<typeof StreamRestartRequestPayloadSchema>;
+  "stream.restarted": z.infer<typeof StreamRestartedPayloadSchema>;
+  "stream.restart.result": z.infer<typeof StreamRestartResultPayloadSchema>;
+  "stream.join.request": z.infer<typeof StreamJoinRequestPayloadSchema>;
+  "stream.join.response": z.infer<typeof StreamJoinResponsePayloadSchema>;
+  "stream.leave": z.infer<typeof StreamLeavePayloadSchema>;
+  "media.bind": z.infer<typeof MediaBindPayloadSchema>;
+  "quality.viewer.request": z.infer<typeof QualityViewerRequestPayloadSchema>;
+  "quality.viewer.clear": z.infer<typeof QualityViewerClearPayloadSchema>;
+  "quality.effective": z.infer<typeof QualityEffectivePayloadSchema>;
+  "quality.configured": z.infer<typeof QualityConfiguredPayloadSchema>;
+  "quality.observed": z.infer<typeof QualityObservedPayloadSchema>;
+  "ping": z.infer<typeof PingPayloadSchema>;
+  "pong": z.infer<typeof PongPayloadSchema>;
+};
+
+const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
+  "group.hello": GroupHelloPayloadSchema,
+  "group.hello.response": GroupHelloResponsePayloadSchema,
+  "group.state.summary": GroupStateSummaryPayloadSchema,
+  "group.state.request": GroupStateRequestPayloadSchema,
+  "group.state.update": GroupStateUpdatePayloadSchema,
+  "group.member.update": GroupMemberUpdatePayloadSchema,
+  "group.presence": GroupPresencePayloadSchema,
+  "stream.state.request": StreamStateRequestPayloadSchema,
+  "stream.state.snapshot": StreamStateSnapshotPayloadSchema,
+  "stream.started": StreamStartedPayloadSchema,
+  "stream.heartbeat": StreamHeartbeatPayloadSchema,
+  "stream.stopped": StreamStoppedPayloadSchema,
+  "stream.restart.request": StreamRestartRequestPayloadSchema,
+  "stream.restarted": StreamRestartedPayloadSchema,
+  "stream.restart.result": StreamRestartResultPayloadSchema,
+  "stream.join.request": StreamJoinRequestPayloadSchema,
+  "stream.join.response": StreamJoinResponsePayloadSchema,
+  "stream.leave": StreamLeavePayloadSchema,
+  "media.bind": MediaBindPayloadSchema,
+  "quality.viewer.request": QualityViewerRequestPayloadSchema,
+  "quality.viewer.clear": QualityViewerClearPayloadSchema,
+  "quality.effective": QualityEffectivePayloadSchema,
+  "quality.configured": QualityConfiguredPayloadSchema,
+  "quality.observed": QualityObservedPayloadSchema,
+  "ping": PingPayloadSchema,
+  "pong": PongPayloadSchema,
+};
+
+/**
+ * Parse a group control message payload against the schema for the given type.
+ * The return type is correctly inferred via GroupControlPayloadMap, so callers
+ * get typed data without needing `as` casts.
+ *
+ * @example
+ *   const parsed = parseGroupMessagePayload("group.member.update", raw);
+ *   if (parsed.ok) {
+ *     parsed.data.member // typed as GroupMemberUpdatePayloadSchema output
+ *   }
+ */
+export function parseGroupMessagePayload<T extends GroupControlMessageType>(
+  type: T,
+  payload: unknown,
+): { ok: true; data: GroupControlPayloadMap[T] } | { ok: false; reason: string } {
+  const schema = payloadSchemaMap[type];
+  if (!schema) {
+    return { ok: false, reason: `Unknown message type: ${type}` };
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return { ok: false, reason: "Payload must be a non-null object" };
+  }
+  const result = schema.safeParse(payload);
+  if (!result.success) {
+    return { ok: false, reason: `Invalid payload: ${result.error.message}` };
+  }
+  return { ok: true, data: result.data as GroupControlPayloadMap[T] };
+}
+
 // ─── DedupSet ──────────────────────────────────────────────────────────────
 
 /**
@@ -272,10 +547,17 @@ export const GroupMemberUpdatePayloadSchema = z.object({
  */
 export class DedupSet {
   private readonly windowMs: number;
+  private readonly maxEntries: number;
   private readonly entries: Map<string, number> = new Map();
+  /** Queue of entry insertion order for LRU eviction */
+  private insertionOrder: string[] = [];
 
-  constructor(windowMs: number = DEDUP_WINDOW_MS) {
+  constructor(
+    windowMs: number = DEDUP_WINDOW_MS,
+    maxEntries: number = DEDUP_MAX_ENTRIES,
+  ) {
     this.windowMs = windowMs;
+    this.maxEntries = maxEntries;
   }
 
   has(id: string): boolean {
@@ -286,6 +568,15 @@ export class DedupSet {
   add(id: string): void {
     this.evict();
     this.entries.set(id, Date.now());
+    this.insertionOrder.push(id);
+    // Enforce max count bound — evict oldest when over limit
+    if (this.entries.size > this.maxEntries) {
+      const toEvict = this.entries.size - this.maxEntries;
+      for (let i = 0; i < toEvict && this.insertionOrder.length > 0; i++) {
+        const oldestId = this.insertionOrder.shift()!;
+        this.entries.delete(oldestId);
+      }
+    }
   }
 
   size(): number {
@@ -295,6 +586,7 @@ export class DedupSet {
 
   clear(): void {
     this.entries.clear();
+    this.insertionOrder = [];
   }
 
   private evict(): void {
@@ -302,6 +594,9 @@ export class DedupSet {
     for (const [id, addedAt] of this.entries) {
       if (addedAt < cutoff) {
         this.entries.delete(id);
+        // Also remove from insertion order (O(n) but eviction is a background op)
+        const idx = this.insertionOrder.indexOf(id);
+        if (idx !== -1) this.insertionOrder.splice(idx, 1);
       }
     }
   }

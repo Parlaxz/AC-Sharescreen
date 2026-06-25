@@ -1,9 +1,10 @@
 import { GroupConnectionManager } from "./group-connection-manager.js";
 import { GroupSyncService, type SyncPersistenceAdapter } from "./group-sync-service.js";
 import { ActiveStreamRegistry } from "./active-stream-registry.js";
-import { GroupMessageRouter } from "./group-message-router.js";
+import { GroupMessageRouter, type JoinResponseData } from "./group-message-router.js";
 import { StreamSessionManager } from "./stream-session-manager.js";
 import { ViewerMediaBinding } from "./viewer-media-binding.js";
+import { RestartCoordinator } from "./restart-coordinator.js";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
 /**
@@ -19,6 +20,7 @@ import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
  * - Serializes initialization (waits for pending destroy)
  * - Uses generation counters to reject stale callbacks
  * - Safe for StrictMode double-mount in React 18
+ * - Accepts optional SyncPersistenceAdapter for group state persistence
  */
 export class Phase3Runtime {
   private connManager: GroupConnectionManager;
@@ -27,15 +29,26 @@ export class Phase3Runtime {
   private messageRouter!: GroupMessageRouter;
   private streamSessionManager!: StreamSessionManager;
   private viewerMediaBinding!: ViewerMediaBinding;
+  private restartCoordinator!: RestartCoordinator;
   private destroyed = false;
   private initialized = false;
   private initGen = 0;
   private destroyPromise: Promise<void> | null = null;
+  private _deviceId: string | null = null;
+  private _displayName: string | null = null;
 
-  constructor() {
+  /** Human-readable identity for diagnostics. Not available until addGroup(). */
+  get deviceId(): string | null { return this._deviceId; }
+  get displayName(): string | null { return this._displayName; }
+
+  constructor(persistence?: SyncPersistenceAdapter) {
     this.connManager = new GroupConnectionManager();
-    this.syncService = new GroupSyncService(this.connManager);
+    this.syncService = new GroupSyncService(this.connManager, persistence);
     this.activeStreamRegistry = new ActiveStreamRegistry();
+  }
+
+  isDestroyed(): boolean {
+    return this.destroyed;
   }
 
   async initialize(): Promise<void> {
@@ -75,7 +88,7 @@ export class Phase3Runtime {
         if (peerUuid) {
           void conn.sendToPeer(peerUuid, {
             type: "stream.state.request",
-          });
+          }).catch(() => {});
         }
       }
     });
@@ -142,17 +155,59 @@ export class Phase3Runtime {
     // VDO publishing is managed externally via PublisherManager.
     this.streamSessionManager = new StreamSessionManager(this);
 
+    // Create RestartCoordinator (Stage 14)
+    this.restartCoordinator = new RestartCoordinator(this);
+
     this.initialized = true;
   }
 
+  /**
+   * Add a group connection with proper ordering:
+   *   1) Validate (local identity assumptions already available in config)
+   *   2) Initialize sync state + clock (BEFORE connection starts)
+   *   3) Persist missing local member record (done inside initializeGroup)
+   *   4) Register routing (already set up in initialize())
+   *   5) Start connection
+   *   6) Hello (happens automatically inside connection start)
+   *   7) Broadcast state summary / snapshot
+   *
+   * Messages immediately after connection must not drop due to missing sync state.
+   */
   async addGroup(
     config: { groupId: string; controlRoomId: string; groupSecret: string; nodeId: string; displayName: string },
     state: GroupSharedState,
     clock: HybridTimestamp,
   ): Promise<void> {
     if (this.destroyed) return;
+
+    // Propagate real device identity to StreamSessionManager on first group.
+    // Identity is the same across all groups, so set it once.
+    if (!this._deviceId) {
+      this._deviceId = config.nodeId;
+      this._displayName = config.displayName;
+      this.streamSessionManager.setDeviceIdentity(config.nodeId, config.displayName);
+    }
+
+    // Step 2: Initialize sync state FIRST so messages arriving after connection
+    // start have a valid sync state to work with.  Await sync init (including
+    // any persistence of a freshly inserted local member) before connecting.
+    await this.syncService.initializeGroup(config.groupId, state, clock, config.nodeId, config.displayName);
+
+    // Step 5: Start the connection
     await this.connManager.addGroup(config);
-    this.syncService.initializeGroup(config.groupId, state, clock, config.nodeId, config.displayName);
+
+    // Step 7: Broadcast full state snapshot immediately so peers get our state
+    // without waiting for the 30s anti-entropy timer.
+    const syncState = this.syncService.getSyncState(config.groupId);
+    if (syncState) {
+      const conn = this.connManager.getConnection(config.groupId);
+      if (conn && conn.state === "connected") {
+        void conn.broadcast({
+          type: "group.state.update",
+          state: syncState.state,
+        }).catch(() => {});
+      }
+    }
   }
 
   async removeGroup(groupId: string): Promise<void> {
@@ -169,6 +224,7 @@ export class Phase3Runtime {
       this.activeStreamRegistry.destroy();
       this.streamSessionManager.destroy();
       this.viewerMediaBinding.destroy();
+      this.restartCoordinator.destroy();
       this.syncService.destroy();
       await this.connManager.destroyAll();
     })();
@@ -191,28 +247,117 @@ export class Phase3Runtime {
     return this.streamSessionManager;
   }
 
+  getRestartCoordinator(): RestartCoordinator {
+    return this.restartCoordinator;
+  }
+
   getViewerMediaBinding(): ViewerMediaBinding {
     return this.viewerMediaBinding;
   }
+
+  /**
+   * Wait for a stream.join.response matching the given requestId.
+   * Delegates to GroupMessageRouter's pending request resolution.
+   * Used by Dashboard to complete the viewer join flow.
+   */
+  waitForJoinResponse(requestId: string, timeoutMs?: number): Promise<JoinResponseData> {
+    return this.messageRouter.waitForJoinResponse(requestId, timeoutMs);
+  }
 }
 
-// ─── Singleton accessor ─────────────────────────────────────────────────────
+// ─── Singleton accessor (async acquire/release) ─────────────────────────────
 
 let _runtime: Phase3Runtime | null = null;
+let _initPromise: Promise<Phase3Runtime> | null = null;
+let _destroyPromise: Promise<void> | null = null;
 
+/**
+ * Acquire the Phase3Runtime singleton.
+ *
+ * Guarantees:
+ * - One active runtime max
+ * - One init promise max (concurrent acquires share the same initialized runtime)
+ * - One destroy promise max
+ * - Acquire waits for any pending destruction
+ * - No new runtime starts until old group connections fully close
+ * - Generation safety preserved via Phase3Runtime.initGen
+ */
+export async function acquirePhase3Runtime(persistence?: SyncPersistenceAdapter): Promise<Phase3Runtime> {
+  // Wait for any pending destroy to complete before creating a new runtime
+  if (_destroyPromise) {
+    await _destroyPromise;
+    _destroyPromise = null;
+  }
+
+  // If a concurrent acquire already started initializing, return the same promise
+  if (_initPromise) {
+    return _initPromise;
+  }
+
+  // If a runtime already exists and is not destroyed, return it
+  if (_runtime && !_runtime.isDestroyed()) {
+    return _runtime;
+  }
+
+  // Create and initialize a new runtime
+  _initPromise = (async () => {
+    const runtime = new Phase3Runtime(persistence);
+    await runtime.initialize();
+    _runtime = runtime;
+    return runtime;
+  })();
+
+  try {
+    return await _initPromise;
+  } finally {
+    _initPromise = null;
+  }
+}
+
+/**
+ * Release (destroy) the Phase3Runtime singleton.
+ *
+ * Guarantees:
+ * - Idempotent: calling multiple times is safe
+ * - No detached destruction promise
+ * - Waits for full cleanup including all group connections
+ * - Handles in-flight startup: if acquirePhase3Runtime is still initializing,
+ *   waits for it to complete then destroys the runtime.
+ */
+export async function releasePhase3Runtime(): Promise<void> {
+  // If destruction is already in progress, wait for it
+  if (_destroyPromise) {
+    await _destroyPromise;
+    return;
+  }
+
+  // If startup is still in progress, wait for it then destroy.
+  // This handles the case where cleanup fires before acquirePhase3Runtime
+  // finishes initializing (e.g. StrictMode unmount during pending acquire).
+  if (_initPromise) {
+    const runtime = await _initPromise;
+    _initPromise = null; // prevent further reuse of this promise
+    _runtime = null;
+    await runtime.destroy();
+    return;
+  }
+
+  const runtime = _runtime;
+  if (!runtime || runtime.isDestroyed()) return;
+
+  // Start destruction, tracking the promise
+  _destroyPromise = (async () => {
+    _runtime = null;
+    await runtime.destroy();
+  })();
+
+  await _destroyPromise;
+  _destroyPromise = null;
+}
+
+/**
+ * Synchronously get the current runtime, or null if none is active.
+ */
 export function getRuntime(): Phase3Runtime | null {
   return _runtime;
-}
-
-export function createRuntime(): Phase3Runtime {
-  _runtime = new Phase3Runtime();
-  return _runtime;
-}
-
-export function destroyRuntime(): void {
-  const r = _runtime;
-  _runtime = null;
-  if (r) {
-    void r.destroy();
-  }
 }

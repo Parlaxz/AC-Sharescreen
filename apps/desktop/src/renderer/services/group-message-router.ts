@@ -1,27 +1,60 @@
-import type { GroupControlEnvelope } from "@screenlink/shared";
+import type { GroupControlEnvelope, GroupControlMessageType } from "@screenlink/shared";
+import { parseGroupMessagePayload } from "@screenlink/shared";
 import type { GroupSyncService } from "./group-sync-service.js";
 import type { ActiveStreamRegistry } from "./active-stream-registry.js";
 import type { ViewerMediaBinding } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
+import type { QualityCoordinator } from "./quality-coordinator.js";
 
 /**
- * C1: GroupMessageRouter
+ * C1: GroupMessageRouter (Stages 4–5)
  *
  * Sole message handler for GroupConnectionManager.
  * Receives validated GroupControlEnvelopes and routes them
  * to the appropriate service based on envelope type.
  *
- * Routing table:
- *   group.state.*         → GroupSyncService
- *   stream.*              → ActiveStreamRegistry
- *   stream.join.request   → ViewerMediaBinding
- *   media.bind            → ViewerMediaBinding
- *   quality.*             → (future) QualityCoordinator
- *   ping / pong           → connection health tracking
+ * Routing order (Stage 5: exact types first, then generic):
+ *   group.state.*, group.member.update   → GroupSyncService
+ *   stream.join.request                   → ViewerMediaBinding (host handles join)
+ *   stream.join.response                  → (viewer handles accepted response)
+ *   stream.leave                          → ViewerMediaBinding (cleanup)
+ *   stream.restart.request                → (future: restart handling)
+ *   stream.restart.result                 → (future: restart result)
+ *   stream.restarted                      → ActiveStreamRegistry (replacement)
+ *   media.bind                            → ViewerMediaBinding (token consumption)
+ *   quality.*                             → (future) QualityCoordinator
+ *   ping / pong                           → connection health tracking
+ *   stream.* (generic)                    → ActiveStreamRegistry (lifecycle)
  */
+export interface JoinResponseData {
+  logicalStreamId: string;
+  accepted: boolean;
+  viewerDeviceId: string;
+  mediaJoinMetadata?: string;
+  mediaSessionId?: string;
+  /** VDO stream ID for connecting the ViewerClient */
+  streamId?: string;
+  /** VDO password for connecting the ViewerClient */
+  password?: string;
+  /** Binding token for media.bind (same as mediaJoinMetadata, explicit) */
+  bindingToken?: string;
+  reason?: string;
+  requestId?: string;
+}
+
 export class GroupMessageRouter {
   private pingTimestamps = new Map<string, number>();
   private pongTimestamps = new Map<string, number>();
+
+  /** Pending join request resolvers keyed by requestId */
+  private joinResponseResolvers = new Map<string, {
+    resolve: (data: JoinResponseData) => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+
+  /** Stage 6: Quality coordinator for quality message routing */
+  private qualityCoordinator: QualityCoordinator | null = null;
 
   constructor(
     private syncService: GroupSyncService,
@@ -31,11 +64,46 @@ export class GroupMessageRouter {
   ) {}
 
   /**
+   * Stage 6: Set the quality coordinator for quality message routing.
+   * Called after construction when the quality coordinator is available.
+   */
+  setQualityCoordinator(coordinator: QualityCoordinator): void {
+    this.qualityCoordinator = coordinator;
+  }
+
+  /**
+   * Wait for a stream.join.response matching the given requestId.
+   * Returns a promise that resolves with the response data or rejects
+   * after the timeout (default 30 seconds).
+   */
+  waitForJoinResponse(requestId: string, timeoutMs = 30_000): Promise<JoinResponseData> {
+    return new Promise((resolve, reject) => {
+      // Check if already resolved
+      const existing = this.joinResponseResolvers.get(requestId);
+      if (existing) {
+        reject(new Error("Duplicate waitForJoinResponse for requestId"));
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.joinResponseResolvers.delete(requestId);
+        reject(new Error(`Join response timeout for request ${requestId.slice(0, 8)}`));
+      }, timeoutMs);
+      this.joinResponseResolvers.set(requestId, { resolve, reject, timer });
+    });
+  }
+
+  /**
    * Route a validated GroupControlEnvelope to the appropriate service.
    * Called by GroupConnectionManager's onMessage callback.
+   * Validates payload against schema before routing to prevent malformed
+   * data from reaching services.
    */
   routeMessage(groupId: string, envelope: GroupControlEnvelope): void {
     const type = envelope.type;
+
+    // ── Schema validation for ALL message types ─────────────────────
+    const parsed = parseGroupMessagePayload(type, envelope.payload);
+    if (!parsed.ok) return; // Malformed payload rejected
 
     // ── group.state.*, group.member.* → GroupSyncService ──────────
     if (
@@ -46,13 +114,11 @@ export class GroupMessageRouter {
       return;
     }
 
-    // ── stream.* → ActiveStreamRegistry ───────────────────────────
-    if (type.startsWith("stream.")) {
-      void this.routeStreamMessage(groupId, envelope);
-      return;
-    }
+    // ── Stage 5: Exact match types BEFORE generic stream.* ─────────
+    // This ensures stream.join.request, stream.leave, media.bind etc.
+    // are not caught by the generic stream.* catch-all below.
 
-    // ── stream.join.request, media.bind → ViewerMediaBinding ──────
+    // stream.join.request → ViewerMediaBinding (host-side join handling)
     if (type === "stream.join.request") {
       if (this.viewerBinding) {
         this.viewerBinding.handleJoinRequest(envelope);
@@ -60,10 +126,70 @@ export class GroupMessageRouter {
       return;
     }
 
+    // stream.join.response → resolve pending join request
+    if (type === "stream.join.response") {
+      const joinData = parsed.data; // typed via GroupControlPayloadMap
+      const requestId = joinData.requestId;
+      if (requestId) {
+        const resolver = this.joinResponseResolvers.get(requestId);
+        if (resolver) {
+          clearTimeout(resolver.timer);
+          this.joinResponseResolvers.delete(requestId);
+          resolver.resolve({
+            logicalStreamId: joinData.logicalStreamId,
+            accepted: joinData.accepted,
+            viewerDeviceId: joinData.viewerDeviceId,
+            mediaJoinMetadata: joinData.mediaJoinMetadata,
+            mediaSessionId: joinData.mediaSessionId,
+            streamId: joinData.streamId,
+            password: joinData.password,
+            bindingToken: joinData.bindingToken,
+            reason: joinData.reason,
+            requestId: joinData.requestId,
+          });
+        }
+      }
+      return;
+    }
+
+    // stream.leave → ViewerMediaBinding (viewer disconnect cleanup)
+    if (type === "stream.leave") {
+      if (this.viewerBinding) {
+        const leaveData = parsed.data; // typed via GroupControlPayloadMap
+        const viewerDeviceId = leaveData.viewerDeviceId;
+        if (viewerDeviceId) {
+          this.viewerBinding.removeViewer(viewerDeviceId);
+        }
+      }
+      return;
+    }
+
+    // stream.restart.request → (future: forward to stream manager)
+    if (type === "stream.restart.request") {
+      // Future: forward to StreamSessionManager or QualityCoordinator
+      return;
+    }
+
+    // stream.restart.result → (future: handle restart outcome)
+    if (type === "stream.restart.result") {
+      return;
+    }
+
+    // stream.restarted → ActiveStreamRegistry (handles as replacement via replacesSessionId)
+    // The expanded StreamRestartedPayloadSchema now includes all StreamAnnouncement fields
+    // (groupId, hostDeviceId, heartbeatSequence, streamRevision, replacesSessionId, etc.),
+    // so handleStarted correctly identifies it as a replacement, not a new stream.
+    if (type === "stream.restarted") {
+      void this.streamRegistry.handleStarted(parsed.data as never);
+      return;
+    }
+
+    // media.bind → ViewerMediaBinding (token consumption via actual media peer UUID)
     if (type === "media.bind") {
       if (this.viewerBinding) {
+        const bindData = parsed.data; // typed via GroupControlPayloadMap
         const peerUuid = envelope.senderDeviceId;
-        const token = envelope.payload?.token as string | undefined;
+        const token = bindData.token;
         if (peerUuid && token) {
           void this.viewerBinding.handleMediaBind(peerUuid, token);
         }
@@ -71,33 +197,45 @@ export class GroupMessageRouter {
       return;
     }
 
+    // ── quality.* → QualityCoordinator (Stage 6) ──────────────────
+    if (
+      type.startsWith("quality.viewer.") ||
+      type === "quality.effective" ||
+      type === "quality.configured" ||
+      type === "quality.observed"
+    ) {
+      this.handleQualityMessage(groupId, type, envelope);
+      return;
+    }
+
     // ── ping / pong → connection health tracking ──────────────────
     if (type === "ping") {
-      const seq = envelope.payload?.seq as number | undefined;
-      if (seq !== undefined) {
-        this.pingTimestamps.set(`${groupId}:${envelope.senderDeviceId}:${seq}`, Date.now());
-        // Respond with pong
-        const conn = this.connManager.getConnection(groupId);
-        if (conn) {
-          const peerUuid = conn.peerForDevice(envelope.senderDeviceId);
-          if (peerUuid) {
-            void conn.sendToPeer(peerUuid, { type: "pong", seq });
-          }
+      const pingData = parsed.data; // typed via GroupControlPayloadMap
+      const seq = pingData.seq;
+      this.pingTimestamps.set(`${groupId}:${envelope.senderDeviceId}:${seq}`, Date.now());
+      // Respond with pong
+      const conn = this.connManager.getConnection(groupId);
+      if (conn) {
+        const peerUuid = conn.peerForDevice(envelope.senderDeviceId);
+        if (peerUuid) {
+          void conn.sendToPeer(peerUuid, { type: "pong", seq });
         }
       }
       return;
     }
 
     if (type === "pong") {
-      const seq = envelope.payload?.seq as number | undefined;
-      if (seq !== undefined) {
-        this.pongTimestamps.set(`${groupId}:${envelope.senderDeviceId}:${seq}`, Date.now());
-      }
+      const pongData = parsed.data; // typed via GroupControlPayloadMap
+      const seq = pongData.seq;
+      this.pongTimestamps.set(`${groupId}:${envelope.senderDeviceId}:${seq}`, Date.now());
       return;
     }
 
-    // ── quality.* → (future) QualityCoordinator ───────────────────
-    // Currently unhandled — will route to QualityCoordinator in future phase.
+    // ── Generic stream.* → ActiveStreamRegistry (lifecycle) ──────
+    if (type.startsWith("stream.")) {
+      void this.routeStreamMessage(type, envelope, parsed.data);
+      return;
+    }
   }
 
   /**
@@ -114,28 +252,85 @@ export class GroupMessageRouter {
     return undefined;
   }
 
+  // ── Quality message handling (Stage 6) ───────────────────────
+
+  private handleQualityMessage(
+    groupId: string,
+    type: string,
+    envelope: GroupControlEnvelope,
+  ): void {
+    const parsed = parseGroupMessagePayload(type as any, envelope.payload);
+    if (!parsed.ok) return;
+
+    if (!this.qualityCoordinator) {
+      return; // No coordinator configured yet, silently ignore
+    }
+
+    if (type === "quality.viewer.request") {
+      const data = parsed.data as Record<string, unknown>;
+      // The streamSessionId from the quality payload serves as the logicalStreamId
+      // for storage key construction.
+      const logicalStreamId = data.streamSessionId as string;
+      this.qualityCoordinator.handleViewerRequest(
+        groupId,
+        logicalStreamId,
+        envelope.senderDeviceId,
+        {
+          streamSessionId: data.streamSessionId as string,
+          requestId: (data as any).requestId ?? "",
+          revision: (data as any).revision ?? 0,
+          videoBitrateKbps: (data as any).videoBitrateKbps ?? 0,
+          maxWidth: (data as any).maxWidth ?? 0,
+          maxHeight: (data as any).maxHeight ?? 0,
+          maxFps: (data as any).maxFps ?? 0,
+          degradationPreference: (data as any).degradationPreference ?? "balanced",
+        },
+      );
+      return;
+    }
+
+    if (type === "quality.viewer.clear") {
+      const data = parsed.data as Record<string, unknown>;
+      const logicalStreamId = data.streamSessionId as string;
+      this.qualityCoordinator.handleViewerClear(
+        groupId,
+        logicalStreamId,
+        envelope.senderDeviceId,
+      );
+      return;
+    }
+
+    // quality.effective, quality.configured, quality.observed are
+    // informational broadcasts — the coordinator may track them in future.
+  }
+
   // ── Private ──────────────────────────────────────────────────
 
-  private async routeStreamMessage(groupId: string, envelope: GroupControlEnvelope): Promise<void> {
+  private async routeStreamMessage(
+    groupId: string,
+    envelope: GroupControlEnvelope,
+    _validatedPayload: unknown,
+  ): Promise<void> {
     const type = envelope.type;
-    const payload = envelope.payload;
 
     switch (type) {
       case "stream.started":
-        this.streamRegistry.handleStarted(payload as any);
+        this.streamRegistry.handleStarted(_validatedPayload as never);
         break;
 
       case "stream.heartbeat":
-        this.streamRegistry.handleHeartbeat(payload as any);
+        this.streamRegistry.handleHeartbeat(_validatedPayload as never);
         break;
 
       case "stream.stopped":
-        this.streamRegistry.handleStopped(payload as any);
+        this.streamRegistry.handleStopped(_validatedPayload as never);
         break;
 
-      case "stream.state.snapshot":
-        this.streamRegistry.handleSnapshot(payload?.streams as any);
+      case "stream.state.snapshot": {
+        const snapshotPayload = _validatedPayload as { streams: unknown[] };
+        this.streamRegistry.handleSnapshot(snapshotPayload?.streams ?? []);
         break;
+      }
 
       case "stream.state.request":
         // Respond with snapshot of our current streams
