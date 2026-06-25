@@ -55,6 +55,13 @@ const api: ScreenLinkAPI = {
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
   getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
 
+  /**
+   * Write text to the OS clipboard via the main process. Bypasses
+   * the renderer's `navigator.clipboard.writeText` which is often
+   * blocked in Electron with "Write permission denied".
+   */
+  clipboardWriteText: (text: string) => ipcRenderer.invoke("clipboard-write-text", text),
+
   requestAudioPort: () => ipcRenderer.invoke("request-audio-port"),
   ensureAudioHelper: () => ipcRenderer.invoke("ensure-audio-helper"),
   getAudioState: () => ipcRenderer.invoke("get-audio-state"),

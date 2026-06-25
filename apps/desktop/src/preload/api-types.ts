@@ -63,6 +63,13 @@ export interface ScreenLinkAPI {
     chromeVersion: string;
   }>;
 
+  /**
+   * Write text to the OS clipboard via the main process. Bypasses
+   * the renderer's `navigator.clipboard.writeText` which is often
+   * blocked in Electron with "Write permission denied".
+   */
+  clipboardWriteText: (text: string) => Promise<{ success: boolean; length: number }>;
+
   // Audio capabilities
   getAudioCapabilities: () => Promise<{
     success: boolean;

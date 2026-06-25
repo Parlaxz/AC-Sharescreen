@@ -433,7 +433,14 @@ export function QualityPresets() {
             <p className="dim">Export: {exportName}</p>
             <textarea readOnly value={exportString} rows={3} style={{ width: "100%" }} />
             <div className="actions" style={{ marginTop: "0.5rem" }}>
-              <button onClick={async () => { await navigator.clipboard.writeText(exportString); }}>Copy</button>
+              <button onClick={async () => {
+                try {
+                  const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+                  if (api) await api.clipboardWriteText(exportString);
+                } catch (e) {
+                  setError(String(e));
+                }
+              }}>Copy</button>
               <button onClick={() => { setExportString(null); setExportName(""); }}>Close</button>
             </div>
           </div>

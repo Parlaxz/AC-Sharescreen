@@ -139,7 +139,10 @@ export function Groups() {
       if (!api) return;
       const result = (await api.getGroupInvite(groupId)) as { link: string } | null;
       if (result?.link) {
-        await navigator.clipboard.writeText(result.link);
+        // Use the main-process clipboard. The renderer's
+        // navigator.clipboard.writeText is blocked in many Electron
+        // contexts with "Write permission denied".
+        await api.clipboardWriteText(result.link);
         setInviteLink(result.link);
       }
     } catch (e) {
@@ -220,7 +223,14 @@ export function Groups() {
           <p>Copy this link and share it with anyone you want to invite.</p>
           <textarea readOnly value={inviteLink} rows={3} />
           <div className="actions">
-            <button onClick={async () => { await navigator.clipboard.writeText(inviteLink); }}>Copy Group Link</button>
+            <button onClick={async () => {
+              try {
+                const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+                if (api) await api.clipboardWriteText(inviteLink);
+              } catch (e) {
+                setError(String(e));
+              }
+            }}>Copy Group Link</button>
             <button onClick={() => setInviteLink(null)}>Done</button>
           </div>
         </div>

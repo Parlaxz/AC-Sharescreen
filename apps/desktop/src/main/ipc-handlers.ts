@@ -1,4 +1,4 @@
-import { ipcMain, app, BrowserWindow } from "electron";
+import { ipcMain, app, BrowserWindow, clipboard } from "electron";
 import { enumerateSources, getSourceFingerprint } from "./capture-source-manager.js";
 import { setApprovedSource } from "./display-media-handler.js";
 import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.js";
@@ -151,6 +151,21 @@ export function registerIpcHandlers(
 
   ipcMain.handle("get-device-identity", () => {
     return settings.get().deviceIdentity;
+  });
+
+  // ── Clipboard ────────────────────────────────────────────────────
+  //
+  // The renderer's `navigator.clipboard.writeText` is blocked in
+  // many Electron contexts with "Write permission denied" because
+  // the document must be focused and the user gesture policy is
+  // strict. Use the main-process clipboard module instead — it
+  // always works inside the desktop app.
+  ipcMain.handle("clipboard-write-text", (_event, text: string) => {
+    if (typeof text !== "string") {
+      throw new Error("clipboard-write-text expects a string");
+    }
+    clipboard.writeText(text);
+    return { success: true, length: text.length };
   });
 
   ipcMain.handle("update-display-name", (_event, displayName: string) => {
