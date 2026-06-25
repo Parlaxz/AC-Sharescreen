@@ -6,7 +6,7 @@ import type {
 import {
   GROUP_PROTOCOL_VERSION,
   buildEnvelope,
-  verifyEnvelope,
+  validateEnvelope,
   DedupSet,
 } from "@screenlink/shared";
 import { getSDKConstructor } from "@screenlink/vdo-adapter";
@@ -131,14 +131,22 @@ export class GroupControlConnection {
     this.setState("destroyed");
     const sdk = this.sdk;
     this.sdk = null;
+    if (sdk) {
+      try { sdk.removeAllListeners?.(); } catch { /* ignore */ }
+      try { await sdk.disconnect(); } catch { /* ignore */ }
+    }
+    const allDeviceIds = Array.from(this.deviceToPeer.keys());
     this.peerToDevice.clear();
     this.deviceToPeer.clear();
-    if (sdk) {
-      try { await sdk.disconnect(); } catch { /* ignore */ }
+    for (const deviceId of allDeviceIds) {
+      this.opts.onPeerOffline(deviceId);
     }
   }
 
   async sendToPeer(peerUuid: string, payload: Record<string, unknown>): Promise<void> {
+    if (!peerUuid || peerUuid.length === 0) {
+      throw new Error("Cannot send to empty peer UUID");
+    }
     if (!this.sdk) throw new Error("Not connected");
     const input = makeInput(payload.type as string, this.opts.nodeId, this.opts.groupId, payload, this.clock);
     const envelope = await buildEnvelope(input, this.opts.groupSecret);
@@ -210,34 +218,51 @@ export class GroupControlConnection {
     sdk.on("dataReceived", async (data: unknown, peerUuid: string) => {
       if (gen !== this.startGeneration || this.destroyed) return;
       try {
-        const envelope = data as GroupControlEnvelope;
-        const valid = await verifyEnvelope(envelope, this.opts.groupSecret);
-        if (!valid) return;
+        // Use full validateEnvelope (checks schema, version, group ID, MAC, size, dedup) (B11)
+        const result = await validateEnvelope(data, this.opts.groupId, this.opts.groupSecret, this.dedupSet);
+        if (!result.ok) return;
+        const validatedEnvelope = result.data;
 
-        // Dedup
-        if (this.dedupSet.has(envelope.messageId)) return;
-        this.dedupSet.add(envelope.messageId);
+        // Handle hello messages (B13)
+        if (validatedEnvelope.type === "group.hello") {
+          const deviceId = validatedEnvelope.senderDeviceId;
+          const displayName = validatedEnvelope.payload?.displayName as string;
+          if (!deviceId) return;
 
-        // Auto-map hello messages to device IDs
-        if (envelope.type === "group.hello") {
-          const deviceId = envelope.senderDeviceId || (envelope.payload?.deviceId as string);
-          const displayName = envelope.payload?.displayName as string;
-          if (deviceId) {
-            const oldPeer = this.deviceToPeer.get(deviceId);
-            if (oldPeer && oldPeer !== peerUuid) {
-              this.peerToDevice.delete(oldPeer);
-            }
+          // Map if not already mapped
+          const oldPeer = this.deviceToPeer.get(deviceId);
+          if (!oldPeer || oldPeer !== peerUuid) {
+            if (oldPeer) this.peerToDevice.delete(oldPeer);
             this.peerToDevice.set(peerUuid, deviceId);
             this.deviceToPeer.set(deviceId, peerUuid);
             this.opts.onPeerOnline(deviceId, displayName);
+
+            // Send hello.response once
+            this.sendToPeer(peerUuid, {
+              type: "group.hello.response",
+              deviceId: this.opts.nodeId,
+              displayName: this.opts.displayName,
+            }).catch(() => {});
           }
-          // Respond with our hello if we haven't mapped them yet
-          if (!this.deviceToPeer.has(this.opts.nodeId)) {
-            this.broadcastHello().catch(() => {});
-          }
+          return; // Don't forward hello to message handler
         }
 
-        this.opts.onMessage(envelope);
+        if (validatedEnvelope.type === "group.hello.response") {
+          const deviceId = validatedEnvelope.senderDeviceId;
+          if (!deviceId) return;
+
+          const oldPeer = this.deviceToPeer.get(deviceId);
+          if (!oldPeer || oldPeer !== peerUuid) {
+            if (oldPeer) this.peerToDevice.delete(oldPeer);
+            this.peerToDevice.set(peerUuid, deviceId);
+            this.deviceToPeer.set(deviceId, peerUuid);
+            this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
+          }
+          // DO NOT respond to a response
+          return;
+        }
+
+        this.opts.onMessage(validatedEnvelope);
       } catch {
         // Invalid message
       }
@@ -246,8 +271,13 @@ export class GroupControlConnection {
     sdk.on("disconnected", () => {
       if (gen !== this.startGeneration || this.destroyed) return;
       this.setState("reconnecting");
+      // Snapshot and notify all peers offline (B14)
+      const allDeviceIds = Array.from(this.deviceToPeer.keys());
       this.peerToDevice.clear();
       this.deviceToPeer.clear();
+      for (const deviceId of allDeviceIds) {
+        this.opts.onPeerOffline(deviceId);
+      }
     });
 
     sdk.on("reconnected", () => {

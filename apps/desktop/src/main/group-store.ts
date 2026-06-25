@@ -7,8 +7,12 @@ import { SecureStore } from "./secure-store.js";
   HybridTimestampSchema,
   type GroupSharedState,
   type HybridTimestamp,
-  makeLww,
+  makeLwwWithHash,
   createDefaultGroupQualitySettings,
+  createDefaultVideoQualitySettings,
+  createDefaultAudioEncodingSettings,
+  formatGroupInviteLink,
+  type GroupInviteV1,
 } from "@screenlink/shared";
 import { z } from "zod";
 
@@ -53,6 +57,33 @@ export class GroupStore {
     this.records = this.load();
   }
 
+  /**
+   * Detect compact quality settings form (Phase 2/early Phase 3) and migrate
+   * to the nested GroupQualitySettings schema with video/audio sub-objects.
+   */
+  private migrateCompactQuality(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
+    const obj = value as Record<string, unknown>;
+    // Compact form has videoBitrateKbps at the top level (not nested under "video")
+    if ("videoBitrateKbps" in obj && typeof obj.videoBitrateKbps === "number" && !("schemaVersion" in obj)) {
+      const video = createDefaultVideoQualitySettings();
+      const audio = createDefaultAudioEncodingSettings();
+      // Override from compact fields
+      if (typeof obj.videoBitrateKbps === "number") video.videoBitrateKbps = obj.videoBitrateKbps as number;
+      if (typeof obj.maxWidth === "number") video.sendWidth = obj.maxWidth as number;
+      if (typeof obj.maxHeight === "number") video.sendHeight = obj.maxHeight as number;
+      if (typeof obj.maxFps === "number") video.sendFps = obj.maxFps as number;
+      if (typeof obj.captureWidth === "number") video.captureWidth = obj.captureWidth as number;
+      if (typeof obj.captureHeight === "number") video.captureHeight = obj.captureHeight as number;
+      if (typeof obj.captureFps === "number") video.captureFps = obj.captureFps as number;
+      if (typeof obj.degradationPreference === "string") video.degradationPreference = obj.degradationPreference as never;
+      if (typeof obj.contentHint === "string") video.contentHint = obj.contentHint as never;
+      if (typeof obj.audioEnabled === "boolean") audio.fec = obj.audioEnabled as boolean;
+      return { schemaVersion: 1 as const, video, audio };
+    }
+    return value;
+  }
+
   private load(): Map<string, LocalGroupRecord> {
     const map = new Map<string, LocalGroupRecord>();
     const tryRead = (filePath: string): LocalGroupRecord[] | null => {
@@ -61,11 +92,35 @@ export class GroupStore {
         const raw = fs.readFileSync(filePath, "utf-8");
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return null;
+        let needsPersist = false;
         const validated: LocalGroupRecord[] = [];
         for (const item of parsed) {
+          // Phase 2/early Phase 3 migration: convert compact quality settings
+          if (item && typeof item === "object") {
+            const itemObj = item as Record<string, unknown>;
+            if (itemObj.sharedState && typeof itemObj.sharedState === "object") {
+              const ss = itemObj.sharedState as Record<string, unknown>;
+              if (ss.defaultQuality && typeof ss.defaultQuality === "object") {
+                const dq = ss.defaultQuality as Record<string, unknown>;
+                const migrated = this.migrateCompactQuality(dq.value);
+                if (migrated !== dq.value) {
+                  dq.value = migrated;
+                  needsPersist = true;
+                }
+              }
+            }
+          }
           const result = LocalGroupRecordSchema.safeParse(item);
           if (result.success) {
             validated.push(result.data as LocalGroupRecord);
+          }
+        }
+        if (needsPersist && validated.length > 0) {
+          // Persist migrated data silently
+          try {
+            this.writeAtomic(validated);
+          } catch {
+            // best-effort
           }
         }
         return validated;
@@ -114,14 +169,14 @@ export class GroupStore {
     return this.records.get(groupId) ?? null;
   }
 
-  create(input: {
+  async create(input: {
     groupId: string;
     controlRoomId: string;
     groupSecret: string;
     nodeId: string;
     groupName: string;
     joinedAt?: number;
-  }): LocalGroupRecord {
+  }): Promise<LocalGroupRecord> {
     if (this.records.has(input.groupId)) {
       return this.records.get(input.groupId)!;
     }
@@ -135,8 +190,8 @@ export class GroupStore {
     const sharedState: GroupSharedState = {
       schemaVersion: 1,
       groupId: input.groupId,
-      name: makeLww(input.groupName, initialStamp, input.nodeId),
-      defaultQuality: makeLww(
+      name: await makeLwwWithHash(input.groupName, initialStamp, input.nodeId),
+      defaultQuality: await makeLwwWithHash(
         createDefaultGroupQualitySettings(),
         initialStamp,
         input.nodeId,
@@ -161,7 +216,7 @@ export class GroupStore {
     return record;
   }
 
-  import(input: {
+  async import(input: {
     invite: {
       groupId: string;
       controlRoomId: string;
@@ -172,8 +227,9 @@ export class GroupStore {
       bootstrapSettingsStamp: HybridTimestamp;
     };
     nodeId: string;
+    displayName: string;
     joinedAt?: number;
-  }): LocalGroupRecord {
+  }): Promise<LocalGroupRecord> {
     if (this.records.has(input.invite.groupId)) {
       return this.records.get(input.invite.groupId)!;
     }
@@ -186,13 +242,20 @@ export class GroupStore {
     const sharedState: GroupSharedState = {
       schemaVersion: 1,
       groupId: input.invite.groupId,
-      name: makeLww(input.invite.bootstrapName, input.invite.bootstrapNameStamp, ""),
-      defaultQuality: makeLww(
+      name: await makeLwwWithHash(input.invite.bootstrapName, input.invite.bootstrapNameStamp, ""),
+      defaultQuality: await makeLwwWithHash(
         input.invite.bootstrapSettings,
         input.invite.bootstrapSettingsStamp,
         "",
       ),
       members: {},
+    };
+    // Add self as a member
+    sharedState.members[input.nodeId] = {
+      deviceId: input.nodeId,
+      displayName: input.displayName,
+      firstSeenAt: joinedAt,
+      profileStamp: initialStamp,
     };
     const encrypted = this.secureStore.encrypt(input.invite.groupSecret);
     if (!encrypted) {
@@ -259,6 +322,35 @@ export class GroupStore {
         groupSecret: secret,
         nodeId,
       };
+    } catch {
+      return null;
+    }
+  }
+
+  getInviteLink(groupId: string): string | null {
+    const record = this.records.get(groupId);
+    if (!record) return null;
+    try {
+      const buf = Buffer.from(record.encryptedGroupSecret, "base64");
+      const groupSecret = this.secureStore.decrypt(buf);
+      if (!groupSecret) return null;
+      const invite: GroupInviteV1 = {
+        version: 1,
+        groupId: record.groupId,
+        controlRoomId: record.controlRoomId,
+        groupSecret,
+        bootstrapName: record.sharedState.name.value,
+        bootstrapNameStamp: record.sharedState.name.stamp,
+        bootstrapSettings: record.sharedState.defaultQuality.value,
+        bootstrapSettingsStamp: record.sharedState.defaultQuality.stamp,
+        bootstrapCreator: {
+          deviceId: "",
+          displayName: "",
+          firstSeenAt: 0,
+          profileStamp: { wallTimeMs: 0, counter: 0, nodeId: "" },
+        },
+      };
+      return formatGroupInviteLink(invite);
     } catch {
       return null;
     }

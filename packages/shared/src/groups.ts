@@ -244,7 +244,9 @@ export function mergeGroupSharedState(
             field: `members.${deviceId}`,
             reason: "Concurrent member update with equal stamp but different displayName",
           });
-          if (remoteMember.deviceId < localMember.deviceId) {
+          // Both members have the same key (deviceId), so remoteMember.deviceId === localMember.deviceId always
+          // Use the node IDs from the profile stamps instead:
+          if (remoteMember.profileStamp.nodeId < localMember.profileStamp.nodeId) {
             state.members[deviceId] = { ...remoteMember };
             changed = true;
           }
@@ -312,7 +314,7 @@ export function getGroupStateDelta(
   let hasDelta = false;
 
   if (
-    local.name.value !== remote.name.value ||
+    local.name.valueHash !== remote.name.valueHash ||
     compareHybridTimestamp(local.name.stamp, remote.name.stamp) !== 0
   ) {
     delta.name = remote.name;
@@ -320,7 +322,7 @@ export function getGroupStateDelta(
   }
 
   if (
-    local.defaultQuality.value !== remote.defaultQuality.value ||
+    local.defaultQuality.valueHash !== remote.defaultQuality.valueHash ||
     compareHybridTimestamp(local.defaultQuality.stamp, remote.defaultQuality.stamp) !== 0
   ) {
     delta.defaultQuality = remote.defaultQuality;

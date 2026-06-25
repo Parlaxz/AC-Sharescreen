@@ -1,15 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../stores/main-store.js";
-import { getGroupConnectionManager } from "../App.js";
+import { getRuntime } from "../services/phase3-runtime.js";
+import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
 interface GroupRecord {
   groupId: string;
   controlRoomId: string;
   encryptedGroupSecret: string;
-  sharedState: {
-    name: { value: string };
-    members: Record<string, { deviceId: string; displayName: string }>;
-  };
+  sharedState: GroupSharedState;
+  lastClock: HybridTimestamp;
   notificationsEnabled: boolean;
 }
 
@@ -43,17 +42,19 @@ export function Groups() {
     if (!api) return;
     const config = await api.getGroupConnectionConfig(record.groupId) as { groupId: string; controlRoomId: string; groupSecret: string; nodeId: string } | null;
     if (!config) return;
-    const identity = await api.getDeviceIdentity();
-    if (!identity) return;
-    const connManager = getGroupConnectionManager();
-    if (connManager) {
-      await connManager.addGroup({
-        groupId: config.groupId,
-        controlRoomId: config.controlRoomId,
-        groupSecret: config.groupSecret,
-        nodeId: identity.deviceId,
-        displayName: identity.displayName,
-      });
+    const runtime = getRuntime();
+    if (runtime) {
+      await runtime.addGroup(
+        {
+          groupId: config.groupId,
+          controlRoomId: config.controlRoomId,
+          groupSecret: config.groupSecret,
+          nodeId: config.nodeId,
+          displayName: config.displayName,
+        },
+        record.sharedState,
+        record.lastClock,
+      );
     }
   };
 
@@ -110,9 +111,9 @@ export function Groups() {
   const onLeaveGroup = async (groupId: string) => {
     const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
     if (!api) return;
-    const connManager = getGroupConnectionManager();
-    if (connManager) {
-      await connManager.removeGroup(groupId);
+    const runtime = getRuntime();
+    if (runtime) {
+      await runtime.removeGroup(groupId);
     }
     await api.leaveGroup(groupId);
     await refresh();
@@ -213,7 +214,17 @@ export function Groups() {
                 </div>
                 <div className="actions">
                   <button onClick={(e) => { e.stopPropagation(); void onCopyInvite(g.groupId); }}>Copy Group Link</button>
-                  <button disabled>Group Settings</button>
+                  <button onClick={(e) => {
+                    e.stopPropagation();
+                    const newName = prompt("Group name:", g.sharedState?.name?.value ?? "");
+                    if (newName && newName.trim()) {
+                      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+                      if (api) {
+                        const updatedState = { ...g.sharedState, name: { value: newName.trim() } };
+                        api.updateGroupSharedState(g.groupId, updatedState).catch(() => {});
+                      }
+                    }
+                  }}>Group Settings</button>
                   <button onClick={(e) => { e.stopPropagation(); void onLeaveGroup(g.groupId); }}>Leave Group</button>
                 </div>
               </div>

@@ -35,8 +35,8 @@ describe("GroupStore", () => {
     store = new GroupStore(secure as unknown as SecureStore, dir);
   });
 
-  it("creates a group and lists it", () => {
-    const record = store.create({
+  it("creates a group and lists it", async () => {
+    const record = await store.create({
       groupId: "00000000-0000-4000-8000-000000000001",
       controlRoomId: "control-room-1",
       groupSecret: "super-secret-1",
@@ -45,13 +45,15 @@ describe("GroupStore", () => {
     });
     expect(record.groupId).toBe("00000000-0000-4000-8000-000000000001");
     expect(record.sharedState.name.value).toBe("Test Group");
+    expect(record.sharedState.name.valueHash).toBeTruthy();
+    expect(record.sharedState.defaultQuality.valueHash).toBeTruthy();
     expect(record.encryptedGroupSecret).toBeTruthy();
     const list = store.list();
     expect(list).toHaveLength(1);
   });
 
-  it("decrypts the group secret via getConnectionConfig", () => {
-    store.create({
+  it("decrypts the group secret via getConnectionConfig", async () => {
+    await store.create({
       groupId: "00000000-0000-4000-8000-000000000002",
       controlRoomId: "control-room-2",
       groupSecret: "super-secret-2",
@@ -64,14 +66,14 @@ describe("GroupStore", () => {
     expect(cfg!.controlRoomId).toBe("control-room-2");
   });
 
-  it("does not log the secret", () => {
+  it("does not log the secret", async () => {
     const original = console.log;
     const calls: string[] = [];
     console.log = (...args: unknown[]) => {
       calls.push(args.map((a) => String(a)).join(" "));
     };
     try {
-      store.create({
+      await store.create({
         groupId: "00000000-0000-4000-8000-000000000003",
         controlRoomId: "control-room-3",
         groupSecret: "SECRET-DO-NOT-LOG",
@@ -85,8 +87,8 @@ describe("GroupStore", () => {
     }
   });
 
-  it("updateSharedState persists new state", () => {
-    const record = store.create({
+  it("updateSharedState persists new state", async () => {
+    const record = await store.create({
       groupId: "00000000-0000-4000-8000-000000000004",
       controlRoomId: "control-room-4",
       groupSecret: "secret-4",
@@ -102,8 +104,8 @@ describe("GroupStore", () => {
     expect(fetched!.sharedState.name.value).toBe("Renamed");
   });
 
-  it("leave removes a group", () => {
-    const record = store.create({
+  it("leave removes a group", async () => {
+    const record = await store.create({
       groupId: "00000000-0000-4000-8000-000000000005",
       controlRoomId: "control-room-5",
       groupSecret: "secret-5",

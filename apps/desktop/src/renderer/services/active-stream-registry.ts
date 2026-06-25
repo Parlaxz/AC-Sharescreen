@@ -9,6 +9,7 @@ export interface StreamAnnouncement {
   startedAt: number;
   appliedSettingsRevision: number;
   heartbeatSequence: number;
+  streamRevision: number;
   /** Per-viewer join metadata (not the actual media secret) */
   mediaJoinMetadata: string;
   replacesSessionId: string | null;
@@ -27,14 +28,22 @@ export interface StreamUpdate {
 
 export class ActiveStreamRegistry {
   private streams = new Map<string, InternalStream>();
+  /** Tracks stopped streams by logicalStreamId → stopTimeMs to prevent resurrection. */
+  private stopTombstones = new Map<string, number>();
+  /** Per-stream highest observed heartbeatSequence for stale rejection. */
+  private heartbeatSequences = new Map<string, number>();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private listeners = new Set<(update: StreamUpdate) => void>();
   private heartbeatIntervalMs: number;
   private expiryMs: number;
+  private tombstoneMaxAgeMs: number;
+  private tombstoneMaxEntries: number;
 
   constructor(heartbeatIntervalMs = 10_000, expiryMs = 30_000) {
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.expiryMs = expiryMs;
+    this.tombstoneMaxAgeMs = 5 * 60 * 1000; // 5 minutes
+    this.tombstoneMaxEntries = 100;
     this.startHeartbeatCheck();
   }
 
@@ -54,6 +63,17 @@ export class ActiveStreamRegistry {
   }
 
   handleStarted(data: StreamAnnouncement): void {
+    const tombstoneStopTime = this.stopTombstones.get(data.logicalStreamId);
+    if (tombstoneStopTime !== undefined) {
+      const age = Date.now() - tombstoneStopTime;
+      if (age < this.tombstoneMaxAgeMs) {
+        // Tombstone too recent — reject this start as stale
+        return;
+      }
+      // Tombstone older than 5 minutes — remove it and accept
+      this.stopTombstones.delete(data.logicalStreamId);
+    }
+
     if (data.replacesSessionId) {
       // This is a restart — remove old stream and mark as replaced
       for (const [k, s] of this.streams) {
@@ -74,8 +94,14 @@ export class ActiveStreamRegistry {
     const k = this.key(data.groupId, data.hostDeviceId, data.logicalStreamId);
     const existing = this.streams.get(k);
     if (existing && !existing.stopped) {
+      // Validate heartbeat sequence — reject stale updates
+      const lastSeq = this.heartbeatSequences.get(data.logicalStreamId) ?? -1;
+      if (data.heartbeatSequence <= lastSeq) {
+        return; // stale
+      }
       existing.announcement = { ...data };
       existing.lastHeartbeatAt = Date.now();
+      this.heartbeatSequences.set(data.logicalStreamId, data.heartbeatSequence);
       this.emit({ type: "updated", stream: data });
       return;
     }
@@ -85,6 +111,7 @@ export class ActiveStreamRegistry {
       lastHeartbeatAt: Date.now(),
       stopped: false,
     });
+    this.heartbeatSequences.set(data.logicalStreamId, data.heartbeatSequence);
     this.emit({ type: "new", stream: data });
   }
 
@@ -96,6 +123,17 @@ export class ActiveStreamRegistry {
     heartbeatSequence: number;
     appliedSettingsRevision?: number;
   }): void {
+    // Check tombstone — if stream is dead, ignore heartbeat (no resurrection)
+    if (this.stopTombstones.has(heartbeat.logicalStreamId)) {
+      return;
+    }
+
+    // Validate sequence number — reject stale heartbeats
+    const lastSeq = this.heartbeatSequences.get(heartbeat.logicalStreamId) ?? -1;
+    if (heartbeat.heartbeatSequence <= lastSeq) {
+      return;
+    }
+
     for (const [k, s] of this.streams) {
       if (!s.stopped &&
           s.announcement.groupId === heartbeat.groupId &&
@@ -103,6 +141,7 @@ export class ActiveStreamRegistry {
           s.announcement.logicalStreamId === heartbeat.logicalStreamId) {
         s.lastHeartbeatAt = Date.now();
         s.announcement.heartbeatSequence = heartbeat.heartbeatSequence;
+        this.heartbeatSequences.set(heartbeat.logicalStreamId, heartbeat.heartbeatSequence);
         if (heartbeat.appliedSettingsRevision !== undefined) {
           s.announcement.appliedSettingsRevision = heartbeat.appliedSettingsRevision;
         }
@@ -122,6 +161,8 @@ export class ActiveStreamRegistry {
           s.announcement.hostDeviceId === stop.hostDeviceId &&
           s.announcement.logicalStreamId === stop.logicalStreamId) {
         s.stopped = true;
+        // Add to tombstone map to prevent resurrection
+        this.stopTombstones.set(stop.logicalStreamId, Date.now());
         this.emit({ type: "stopped", stream: { ...s.announcement } });
         return;
       }
@@ -191,6 +232,8 @@ export class ActiveStreamRegistry {
   destroy(): void {
     this.listeners.clear();
     this.streams.clear();
+    this.stopTombstones.clear();
+    this.heartbeatSequences.clear();
     this.stopHeartbeatCheck();
   }
 
@@ -202,9 +245,12 @@ export class ActiveStreamRegistry {
       for (const [k, s] of this.streams) {
         if (!s.stopped && s.lastHeartbeatAt < expireBefore) {
           s.stopped = true;
+          this.stopTombstones.set(s.announcement.logicalStreamId, now);
           this.emit({ type: "stopped", stream: { ...s.announcement } });
         }
       }
+      // Prune old tombstones
+      this.pruneTombstones(now);
     }, this.heartbeatIntervalMs);
   }
 
@@ -212,6 +258,27 @@ export class ActiveStreamRegistry {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Remove tombstones older than tombstoneMaxAgeMs.
+   * Bound tombstone map to at most tombstoneMaxEntries entries.
+   */
+  private pruneTombstones(now: number): void {
+    const cutoff = now - this.tombstoneMaxAgeMs;
+    for (const [id, stopTime] of this.stopTombstones) {
+      if (stopTime < cutoff) {
+        this.stopTombstones.delete(id);
+      }
+    }
+    // Enforce max entries — evict oldest if over limit
+    if (this.stopTombstones.size > this.tombstoneMaxEntries) {
+      const sorted = [...this.stopTombstones.entries()].sort((a, b) => a[1] - b[1]);
+      const toRemove = sorted.slice(0, sorted.length - this.tombstoneMaxEntries);
+      for (const [id] of toRemove) {
+        this.stopTombstones.delete(id);
+      }
     }
   }
 }

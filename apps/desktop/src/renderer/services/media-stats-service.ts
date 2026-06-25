@@ -1,5 +1,29 @@
 import type { VDONinjaSDK } from "@screenlink/vdo-adapter";
 
+// ─── PerViewerStats ─────────────────────────────────────────────────────────
+
+export interface PerViewerStats {
+  viewerDeviceId: string;
+  mediaPeerUuid: string;
+  videoBitrateKbps: number;
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  qualityLimitationReason: string | null;
+  retransmittedBytes: number;
+  nackCount: number;
+  pliCount: number;
+  availableOutgoingBitrate: number;
+  rtt: number;
+  packetLoss: number;
+  candidateType: string;
+  relayProtocol: string;
+  audioBitrateKbps: number;
+  audioCodec: string;
+  lastUpdated: number;
+}
+
 export interface MediaStatsSnapshot {
   // Outbound
   outboundBitrateKbps: number;
@@ -65,6 +89,21 @@ export class MediaStatsPoller {
   private previousAudioOutboundBytes = 0;
   private previousAudioInboundBytes = 0;
   private onStats: ((stats: MediaStatsSnapshot) => void) | null = null;
+
+  // Per-viewer stats accumulation (Phase 3)
+  readonly viewerStats: Map<string, PerViewerStats> = new Map();
+
+  /**
+   * Accumulate a per-viewer stats entry. If an entry for the given
+   * viewerDeviceId already exists, it is overwritten with the latest data.
+   * The `lastUpdated` field is set to Date.now() automatically.
+   */
+  accumulateViewerStats(stats: Omit<PerViewerStats, "lastUpdated">): void {
+    this.viewerStats.set(stats.viewerDeviceId, {
+      ...stats,
+      lastUpdated: Date.now(),
+    });
+  }
 
   start(
     sdk: VDONinjaSDK,

@@ -6,6 +6,13 @@ import { createDefaultGroupQualitySettings } from "./quality-settings.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
+export interface GroupBootstrapCreator {
+  deviceId: string;
+  displayName: string;
+  firstSeenAt: number;
+  profileStamp: HybridTimestamp;
+}
+
 export interface GroupInviteV1 {
   version: 1;
   groupId: string;
@@ -15,6 +22,7 @@ export interface GroupInviteV1 {
   bootstrapNameStamp: HybridTimestamp;
   bootstrapSettings: GroupQualitySettings;
   bootstrapSettingsStamp: HybridTimestamp;
+  bootstrapCreator: GroupBootstrapCreator;
 }
 
 // ─── Schemas ───────────────────────────────────────────────────────────────
@@ -25,6 +33,13 @@ export interface GroupInviteV1 {
 import { HybridTimestampSchema } from "./hybrid-logical-clock.js";
 import { GroupQualitySettingsSchema } from "./quality-settings.js";
 
+export const GroupBootstrapCreatorSchema: z.ZodType<GroupBootstrapCreator> = z.object({
+  deviceId: z.string().min(1).max(128),
+  displayName: z.string().min(1).max(100),
+  firstSeenAt: z.number().int().positive(),
+  profileStamp: HybridTimestampSchema,
+});
+
 export const GroupInviteV1Schema: z.ZodType<GroupInviteV1> = z.object({
   version: z.literal(1),
   groupId: z.string().uuid(),
@@ -34,6 +49,7 @@ export const GroupInviteV1Schema: z.ZodType<GroupInviteV1> = z.object({
   bootstrapNameStamp: HybridTimestampSchema,
   bootstrapSettings: GroupQualitySettingsSchema,
   bootstrapSettingsStamp: HybridTimestampSchema,
+  bootstrapCreator: GroupBootstrapCreatorSchema,
 });
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -64,7 +80,7 @@ export function createGroupInvite(opts: CreateGroupInviteOpts): GroupInviteV1 {
     groupId: opts.groupId ?? crypto.randomUUID(),
     controlRoomId: randomBase64Url(16),
     groupSecret: randomBase64Url(32),
-    bootstrapName: opts.displayName.trim().slice(0, 100),
+    bootstrapName: opts.groupName.trim().slice(0, 100),
     bootstrapNameStamp: {
       wallTimeMs: now,
       counter: 0,
@@ -75,6 +91,16 @@ export function createGroupInvite(opts: CreateGroupInviteOpts): GroupInviteV1 {
       wallTimeMs: now,
       counter: 0,
       nodeId: opts.nodeId,
+    },
+    bootstrapCreator: {
+      deviceId: opts.nodeId,
+      displayName: opts.displayName.trim().slice(0, 100),
+      firstSeenAt: now,
+      profileStamp: {
+        wallTimeMs: now,
+        counter: 0,
+        nodeId: opts.nodeId,
+      },
     },
   };
 

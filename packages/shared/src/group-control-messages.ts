@@ -229,6 +229,41 @@ export async function validateEnvelope(
   return { ok: true, data };
 }
 
+// ─── Per-Message Payload Schemas ──────────────────────────────────────────
+
+export const GroupHelloPayloadSchema = z.object({
+  deviceId: z.string(),
+  displayName: z.string().min(1).max(100),
+  protocolVersion: z.number().int().positive(),
+});
+
+export const GroupHelloResponsePayloadSchema = z.object({
+  deviceId: z.string(),
+  displayName: z.string().min(1).max(100),
+});
+
+export const GroupStateUpdatePayloadSchema = z.object({
+  state: z.record(z.unknown()),
+  stamp: HybridTimestampSchema.optional(),
+});
+
+export const GroupStateSummaryPayloadSchema = z.object({
+  summary: z.record(z.unknown()),
+});
+
+export const GroupStateRequestPayloadSchema = z.object({
+  type: z.literal("group.state.request").optional(),
+});
+
+export const GroupMemberUpdatePayloadSchema = z.object({
+  member: z.object({
+    deviceId: z.string(),
+    displayName: z.string().min(1).max(100),
+    firstSeenAt: z.number().int().positive(),
+    profileStamp: HybridTimestampSchema,
+  }),
+});
+
 // ─── DedupSet ──────────────────────────────────────────────────────────────
 
 /**

@@ -20,7 +20,10 @@ describe("GroupLink", () => {
     );
     expect(invite.controlRoomId).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(invite.groupSecret).toMatch(/^[A-Za-z0-9_-]+$/);
-    expect(invite.bootstrapName).toBe(displayName);
+    expect(invite.bootstrapName).toBe(groupName);
+    expect(invite.bootstrapCreator.deviceId).toBe(nodeId);
+    expect(invite.bootstrapCreator.displayName).toBe(displayName);
+    expect(invite.bootstrapCreator.firstSeenAt).toBeGreaterThan(0);
     expect(GroupInviteV1Schema.safeParse(invite).success).toBe(true);
   });
 

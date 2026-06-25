@@ -6,8 +6,9 @@ import { AudioHelperManager } from "./AudioHelperManager.js";
 import {
   generateVdoStreamId,
   generateVdoPassword,
+  GroupSharedStateSchema,
+  HybridTimestampSchema,
   type GroupInviteV1,
-  type GroupQualitySettings,
 } from "@screenlink/shared";
 import type { SettingsStore } from "./settings-store.js";
 import type { SecureStore } from "./secure-store.js";
@@ -176,21 +177,22 @@ export function registerIpcHandlers(
       "create-group",
       async (
         _event,
-        input: { groupName: string; nodeId: string; groupId?: string; nowMs?: number },
+        input: { groupName: string; groupId?: string; nowMs?: number },
       ) => {
+        const identity = settings.get().deviceIdentity;
         const { createGroupInvite } = await import("@screenlink/shared");
         const invite = createGroupInvite({
           groupName: input.groupName,
-          displayName: settings.get().deviceIdentity.displayName,
-          nodeId: input.nodeId,
+          displayName: identity.displayName,
+          nodeId: identity.deviceId,
           groupId: input.groupId,
           nowMs: input.nowMs,
         });
-        const record = groupStore.create({
+        const record = await groupStore.create({
           groupId: invite.groupId,
           controlRoomId: invite.controlRoomId,
           groupSecret: invite.groupSecret,
-          nodeId: input.nodeId,
+          nodeId: identity.deviceId,
           groupName: input.groupName,
         });
         return { record, invite };
@@ -199,7 +201,8 @@ export function registerIpcHandlers(
 
     ipcMain.handle(
       "join-group",
-      async (_event, payload: { link: string; nodeId: string; nowMs?: number }) => {
+      async (_event, payload: { link: string; nowMs?: number }) => {
+        const identity = settings.get().deviceIdentity;
         const { parseGroupInviteLink, parseGroupInviteCode } = await import(
           "@screenlink/shared"
         );
@@ -209,7 +212,7 @@ export function registerIpcHandlers(
         if (!invite) {
           throw new Error("Invalid group link or code");
         }
-        const record = groupStore.import({ invite, nodeId: payload.nodeId, joinedAt: payload.nowMs });
+        const record = await groupStore.import({ invite, nodeId: identity.deviceId, displayName: identity.displayName, joinedAt: payload.nowMs });
         return record;
       },
     );
@@ -217,23 +220,9 @@ export function registerIpcHandlers(
     ipcMain.handle(
       "get-group-invite",
       async (_event, groupId: string) => {
-        const { formatGroupInviteLink } = await import(
-          "@screenlink/shared"
-        );
-        const record = groupStore.get(groupId);
-        if (!record) return null;
-        const settings: GroupQualitySettings = record.sharedState.defaultQuality.value;
-        const invite: GroupInviteV1 = {
-          version: 1,
-          groupId: record.groupId,
-          controlRoomId: record.controlRoomId,
-          groupSecret: "",
-          bootstrapName: record.sharedState.name.value,
-          bootstrapNameStamp: record.sharedState.name.stamp,
-          bootstrapSettings: settings,
-          bootstrapSettingsStamp: record.sharedState.defaultQuality.stamp,
-        };
-        return { invite, link: formatGroupInviteLink(invite) };
+        const link = groupStore.getInviteLink(groupId);
+        if (!link) return null;
+        return { link };
       },
     );
 
@@ -242,15 +231,31 @@ export function registerIpcHandlers(
       (_event, groupId: string, state: unknown) => {
         const record = groupStore.get(groupId);
         if (!record) throw new Error("Group not found");
-        // Renderer already validated via Zod; we trust it for performance.
-        // Re-validate is also fine — keep store interface simple.
-        groupStore.updateSharedState(groupId, state as never);
+
+        const parsed = GroupSharedStateSchema.safeParse(state);
+        if (!parsed.success) {
+          throw new Error(`Invalid group state: ${parsed.error.message}`);
+        }
+
+        // Verify group ID matches
+        if (parsed.data.groupId !== groupId) {
+          throw new Error("State groupId does not match IPC groupId");
+        }
+
+        // Verify no empty hashes
+        if (!parsed.data.name.valueHash || !parsed.data.defaultQuality.valueHash) {
+          throw new Error("State contains empty LWW hashes");
+        }
+
+        groupStore.updateSharedState(groupId, parsed.data as never);
         return groupStore.get(groupId);
       },
     );
 
     ipcMain.handle("update-group-clock", (_event, groupId: string, stamp: unknown) => {
-      groupStore.updateClock(groupId, stamp as never);
+      const parsed = HybridTimestampSchema.safeParse(stamp);
+      if (!parsed.success) throw new Error(`Invalid clock: ${parsed.error.message}`);
+      groupStore.updateClock(groupId, parsed.data as never);
     });
 
     ipcMain.handle("set-group-notifications", (_event, groupId: string, enabled: boolean) => {

@@ -9,6 +9,8 @@ import {
   duplicateQualityPreset,
   exportQualityPreset,
   parseQualityPresetExport,
+  createDefaultVideoQualitySettings,
+  createDefaultAudioEncodingSettings,
 } from "@screenlink/shared";
 import { z } from "zod";
 
@@ -31,6 +33,32 @@ export class QualityPresetStore {
     this.presets = this.load();
   }
 
+  /**
+   * Detect compact quality settings form (Phase 2/early Phase 3) and migrate
+   * to the nested GroupQualitySettings schema with video/audio sub-objects.
+   */
+  private migrateCompactSettings(settings: unknown): unknown {
+    if (!settings || typeof settings !== "object") return settings;
+    const obj = settings as Record<string, unknown>;
+    // Compact form has videoBitrateKbps at the top level (not nested under "video")
+    if ("videoBitrateKbps" in obj && typeof obj.videoBitrateKbps === "number" && !("schemaVersion" in obj)) {
+      const video = createDefaultVideoQualitySettings();
+      const audio = createDefaultAudioEncodingSettings();
+      if (typeof obj.videoBitrateKbps === "number") video.videoBitrateKbps = obj.videoBitrateKbps as number;
+      if (typeof obj.maxWidth === "number") video.sendWidth = obj.maxWidth as number;
+      if (typeof obj.maxHeight === "number") video.sendHeight = obj.maxHeight as number;
+      if (typeof obj.maxFps === "number") video.sendFps = obj.maxFps as number;
+      if (typeof obj.captureWidth === "number") video.captureWidth = obj.captureWidth as number;
+      if (typeof obj.captureHeight === "number") video.captureHeight = obj.captureHeight as number;
+      if (typeof obj.captureFps === "number") video.captureFps = obj.captureFps as number;
+      if (typeof obj.degradationPreference === "string") video.degradationPreference = obj.degradationPreference as never;
+      if (typeof obj.contentHint === "string") video.contentHint = obj.contentHint as never;
+      if (typeof obj.audioEnabled === "boolean") audio.fec = obj.audioEnabled as boolean;
+      return { schemaVersion: 1 as const, video, audio };
+    }
+    return settings;
+  }
+
   private load(): Map<string, QualityPreset> {
     const map = new Map<string, QualityPreset>();
     const tryRead = (filePath: string): QualityPreset[] | null => {
@@ -38,6 +66,28 @@ export class QualityPresetStore {
       try {
         const raw = fs.readFileSync(filePath, "utf-8");
         const parsed = JSON.parse(raw);
+        // Phase 2/early Phase 3 migration: convert compact settings per preset
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.presets)) {
+          let needsPersist = false;
+          for (const preset of parsed.presets) {
+            if (preset && typeof preset === "object" && "settings" in preset) {
+              const migrated = this.migrateCompactSettings(preset.settings);
+              if (migrated !== preset.settings) {
+                preset.settings = migrated;
+                needsPersist = true;
+              }
+            }
+          }
+          if (needsPersist) {
+            try {
+              const file: PresetsFile = { schemaVersion: 1 as const, presets: parsed.presets };
+              fs.writeFileSync(this.filePath + ".tmp", JSON.stringify(file, null, 2), "utf-8");
+              fs.renameSync(this.filePath + ".tmp", this.filePath);
+            } catch {
+              // best-effort
+            }
+          }
+        }
         const result = QualityPresetsFileSchema.safeParse(parsed);
         if (result.success) return result.data.presets as QualityPreset[];
         return null;

@@ -43,3 +43,24 @@ export function getVideoSender(pc: RTCPeerConnection): RTCRtpSender | undefined 
 export function getAudioSender(pc: RTCPeerConnection): RTCRtpSender | undefined {
   return pc.getSenders().find(s => s.track?.kind === "audio");
 }
+
+/**
+ * Get the RTCPeerConnection for a specific media peer UUID.
+ * Works for both publishers and viewers.
+ */
+export function getPeerConnection(sdk: VDONinjaSDK, mediaPeerUuid: string): RTCPeerConnection | null {
+  const group = sdk.connections.get(mediaPeerUuid);
+  if (!group) return null;
+  return group.publisher?.pc ?? group.viewer?.pc ?? null;
+}
+
+/**
+ * Get the video RTCRtpSender for a specific peer connection.
+ * In a publishing (host) context, the video sender is sending TO this peer.
+ * In a viewing context, it's the sender on the viewer's peer connection.
+ */
+export function getVideoSenderForPeer(pc: RTCPeerConnection, _mediaPeerUuid: string): RTCRtpSender | null {
+  // mediaPeerUuid is retained in the API signature for future per-peer sender selection.
+  // Currently each RTCPeerConnection represents one peer, so we find the first video sender.
+  return pc.getSenders().find(s => s.track?.kind === "video") ?? null;
+}

@@ -31,7 +31,7 @@ export interface ScreenLinkAPI {
   getGroup: (groupId: string) => Promise<unknown | null>;
   createGroup: (input: { groupName: string }) => Promise<unknown>;
   joinGroup: (input: { link: string }) => Promise<unknown>;
-  getGroupInvite: (groupId: string) => Promise<{ invite: unknown; link: string } | null>;
+  getGroupInvite: (groupId: string) => Promise<{ link: string } | null>;
   updateGroupSharedState: (groupId: string, state: unknown) => Promise<unknown | null>;
   updateGroupClock: (groupId: string, stamp: unknown) => Promise<void>;
   setGroupNotifications: (groupId: string, enabled: boolean) => Promise<void>;

@@ -108,35 +108,6 @@ export interface AppState {
   setGroupConnectionState: (stateById: Record<string, GroupConnectionState>) => void;
   setOnlineDevices: (byGroup: Record<string, string[]>) => void;
   setActiveStreams: (byGroup: Record<string, StreamAnnouncement[]>) => void;
-
-  // ── Phase 2G legacy fields (will be removed with Dashboard rewrite) ──
-  pairingState: string;
-  friendDisplayName: string;
-  friendDeviceId: string;
-  friendIsSharing: boolean;
-  remoteShareState: string;
-  remoteStreamId: string;
-  remoteMediaPassword: string;
-  remoteMediaSessionId: string;
-  localMediaSessionId: string;
-  localStreamId: string;
-  localMediaPassword: string;
-  autoWatchFriend: boolean;
-  mode: string;
-  viewStreamHostName: string;
-
-  // Legacy action setters
-  setPairingState: (s: string) => void;
-  setFriendInfo: (d: string, n: string) => void;
-  setFriendSharing: (s: boolean) => void;
-  setRemoteShareState: (s: string) => void;
-  setRemoteMediaCredentials: (sid: string, s: string, p: string) => void;
-  setLocalMediaCredentials: (sid: string, s: string, p: string) => void;
-  clearRemoteMediaCredentials: () => void;
-  clearLocalMediaCredentials: () => void;
-  setAutoWatchFriend: (e: boolean) => void;
-  setMode: (m: string) => void;
-  setViewStreamHostName: (n: string) => void;
 }
 
 export type LocalShareState =
@@ -176,22 +147,6 @@ const initialState = {
   localShareState: "idle" as LocalShareState,
   localStreamSession: null as { sessionId: string; streamId: string; password: string } | null,
   qualityPresets: [] as unknown[],
-
-  // Legacy deprecated shims
-  pairingState: "unpaired",
-  friendDisplayName: "",
-  friendDeviceId: "",
-  friendIsSharing: false,
-  remoteShareState: "remote-offline",
-  remoteStreamId: "",
-  remoteMediaPassword: "",
-  remoteMediaSessionId: "",
-  localMediaSessionId: "",
-  localStreamId: "",
-  localMediaPassword: "",
-  autoWatchFriend: false,
-  mode: "host",
-  viewStreamHostName: "",
 };
 
 export const useStore = create<AppState>((set) => ({
@@ -237,17 +192,4 @@ export const useStore = create<AppState>((set) => ({
   setActiveStreams: (activeStreamsByGroup) => set({ activeStreamsByGroup }),
 
   reset: () => set(initialState),
-
-  // Legacy shim setters — no-op
-  setPairingState: (s) => set({ pairingState: s }),
-  setFriendInfo: (d, n) => set({ friendDeviceId: d, friendDisplayName: n }),
-  setFriendSharing: (s) => set({ friendIsSharing: s }),
-  setRemoteShareState: (s) => set({ remoteShareState: s }),
-  setRemoteMediaCredentials: (sid, s, p) => set({ remoteMediaSessionId: sid, remoteStreamId: s, remoteMediaPassword: p }),
-  setLocalMediaCredentials: (sid, s, p) => set({ localMediaSessionId: sid, localStreamId: s, localMediaPassword: p }),
-  clearRemoteMediaCredentials: () => set({ remoteMediaSessionId: "", remoteStreamId: "", remoteMediaPassword: "" }),
-  clearLocalMediaCredentials: () => set({ localMediaSessionId: "", localStreamId: "", localMediaPassword: "" }),
-  setAutoWatchFriend: (e) => set({ autoWatchFriend: e }),
-  setMode: (m) => set({ mode: m }),
-  setViewStreamHostName: (n) => set({ viewStreamHostName: n }),
 }));

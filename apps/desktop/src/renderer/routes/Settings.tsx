@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useStore, type Page } from "../stores/main-store.js";
 import type { PersistedSettings } from "../../preload/api-types.js";
-import { restartControlConnection } from "../services/control-connection.js";
+
 
 async function getApi() {
   return (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
@@ -152,8 +152,6 @@ export function Settings() {
         // Reload full config from main process to get the lifecycle state
         const config = await api?.getPairingConfig();
         if (config) setPairingConfig(config as Record<string, unknown>);
-        // Restart control connection so creator enters waiting/connected lifecycle
-        await restartControlConnection();
       }
     } catch (err) {
       setPairingStatus(`Failed: ${(err as Error).message}`);
@@ -183,8 +181,7 @@ export function Settings() {
         setImportLinkInput("");
         const config = await api?.getPairingConfig();
         if (config) setPairingConfig(config as Record<string, unknown>);
-        // Restart control connection so importer connects immediately
-        await restartControlConnection();
+        // Phase 3: GroupConnectionManager handles connection lifecycle
       }
     } catch (err) {
       setPairingStatus(`Import failed: ${(err as Error).message}`);
@@ -198,8 +195,7 @@ export function Settings() {
       setPairingConfig(null);
       setPairingStatus("Pairing reset.");
       setCreatedPairingCode(null);
-      // Restart control connection to tear down stale SDK connections and state
-      await restartControlConnection();
+      // Phase 3: GroupConnectionManager handles connection lifecycle
     } catch (err) {
       setPairingStatus(`Failed: ${(err as Error).message}`);
     }
@@ -215,8 +211,7 @@ export function Settings() {
         setPairingStatus("New pairing link generated!");
         const config = await api?.getPairingConfig();
         if (config) setPairingConfig(config as Record<string, unknown>);
-        // Restart control connection with the regenerated credentials
-        await restartControlConnection();
+        // Phase 3: GroupConnectionManager handles connection lifecycle
       }
     } catch (err) {
       setPairingStatus(`Failed: ${(err as Error).message}`);

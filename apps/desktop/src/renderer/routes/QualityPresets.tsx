@@ -1,10 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../stores/main-store.js";
+import {
+  createDefaultVideoQualitySettings,
+  createDefaultAudioEncodingSettings,
+  extractViewerRequestFromPreset,
+} from "@screenlink/shared";
 
 interface QualityPresetDTO {
   id: string;
   name: string;
-  settings: {
+  settings: import("@screenlink/shared").GroupQualitySettings | {
     videoBitrateKbps: number;
     maxWidth: number;
     maxHeight: number;
@@ -71,15 +76,11 @@ export function QualityPresets() {
           <button
             onClick={async () => {
               const settings = {
-                videoBitrateKbps: 1000,
-                maxWidth: 1280,
-                maxHeight: 720,
-                maxFps: 30,
-                degradationPreference: "maintain-resolution",
-                contentHint: "detail",
-                audioEnabled: true,
+                schemaVersion: 1 as const,
+                video: createDefaultVideoQualitySettings(),
+                audio: createDefaultAudioEncodingSettings(),
               };
-              await (window as unknown as { screenlink: { createQualityPreset: (i: { name: string; settings: typeof settings }) => Promise<unknown> } }).screenlink.createQualityPreset({ name: "New Preset", settings });
+              await (window as unknown as { screenlink: { createQualityPreset: (i: { name: string; settings: unknown }) => Promise<unknown> } }).screenlink.createQualityPreset({ name: "New Preset", settings });
               await refresh();
             }}
           >
@@ -122,10 +123,40 @@ export function QualityPresets() {
             <div key={p.id} className="preset-card">
               <h3>{p.name}</h3>
               <p>
-                {p.settings.maxWidth}×{p.settings.maxHeight} @ {p.settings.maxFps} fps · {p.settings.videoBitrateKbps} kbps · {p.settings.contentHint}
+                {'schemaVersion' in p.settings
+                  ? `${(p.settings as import("@screenlink/shared").GroupQualitySettings).video.sendWidth}×${(p.settings as import("@screenlink/shared").GroupQualitySettings).video.sendHeight} @ ${(p.settings as import("@screenlink/shared").GroupQualitySettings).video.sendFps} fps · ${(p.settings as import("@screenlink/shared").GroupQualitySettings).video.videoBitrateKbps} kbps · ${(p.settings as import("@screenlink/shared").GroupQualitySettings).video.contentHint}`
+                  : `${(p.settings as { maxWidth: number }).maxWidth}×${(p.settings as { maxHeight: number }).maxHeight} @ ${(p.settings as { maxFps: number }).maxFps} fps · ${(p.settings as { videoBitrateKbps: number }).videoBitrateKbps} kbps · ${(p.settings as { contentHint: string }).contentHint}`}
               </p>
               <div className="actions">
-                <button disabled>Edit</button>
+                <button onClick={async () => {
+                  const newName = prompt("New name:", p.name);
+                  if (newName && newName.trim()) {
+                    const api = (window as unknown as { screenlink: { updateQualityPreset: (id: string, input: { name?: string }) => Promise<unknown> } }).screenlink;
+                    if (api) {
+                      await api.updateQualityPreset(p.id, { name: newName.trim() });
+                      await refresh();
+                    }
+                  }
+                }}>Edit</button>
+                <button onClick={async () => {
+                  const store = useStore.getState();
+                  const watchedEntries = Object.entries(store.watchedStreamsBySessionId);
+                  if (watchedEntries.length === 0) {
+                    alert("No watched streams available. Watch a stream first to request quality changes.");
+                    return;
+                  }
+                  const [sessionId, watchInfo] = watchedEntries[0];
+                  const hostDeviceId = watchInfo.hostDeviceId;
+                  if ('schemaVersion' in p.settings) {
+                    const preset = p.settings as import("@screenlink/shared").GroupQualitySettings;
+                    const request = extractViewerRequestFromPreset(preset, sessionId, 0);
+                    console.log("[QualityPresets] quality.viewer.request:", request);
+                    alert(`Quality request sent for stream ${sessionId} on device ${hostDeviceId}. Check console for details.`);
+                    // TODO: Send via group control when the message router supports it
+                  } else {
+                    alert("This preset uses an older format. Please recreate it with the new schema.");
+                  }
+                }}>Use This Preset</button>
                 <button onClick={() => void onDuplicate(p.id)}>Duplicate</button>
                 <button onClick={() => void onExport(p.id)}>Export</button>
                 <button onClick={() => void onDelete(p.id)}>Delete</button>
