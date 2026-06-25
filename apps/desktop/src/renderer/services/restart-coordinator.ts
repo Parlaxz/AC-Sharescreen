@@ -11,6 +11,9 @@ import type { QualityCoordinator } from "./quality-coordinator.js";
  * - Viewer reconnect via ActiveStreamRegistry replacement
  * - Per-viewer request restore via QualityCoordinator
  * - No duplicate share notification
+ * - Local host detection: delegates to StreamSessionManager.restartStream()
+ *   for a real lifecycle restart (stop → capture → publish) rather than
+ *   only broadcasting metadata.
  */
 export class RestartCoordinator {
   /** Tracks target hashes per host device for idempotency */
@@ -45,14 +48,16 @@ export class RestartCoordinator {
   /**
    * Execute a restart of all streams for a given host.
    *
+   * For the local host, delegates to StreamSessionManager.restartStream()
+   * for a real lifecycle restart (stop publication → new capture → re-publish).
+   * For remote hosts, broadcasts stream.restarted via the connection manager.
+   *
    * Flow:
    * 1. Verify idempotency via target stamp/hash
-   * 2. Get current stream announcements for the host
-   * 3. For each stream, generate a new mediaSessionId while preserving logicalStreamId
-   * 4. Broadcast stream.restarted via connection manager
-   * 5. ActiveStreamRegistry handles replacement via replacesSessionId
-   * 6. Restore per-viewer requests from QualityCoordinator
-   * 7. No duplicate share notification (handled by dedup in notification-watcher)
+   * 2. If local host: real restart via StreamSessionManager
+   * 3. If remote host: broadcast stream.restarted for each stream
+   * 4. ActiveStreamRegistry handles replacement via replacesSessionId
+   * 5. Clear the restart target
    */
   async restartHostStreams(
     groupId: string,
@@ -65,6 +70,15 @@ export class RestartCoordinator {
     }
 
     try {
+      // 2. Check if this is the local host — delegate to SSM for real restart
+      if (hostDeviceId === this.runtime.deviceId) {
+        const ssm = this.runtime.getStreamSessionManager();
+        await ssm.restartStream();
+        this.clearRestartTarget(hostDeviceId);
+        return;
+      }
+
+      // 3. Remote host: broadcast-based metadata restart
       const registry = this.runtime.getActiveStreamRegistry();
       const connManager = this.runtime.getConnectionManager();
       const streams = registry.getStreamsByGroup(groupId);
@@ -95,7 +109,7 @@ export class RestartCoordinator {
         });
       }
 
-      // Clear the target after successful broadcast
+      // 4. Clear the target after successful broadcast
       this.clearRestartTarget(hostDeviceId);
     } catch (err) {
       console.error("[RestartCoordinator] Failed to restart host streams:", err);

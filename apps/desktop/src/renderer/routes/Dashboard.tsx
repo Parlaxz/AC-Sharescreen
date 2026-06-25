@@ -43,6 +43,9 @@ export function Dashboard() {
     setWatchedStreams,
   } = useStore();
 
+  // Refs for media rendering
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
   // ── Audio derived mode display ──────────────────────────────
   const [audioMode, setAudioMode] = useState<AudioMode>('none');
   const [audioOptionsReady, setAudioOptionsReady] = useState(false);
@@ -256,7 +259,7 @@ export function Dashboard() {
       // returned in the join response (streamId for view(), password for createAndConnect()).
       const viewerClient = new ViewerClient();
 
-      // Register event handler for receiving media
+      // Register event handler for receiving media tracks
       viewerClient.on("remoteAdded", (/* peerUuid: string */) => {
         // Media has been received — update UI state
         setWatchedStreams((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => ({
@@ -268,6 +271,14 @@ export function Dashboard() {
           },
         }));
         setViewStatus("watching");
+      });
+
+      // Register track event to attach received media to video element
+      viewerClient.on("track", (track: MediaStreamTrack, stream: MediaStream) => {
+        if (track.kind === "video" && videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
       });
 
       // Connect to VDO using the VDO password from the join response.
@@ -338,6 +349,12 @@ export function Dashboard() {
         console.warn("[Dashboard] ViewerClient disconnect error:", err);
       }
       viewerClientRef.current = null;
+    }
+
+    // Clean up video element
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
     }
 
     // Clean up watched state
@@ -557,6 +574,21 @@ export function Dashboard() {
               </div>
               <div className="detail-row">
                 <span className="label">Started:</span> {new Date(w.startedAt).toLocaleTimeString()}
+              </div>
+              {/* Media rendering: video element for the watched stream */}
+              <div style={{ marginTop: "0.5rem", marginBottom: "0.5rem" }}>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  style={{
+                    width: "100%",
+                    maxHeight: "300px",
+                    borderRadius: "8px",
+                    backgroundColor: "#000",
+                  }}
+                />
               </div>
               <div className="actions" style={{ marginTop: "0.25rem" }}>
                 <button className="danger" onClick={() => handleStopWatching(sessionId)}>

@@ -1,10 +1,11 @@
 import type { GroupControlEnvelope, GroupControlMessageType } from "@screenlink/shared";
-import { parseGroupMessagePayload } from "@screenlink/shared";
+import { parseGroupMessagePayload, createDefaultGroupQualitySettings, createDefaultHostQualityLimits } from "@screenlink/shared";
 import type { GroupSyncService } from "./group-sync-service.js";
 import type { ActiveStreamRegistry } from "./active-stream-registry.js";
 import type { ViewerMediaBinding } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
 import type { QualityCoordinator } from "./quality-coordinator.js";
+import type { Phase3Runtime } from "./phase3-runtime.js";
 
 /**
  * C1: GroupMessageRouter (Stages 4–5)
@@ -56,12 +57,22 @@ export class GroupMessageRouter {
   /** Stage 6: Quality coordinator for quality message routing */
   private qualityCoordinator: QualityCoordinator | null = null;
 
+  /** Runtime reference for accessing viewer binding and stats service */
+  private runtime: Phase3Runtime | null = null;
+
   constructor(
     private syncService: GroupSyncService,
     private streamRegistry: ActiveStreamRegistry,
     private connManager: GroupConnectionManager,
     private viewerBinding?: ViewerMediaBinding,
   ) {}
+
+  /**
+   * Set the runtime reference for accessing viewer binding and stats service.
+   */
+  setRuntime(runtime: Phase3Runtime): void {
+    this.runtime = runtime;
+  }
 
   /**
    * Stage 6: Set the quality coordinator for quality message routing.
@@ -286,6 +297,39 @@ export class GroupMessageRouter {
           degradationPreference: (data as any).degradationPreference ?? "balanced",
         },
       );
+
+      // Apply quality to the exact viewer sender
+      if (this.runtime) {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        const sender = viewerBinding.getViewerVideoSender(envelope.senderDeviceId);
+        if (sender && this.qualityCoordinator) {
+          // Get the stored viewer request and compute effective quality
+          const request = this.qualityCoordinator.getViewerRequest(
+            groupId,
+            logicalStreamId,
+            envelope.senderDeviceId,
+          );
+          if (request) {
+            const groupSettings = createDefaultGroupQualitySettings();
+            const hostLimits = createDefaultHostQualityLimits();
+            const sourceDimensions = { width: 1920, height: 1080 };
+
+            const effective = this.qualityCoordinator.calculateEffectiveQuality(
+              groupSettings,
+              hostLimits,
+              request,
+              sourceDimensions,
+            );
+
+            this.qualityCoordinator.applyToExactViewer(
+              envelope.senderDeviceId,
+              envelope.senderDeviceId,
+              sender,
+              effective.effective,
+            ).catch(() => {});
+          }
+        }
+      }
       return;
     }
 
@@ -297,6 +341,31 @@ export class GroupMessageRouter {
         logicalStreamId,
         envelope.senderDeviceId,
       );
+
+      // Clear quality on the exact viewer sender (reset to group defaults)
+      if (this.runtime) {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        const sender = viewerBinding.getViewerVideoSender(envelope.senderDeviceId);
+        if (sender && this.qualityCoordinator) {
+          const groupSettings = createDefaultGroupQualitySettings();
+          const hostLimits = createDefaultHostQualityLimits();
+          const sourceDimensions = { width: 1920, height: 1080 };
+
+          const effective = this.qualityCoordinator.calculateEffectiveQuality(
+            groupSettings,
+            hostLimits,
+            null, // No viewer request → apply group defaults
+            sourceDimensions,
+          );
+
+          this.qualityCoordinator.applyToExactViewer(
+            envelope.senderDeviceId,
+            envelope.senderDeviceId,
+            sender,
+            effective.effective,
+          ).catch(() => {});
+        }
+      }
       return;
     }
 

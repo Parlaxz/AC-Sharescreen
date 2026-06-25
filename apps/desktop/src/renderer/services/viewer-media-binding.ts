@@ -16,9 +16,23 @@ export interface BindingToken {
   consumed: boolean;
 }
 
+/**
+ * Extended viewer mapping with complete binding context.
+ * Stores enough information to support exact viewer operations:
+ * sender quality apply, per-viewer stats, and deterministic cleanup.
+ */
 export interface ViewerMapping {
   viewerDeviceId: string;
   mediaPeerUuid: string;
+  groupId: string;
+  logicalStreamId: string;
+  mediaSessionId: string;
+  /** The RTCPeerConnection for this viewer's media, used for sender access and stats */
+  pc: RTCPeerConnection | null;
+  /** The video RTCRtpSender for this viewer, used for quality application */
+  videoSender: RTCRtpSender | null;
+  /** The audio RTCRtpSender for this viewer, used for diagnostics and per-viewer audio control */
+  audioSender: RTCRtpSender | null;
 }
 
 export interface ConsumeBindingInput {
@@ -240,11 +254,59 @@ export class ViewerMediaBinding {
     bindingToken.consumed = true;
     this.tokens.delete(input.token);
 
-    // Store viewer mapping
+    // Try to resolve the RTCPeerConnection, video sender, and audio sender for this viewer
+    let pc: RTCPeerConnection | null = null;
+    let videoSender: RTCRtpSender | null = null;
+    let audioSender: RTCRtpSender | null = null;
+    try {
+      const publisherManager = this.runtime.getStreamSessionManager().getPublisherManager();
+      const hostPublisher = publisherManager?.getPublisher();
+      if (hostPublisher) {
+        const sdk = hostPublisher.getSDK();
+        if (sdk && sdk.connections) {
+          const group = sdk.connections.get(input.mediaPeerUuid);
+          if (group) {
+            pc = group.publisher?.pc ?? group.viewer?.pc ?? null;
+            if (pc) {
+              const senders = pc.getSenders();
+              videoSender = senders.find(s => s.track?.kind === "video") ?? null;
+              audioSender = senders.find(s => s.track?.kind === "audio") ?? null;
+            }
+          }
+        }
+      }
+    } catch {
+      // Sender/PC resolution is best-effort
+    }
+
+    // Store extended viewer mapping with peer connection and sender references
     this.viewerMap.set(input.viewerDeviceId, {
       viewerDeviceId: input.viewerDeviceId,
       mediaPeerUuid: input.mediaPeerUuid,
+      groupId: input.groupId,
+      logicalStreamId: input.logicalStreamId,
+      mediaSessionId: input.mediaSessionId,
+      pc,
+      videoSender,
+      audioSender,
     });
+
+    // Start per-viewer stats polling when binding is established
+    if (pc) {
+      const statsService = this.runtime.getMediaStatsService();
+      if (statsService) {
+        statsService.startViewerPoller(
+          input.groupId,
+          input.logicalStreamId,
+          input.viewerDeviceId,
+          input.mediaPeerUuid,
+          pc,
+          () => {
+            // Stats callback — no-op for now, stats flow through store in future
+          },
+        );
+      }
+    }
 
     return true;
   }
@@ -261,8 +323,22 @@ export class ViewerMediaBinding {
    * Remove a viewer from the binding map.
    * Called when a viewer disconnects.
    * Stage 5: Does NOT affect other viewers.
+   * Also stops per-viewer stats polling for this viewer.
    */
   removeViewer(viewerDeviceId: string): void {
+    const mapping = this.viewerMap.get(viewerDeviceId);
+    if (mapping) {
+      // Stop per-viewer stats polling
+      const statsService = this.runtime.getMediaStatsService();
+      if (statsService) {
+        statsService.disconnectViewer(
+          mapping.groupId,
+          mapping.logicalStreamId,
+          viewerDeviceId,
+          mapping.mediaPeerUuid,
+        );
+      }
+    }
     this.viewerMap.delete(viewerDeviceId);
   }
 
@@ -272,6 +348,41 @@ export class ViewerMediaBinding {
    */
   getAllViewers(): ViewerMapping[] {
     return Array.from(this.viewerMap.values());
+  }
+
+  /**
+   * Get the video RTCRtpSender for a specific viewer.
+   * Returns null if the viewer is not mapped or sender is unavailable.
+   * Used by QualityCoordinator to apply per-viewer quality.
+   */
+  getViewerVideoSender(viewerDeviceId: string): RTCRtpSender | null {
+    return this.viewerMap.get(viewerDeviceId)?.videoSender ?? null;
+  }
+
+  /**
+   * Get the audio RTCRtpSender for a specific viewer.
+   * Returns null if the viewer is not mapped or sender is unavailable.
+   * Used for per-viewer audio diagnostics and control.
+   */
+  getViewerAudioSender(viewerDeviceId: string): RTCRtpSender | null {
+    return this.viewerMap.get(viewerDeviceId)?.audioSender ?? null;
+  }
+
+  /**
+   * Get the RTCPeerConnection for a specific viewer.
+   * Returns null if the viewer is not mapped or PC is unavailable.
+   * Used for per-viewer stats polling and diagnostics.
+   */
+  getViewerPeerConnection(viewerDeviceId: string): RTCPeerConnection | null {
+    return this.viewerMap.get(viewerDeviceId)?.pc ?? null;
+  }
+
+  /**
+   * Get full viewer mapping for a device ID.
+   * Returns null if viewer is not mapped.
+   */
+  getViewerMapping(viewerDeviceId: string): ViewerMapping | null {
+    return this.viewerMap.get(viewerDeviceId) ?? null;
   }
 
   /**

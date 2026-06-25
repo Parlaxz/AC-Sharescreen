@@ -7,7 +7,7 @@ import {
   type AudioMode,
   normalizeAudioMode,
 } from "@screenlink/shared";
-import type { ProcessAudioController } from "../audio/ProcessAudioController.js";
+import { ProcessAudioController } from "../audio/ProcessAudioController.js";
 
 /**
  * Stream session state machine:
@@ -66,6 +66,7 @@ export class StreamSessionManager {
   private publisherManager: PublisherManager | null = null;
   private vdoConfig: VdoSessionConfig | null = null;
   private captureStream: MediaStream | null = null;
+  private _sourceId: string | null = null;
   private _sourceKind: "screen" | "window" | null = null;
   private _developerMode = false;
   private _audioModeOverride: AudioMode | null = null;
@@ -157,6 +158,13 @@ export class StreamSessionManager {
   }
 
   /**
+   * Get the source ID used for this session (if any).
+   */
+  getSourceId(): string | null {
+    return this._sourceId;
+  }
+
+  /**
    * Stage 13: Set the source kind used for audio mode derivation.
    * Called when the source changes to reset the derived mode.
    */
@@ -215,7 +223,7 @@ export class StreamSessionManager {
       groupId: this.groupId!,
       hostDeviceId: this._hostDeviceId,
       hostDisplayName: this._hostDisplayName,
-      sourceKind: this.currentTrack?.kind ?? "screen",
+        sourceKind: this._sourceKind ?? this.currentTrack?.kind ?? "screen",
       sourceName: this.currentTrack?.label ?? "",
       startedAt: this.startedAt,
       appliedSettingsRevision: 0,
@@ -252,10 +260,28 @@ export class StreamSessionManager {
     this.startedAt = Date.now();
     this.streamRevision++;
     this.heartbeatSeq = 0;
+    this._sourceId = input.source.id;
     this._sourceKind = input.source.kind;
     this._isAudioDegraded = false;
 
     try {
+      // 0. Read group defaults from sync service (Stage 15)
+      const syncState = this.runtime.getSyncService().getSyncState(input.groupId);
+      const quality = syncState?.state?.defaultQuality?.value ?? null;
+
+      // Derive effective publication settings from group defaults
+      const videoBitrate = quality?.video?.videoBitrateKbps ?? 650;
+      const videoWidth = quality?.video?.sendWidth ?? 854;
+      const videoHeight = quality?.video?.sendHeight ?? 480;
+      const videoFps = quality?.video?.sendFps ?? 15;
+      // Stage 17: Additional fields from group defaults
+      const codec = quality?.video?.codec ?? "auto";
+      const contentHint = quality?.video?.contentHint ?? "detail";
+      const degradationPreference = quality?.video?.degradationPreference ?? "maintain-resolution";
+      const captureWidth = quality?.video?.captureWidth ?? 854;
+      const captureHeight = quality?.video?.captureHeight ?? 480;
+      const captureFps = quality?.video?.captureFps ?? 15;
+
       // 0. Generate VDO credentials
       const vdoStreamId = generateVdoStreamId();
       const vdoPassword = generateVdoPassword();
@@ -299,19 +325,38 @@ export class StreamSessionManager {
       }
       this.currentTrack = videoTracks[0];
 
-      // 3. Publish via PublisherManager
-      // If audio controller was set before startStream, it will be included.
+      // 3. Source-derived audio setup
+      // Normal mode: screen → Filtered Monitor Audio, window → Application Audio
+      // If audio setup fails, mark degraded and continue with video only
+      try {
+        await this.setupSourceAudio(input.source.id, input.source.kind);
+      } catch (err) {
+        console.warn("[SSM] Audio setup failed, continuing with video only:", err);
+        this._isAudioDegraded = true;
+      }
+
+      // 4. Publish via PublisherManager with effective quality from group defaults
+      // If audio controller was set before startStream (via setAudioController or
+      // source-derived audio setup), it will be included in the combined stream.
+      // Stage 17: Pass codec, contentHint, degradationPreference, and capture settings
+      // from group defaults so PublisherManager can apply them to the media pipeline.
       await this.publisherManager.startPublishing(this.captureStream, {
         sourceId: input.source.id,
         password: vdoPassword,
         streamId: vdoStreamId,
-        videoBitrate: 650, // default; override via quality settings later
-        videoWidth: 854,
-        videoHeight: 480,
-        videoFps: 15,
+        videoBitrate,
+        videoWidth,
+        videoHeight,
+        videoFps,
+        codec,
+        contentHint,
+        degradationPreference,
+        captureWidth,
+        captureHeight,
+        captureFps,
       });
 
-      // 4. Register locally BEFORE broadcasting so the stream exists
+      // 5. Register locally BEFORE broadcasting so the stream exists
       // when peers respond with snapshots.
       const registry = this.runtime.getActiveStreamRegistry();
       registry.registerLocalStream(this.buildAnnouncement());
@@ -374,6 +419,16 @@ export class StreamSessionManager {
     const lastHostDeviceId = this._hostDeviceId;
 
     try {
+      // Stop audio helper if active (wrapped for Node.js test compat)
+      try {
+        const api = typeof window !== "undefined"
+          ? (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink
+          : null;
+        if (api) {
+          await api.stopAudio();
+        }
+      } catch { /* audio stop is best-effort */ }
+
       // Reject pending joins and close viewer mappings
       const viewerBinding = this.runtime.getViewerMediaBinding();
       if (viewerBinding) {
@@ -415,59 +470,151 @@ export class StreamSessionManager {
   }
 
   /**
-   * Restart stream with a new media session (e.g., after source change).
-   * Transitions: active → starting → active (new mediaSessionId)
+   * Restart stream with a real lifecycle: stop current publication/audio,
+   * preserve logicalStreamId and source selection, create new mediaSessionId
+   * and VDO credentials, restart publication with current defaults, and
+   * broadcast stream.restarted.
+   *
+   * Transitions: active → restarting → active
    */
-  async restartStream(newMediaSessionId: string): Promise<void> {
+  async restartStream(): Promise<void> {
     if (this._state !== "active") return;
     if (this.destroyed) return;
 
-    const oldState = {
-      groupId: this.groupId!,
-      logicalStreamId: this.logicalStreamId!,
-      oldMediaSessionId: this.mediaSessionId!,
-    };
+    const oldGroupId = this.groupId!;
+    const oldLogicalStreamId = this.logicalStreamId!;
+    const oldMediaSessionId = this.mediaSessionId!;
+    const oldSourceId = this._sourceId;
+    const oldSourceKind = this._sourceKind;
 
     this._state = "restarting";
     this.stopHeartbeat();
-    this.mediaSessionId = newMediaSessionId;
-    this.startedAt = Date.now();
-    this.streamRevision++;
-    this.heartbeatSeq = 0;
 
     try {
-      const connManager = this.runtime.getConnectionManager();
+      // 1. Stop current publication and audio cleanly
+      await this.cleanupPublisher();
+      // Also stop capture display tracks
+      if (this.captureStream) {
+        this.captureStream.getTracks().forEach((t) => t.stop());
+        this.captureStream = null;
+      }
+      this.currentTrack = null;
 
-      // Register locally with updated mediaSessionId before broadcasting
+      // 2. Generate new media session identifiers
+      const newMediaSessionId = crypto.randomUUID();
+      this.mediaSessionId = newMediaSessionId;
+      this.startedAt = Date.now();
+      this.streamRevision++;
+      this.heartbeatSeq = 0;
+
+      // 3. New VDO credentials (streamId + password)
+      const vdoStreamId = generateVdoStreamId();
+      const vdoPassword = generateVdoPassword();
+      this.vdoConfig = { streamId: vdoStreamId, password: vdoPassword };
+
+      // 4. Create new PublisherManager
+      this.publisherManager = new PublisherManager({
+        onStateChange: () => {},
+        onStats: () => {},
+        onError: (err) => console.error("[SSM] Publisher error:", err),
+        onTrackEnded: () => {
+          this.stopStream().catch(() => {});
+        },
+      });
+
+      // Wire media.bind handler
+      this.publisherManager.setOnMediaBind((peerUuid: string, token: string) => {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        if (viewerBinding) {
+          viewerBinding.handleMediaBind(peerUuid, token).catch(() => {});
+        }
+      });
+
+      // 5. Capture new display media
+      this.captureStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+      const videoTracks = this.captureStream.getVideoTracks();
+      if (videoTracks.length === 0) {
+        throw new Error("No video track in captured stream during restart");
+      }
+      this.currentTrack = videoTracks[0];
+
+      // 6. Re-setup source-derived audio
+      this._isAudioDegraded = false;
+      if (oldSourceId && oldSourceKind) {
+        try {
+          await this.setupSourceAudio(oldSourceId, oldSourceKind);
+        } catch (err) {
+          console.warn("[SSM] Audio setup failed during restart:", err);
+          this._isAudioDegraded = true;
+        }
+      }
+
+      // 7. Read group defaults for publication quality
+      const syncState = this.runtime.getSyncService().getSyncState(oldGroupId);
+      const quality = syncState?.state?.defaultQuality?.value ?? null;
+      const videoBitrate = quality?.video?.videoBitrateKbps ?? 650;
+      const videoWidth = quality?.video?.sendWidth ?? 854;
+      const videoHeight = quality?.video?.sendHeight ?? 480;
+      const videoFps = quality?.video?.sendFps ?? 15;
+      // Stage 17: Additional fields from group defaults
+      const codec = quality?.video?.codec ?? "auto";
+      const contentHint = quality?.video?.contentHint ?? "detail";
+      const degradationPreference = quality?.video?.degradationPreference ?? "maintain-resolution";
+      const captureWidth = quality?.video?.captureWidth ?? 854;
+      const captureHeight = quality?.video?.captureHeight ?? 480;
+      const captureFps = quality?.video?.captureFps ?? 15;
+
+      // 8. Publish with new credentials
+      await this.publisherManager.startPublishing(this.captureStream, {
+        sourceId: vdoStreamId,
+        password: vdoPassword,
+        streamId: vdoStreamId,
+        videoBitrate,
+        videoWidth,
+        videoHeight,
+        videoFps,
+        codec,
+        contentHint,
+        degradationPreference,
+        captureWidth,
+        captureHeight,
+        captureFps,
+      });
+
+      // 9. Register locally before broadcasting
       const registry = this.runtime.getActiveStreamRegistry();
       registry.registerLocalStream(this.buildAnnouncement());
 
-      // Announce restart with full announcement shape compatible
-      // with ActiveStreamRegistry.handleStarted replacement logic.
-      // replacesSessionId is set to the old mediaSessionId so the registry
-      // recognises this as a replacement (not a new stream).
-      await connManager.broadcast(oldState.groupId, {
+      // 10. Broadcast stream.restarted with replacesSessionId
+      const connManager = this.runtime.getConnectionManager();
+      await connManager.broadcast(oldGroupId, {
         type: "stream.restarted",
-        logicalStreamId: oldState.logicalStreamId,
+        logicalStreamId: oldLogicalStreamId,
         mediaSessionId: newMediaSessionId,
-        previousMediaSessionId: oldState.oldMediaSessionId,
-        groupId: oldState.groupId,
+        previousMediaSessionId: oldMediaSessionId,
+        groupId: oldGroupId,
         hostDeviceId: this._hostDeviceId,
         hostDisplayName: this._hostDisplayName,
-        sourceKind: this.currentTrack?.kind ?? "screen",
+        sourceKind: this._sourceKind ?? this.currentTrack?.kind ?? "screen",
         sourceName: this.currentTrack?.label ?? "",
         startedAt: this.startedAt,
         appliedSettingsRevision: 0,
         heartbeatSequence: this.heartbeatSeq,
         streamRevision: this.streamRevision,
         mediaJoinMetadata: "",
-        replacesSessionId: oldState.oldMediaSessionId,
+        replacesSessionId: oldMediaSessionId,
+        isAudioDegraded: this._isAudioDegraded,
       });
 
+      // 11. Start heartbeat
       this.startHeartbeat();
       this._state = "active";
     } catch (err) {
       this._state = "failed";
+      await this.cleanupPublisher();
       throw err;
     }
   }
@@ -524,6 +671,108 @@ export class StreamSessionManager {
     this._state = "destroyed";
   }
 
+  /**
+   * Setup source-derived audio based on source kind.
+   * screen → startFilteredMonitorAudio via IPC + PCM port → ProcessAudioController
+   * window → startApplicationAudio via IPC + PCM port → ProcessAudioController
+   *
+   * Full audio ownership pipeline:
+   *   1) Start native capture (filtered monitor or application audio)
+   *   2) Request PCM MessagePort via IPC
+   *   3) Wait for pcm:port window message
+   *   4) Create & initialize ProcessAudioController
+   *   5) Wait for ring buffer priming
+   *   6) Set stream generation from capture start result
+   *   7) Attach controller to PublisherManager
+   *
+   * Throws if any audio stage fails (caller should mark degraded and continue).
+   */
+  private async setupSourceAudio(sourceId: string, sourceKind: "screen" | "window"): Promise<void> {
+    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
+    if (!api) return;
+    if (!this.publisherManager) return;
+
+    let streamGeneration: number | undefined;
+
+    // 1) Start native audio capture
+    if (sourceKind === "screen") {
+      // Filtered Monitor Audio
+      const result = await api.startFilteredMonitorAudio({
+        excludeDiscord: true,
+        excludeScreenLink: true,
+      });
+      if (!result?.success) {
+        throw new Error(`startFilteredMonitorAudio failed: ${result?.error ?? "unknown"}`);
+      }
+      streamGeneration = result.streamGeneration;
+      this._sourceKind = "screen";
+    } else if (sourceKind === "window") {
+      // Application Audio
+      const result = await api.startApplicationAudio({ sourceId });
+      if (!result?.success) {
+        throw new Error(`startApplicationAudio failed: ${result?.error ?? "unknown"}`);
+      }
+      streamGeneration = result.streamGeneration;
+      this._sourceKind = "window";
+    }
+
+    // 2) Request PCM MessagePort via IPC
+    const portResult = await api.requestAudioPort();
+    if (!portResult?.success) {
+      throw new Error(`requestAudioPort failed: ${portResult?.error ?? "unknown"}`);
+    }
+
+    // 3) Wait for pcm:port window message to receive the MessagePort
+    const pcmPort = await this.waitForPcmPort(5000);
+
+    // 4) Create & initialize ProcessAudioController
+    const controller = new ProcessAudioController();
+    await controller.initialize(pcmPort, {
+      onStateChange: (state) => {
+        console.log(`[SSM] Audio controller state: ${state}`);
+      },
+    });
+
+    // 5) Wait for ring buffer priming (enough audio buffered before attaching)
+    await controller.waitUntilPrimed();
+
+    // 6) Set stream generation to align with native capture
+    if (streamGeneration !== undefined) {
+      controller.setStreamGeneration(streamGeneration);
+    }
+
+    // 7) Resolve effective audio mode and attach to PublisherManager
+    const mode = this.resolveAudioMode();
+    // Map AudioMode to publisher's union; default to 'system' for non-none modes
+    const publisherMode = mode === "none" ? "system" : (mode as 'system' | 'application' | 'monitor' | 'test-tone');
+    this.publisherManager.setAudioController(controller, publisherMode);
+  }
+
+  /**
+   * Wait for a pcm:port window message containing the PCM MessagePort
+   * from the audio helper process.
+   */
+  private waitForPcmPort(timeoutMs: number): Promise<MessagePort> {
+    return new Promise((resolve, reject) => {
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type === "pcm:port") {
+          window.removeEventListener("message", handler);
+          const port = event.ports?.[0];
+          if (port) {
+            resolve(port);
+          } else {
+            reject(new Error("pcm:port event missing MessagePort"));
+          }
+        }
+      };
+      window.addEventListener("message", handler);
+      setTimeout(() => {
+        window.removeEventListener("message", handler);
+        reject(new Error("pcm:port wait timeout"));
+      }, timeoutMs);
+    });
+  }
+
   // ── Private ──────────────────────────────────────────────────
 
   private resetSessionState(): void {
@@ -534,6 +783,7 @@ export class StreamSessionManager {
     this.currentTrack = null;
     this.captureStream = null;
     this.vdoConfig = null;
+    this._sourceId = null;
   }
 
   private async cleanupPublisher(): Promise<void> {

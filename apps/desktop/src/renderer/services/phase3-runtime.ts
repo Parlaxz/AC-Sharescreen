@@ -5,6 +5,8 @@ import { GroupMessageRouter, type JoinResponseData } from "./group-message-route
 import { StreamSessionManager } from "./stream-session-manager.js";
 import { ViewerMediaBinding } from "./viewer-media-binding.js";
 import { RestartCoordinator } from "./restart-coordinator.js";
+import { QualityCoordinator } from "./quality-coordinator.js";
+import { MediaStatsPoller } from "./media-stats-service.js";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
 /**
@@ -30,6 +32,8 @@ export class Phase3Runtime {
   private streamSessionManager!: StreamSessionManager;
   private viewerMediaBinding!: ViewerMediaBinding;
   private restartCoordinator!: RestartCoordinator;
+  private qualityCoordinator!: QualityCoordinator;
+  private mediaStatsService!: MediaStatsPoller;
   private destroyed = false;
   private initialized = false;
   private initGen = 0;
@@ -136,6 +140,10 @@ export class Phase3Runtime {
 
     // ── Create Phase 3 services (C2, C7) ──────────────────────────────
 
+    // Create QualityCoordinator and MediaStatsPoller
+    this.qualityCoordinator = new QualityCoordinator();
+    this.mediaStatsService = new MediaStatsPoller();
+
     // Create ViewerMediaBinding
     this.viewerMediaBinding = new ViewerMediaBinding(this);
 
@@ -146,6 +154,10 @@ export class Phase3Runtime {
       this.connManager,
       this.viewerMediaBinding,
     );
+    // Wire QualityCoordinator into the message router
+    this.messageRouter.setQualityCoordinator(this.qualityCoordinator);
+    this.messageRouter.setRuntime(this);
+
     this.connManager.setOnMessage((groupId, envelope) => {
       if (gen !== this.initGen || this.destroyed) return;
       this.messageRouter.routeMessage(groupId, envelope as any);
@@ -253,6 +265,14 @@ export class Phase3Runtime {
 
   getViewerMediaBinding(): ViewerMediaBinding {
     return this.viewerMediaBinding;
+  }
+
+  getQualityCoordinator(): QualityCoordinator {
+    return this.qualityCoordinator;
+  }
+
+  getMediaStatsService(): MediaStatsPoller {
+    return this.mediaStatsService;
   }
 
   /**

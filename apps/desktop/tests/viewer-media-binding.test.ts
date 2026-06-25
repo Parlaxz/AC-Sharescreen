@@ -33,11 +33,18 @@ function makeMockRuntime(): Phase3Runtime {
       password: "vdo-password-xyz",
     })),
   };
+  const mediaStatsService = {
+    startViewerPoller: vi.fn(),
+    stopViewerPoller: vi.fn(),
+    disconnectViewer: vi.fn(),
+    hasViewerPoller: vi.fn().mockReturnValue(false),
+  };
   return {
     getActiveStreamRegistry: () => registry,
     getConnectionManager: () => connManager,
     getStreamSessionManager: () => ssm,
     getViewerMediaBinding: () => ({} as any),
+    getMediaStatsService: () => mediaStatsService,
     ssm, // expose for test assertions
     deviceId: "real-host-device",
     displayName: "Real Host",
@@ -631,5 +638,188 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     expect(binding.getViewerMediaPeer("viewer-1")).toBeNull();
     expect(binding.getViewerMediaPeer("viewer-2")).toBe("peer-2");
     expect(binding.getAllViewers()).toHaveLength(1);
+  });
+
+  // ─── Audio sender mapping (remediation batch) ──────────────────────
+
+  it("ViewerMapping includes audioSender field", () => {
+    const mapping: import("../src/renderer/services/viewer-media-binding.js").ViewerMapping = {
+      viewerDeviceId: "v-1",
+      mediaPeerUuid: "peer-1",
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      pc: null,
+      videoSender: null,
+      audioSender: null,
+    };
+    expect(mapping.audioSender).toBeNull();
+    expect("audioSender" in mapping).toBe(true);
+  });
+
+  it("consumeBinding resolves audio sender alongside video sender", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      groupId: "g-1",
+      hostDeviceId: "local",
+      hostDisplayName: "Host",
+      sourceKind: "screen",
+      sourceName: "Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    // Mock getPublisherManager to return a publisher with SDK that has connections
+    const getSenders = vi.fn().mockReturnValue([
+      { track: { kind: "video" }, getParameters: vi.fn() },
+      { track: { kind: "audio" }, getParameters: vi.fn() },
+    ]);
+    const mockPc = { getSenders };
+    const mockConnections = new Map([
+      ["peer-uuid-1", { publisher: { pc: mockPc }, viewer: null }],
+    ]);
+    const mockSDK = { connections: mockConnections };
+    const mockPublisher = { getSDK: vi.fn().mockReturnValue(mockSDK) };
+    const mockPubManager = { getPublisher: vi.fn().mockReturnValue(mockPublisher) };
+
+    // Access SSM through the runtime
+    const { ssm } = runtime as unknown as { ssm: { getPublisherManager: any } };
+    ssm.getPublisherManager = vi.fn().mockReturnValue(mockPubManager);
+
+    const envelope = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const result = binding.handleJoinRequest(envelope);
+    expect(result).not.toBeNull();
+
+    await binding.consumeBinding({
+      token: result!.token,
+      viewerDeviceId: "viewer-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      mediaPeerUuid: "peer-uuid-1",
+    });
+
+    // Verify audio sender is stored alongside video sender
+    expect(binding.getViewerVideoSender("viewer-1")).not.toBeNull();
+    expect(binding.getViewerAudioSender("viewer-1")).not.toBeNull();
+    expect(binding.getViewerAudioSender("viewer-1")!.track!.kind).toBe("audio");
+  });
+
+  it("getViewerAudioSender returns null for unmapped viewer", () => {
+    expect(binding.getViewerAudioSender("unknown-viewer")).toBeNull();
+  });
+
+  it("getViewerAudioSender returns null when no audio sender resolved", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      groupId: "g-1",
+      hostDeviceId: "local",
+      hostDisplayName: "Host",
+      sourceKind: "screen",
+      sourceName: "Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    // Mock publisher manager with NO audio sender (no audio track)
+    const getSenders = vi.fn().mockReturnValue([
+      { track: { kind: "video" }, getParameters: vi.fn() },
+    ]);
+    const mockPc = { getSenders };
+    const mockConnections = new Map([
+      ["peer-uuid-1", { publisher: { pc: mockPc }, viewer: null }],
+    ]);
+    const mockSDK = { connections: mockConnections };
+    const mockPublisher = { getSDK: vi.fn().mockReturnValue(mockSDK) };
+    const mockPubManager = { getPublisher: vi.fn().mockReturnValue(mockPublisher) };
+
+    const { ssm } = runtime as unknown as { ssm: { getPublisherManager: any } };
+    ssm.getPublisherManager = vi.fn().mockReturnValue(mockPubManager);
+
+    const envelope = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const result = binding.handleJoinRequest(envelope);
+    expect(result).not.toBeNull();
+
+    await binding.consumeBinding({
+      token: result!.token,
+      viewerDeviceId: "viewer-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      mediaPeerUuid: "peer-uuid-1",
+    });
+
+    expect(binding.getViewerVideoSender("viewer-1")).not.toBeNull();
+    expect(binding.getViewerAudioSender("viewer-1")).toBeNull();
+  });
+
+  it("audio sender is included in getAllViewers output", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      groupId: "g-1",
+      hostDeviceId: "local",
+      hostDisplayName: "Host",
+      sourceKind: "screen",
+      sourceName: "Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    // Mock publishers with both video and audio senders
+    const makeSenders = () => [
+      { track: { kind: "video" } },
+      { track: { kind: "audio" } },
+    ];
+    const getSenders1 = vi.fn().mockReturnValue(makeSenders());
+    const getSenders2 = vi.fn().mockReturnValue(makeSenders());
+    const mockConnections = new Map([
+      ["peer-uuid-1", { publisher: { pc: { getSenders: getSenders1 } }, viewer: null }],
+      ["peer-uuid-2", { publisher: { pc: { getSenders: getSenders2 } }, viewer: null }],
+    ]);
+    const mockSDK = { connections: mockConnections };
+    const mockPublisher = { getSDK: vi.fn().mockReturnValue(mockSDK) };
+    const mockPubManager = { getPublisher: vi.fn().mockReturnValue(mockPublisher) };
+
+    const { ssm } = runtime as unknown as { ssm: { getPublisherManager: any } };
+    ssm.getPublisherManager = vi.fn().mockReturnValue(mockPubManager);
+
+    // Bind viewer-1
+    const env1 = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const r1 = binding.handleJoinRequest(env1);
+    await binding.consumeBinding({
+      token: r1!.token, viewerDeviceId: "viewer-1", groupId: "g-1",
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", mediaPeerUuid: "peer-uuid-1",
+    });
+
+    // Bind viewer-2
+    const env2 = makeJoinRequestEnvelope("g-1", "viewer-2", "stream-1");
+    const r2 = binding.handleJoinRequest(env2);
+    await binding.consumeBinding({
+      token: r2!.token, viewerDeviceId: "viewer-2", groupId: "g-1",
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", mediaPeerUuid: "peer-uuid-2",
+    });
+
+    const allViewers = binding.getAllViewers();
+    expect(allViewers).toHaveLength(2);
+    for (const v of allViewers) {
+      expect(v).toHaveProperty("audioSender");
+      expect(v.audioSender).not.toBeNull();
+      expect(v.audioSender!.track!.kind).toBe("audio");
+    }
   });
 });
