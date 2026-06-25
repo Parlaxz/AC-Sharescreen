@@ -427,7 +427,7 @@ void TestSourceLimit() {
     // Add 10 sessions with different PIDs that all resolve to root 200
     for (uint32_t i = 301; i < 311; i++) {
         AudioSessionInfo s;
-        s.pid = selfPid; // all same PID -> same root -> dedup to 1
+        s.pid = i; // all distinct PIDs, same root 200 -> dedup to 1
         s.creationTimeUtc100ns = 1000000 + i;
         s.identityValidated = true;
         s.processAlive = true;

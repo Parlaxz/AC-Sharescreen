@@ -14,35 +14,6 @@
 
 namespace screenlink::audio {
 
-namespace {
-
-/// Measure the actual energy in an AudioPacket by scanning samples.
-struct PacketEnergy {
-    float peak = 0.0f;
-    uint64_t nonZeroSamples = 0;
-};
-
-PacketEnergy MeasurePacketEnergy(const AudioPacket& packet) {
-    PacketEnergy energy;
-    if (packet.frames == nullptr || packet.frameCount == 0 || packet.channels == 0) {
-        return energy;
-    }
-    const size_t sampleCount = static_cast<size_t>(packet.frameCount) *
-                               static_cast<size_t>(packet.channels);
-    for (size_t idx = 0; idx < sampleCount; ++idx) {
-        const float magnitude = std::abs(packet.frames[idx]);
-        if (magnitude > energy.peak) {
-            energy.peak = magnitude;
-        }
-        if (magnitude > 1.0e-8f) {
-            ++energy.nonZeroSamples;
-        }
-    }
-    return energy;
-}
-
-} // anonymous namespace
-
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
