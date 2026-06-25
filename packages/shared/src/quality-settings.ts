@@ -547,3 +547,192 @@ export function validateGroupSettings(
     clampReasons,
   };
 }
+
+// ─── Settings revision identity (Gate 2.4) ─────────────────────────────────
+
+/**
+ * Synchronized identity for a group's quality settings.
+ *
+ * `stamp` is the HLC timestamp the settings were published under.
+ * `hash` is a deterministic hex-encoded SHA-256 of the canonicalized
+ * settings, used to detect equal-but-different revisions.
+ */
+export interface GroupSettingsRevision {
+  stamp: string;
+  hash: string;
+}
+
+export interface GroupRevisionMetadata {
+  stamp: string;
+  hash: string;
+  lastEditor: string;
+  lastModified: number;
+}
+
+export const EMPTY_GROUP_SETTINGS_REVISION: GroupSettingsRevision = {
+  stamp: "0-0-0",
+  hash: "",
+};
+
+/**
+ * Compute a deterministic SHA-256 hash of the canonicalized settings.
+ * Uses WebCrypto so the same algorithm runs in both main and renderer.
+ */
+export async function hashGroupSettings(
+  settings: GroupQualitySettings,
+): Promise<string> {
+  const canonical = canonicalSettingsStringify(settings);
+  const buf = new TextEncoder().encode(canonical);
+  const digest = await crypto.subtle.digest("SHA-256", buf.buffer as ArrayBuffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function canonicalSettingsStringify(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalSettingsStringify).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    const pairs = keys.map(
+      (k) =>
+        `${JSON.stringify(k)}:${canonicalSettingsStringify((value as Record<string, unknown>)[k])}`,
+    );
+    return `{${pairs.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// ─── Restart-required classification (Gate 9.6) ────────────────────────────
+
+/**
+ * Compare two settings and return the list of fields whose value
+ * changed. The caller is responsible for mapping fields to
+ * "live-safe" or "restart-required" categories; the constants below
+ * are the canonical lists used by ScreenLink.
+ */
+export function diffGroupSettings(
+  before: GroupQualitySettings,
+  after: GroupQualitySettings,
+): string[] {
+  const diffs: string[] = [];
+  const fields: Array<keyof VideoQualitySettings | keyof AudioEncodingSettings> = [
+    "videoBitrateKbps",
+    "sendWidth",
+    "sendHeight",
+    "sendFps",
+    "captureWidth",
+    "captureHeight",
+    "captureFps",
+    "preserveAspectRatio",
+    "preventUpscale",
+    "resolutionMode",
+    "scaleResolutionDownBy",
+    "codec",
+    "h264Profile",
+    "contentHint",
+    "degradationPreference",
+    "scalabilityMode",
+    "cursorMode",
+    "rtpPriority",
+  ];
+  for (const f of fields) {
+    if ((before.video as unknown as Record<string, unknown>)[f] !==
+        (after.video as unknown as Record<string, unknown>)[f]) {
+      diffs.push(`video.${f}`);
+    }
+  }
+  const audioFields: Array<keyof AudioEncodingSettings> = [
+    "bitrateKbps",
+    "channels",
+    "bitrateMode",
+    "dtx",
+    "fec",
+    "packetDurationMs",
+    "redundantAudio",
+  ];
+  for (const f of audioFields) {
+    if ((before.audio as unknown as Record<string, unknown>)[f] !==
+        (after.audio as unknown as Record<string, unknown>)[f]) {
+      diffs.push(`audio.${f}`);
+    }
+  }
+  return diffs;
+}
+
+/**
+ * Subset of group quality fields that can be live-applied to a
+ * running publication without restarting the stream.
+ */
+export const LIVE_SAFE_VIDEO_FIELDS = new Set<string>([
+  "videoBitrateKbps",
+  "sendWidth",
+  "sendHeight",
+  "sendFps",
+  "scaleResolutionDownBy",
+  "contentHint",
+  "degradationPreference",
+  "rtpPriority",
+]);
+
+/**
+ * Subset of group quality fields whose change requires a stream
+ * restart. These touch capture-side or codec-negotiation state that
+ * cannot be live-applied through `setParameters`.
+ */
+export const RESTART_REQUIRED_VIDEO_FIELDS = new Set<string>([
+  "codec",
+  "h264Profile",
+  "captureWidth",
+  "captureHeight",
+  "captureFps",
+  "cursorMode",
+]);
+
+/**
+ * Audio fields are always restart-required — re-negotiating audio
+ * encoding on a live publication is not safely possible.
+ */
+export const RESTART_REQUIRED_AUDIO_PREFIX = "audio";
+
+/**
+ * Classify a list of changed field paths into `liveSafe` (can be
+ * applied without restart) and `restartRequired` (force a restart).
+ */
+export function classifySettingsDiff(fieldPaths: string[]): {
+  liveSafe: string[];
+  restartRequired: string[];
+} {
+  const liveSafe: string[] = [];
+  const restartRequired: string[] = [];
+  for (const path of fieldPaths) {
+    if (path.startsWith(RESTART_REQUIRED_AUDIO_PREFIX + ".")) {
+      restartRequired.push(path);
+      continue;
+    }
+    const fieldName = path.startsWith("video.") ? path.slice("video.".length) : path;
+    if (RESTART_REQUIRED_VIDEO_FIELDS.has(fieldName)) {
+      restartRequired.push(path);
+    } else if (LIVE_SAFE_VIDEO_FIELDS.has(fieldName)) {
+      liveSafe.push(path);
+    } else {
+      // Unknown change: be conservative and require restart.
+      restartRequired.push(path);
+    }
+  }
+  return { liveSafe, restartRequired };
+}
+
+export function isRestartRequired(
+  before: GroupQualitySettings,
+  after: GroupQualitySettings,
+): boolean {
+  const { restartRequired } = classifySettingsDiff(diffGroupSettings(before, after));
+  return restartRequired.length > 0;
+}

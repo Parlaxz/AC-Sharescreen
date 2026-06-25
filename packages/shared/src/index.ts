@@ -73,6 +73,8 @@ export type {
   DeviceIdentity,
 } from "./device-identity.js";
 
+export * from "./device-signing-key.js";
+
 export * from "./hybrid-logical-clock.js";
 export * from "./quality-settings.js";
 export * from "./group-link.js";
@@ -108,6 +110,7 @@ export {
   StreamRestartResultPayloadSchema,
   StreamJoinRequestPayloadSchema,
   StreamJoinResponsePayloadSchema,
+  StreamBindAckPayloadSchema,
   StreamLeavePayloadSchema,
   MediaBindPayloadSchema,
   QualityViewerRequestPayloadSchema,
@@ -119,6 +122,9 @@ export {
   deriveMacKey,
   signEnvelope,
   verifyEnvelope,
+  buildEnvelopeWithDeviceSignature,
+  serializeForDeviceSignature,
+  verifyEnvelopeDeviceSignature,
   validateEnvelope,
   DedupSet,
   parseGroupMessagePayload,
@@ -128,4 +134,6 @@ export type {
   GroupControlMessageType,
   GroupControlEnvelope,
   GroupControlEnvelopeInput,
+  DevicePublicKeyLookup,
+  GroupControlPayloadMap,
 } from "./group-control-messages.js";

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import {
   DedupSet,
   GroupHelloPayloadSchema,
@@ -37,6 +37,11 @@ import {
   GROUP_PROTOCOL_VERSION,
 } from "../src/group-control-messages.js";
 import type { GroupControlEnvelopeInput } from "../src/group-control-messages.js";
+import {
+  generateDeviceKeyPair,
+  importDevicePrivateKeyForSigning,
+  type DeviceKeyPair,
+} from "../src/device-signing-key.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -191,7 +196,9 @@ describe("StreamStoppedPayloadSchema", () => {
 describe("StreamRestartRequestPayloadSchema", () => {
   it("accepts valid restart request", () => {
     const r = StreamRestartRequestPayloadSchema.safeParse({
-      logicalStreamId: "stream-1",
+      commandId: "cmd-1",
+      groupId: "00000000-0000-4000-0000-000000000001",
+      requestedByDeviceId: "host-1",
       reason: "degraded",
     });
     expect(r.success).toBe(true);
@@ -223,18 +230,27 @@ describe("StreamRestartedPayloadSchema", () => {
 describe("StreamRestartResultPayloadSchema", () => {
   it("accepts success result", () => {
     const r = StreamRestartResultPayloadSchema.safeParse({
+      commandId: "cmd-1",
+      groupId: "00000000-0000-4000-0000-000000000001",
+      hostDeviceId: "host-1",
       logicalStreamId: "stream-1",
+      accepted: true,
       success: true,
-      mediaSessionId: "session-2",
+      oldMediaSessionId: "session-1",
+      newMediaSessionId: "session-2",
     });
     expect(r.success).toBe(true);
   });
 
   it("accepts failure result", () => {
     const r = StreamRestartResultPayloadSchema.safeParse({
+      commandId: "cmd-1",
+      groupId: "00000000-0000-4000-0000-000000000001",
+      hostDeviceId: "host-1",
       logicalStreamId: "stream-1",
+      accepted: false,
       success: false,
-      error: "no resources",
+      failureReason: "no resources",
     });
     expect(r.success).toBe(true);
   });
@@ -540,8 +556,11 @@ const VALIDATION_SENDER = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
 
 async function makeValidEnvelope(
   overrides?: Partial<GroupControlEnvelopeInput>,
+  keyPair?: DeviceKeyPair,
 ) {
-  const input: GroupControlEnvelopeInput = {
+  const kp = keyPair ?? VALIDATION_KEYPAIR;
+  const privateKey = await importDevicePrivateKeyForSigning(kp.privateKeySeed);
+  const input: Omit<GroupControlEnvelopeInput, "deviceSignature"> = {
     version: GROUP_PROTOCOL_VERSION,
     type: "group.hello",
     messageId: crypto.randomUUID(),
@@ -549,17 +568,33 @@ async function makeValidEnvelope(
     senderDeviceId: VALIDATION_SENDER,
     groupId: VALIDATION_GROUP_ID,
     logicalStamp: { wallTimeMs: Date.now(), counter: 0, nodeId: VALIDATION_SENDER },
-    payload: { deviceId: VALIDATION_SENDER, displayName: "Alice", protocolVersion: 2 },
+    payload: {
+      deviceId: VALIDATION_SENDER,
+      displayName: "Alice",
+      protocolVersion: GROUP_PROTOCOL_VERSION,
+      publicKey: kp.publicKey.key,
+    },
     ...overrides,
-  };
-  return await buildEnvelope(input, VALIDATION_GROUP_SECRET);
+  } as Omit<GroupControlEnvelopeInput, "deviceSignature">;
+  return await buildEnvelope(input, VALIDATION_GROUP_SECRET, privateKey);
 }
+
+let VALIDATION_KEYPAIR: DeviceKeyPair;
+const VALIDATION_LOOKUP = (senderDeviceId: string) => {
+  if (senderDeviceId === VALIDATION_SENDER) {
+    return { publicKey: VALIDATION_KEYPAIR.publicKey };
+  }
+  return null;
+};
+beforeAll(async () => {
+  VALIDATION_KEYPAIR = await generateDeviceKeyPair();
+});
 
 describe("validateEnvelope integration", () => {
   it("accepts a valid envelope with correct group, MAC, size, and dedup", async () => {
     const envelope = await makeValidEnvelope();
     const dedup = new DedupSet();
-    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data.type).toBe("group.hello");
@@ -576,7 +611,7 @@ describe("validateEnvelope integration", () => {
       payload: oversizedPayload as any,
     });
     const dedup = new DedupSet();
-    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
+    const result = await validateEnvelope(envelope, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toContain("exceeds maximum size");
@@ -588,11 +623,11 @@ describe("validateEnvelope integration", () => {
     const dedup = new DedupSet(60000);
 
     // First use — accept
-    const r1 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
+    const r1 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
     expect(r1.ok).toBe(true);
 
     // Second use with same messageId — reject as duplicate
-    const r2 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup);
+    const r2 = await validateEnvelope(envelope1, VALIDATION_GROUP_ID, VALIDATION_GROUP_SECRET, dedup, VALIDATION_LOOKUP);
     expect(r2.ok).toBe(false);
     if (!r2.ok) {
       expect(r2.reason).toContain("Duplicate");

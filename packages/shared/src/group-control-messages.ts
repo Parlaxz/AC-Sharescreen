@@ -4,7 +4,7 @@ import { HybridTimestampSchema } from "./hybrid-logical-clock.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-export const GROUP_PROTOCOL_VERSION = 2;
+export const GROUP_PROTOCOL_VERSION = 3;
 
 export const GROUP_CONTROL_MESSAGE_TYPES = [
   "group.hello",
@@ -24,6 +24,7 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "stream.restart.result",
   "stream.join.request",
   "stream.join.response",
+  "stream.bind.ack",
   "stream.leave",
   "media.bind",
   "quality.viewer.request",
@@ -62,6 +63,15 @@ export interface GroupControlEnvelope {
   groupId: string;
   logicalStamp: HybridTimestamp;
   payload: Record<string, unknown>;
+  /**
+   * Ed25519 signature by the sender's device private key over the
+   * canonical bytes of the envelope without the mac and deviceSignature
+   * fields. Hex-encoded raw signature (64 bytes → 128 hex chars).
+   *
+   * Present for v3+ envelopes. v2 envelopes without it must be
+   * rejected by `validateEnvelope` (see signatureRequired).
+   */
+  deviceSignature: string;
   mac: string; // HMAC-SHA256, hex-encoded
 }
 
@@ -74,6 +84,7 @@ export interface GroupControlEnvelopeInput {
   groupId: string;
   logicalStamp: HybridTimestamp;
   payload: Record<string, unknown>;
+  deviceSignature: string;
 }
 
 // ─── Schemas ───────────────────────────────────────────────────────────────
@@ -87,6 +98,7 @@ export const GroupControlEnvelopeSchema = z.object({
   groupId: z.string().uuid(),
   logicalStamp: HybridTimestampSchema,
   payload: z.record(z.unknown()),
+  deviceSignature: z.string().max(1024),
   mac: z.string(),
 });
 
@@ -112,6 +124,10 @@ export async function deriveMacKey(groupSecret: string): Promise<CryptoKey> {
 /**
  * Compute an HMAC-SHA256 signature for the envelope body (everything except the mac field).
  * Returns the hex-encoded signature.
+ *
+ * The HMAC is computed over the canonical bytes of the input INCLUDING
+ * the device signature, so the group HMAC attests that the signed
+ * envelope is unchanged.
  */
 export async function signEnvelope(
   envelope: GroupControlEnvelopeInput,
@@ -140,14 +156,49 @@ export async function verifyEnvelope(
     groupId: envelope.groupId,
     logicalStamp: envelope.logicalStamp,
     payload: envelope.payload,
+    deviceSignature: envelope.deviceSignature,
   };
   const data = serializeForMac(input);
   const sigBytes = hexToBytes(envelope.mac);
   return await crypto.subtle.verify("HMAC", key, sigBytes.buffer as ArrayBuffer, data.buffer as ArrayBuffer);
 }
 
-function serializeForMac(input: GroupControlEnvelopeInput): Uint8Array {
+/**
+ * Serialize an envelope for HMAC signing.
+ *
+ * The canonical bytes include the device signature so the group HMAC
+ * attests that the device signature was bound to this envelope.
+ * Both the mac and deviceSignature fields are excluded from the
+ * canonical bytes — `mac` because it is the output, and
+ * `deviceSignature` is INCLUDED so the HMAC binds it.
+ */
+export function serializeForMac(input: GroupControlEnvelopeInput): Uint8Array {
   // Canonical JSON (sorted keys) of the envelope without the mac field
+  const obj: Record<string, unknown> = {
+    version: input.version,
+    type: input.type,
+    messageId: input.messageId,
+    sentAt: input.sentAt,
+    senderDeviceId: input.senderDeviceId,
+    groupId: input.groupId,
+    logicalStamp: {
+      wallTimeMs: input.logicalStamp.wallTimeMs,
+      counter: input.logicalStamp.counter,
+      nodeId: input.logicalStamp.nodeId,
+    },
+    payload: input.payload,
+    deviceSignature: input.deviceSignature,
+  };
+  const json = canonicalJsonStringify(obj);
+  const encoder = new TextEncoder();
+  return encoder.encode(json);
+}
+
+/**
+ * Serialize an envelope for device signing — EXCLUDES both the device
+ * signature field and the mac field.
+ */
+export function serializeForDeviceSignature(input: GroupControlEnvelopeInput): Uint8Array {
   const obj: Record<string, unknown> = {
     version: input.version,
     type: input.type,
@@ -170,10 +221,58 @@ function serializeForMac(input: GroupControlEnvelopeInput): Uint8Array {
 // ─── Envelope building ─────────────────────────────────────────────────────
 
 /**
- * Build a fully signed GroupControlEnvelope.
+ * Build a fully signed GroupControlEnvelope from a partial input
+ * (without the device signature yet). The caller must supply a
+ * pre-imported private CryptoKey.
+ *
+ * The signing sequence is:
+ *   1. Build envelope without deviceSignature.
+ *   2. Compute canonical bytes excluding both signatures.
+ *   3. Sign those bytes with the sender's device private key.
+ *   4. Compute the group HMAC over the canonical bytes that include
+ *      the device signature.
+ *   5. Attach the device signature and HMAC.
  */
 export async function buildEnvelope(
-  input: GroupControlEnvelopeInput,
+  input: Omit<GroupControlEnvelopeInput, "deviceSignature">,
+  groupSecret: string,
+  devicePrivateKey: CryptoKey,
+): Promise<GroupControlEnvelope> {
+  // Step 1: build with empty signature so the canonicalization is consistent.
+  const partialInput: GroupControlEnvelopeInput = {
+    ...input,
+    deviceSignature: "",
+  };
+
+  // Step 2: canonical bytes for device signing (no device sig, no mac)
+  const deviceSignBytes = serializeForDeviceSignature(partialInput);
+  const deviceSigBytes = await crypto.subtle.sign(
+    { name: "Ed25519" } as EcdsaParams,
+    devicePrivateKey,
+    deviceSignBytes.buffer as ArrayBuffer,
+  );
+  const deviceSignature = bytesToHex(new Uint8Array(deviceSigBytes));
+
+  // Step 3: build the full input with the device signature, then HMAC.
+  const fullInput: GroupControlEnvelopeInput = {
+    ...partialInput,
+    deviceSignature,
+  };
+  const mac = await signEnvelope(fullInput, groupSecret);
+
+  return {
+    ...fullInput,
+    mac,
+  };
+}
+
+/**
+ * Build a v3+ envelope when the caller has already computed the device
+ * signature bytes directly. Used in tests and by callers that have
+ * access to a pre-signed message they want to wrap.
+ */
+export async function buildEnvelopeWithDeviceSignature(
+  input: Omit<GroupControlEnvelopeInput, "mac">,
   groupSecret: string,
 ): Promise<GroupControlEnvelope> {
   const mac = await signEnvelope(input, groupSecret);
@@ -185,14 +284,23 @@ export async function buildEnvelope(
 
 /**
  * Validate a GroupControlEnvelope.
- * Rejects on: wrong group, invalid MAC, oversized payload, invalid schema,
- * duplicate ID, unsupported version.
+ * Rejects on: wrong group, invalid MAC, invalid device signature,
+ * oversized payload, invalid schema, duplicate ID, unsupported version.
+ *
+ * The caller must supply a devicePublicKey lookup function that
+ * returns the verified base64url public key for a sender deviceId,
+ * or null if the device is not yet known (which is permitted only
+ * for the very first hello from that peer — and the caller is
+ * responsible for gating on that flow).
  */
 export async function validateEnvelope(
   envelope: unknown,
   expectedGroupId: string,
   groupSecret: string,
   dedupSet: DedupSet,
+  devicePublicKeyLookup?: (
+    senderDeviceId: string,
+  ) => DevicePublicKeyLookup | null | Promise<DevicePublicKeyLookup | null>,
 ): Promise<{ ok: true; data: GroupControlEnvelope } | { ok: false; reason: string }> {
   // Schema validation
   const parseResult = GroupControlEnvelopeSchema.safeParse(envelope);
@@ -226,6 +334,34 @@ export async function validateEnvelope(
     return { ok: false, reason: "Duplicate message ID" };
   }
 
+  // Device signature verification (Gate 1.3 / 1.4)
+  if (data.deviceSignature.length === 0) {
+    return { ok: false, reason: "Missing device signature" };
+  }
+  if (devicePublicKeyLookup) {
+    const pub = await devicePublicKeyLookup(data.senderDeviceId);
+    if (pub) {
+      const ok = await verifyEnvelopeDeviceSignature(
+        data,
+        pub.publicKey,
+      );
+      if (!ok) {
+        return { ok: false, reason: "Invalid device signature" };
+      }
+    } else {
+      // No public key yet — allow hello only, the connection
+      // layer must reject the rest until pinned.
+      if (data.type !== "group.hello") {
+        return {
+          ok: false,
+          reason: "No pinned device public key for sender",
+        };
+      }
+    }
+  } else {
+    return { ok: false, reason: "No device public key lookup supplied" };
+  }
+
   // MAC verification
   const macValid = await verifyEnvelope(data, groupSecret);
   if (!macValid) {
@@ -238,17 +374,64 @@ export async function validateEnvelope(
   return { ok: true, data };
 }
 
+// ─── Device signature helpers ──────────────────────────────────────────────
+
+import {
+  importDevicePublicKey,
+  verifyBytes,
+  type DevicePublicKey,
+} from "./device-signing-key.js";
+
+export interface DevicePublicKeyLookup {
+  publicKey: DevicePublicKey;
+}
+
+/**
+ * Verify the Ed25519 device signature on an envelope.
+ * Reconstructs the canonical bytes exactly as `buildEnvelope` did.
+ */
+export async function verifyEnvelopeDeviceSignature(
+  envelope: GroupControlEnvelope,
+  publicKey: DevicePublicKey,
+): Promise<boolean> {
+  if (envelope.deviceSignature.length === 0) return false;
+  const input: GroupControlEnvelopeInput = {
+    version: envelope.version,
+    type: envelope.type,
+    messageId: envelope.messageId,
+    sentAt: envelope.sentAt,
+    senderDeviceId: envelope.senderDeviceId,
+    groupId: envelope.groupId,
+    logicalStamp: envelope.logicalStamp,
+    payload: envelope.payload,
+    deviceSignature: envelope.deviceSignature,
+  };
+  const data = serializeForDeviceSignature(input);
+  const sigBytes = hexToBytes(envelope.deviceSignature);
+  if (sigBytes.length === 0) return false;
+  let key: CryptoKey;
+  try {
+    key = await importDevicePublicKey(publicKey);
+  } catch {
+    return false;
+  }
+  return await verifyBytes(key, sigBytes, data);
+}
+
 // ─── Per-Message Payload Schemas ──────────────────────────────────────────
 
 export const GroupHelloPayloadSchema = z.object({
   deviceId: z.string(),
   displayName: z.string().min(1).max(100),
   protocolVersion: z.number().int().positive(),
+  /** base64url-encoded 32-byte Ed25519 public key (optional during bootstrap, required after bootstrap). */
+  publicKey: z.string().min(1).max(512).optional(),
 });
 
 export const GroupHelloResponsePayloadSchema = z.object({
   deviceId: z.string(),
   displayName: z.string().min(1).max(100),
+  publicKey: z.string().min(1).max(512).optional(),
 });
 
 export const GroupStateUpdatePayloadSchema = z.object({
@@ -285,6 +468,7 @@ export const GroupMemberUpdatePayloadSchema = z.object({
     displayName: z.string().min(1).max(100),
     firstSeenAt: z.number().int().positive(),
     profileStamp: HybridTimestampSchema,
+    publicKey: z.string().min(1).max(512).optional(),
   }),
 });
 
@@ -318,6 +502,15 @@ export const StreamStartedPayloadSchema = z.object({
   streamRevision: z.number(),
   mediaJoinMetadata: z.string(),
   replacesSessionId: z.string().nullable(),
+  /** HLC stamp of the synchronized group settings applied at publication. */
+  sharedSettingsRevision: z.string().optional(),
+  /** HLC stamp of the live-applied group settings. */
+  appliedLiveSettingsRevision: z.string().optional(),
+  /** HLC stamp of the last restart-applied settings. */
+  appliedRestartSettingsRevision: z.string().optional(),
+  /** Wall-time the host asserts the lease is still valid through. */
+  leaseValidUntil: z.number().optional(),
+  isAudioDegraded: z.boolean().optional(),
 });
 
 export const StreamHeartbeatPayloadSchema = z.object({
@@ -327,6 +520,10 @@ export const StreamHeartbeatPayloadSchema = z.object({
   mediaSessionId: z.string(),
   heartbeatSequence: z.number(),
   appliedSettingsRevision: z.number().optional(),
+  /** Wall-time the host asserts the lease is still valid through. */
+  leaseValidUntil: z.number().optional(),
+  /** When the last heartbeat was actually sent. */
+  lastHeartbeatAt: z.number().optional(),
 });
 
 export const StreamStoppedPayloadSchema = z.object({
@@ -336,7 +533,13 @@ export const StreamStoppedPayloadSchema = z.object({
 });
 
 export const StreamRestartRequestPayloadSchema = z.object({
-  logicalStreamId: z.string(),
+  commandId: z.string(),
+  groupId: z.string(),
+  /** HLC stamp the requesting device expects to apply. */
+  targetSettingsStamp: z.string().optional(),
+  /** Hash of the synchronized settings the requesting device expects to apply. */
+  targetSettingsHash: z.string().optional(),
+  requestedByDeviceId: z.string(),
   reason: z.string().optional(),
 });
 
@@ -359,13 +562,28 @@ export const StreamRestartedPayloadSchema = z.object({
    * Required non-empty string to trigger replacement logic; null means no prior session
    * (should not happen for restart, but schema allows it for forward compat). */
   replacesSessionId: z.string().nullable(),
+  /** HLC stamp of the synchronized group settings applied at publication. */
+  sharedSettingsRevision: z.string().optional(),
+  /** HLC stamp of the live-applied group settings. */
+  appliedLiveSettingsRevision: z.string().optional(),
+  /** HLC stamp of the restart-applied settings. */
+  appliedRestartSettingsRevision: z.string().optional(),
+  /** HLC stamp the restart applied to. */
+  appliedSettingsStamp: z.string().optional(),
+  isAudioDegraded: z.boolean().optional(),
 });
 
 export const StreamRestartResultPayloadSchema = z.object({
+  commandId: z.string(),
+  groupId: z.string(),
+  hostDeviceId: z.string(),
   logicalStreamId: z.string(),
+  accepted: z.boolean(),
   success: z.boolean(),
-  mediaSessionId: z.string().optional(),
-  error: z.string().optional(),
+  oldMediaSessionId: z.string().optional(),
+  newMediaSessionId: z.string().optional(),
+  appliedSettingsStamp: z.string().optional(),
+  failureReason: z.string().optional(),
 });
 
 export const StreamJoinRequestPayloadSchema = z.object({
@@ -391,6 +609,16 @@ export const StreamJoinResponsePayloadSchema = z.object({
   bindingToken: z.string().optional(),
 });
 
+export const StreamBindAckPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  mediaSessionId: z.string(),
+  viewerDeviceId: z.string(),
+  accepted: z.boolean(),
+  reason: z.string().optional(),
+  /** Sanitized binding identifier (e.g. mediaPeerUuid). */
+  boundMediaPeer: z.string().optional(),
+});
+
 export const StreamLeavePayloadSchema = z.object({
   logicalStreamId: z.string(),
   viewerDeviceId: z.string(),
@@ -400,6 +628,9 @@ export const StreamLeavePayloadSchema = z.object({
 
 export const MediaBindPayloadSchema = z.object({
   token: z.string(),
+  viewerDeviceId: z.string().optional(),
+  groupId: z.string().optional(),
+  logicalStreamId: z.string().optional(),
   mediaSessionId: z.string().optional(),
 });
 
@@ -470,6 +701,7 @@ export type GroupControlPayloadMap = {
   "stream.restart.result": z.infer<typeof StreamRestartResultPayloadSchema>;
   "stream.join.request": z.infer<typeof StreamJoinRequestPayloadSchema>;
   "stream.join.response": z.infer<typeof StreamJoinResponsePayloadSchema>;
+  "stream.bind.ack": z.infer<typeof StreamBindAckPayloadSchema>;
   "stream.leave": z.infer<typeof StreamLeavePayloadSchema>;
   "media.bind": z.infer<typeof MediaBindPayloadSchema>;
   "quality.viewer.request": z.infer<typeof QualityViewerRequestPayloadSchema>;
@@ -499,6 +731,7 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "stream.restart.result": StreamRestartResultPayloadSchema,
   "stream.join.request": StreamJoinRequestPayloadSchema,
   "stream.join.response": StreamJoinResponsePayloadSchema,
+  "stream.bind.ack": StreamBindAckPayloadSchema,
   "stream.leave": StreamLeavePayloadSchema,
   "media.bind": MediaBindPayloadSchema,
   "quality.viewer.request": QualityViewerRequestPayloadSchema,
@@ -629,6 +862,13 @@ function bytesToHex(bytes: Uint8Array): string {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
+/**
+ * Public bytesToHex — used by callers that have raw bytes (e.g. a
+ * freshly-computed device signature) and need to encode them into the
+ * envelope's hex field.
+ */
+export { bytesToHex };
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
