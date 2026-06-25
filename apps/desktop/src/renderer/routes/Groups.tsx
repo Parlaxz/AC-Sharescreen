@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { useStore } from "../stores/main-store.js";
 import { getRuntime } from "../services/phase3-runtime.js";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
+import { GroupSettingsDialog } from "../components/GroupSettingsDialog.js";
 
 interface GroupRecord {
   groupId: string;
@@ -13,35 +14,49 @@ interface GroupRecord {
 }
 
 export function Groups() {
-  const [groups, setGroups] = useState<GroupRecord[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [joining, setJoining] = useState(false);
   const [joinLink, setJoinLink] = useState("");
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [settingsGroupId, setSettingsGroupId] = useState<string | null>(null);
 
+  // Store-driven: read groups from normalized store, not from local state
+  const groupsById = useStore((s) => s.groupsById);
+  const groupOrder = useStore((s) => s.groupOrder);
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const setSelectedGroupId = useStore((s) => s.setSelectedGroupId);
   const connectionStateById = useStore((s) => s.groupConnectionStateById);
   const onlineDeviceIdsByGroup = useStore((s) => s.onlineDeviceIdsByGroup);
 
-  const refresh = async () => {
-    const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-    if (!api) return;
-    const list = (await api.listGroups()) as GroupRecord[];
-    setGroups(list);
+  // Helper: add group to store
+  const addGroupToStore = (groupId: string, name: string, members: Record<string, { deviceId: string; displayName: string }>) => {
+    const store = useStore.getState();
+    const groupsById = { ...store.groupsById };
+    const groupOrder = [...store.groupOrder];
+    groupsById[groupId] = { id: groupId, name, members };
+    if (!groupOrder.includes(groupId)) groupOrder.push(groupId);
+    store.setGroups(groupsById, groupOrder);
   };
 
-  useEffect(() => {
-    void refresh();
-  }, []);
+  // Helper: remove group from store
+  const removeGroupFromStore = (groupId: string) => {
+    const store = useStore.getState();
+    const groupsById = { ...store.groupsById };
+    const groupOrder = [...store.groupOrder];
+    delete groupsById[groupId];
+    store.setGroups(groupsById, groupOrder.filter((id) => id !== groupId));
+  };
 
   const onConnectGroup = async (record: GroupRecord) => {
     const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
     if (!api) return;
-    const config = await api.getGroupConnectionConfig(record.groupId) as { groupId: string; controlRoomId: string; groupSecret: string; nodeId: string } | null;
-    if (!config) return;
+    const [config, identity] = await Promise.all([
+      api.getGroupConnectionConfig(record.groupId) as Promise<{ groupId: string; controlRoomId: string; groupSecret: string; nodeId: string } | null>,
+      api.getDeviceIdentity(),
+    ]);
+    if (!config || !identity) return;
     const runtime = getRuntime();
     if (runtime) {
       await runtime.addGroup(
@@ -49,8 +64,8 @@ export function Groups() {
           groupId: config.groupId,
           controlRoomId: config.controlRoomId,
           groupSecret: config.groupSecret,
-          nodeId: config.nodeId,
-          displayName: config.displayName,
+          nodeId: identity.deviceId,
+          displayName: identity.displayName,
         },
         record.sharedState,
         record.lastClock,
@@ -70,9 +85,21 @@ export function Groups() {
       }
       setNewName("");
       setCreating(false);
-      await refresh();
+
+      // Update store immediately with the new group
       if (result.record) {
-        await onConnectGroup(result.record);
+        const record = result.record;
+        addGroupToStore(
+          record.groupId,
+          record.sharedState.name.value,
+          Object.fromEntries(
+            Object.entries(record.sharedState.members).map(([k, v]) => [
+              k,
+              { deviceId: v.deviceId, displayName: v.displayName },
+            ]),
+          ),
+        );
+        await onConnectGroup(record);
       }
     } catch (e) {
       setError(String(e));
@@ -87,7 +114,18 @@ export function Groups() {
       const record = (await api.joinGroup({ link: joinLink.trim() })) as GroupRecord;
       setJoinLink("");
       setJoining(false);
-      await refresh();
+
+      // Update store immediately with the joined group
+      addGroupToStore(
+        record.groupId,
+        record.sharedState.name.value,
+        Object.fromEntries(
+          Object.entries(record.sharedState.members).map(([k, v]) => [
+            k,
+            { deviceId: v.deviceId, displayName: v.displayName },
+          ]),
+        ),
+      );
       await onConnectGroup(record);
     } catch (e) {
       setError(String(e));
@@ -116,7 +154,7 @@ export function Groups() {
       await runtime.removeGroup(groupId);
     }
     await api.leaveGroup(groupId);
-    await refresh();
+    removeGroupFromStore(groupId);
   };
 
   const sortedMembers = (members: Record<string, { deviceId: string; displayName: string }>, online: string[]) => {
@@ -129,6 +167,8 @@ export function Groups() {
       ...offlineList.sort((a, b) => a.displayName.localeCompare(b.displayName)),
     ];
   };
+
+  const groups = groupOrder.map((id) => groupsById[id]).filter(Boolean);
 
   return (
     <div className="page">
@@ -185,6 +225,13 @@ export function Groups() {
         </div>
       )}
 
+      {settingsGroupId && (
+        <GroupSettingsDialog
+          groupId={settingsGroupId}
+          onClose={() => setSettingsGroupId(null)}
+        />
+      )}
+
       {error && <p className="error">{error}</p>}
 
       <div className="group-list">
@@ -192,40 +239,33 @@ export function Groups() {
           <p>You have no groups yet. Create or join a group to start sharing.</p>
         ) : (
           groups.map((g) => {
-            const onlineIds = onlineDeviceIdsByGroup[g.groupId] ?? [];
-            const connState = connectionStateById[g.groupId];
-            const members = Object.values(g.sharedState?.members ?? {});
+            const onlineIds = onlineDeviceIdsByGroup[g.id] ?? [];
+            const connState = connectionStateById[g.id];
+            const membersList = Object.values(g.members);
             return (
               <div
-                key={g.groupId}
-                className={`group-card card ${selectedGroupId === g.groupId ? "selected" : ""}`}
-                onClick={() => setSelectedGroupId(g.groupId)}
+                key={g.id}
+                className={`group-card card ${selectedGroupId === g.id ? "selected" : ""}`}
+                onClick={() => setSelectedGroupId(g.id)}
               >
-                <h3>{g.sharedState?.name?.value ?? "(unnamed)"}</h3>
+                <h3>{g.name || "(unnamed)"}</h3>
                 <p className="connection-state">
-                  {connState ? connState.state : "idle"} · {onlineIds.length} online · {members.length} known user{members.length === 1 ? "" : "s"}
+                  {connState ? connState.state : "idle"} · {onlineIds.length} online · {membersList.length} known user{membersList.length === 1 ? "" : "s"}
                 </p>
                 <div className="member-list compact">
-                  {sortedMembers(g.sharedState?.members ?? {}, onlineIds).slice(0, 8).map((m) => (
+                  {sortedMembers(g.members, onlineIds).slice(0, 8).map((m) => (
                     <span key={m.deviceId} className={`member-tag ${onlineIds.includes(m.deviceId) ? "online" : "offline"}`}>
                       {m.displayName}
                     </span>
                   ))}
                 </div>
                 <div className="actions">
-                  <button onClick={(e) => { e.stopPropagation(); void onCopyInvite(g.groupId); }}>Copy Group Link</button>
+                  <button onClick={(e) => { e.stopPropagation(); void onCopyInvite(g.id); }}>Copy Group Link</button>
                   <button onClick={(e) => {
                     e.stopPropagation();
-                    const newName = prompt("Group name:", g.sharedState?.name?.value ?? "");
-                    if (newName && newName.trim()) {
-                      const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-                      if (api) {
-                        const updatedState = { ...g.sharedState, name: { value: newName.trim() } };
-                        api.updateGroupSharedState(g.groupId, updatedState).catch(() => {});
-                      }
-                    }
+                    setSettingsGroupId(g.id);
                   }}>Group Settings</button>
-                  <button onClick={(e) => { e.stopPropagation(); void onLeaveGroup(g.groupId); }}>Leave Group</button>
+                  <button onClick={(e) => { e.stopPropagation(); void onLeaveGroup(g.id); }}>Leave Group</button>
                 </div>
               </div>
             );
