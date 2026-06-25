@@ -72,6 +72,7 @@ export interface ScreenLinkAPI {
 
   // Audio pipeline
   requestAudioPort: () => Promise<{ success: boolean; error?: string }>;
+  ensureAudioHelper: () => Promise<{ success: boolean; error?: string }>;
   getAudioState: () => Promise<AudioStateDTO>;
   startSyntheticAudio: (mode?: number) => Promise<{ success: boolean; error?: string }>;
   stopAudio: () => Promise<void>;

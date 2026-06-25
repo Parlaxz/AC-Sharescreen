@@ -324,6 +324,16 @@ export function registerIpcHandlers(
 
   // ── Audio pipeline ─────────────────────────────────────────────────────
 
+  ipcMain.handle("ensure-audio-helper", async () => {
+    try {
+      await ensureAudioHelper();
+      return { success: true };
+    } catch (err) {
+      console.error("[IPC] ensure-audio-helper failed:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+
   ipcMain.handle("request-audio-port", async (event) => {
     try {
       const helper = await ensureAudioHelper();

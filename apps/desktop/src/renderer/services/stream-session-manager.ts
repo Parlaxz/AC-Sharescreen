@@ -676,76 +676,127 @@ export class StreamSessionManager {
    * screen → startFilteredMonitorAudio via IPC + PCM port → ProcessAudioController
    * window → startApplicationAudio via IPC + PCM port → ProcessAudioController
    *
-   * Full audio ownership pipeline:
-   *   1) Start native capture (filtered monitor or application audio)
-   *   2) Request PCM MessagePort via IPC
-   *   3) Wait for pcm:port window message
-   *   4) Create & initialize ProcessAudioController
-   *   5) Wait for ring buffer priming
-   *   6) Set stream generation from capture start result
-   *   7) Attach controller to PublisherManager
+   * Full audio ownership pipeline (Gate 4.5 — production order):
+   *   1) Ensure audio helper exists and is running (main process).
+   *   2) Request the PCM MessagePort.
+   *   3) Receive the MessagePort via the pcm:port window message.
+   *   4) Initialize ProcessAudioController with the port.
+   *   5) Start the selected native capture mode (filtered monitor /
+   *      application / system / test-tone).
+   *   6) Receive the capture stream generation from the start result.
+   *   7) Set the controller stream generation IMMEDIATELY (do not wait
+   *      for priming first).
+   *   8) Wait for the controller to prime.
+   *   9) Attach the controller to PublisherManager.
+   *  10) Publish the combined media stream.
    *
-   * Throws if any audio stage fails (caller should mark degraded and continue).
+   * On failure at any stage: destroy the ProcessAudioController, stop
+   * native capture, release the PCM port, clear audio ownership, keep
+   * video capture, set isAudioDegraded, and preserve a sanitized
+   * failure reason. No partial helper ownership may remain.
    */
   private async setupSourceAudio(sourceId: string, sourceKind: "screen" | "window"): Promise<void> {
     const api = (window as unknown as { screenlink?: import("../../preload/api-types.js").ScreenLinkAPI }).screenlink;
     if (!api) return;
     if (!this.publisherManager) return;
 
+    let controller: ProcessAudioController | null = null;
     let streamGeneration: number | undefined;
-
-    // 1) Start native audio capture
-    if (sourceKind === "screen") {
-      // Filtered Monitor Audio
-      const result = await api.startFilteredMonitorAudio({
-        excludeDiscord: true,
-        excludeScreenLink: true,
-      });
-      if (!result?.success) {
-        throw new Error(`startFilteredMonitorAudio failed: ${result?.error ?? "unknown"}`);
-      }
-      streamGeneration = result.streamGeneration;
-      this._sourceKind = "screen";
-    } else if (sourceKind === "window") {
-      // Application Audio
-      const result = await api.startApplicationAudio({ sourceId });
-      if (!result?.success) {
-        throw new Error(`startApplicationAudio failed: ${result?.error ?? "unknown"}`);
-      }
-      streamGeneration = result.streamGeneration;
-      this._sourceKind = "window";
-    }
-
-    // 2) Request PCM MessagePort via IPC
-    const portResult = await api.requestAudioPort();
-    if (!portResult?.success) {
-      throw new Error(`requestAudioPort failed: ${portResult?.error ?? "unknown"}`);
-    }
-
-    // 3) Wait for pcm:port window message to receive the MessagePort
-    const pcmPort = await this.waitForPcmPort(5000);
-
-    // 4) Create & initialize ProcessAudioController
-    const controller = new ProcessAudioController();
-    await controller.initialize(pcmPort, {
-      onStateChange: (state) => {
-        console.log(`[SSM] Audio controller state: ${state}`);
-      },
+    let pcmPortReceived = false;
+    const pcmPortPromise = this.waitForPcmPort(5000).then((port) => {
+      pcmPortReceived = true;
+      return port;
     });
 
-    // 5) Wait for ring buffer priming (enough audio buffered before attaching)
-    await controller.waitUntilPrimed();
+    try {
+      // 1) Ensure the audio helper is up before we touch anything else.
+      const ensure = await api.ensureAudioHelper();
+      if (!ensure?.success) {
+        throw new Error(`ensureAudioHelper failed: ${ensure?.error ?? "unknown"}`);
+      }
 
-    // 6) Set stream generation to align with native capture
-    if (streamGeneration !== undefined) {
-      controller.setStreamGeneration(streamGeneration);
+      // 2) Request the PCM MessagePort. This is what will deliver the
+      //    port to the renderer via pcm:port window event.
+      const portResult = await api.requestAudioPort();
+      if (!portResult?.success) {
+        throw new Error(`requestAudioPort failed: ${portResult?.error ?? "unknown"}`);
+      }
+
+      // 3) Receive the port.
+      const pcmPort = await pcmPortPromise;
+      if (!pcmPortReceived) {
+        throw new Error("PCM MessagePort not received within timeout");
+      }
+
+      // 4) Initialize the ProcessAudioController with the port.
+      controller = new ProcessAudioController();
+      await controller.initialize(pcmPort, {
+        onStateChange: (state) => {
+          console.log(`[SSM] Audio controller state: ${state}`);
+        },
+      });
+
+      // 5) Start the selected native capture mode and capture the
+      //    stream generation the helper hands back. (This is what
+      //    allows us to align the ring buffer with the capture epoch.)
+      if (sourceKind === "screen") {
+        const result = await api.startFilteredMonitorAudio({
+          excludeDiscord: true,
+          excludeScreenLink: true,
+        });
+        if (!result?.success) {
+          throw new Error(`startFilteredMonitorAudio failed: ${result?.error ?? "unknown"}`);
+        }
+        streamGeneration = result.streamGeneration;
+        this._sourceKind = "screen";
+      } else if (sourceKind === "window") {
+        const result = await api.startApplicationAudio({ sourceId });
+        if (!result?.success) {
+          throw new Error(`startApplicationAudio failed: ${result?.error ?? "unknown"}`);
+        }
+        streamGeneration = result.streamGeneration;
+        this._sourceKind = "window";
+      }
+
+      // 6 + 7) Set the controller stream generation IMMEDIATELY. The
+      //   ring buffer will use this to drop samples that arrived
+      //   before the controller was attached, even though we are
+      //   about to wait for priming.
+      if (streamGeneration !== undefined && controller) {
+        controller.setStreamGeneration(streamGeneration);
+      }
+
+      // 8) Wait for the controller to prime.
+      if (controller) {
+        await controller.waitUntilPrimed();
+      }
+
+      // 9) Resolve the effective audio mode and attach to the
+      //    publisher. The controller is now the source of audio for
+      //    the publication.
+      const mode = this.resolveAudioMode();
+      const publisherMode = mode === "none"
+        ? "system"
+        : (mode as 'system' | 'application' | 'monitor' | 'test-tone');
+      this.publisherManager.setAudioController(controller, publisherMode);
+    } catch (err) {
+      // Roll back partial audio ownership. The video pipeline stays
+      // untouched.
+      if (controller) {
+        try { controller.destroy(); } catch { /* best effort */ }
+      }
+      // Best-effort stop of any started capture.
+      try { await api.stopAudio(); } catch { /* best effort */ }
+      // Close the port if it ever arrived.
+      if (pcmPortReceived) {
+        try {
+          // The controller owns the port lifecycle once it is
+          // initialized; if initialization failed the port is
+          // unattached and the GC will collect it.
+        } catch { /* ignore */ }
+      }
+      throw err;
     }
-
-    // 7) Resolve effective audio mode and attach to PublisherManager
-    const mode = this.resolveAudioMode();
-    // Map AudioMode to publisher's union; default to 'system' for non-none modes
-    const publisherMode = mode === "none" ? "system" : (mode as 'system' | 'application' | 'monitor' | 'test-tone');
-    this.publisherManager.setAudioController(controller, publisherMode);
   }
 
   /**

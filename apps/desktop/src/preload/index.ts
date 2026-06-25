@@ -56,6 +56,7 @@ const api: ScreenLinkAPI = {
   getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
 
   requestAudioPort: () => ipcRenderer.invoke("request-audio-port"),
+  ensureAudioHelper: () => ipcRenderer.invoke("ensure-audio-helper"),
   getAudioState: () => ipcRenderer.invoke("get-audio-state"),
   startSyntheticAudio: (mode) => ipcRenderer.invoke("start-synthetic-audio", mode),
   stopAudio: () => ipcRenderer.invoke("stop-audio"),
