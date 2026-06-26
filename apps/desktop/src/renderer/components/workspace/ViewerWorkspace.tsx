@@ -14,7 +14,6 @@ import {
   WifiOff,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -36,6 +35,7 @@ import {
 } from "@/stores/main-store";
 import { VideoControls } from "./viewer/VideoControls.js";
 import type { QualityLevel } from "./viewer/QualityPopover.js";
+import { ViewerSession, type ViewerSessionState } from "@/services/viewer-session.js";
 
 // ─── Reduced motion hook ──────────────────────────────────────────────────
 
@@ -92,7 +92,6 @@ function useControlsAutoHide(delay = 3000) {
   }, []);
 
   useEffect(() => {
-    // Start the hide timer
     timerRef.current = setTimeout(() => setVisible(false), delay);
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
@@ -122,24 +121,45 @@ const fadeInstant = {
   ease: "easeInOut" as const,
 };
 
+// ─── Map ViewerSession state to viewStatus string ────────────────────────
+
+function sessionStateToViewStatus(state: ViewerSessionState): string {
+  switch (state) {
+    case "idle":
+    case "connecting":
+      return "connecting";
+    case "requesting-join":
+      return "connecting";
+    case "waiting-for-host":
+      return "connecting";
+    case "accepted":
+      return "connecting";
+    case "connecting-media":
+      return "connecting";
+    case "watching":
+      return "watching";
+    case "ended":
+      return "ended";
+    case "error":
+      return "error";
+  }
+}
+
 // ─── ViewerWorkspace ──────────────────────────────────────────────────────
 
 /**
  * ViewerWorkspace — Video-first viewer layout (Section 8.5).
  *
+ * Uses the real ViewerSession to manage the join flow and media
+ * connection. No simulation, no timers.
+ *
  * States (Section 15):
- *   - Connecting   → Skeleton + "Connecting" text
- *   - Reconnecting → Amber Alert with inline Progress
+ *   - Connecting   → Skeleton + status text
+ *   - Reconnecting → Amber Alert with inline Progress (future use)
  *   - Degraded     → Amber Alert
  *   - Ended        → Animated exit + "Return to overview"
  *   - Fatal error  → Destructive Alert + retry
- *   - Connected    → Video stage + header strip + controls
- *
- * Composed from Watermelon: Skeleton, Alert, Progress, Button, Badge,
- * Tooltip + framer-motion AnimatePresence/layout.
- *
- * The native <video> element is the only exception to the "all UI from
- * Watermelon" rule (Section 8.5).
+ *   - Watching     → Video stage + header strip + controls
  */
 export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const reduced = usePrefersReducedMotion();
@@ -158,12 +178,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [isPaused, setIsPaused] = useState(false);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
-  const [quality, setQuality] = useState<QualityLevel>("balanced");
+  const [quality, setQuality] = useState<QualityLevel>("custom");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
+  const [sessionState, setSessionState] = useState<ViewerSessionState>("idle");
 
-  // Video element ref
+  // Video element ref — shared with ViewerSession
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // ViewerSession instance ref — stable across renders
+  const sessionRef = useRef<ViewerSession | null>(null);
 
   // Auto-hide controls
   const { visible: controlsVisible, show: showControls, keepVisible, hide: hideControls } =
@@ -202,13 +226,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [currentStream, currentStreamId]);
 
-  // Watched stream fallback info
+  // Watched stream info (set by Watch button or join flow)
   const watchedInfo = useMemo(() => {
-    if (currentStreamId && watchedStreamsBySessionId[currentStreamId]) {
-      return watchedStreamsBySessionId[currentStreamId];
+    const watchedId = currentStream?.mediaSessionId ?? Object.keys(watchedStreamsBySessionId)[0] ?? null;
+    if (watchedId && watchedStreamsBySessionId[watchedId]) {
+      return { sessionId: watchedId, ...watchedStreamsBySessionId[watchedId] };
     }
     return null;
-  }, [currentStreamId, watchedStreamsBySessionId]);
+  }, [currentStream, watchedStreamsBySessionId]);
 
   const sharerName = currentStream?.hostDisplayName ?? watchedInfo?.hostName ?? "Unknown";
   const sourceName =
@@ -219,9 +244,99 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     ? formatLiveDuration(watchedInfo.startedAt)
     : "";
 
+  // ── ViewerSession lifecycle ─────────────────────────────────────
+  //
+  // INTENTIONAL STALE-CLOSURE PATTERN
+  // ──────────────────────────────────
+  // This effect captures watch-target values (selectedGroupId,
+  // watchedInfo, currentStream, sharerName) via refs at mount time,
+  // then reads them inside the effect via those refs.  The effect
+  // depends ONLY on `isViewing` because:
+  //
+  //   1. The viewer page mounts once per watch session; target
+  //      parameters are set by the Watch button and should not
+  //      change mid-session.
+  //   2. Adding the watch-target values to the deps array would
+  //      tear down and recreate the ViewerSession on every store
+  //      update (e.g. new stream heartbeat), which is wrong.
+  //   3. The only legitimate re-creation trigger is the user
+  //      exiting and re-watching (isViewing toggles).
+  //
+  // Re-structuring to avoid stale values would require threading
+  // the watch target through a dedicated context or route param,
+  // which is out of scope for this defect pass.
+
+  const targetRef = useRef({ selectedGroupId, watchedInfo, currentStream, sharerName });
+  targetRef.current = { selectedGroupId, watchedInfo, currentStream, sharerName };
+
+  useEffect(() => {
+    if (!isViewing || sessionRef.current) return;
+
+    const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
+
+    // Determine the watch target from watched info or active stream
+    const targetSessionId = wInfo?.sessionId;
+    const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
+    const targetLogicalStreamId = cStream?.logicalStreamId;
+
+    if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
+      // Cannot start session without complete target info
+      setViewStatus("error: missing stream target");
+      return;
+    }
+
+    const session = new ViewerSession();
+    sessionRef.current = session;
+
+    // Listen for state changes
+    session.onStateChange = (state: ViewerSessionState) => {
+      setSessionState(state);
+      const status = sessionStateToViewStatus(state);
+      setViewStatus(status);
+    };
+
+    // Handle errors
+    session.onError = (error: string) => {
+      setViewStatus(`error: ${error}`);
+    };
+
+    // Start the session
+    session.start({
+      groupId: gId,
+      hostDeviceId: targetHostDeviceId,
+      logicalStreamId: targetLogicalStreamId,
+      mediaSessionId: targetSessionId,
+      hostName: sName,
+      videoElement: videoRef.current,
+    }).catch((err) => {
+      setViewStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+
+    return () => {
+      // Cleanup on unmount
+      if (sessionRef.current) {
+        sessionRef.current.destroy();
+        sessionRef.current = null;
+      }
+    };
+  }, [isViewing]);
+
+  // Bind video element to session whenever ref is available
+  useEffect(() => {
+    if (sessionRef.current && videoRef.current) {
+      sessionRef.current.bindVideoElement(videoRef.current);
+    }
+  }, [videoRef.current, sessionState]);
+
   // ── Callbacks ────────────────────────────────────────────────────
 
   const handleExit = useCallback(() => {
+    // Stop the session
+    if (sessionRef.current) {
+      sessionRef.current.stop();
+      sessionRef.current.destroy();
+      sessionRef.current = null;
+    }
     setIsViewing(false);
     setViewStatus("");
     if (document.fullscreenElement) {
@@ -241,27 +356,28 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const handleStreamSwitch = useCallback(
     (stream: StreamAnnouncement) => {
       setCurrentStreamId(stream.logicalStreamId);
-      toast(`Switched to ${stream.hostDisplayName}'s stream`);
     },
     [],
   );
 
   const handleRetry = useCallback(() => {
-    // No simulated viewer reconnect. There is no complete viewer
-    // join operation in this pass; retry simply returns the user
-    // to the connecting state and tells them the viewer is not
-    // yet wired.
-    setViewStatus("connecting");
-    setIsViewing(false);
-  }, [setViewStatus, setIsViewing]);
+    if (sessionRef.current) {
+      setViewStatus("connecting");
+      void sessionRef.current.retry();
+    } else {
+      // If no session, reset view status to trigger re-mount effect
+      setViewStatus("connecting");
+    }
+  }, [setViewStatus]);
 
-  // ── Status is "connecting" ───────────────────────────────────────
-  const status = viewStatus || "connecting";
+  // ── Derive display status from session state ─────────────────────
+  // Use the store's viewStatus as source of truth, falling back to sessionState
+  const displayStatus = viewStatus || sessionStateToViewStatus(sessionState);
 
   // ── Render by view status (Section 15) ───────────────────────────
 
   // Connecting state — Skeleton + status text
-  if (status === "connecting") {
+  if (displayStatus === "connecting") {
     return (
       <ViewerShell className={className} onExit={handleExit}>
         <motion.div
@@ -303,7 +419,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }
 
   // Reconnecting state — Amber Alert with inline Progress
-  if (status === "reconnecting") {
+  if (displayStatus === "reconnecting") {
     return (
       <ViewerShell className={className} onExit={handleExit}>
         <motion.div
@@ -366,7 +482,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }
 
   // Degraded state — Amber Alert
-  if (status === "degraded") {
+  if (displayStatus === "degraded") {
     return (
       <ViewerShell className={className} onExit={handleExit}>
         <motion.div
@@ -427,7 +543,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }
 
   // Stream ended state — Animated exit
-  if (status === "ended") {
+  if (displayStatus === "ended") {
     return (
       <ViewerShell className={className} onExit={handleExit}>
         <motion.div
@@ -476,7 +592,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }
 
   // Fatal error state — Destructive Alert + retry
-  if (status === "error") {
+  if (displayStatus === "error") {
     return (
       <ViewerShell className={className} onExit={handleExit}>
         <motion.div
@@ -495,6 +611,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 A fatal error occurred while trying to connect to or play
                 {sharerName}'s stream. Please try again or check your
                 connection.
+                {viewStatus.startsWith("error:") && (
+                  <span className="block mt-2 text-xs opacity-70">
+                    {viewStatus.slice(6)}
+                  </span>
+                )}
               </AlertDescription>
             </Alert>
             <div className="flex items-center gap-3 mt-4 justify-center">
@@ -513,12 +634,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     );
   }
 
-  // ── Connected / default state: Video stage with controls ────────
+  // ── Watching / default state: Video stage with controls ────────
 
   return (
     <ViewerShell className={className} onExit={handleExit}>
       <motion.div
-        key="connected"
+        key="watching"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
@@ -552,9 +673,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState={
-              status === "connected"
+              displayStatus === "watching"
                 ? "connected"
-                : status === "degraded"
+                : displayStatus === "degraded"
                 ? "degraded"
                 : "connected"
             }
@@ -621,8 +742,10 @@ function ViewerShell({
         return "bg-text-muted";
       case "error":
         return "bg-danger";
-      default:
+      case "watching":
         return "bg-success";
+      default:
+        return "bg-warning";
     }
   }, [viewStatus]);
 
@@ -636,8 +759,10 @@ function ViewerShell({
         return "Ended";
       case "error":
         return "Error";
+      case "watching":
+        return "Watching";
       default:
-        return "Connected";
+        return viewStatus || "Connecting";
     }
   }, [viewStatus]);
 

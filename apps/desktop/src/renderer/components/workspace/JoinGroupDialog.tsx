@@ -96,10 +96,10 @@ export function JoinGroupDialog() {
               value={inviteLink}
               onChange={(e) => setInviteLink(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="https://screenlink.app/invite/…"
-              disabled={joining}
-              autoFocus
-            />
+                placeholder="Paste invite link or code"
+                disabled={joining}
+                autoFocus
+              />
           </div>
 
           {error && (

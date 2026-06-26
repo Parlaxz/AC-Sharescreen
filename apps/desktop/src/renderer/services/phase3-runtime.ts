@@ -45,6 +45,13 @@ export class Phase3Runtime {
   get deviceId(): string | null { return this._deviceId; }
   get displayName(): string | null { return this._displayName; }
 
+  updateLocalDisplayName(displayName: string): void {
+    this._displayName = displayName;
+    if (this._deviceId) {
+      this.streamSessionManager.setDeviceIdentity(this._deviceId, displayName);
+    }
+  }
+
   constructor(persistence?: SyncPersistenceAdapter) {
     this.connManager = new GroupConnectionManager();
     this.syncService = new GroupSyncService(this.connManager, persistence);

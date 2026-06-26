@@ -20,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
+
 import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
@@ -139,8 +139,7 @@ export function QualityPresetsPage() {
   const [formResolution, setFormResolution] = useState("1920x1080");
   const [formFps, setFormFps] = useState(30);
   const [formBitrate, setFormBitrate] = useState(4000);
-  const [formCodec, setFormCodec] = useState("h264");
-  const [formSystemAudio, setFormSystemAudio] = useState(false);
+  const [formCodec, setFormCodec] = useState("vp9");
   const [formContentHint, setFormContentHint] = useState("motion");
   const [formSaving, setFormSaving] = useState(false);
 
@@ -180,8 +179,7 @@ export function QualityPresetsPage() {
     setFormResolution("1920x1080");
     setFormFps(30);
     setFormBitrate(4000);
-    setFormCodec("h264");
-    setFormSystemAudio(false);
+    setFormCodec("vp9");
     setFormContentHint("motion");
     setFormSaving(false);
   }, []);
@@ -201,9 +199,8 @@ export function QualityPresetsPage() {
       setFormBitrate(s.bitrate);
       // Infer codec + content hint from settings
       const video = (preset.settings.video as Record<string, unknown>) ?? {};
-      setFormCodec((video.codec as string) ?? "h264");
+      setFormCodec((video.codec as string) ?? "vp9");
       setFormContentHint((video.contentHint as string) ?? "motion");
-      setFormSystemAudio(false);
       setEditingId(preset.id);
       setEditorOpen(true);
     },
@@ -641,15 +638,6 @@ export function QualityPresetsPage() {
               </Select>
             </div>
 
-            <div className="flex items-center justify-between">
-              <Label htmlFor="preset-system-audio">System audio</Label>
-              <Switch
-                id="preset-system-audio"
-                checked={formSystemAudio}
-                onCheckedChange={setFormSystemAudio}
-                disabled={formSaving}
-              />
-            </div>
           </div>
 
           <SheetFooter className="mt-6">

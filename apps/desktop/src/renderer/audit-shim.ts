@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+export {};
 /**
  * Browser shim for window.screenlink API.
  *
@@ -95,9 +96,41 @@ const noopUnsub = () => () => {};
   // Groups
   listGroups: () => Promise.resolve([]),
   getGroup: stub,
-  createGroup: () => Promise.resolve({ groupId: "stub-group", name: { value: "Demo Group" } }),
-  joinGroup: () => Promise.resolve({ groupId: "stub-group" }),
-  getGroupInvite: () => Promise.resolve({ link: "https://screenlink.app/invite/stub-group" }),
+  createGroup: () => Promise.resolve({
+    record: {
+      groupId: "00000000-0000-0000-0000-000000000001",
+      controlRoomId: "audit-room",
+      encryptedGroupSecret: "stub-secret",
+      sharedState: {
+        schemaVersion: 1,
+        groupId: "00000000-0000-0000-0000-000000000001",
+        name: { value: "Demo Group", stamp: { wallTimeMs: 0, counter: 0, nodeId: "audit-device" }, valueHash: "name" },
+        defaultQuality: { value: { schemaVersion: 1, video: {}, audio: {} }, stamp: { wallTimeMs: 0, counter: 0, nodeId: "audit-device" }, valueHash: "quality" },
+        members: {},
+      },
+      lastClock: { wallTimeMs: 0, counter: 0, nodeId: "audit-device" },
+      joinedAt: Date.now(),
+      notificationsEnabled: true,
+    },
+    invite: {},
+    link: "stub-group-invite-code",
+  }),
+  joinGroup: () => Promise.resolve({
+    groupId: "00000000-0000-0000-0000-000000000001",
+    controlRoomId: "audit-room",
+    encryptedGroupSecret: "stub-secret",
+    sharedState: {
+      schemaVersion: 1,
+      groupId: "00000000-0000-0000-0000-000000000001",
+      name: { value: "Demo Group", stamp: { wallTimeMs: 0, counter: 0, nodeId: "audit-device" }, valueHash: "name" },
+      defaultQuality: { value: { schemaVersion: 1, video: {}, audio: {} }, stamp: { wallTimeMs: 0, counter: 0, nodeId: "audit-device" }, valueHash: "quality" },
+      members: {},
+    },
+    lastClock: { wallTimeMs: 0, counter: 0, nodeId: "audit-device" },
+    joinedAt: Date.now(),
+    notificationsEnabled: true,
+  }),
+  getGroupInvite: () => Promise.resolve({ link: "stub-group-invite-code" }),
   updateGroupSharedState: () => Promise.resolve(null),
   updateGroupClock: stub,
   setGroupNotifications: stub,
@@ -105,27 +138,7 @@ const noopUnsub = () => () => {};
   getGroupConnectionConfig: () => Promise.resolve(null),
 
   // Quality presets
-  listQualityPresets: () =>
-    Promise.resolve([
-      {
-        id: "data-saver",
-        name: "Data saver",
-        settings: { width: 640, height: 360, fps: 10, bitrateKbps: 250, codec: "h264" },
-        isDefault: false,
-      },
-      {
-        id: "balanced",
-        name: "Balanced",
-        settings: { width: 854, height: 480, fps: 15, bitrateKbps: 650, codec: "h264" },
-        isDefault: true,
-      },
-      {
-        id: "clear",
-        name: "Clear",
-        settings: { width: 1280, height: 720, fps: 30, bitrateKbps: 1500, codec: "h264" },
-        isDefault: false,
-      },
-    ]),
+  listQualityPresets: () => Promise.resolve([]),
   getQualityPreset: () => Promise.resolve(null),
   createQualityPreset: () => Promise.resolve({ id: "new-preset" }),
   updateQualityPreset: () => Promise.resolve(null),

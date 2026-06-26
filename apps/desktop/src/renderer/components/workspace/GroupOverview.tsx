@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 import {
   UserPlus,
   Monitor,
+  Eye,
   RefreshCw,
   AlertTriangle,
 } from "lucide-react";
@@ -65,6 +66,12 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
   // member is the host of an active share.
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const groupsById = useStore((s) => s.groupsById);
+  const isViewing = useStore((s) => s.isViewing);
+  const setIsViewing = useStore((s) => s.setIsViewing);
+  const setViewStatus = useStore((s) => s.setViewStatus);
+  const setWatchedStreams = useStore((s) => s.setWatchedStreams);
+  const navigate = useStore((s) => s.navigate);
+
   const memberIsSharing = useMemo(() => {
     const group = groupsById[share.groupId];
     if (!group) return false;
@@ -73,6 +80,22 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
       (s) => s.hostDeviceId === hostDeviceId || s.logicalStreamId === share.logicalStreamId,
     );
   }, [activeStreamsByGroup, groupsById, share.groupId, share.logicalStreamId, hostDeviceId]);
+
+  const handleWatch = useCallback(() => {
+    if (isViewing) return;
+    // Store the watch target info so ViewerWorkspace can pick it up
+    setWatchedStreams((prev) => ({
+      ...prev,
+      [share.mediaSessionId]: {
+        hostDeviceId: share.hostDeviceId,
+        hostName: share.hostDisplayName,
+        startedAt: share.startedAt,
+      },
+    }));
+    setIsViewing(true);
+    setViewStatus("connecting");
+    navigate("viewer");
+  }, [isViewing, share, setWatchedStreams, setIsViewing, setViewStatus, navigate]);
 
   return (
     <motion.div
@@ -120,10 +143,7 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
 
           <Separator className="my-3" />
 
-          {/* Footer row — only truthful metadata. No fake stream
-              statistics, no fake stream actions, no Watch button
-              (no complete viewer join operation exists in this
-              pass). */}
+          {/* Footer row — real Watch button for remote streams */}
           <div className="flex items-center justify-end gap-2">
             {memberIsSharing && (
               <Badge
@@ -134,6 +154,17 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
                 Sharing
               </Badge>
             )}
+            <Button
+              variant="default"
+              size="sm"
+              className="h-7 text-xs px-3"
+              onClick={handleWatch}
+              disabled={isViewing}
+              aria-label={`Watch ${share.hostDisplayName}'s stream`}
+            >
+              <Eye className="h-3 w-3 mr-1" />
+              Watch
+            </Button>
           </div>
         </CardContent>
       </Card>
@@ -151,9 +182,8 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
  * section. The Members section is always rendered (whether or not
  * there are active shares) and uses real group member data.
  *
- * Watch has been removed in this pass: no complete viewer-join
- * operation is available. The previous setTimeout-simulation was
- * explicitly called out as fake and is no longer present.
+ * Active share cards include a real Watch button that triggers the
+ * viewer join flow via ViewerSession. No simulation or timers.
  *
  * Composed from Watermelon: Card, Avatar, Badge, Button, Tooltip,
  * Skeleton, Alert, Separator + framer-motion. No fake stream
@@ -180,10 +210,6 @@ export function GroupOverview({
   const memberCount = group ? Object.keys(group.members).length : 0;
 
   const setIsSharing = useStore((s) => s.setIsSharing);
-
-  // Watch has been removed in this pass: no complete viewer-join
-  // operation is available. The previous setTimeout-simulation was
-  // explicitly called out as fake and is no longer present.
 
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
 

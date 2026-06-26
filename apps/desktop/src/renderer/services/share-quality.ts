@@ -1,7 +1,7 @@
 /**
- * Shared session-start quality override type and built-in preset
- * definitions. Consumed by ShareSetup, QuickShareDialog, the share
- * coordinator, StreamSessionManager, and PublisherManager.
+ * Shared session-start quality override type. Consumed by ShareSetup,
+ * QuickShareDialog, the share coordinator, StreamSessionManager, and
+ * PublisherManager.
  *
  * A quality override is a per-session input that resolves to a
  * publication/capture configuration without inventing a separate
@@ -10,6 +10,17 @@
  */
 
 export type AudioModeValue = "none" | "monitor" | "application";
+
+// ─── Default video fallback values ─────────────────────────────────────────
+// Single source of truth shared by SessionQualityOverride builders and
+// StreamSessionManager. Any change here affects all fallback paths.
+export const DEFAULT_VIDEO_BITRATE_KBPS = 650;
+export const DEFAULT_SEND_WIDTH = 854;
+export const DEFAULT_SEND_HEIGHT = 480;
+export const DEFAULT_SEND_FPS = 15;
+export const DEFAULT_CODEC = "vp9";
+export const DEFAULT_CONTENT_HINT = "detail";
+export const DEFAULT_DEGRADATION_PREFERENCE = "maintain-resolution";
 
 /**
  * Per-session quality override. Only fields that affect capture or
@@ -27,89 +38,6 @@ export interface SessionQualityOverride {
   codec?: string;
   contentHint?: string;
   degradationPreference?: string;
-}
-
-export type BuiltInPresetKind = "data-saver" | "balanced" | "clear";
-
-/**
- * Built-in quality presets. The slot list is the source of truth for
- * the values displayed in the ShareSetup / QuickShareDialog cards
- * and for resolving a built-in slot into a SessionQualityOverride.
- */
-export interface BuiltInPresetDefinition {
-  kind: BuiltInPresetKind;
-  name: string;
-  summary: string;
-  videoBitrateKbps: number;
-  sendWidth: number;
-  sendHeight: number;
-  sendFps: number;
-  captureWidth: number;
-  captureHeight: number;
-  captureFps: number;
-}
-
-export const BUILT_IN_PRESETS: readonly BuiltInPresetDefinition[] = [
-  {
-    kind: "data-saver",
-    name: "Data saver",
-    summary: "640×360 @ 10 fps · 400 kbps",
-    videoBitrateKbps: 400,
-    sendWidth: 640,
-    sendHeight: 360,
-    sendFps: 10,
-    captureWidth: 640,
-    captureHeight: 360,
-    captureFps: 10,
-  },
-  {
-    kind: "balanced",
-    name: "Balanced",
-    summary: "854×480 @ 15 fps · 650 kbps",
-    videoBitrateKbps: 650,
-    sendWidth: 854,
-    sendHeight: 480,
-    sendFps: 15,
-    captureWidth: 854,
-    captureHeight: 480,
-    captureFps: 15,
-  },
-  {
-    kind: "clear",
-    name: "Clear",
-    summary: "1280×720 @ 24 fps · 1500 kbps",
-    videoBitrateKbps: 1500,
-    sendWidth: 1280,
-    sendHeight: 720,
-    sendFps: 24,
-    captureWidth: 1280,
-    captureHeight: 720,
-    captureFps: 24,
-  },
-] as const;
-
-/**
- * Convert a built-in slot into a SessionQualityOverride. Codec,
- * content hint, and degradation preference are intentionally omitted
- * for built-ins so that group defaults or runtime defaults supply
- * them.
- */
-export function builtInPresetToOverride(
-  kind: BuiltInPresetKind,
-): SessionQualityOverride {
-  const preset = BUILT_IN_PRESETS.find((p) => p.kind === kind);
-  if (!preset) {
-    throw new Error(`Unknown built-in preset: ${kind}`);
-  }
-  return {
-    videoBitrateKbps: preset.videoBitrateKbps,
-    sendWidth: preset.sendWidth,
-    sendHeight: preset.sendHeight,
-    sendFps: preset.sendFps,
-    captureWidth: preset.captureWidth,
-    captureHeight: preset.captureHeight,
-    captureFps: preset.captureFps,
-  };
 }
 
 /**
@@ -136,39 +64,37 @@ export interface PresetSettingsLike {
 
 /**
  * Convert a personal preset's settings into a SessionQualityOverride.
- * Missing fields are filled from a fallback (typically the Balanced
- * built-in) so the override is always complete.
+ * Missing fields are filled from VP9 defaults so the override is
+ * always complete.
  */
 export function presetSettingsToOverride(
   settings: PresetSettingsLike | undefined,
-  fallback: BuiltInPresetKind = "balanced",
 ): SessionQualityOverride {
-  const balanced = builtInPresetToOverride(fallback);
   const video = settings?.video ?? {};
   return {
     videoBitrateKbps:
       typeof video.videoBitrateKbps === "number"
         ? video.videoBitrateKbps
-        : balanced.videoBitrateKbps,
+        : DEFAULT_VIDEO_BITRATE_KBPS,
     sendWidth:
-      typeof video.sendWidth === "number" ? video.sendWidth : balanced.sendWidth,
+      typeof video.sendWidth === "number" ? video.sendWidth : DEFAULT_SEND_WIDTH,
     sendHeight:
       typeof video.sendHeight === "number"
         ? video.sendHeight
-        : balanced.sendHeight,
+        : DEFAULT_SEND_HEIGHT,
     sendFps:
-      typeof video.sendFps === "number" ? video.sendFps : balanced.sendFps,
+      typeof video.sendFps === "number" ? video.sendFps : DEFAULT_SEND_FPS,
     captureWidth:
       typeof video.captureWidth === "number"
         ? video.captureWidth
-        : balanced.captureWidth,
+        : DEFAULT_SEND_WIDTH,
     captureHeight:
       typeof video.captureHeight === "number"
         ? video.captureHeight
-        : balanced.captureHeight,
+        : DEFAULT_SEND_HEIGHT,
     captureFps:
-      typeof video.captureFps === "number" ? video.captureFps : balanced.sendFps,
-    codec: typeof video.codec === "string" ? video.codec : undefined,
+      typeof video.captureFps === "number" ? video.captureFps : DEFAULT_SEND_FPS,
+    codec: typeof video.codec === "string" ? video.codec : DEFAULT_CODEC,
     contentHint:
       typeof video.contentHint === "string" ? video.contentHint : undefined,
     degradationPreference:
@@ -180,12 +106,14 @@ export function presetSettingsToOverride(
 
 /**
  * Build a SessionQualityOverride from raw custom slider values.
+ * Default codec is VP9 for new Custom flows and runtime fallback.
  */
 export function customPresetToOverride(input: {
   width: number;
   height: number;
   fps: number;
   bitrate: number;
+  codec?: string;
 }): SessionQualityOverride {
   return {
     videoBitrateKbps: input.bitrate,
@@ -195,6 +123,7 @@ export function customPresetToOverride(input: {
     captureWidth: input.width,
     captureHeight: input.height,
     captureFps: input.fps,
+    codec: input.codec ?? DEFAULT_CODEC,
   };
 }
 

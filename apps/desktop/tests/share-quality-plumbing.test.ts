@@ -5,8 +5,6 @@ import { StreamSessionManager } from "../src/renderer/services/stream-session-ma
 import { PublisherManager } from "../src/renderer/services/publisher-manager.js";
 import type { Phase3Runtime } from "../src/renderer/services/phase3-runtime.js";
 import {
-  BUILT_IN_PRESETS,
-  builtInPresetToOverride,
   customPresetToOverride,
   presetSettingsToOverride,
   validateSessionQualityOverride,
@@ -127,55 +125,10 @@ function mockAudioApi() {
   } };
 }
 
-// ─── Built-in preset definitions ─────────────────────────────────────────
+// ─── Quality override helpers ────────────────────────────────────────────
 
-describe("Built-in preset definitions", () => {
-  it("Data Saver is 640×360, 10 FPS, 400 kbps", () => {
-    expect(builtInPresetToOverride("data-saver")).toEqual({
-      videoBitrateKbps: 400,
-      sendWidth: 640,
-      sendHeight: 360,
-      sendFps: 10,
-      captureWidth: 640,
-      captureHeight: 360,
-      captureFps: 10,
-    });
-  });
-
-  it("Balanced is 854×480, 15 FPS, 650 kbps", () => {
-    expect(builtInPresetToOverride("balanced")).toEqual({
-      videoBitrateKbps: 650,
-      sendWidth: 854,
-      sendHeight: 480,
-      sendFps: 15,
-      captureWidth: 854,
-      captureHeight: 480,
-      captureFps: 15,
-    });
-  });
-
-  it("Clear is 1280×720, 24 FPS, 1500 kbps", () => {
-    expect(builtInPresetToOverride("clear")).toEqual({
-      videoBitrateKbps: 1500,
-      sendWidth: 1280,
-      sendHeight: 720,
-      sendFps: 24,
-      captureWidth: 1280,
-      captureHeight: 720,
-      captureFps: 24,
-    });
-  });
-
-  it("Built-in slots omit codec/contentHint/degradationPreference", () => {
-    for (const p of BUILT_IN_PRESETS) {
-      const ov = builtInPresetToOverride(p.kind);
-      expect(ov.codec).toBeUndefined();
-      expect(ov.contentHint).toBeUndefined();
-      expect(ov.degradationPreference).toBeUndefined();
-    }
-  });
-
-  it("Custom uses the provided slider values verbatim", () => {
+describe("Quality override helpers", () => {
+  it("Custom uses the provided slider values verbatim with VP9 codec", () => {
     expect(
       customPresetToOverride({ width: 1920, height: 1080, fps: 30, bitrate: 4000 }),
     ).toEqual({
@@ -186,6 +139,22 @@ describe("Built-in preset definitions", () => {
       captureWidth: 1920,
       captureHeight: 1080,
       captureFps: 30,
+      codec: "vp9",
+    });
+  });
+
+  it("Custom override allows explicit codec", () => {
+    expect(
+      customPresetToOverride({ width: 1280, height: 720, fps: 24, bitrate: 1500, codec: "h264" }),
+    ).toEqual({
+      videoBitrateKbps: 1500,
+      sendWidth: 1280,
+      sendHeight: 720,
+      sendFps: 24,
+      captureWidth: 1280,
+      captureHeight: 720,
+      captureFps: 24,
+      codec: "h264",
     });
   });
 
@@ -212,13 +181,37 @@ describe("Built-in preset definitions", () => {
     expect(ov.degradationPreference).toBe("maintain-framerate");
   });
 
+  it("Personal preset with no codec falls back to VP9", () => {
+    const ov = presetSettingsToOverride({
+      video: {
+        videoBitrateKbps: 2000,
+        sendWidth: 1920,
+        sendHeight: 1080,
+        sendFps: 60,
+        captureWidth: 1920,
+        captureHeight: 1080,
+        captureFps: 60,
+      },
+    });
+    expect(ov.codec).toBe("vp9");
+  });
+
+  it("Missing settings fall back to VP9 defaults", () => {
+    const ov = presetSettingsToOverride(undefined);
+    expect(ov.codec).toBe("vp9");
+    expect(ov.videoBitrateKbps).toBe(650);
+    expect(ov.sendWidth).toBe(854);
+    expect(ov.sendHeight).toBe(480);
+    expect(ov.sendFps).toBe(15);
+  });
+
   it("validateSessionQualityOverride accepts valid values", () => {
-    const ok = builtInPresetToOverride("balanced");
+    const ok = customPresetToOverride({ width: 854, height: 480, fps: 15, bitrate: 650 });
     expect(validateSessionQualityOverride(ok)).toBeNull();
   });
 
   it("validateSessionQualityOverride rejects out-of-range values", () => {
-    const bad = { ...builtInPresetToOverride("balanced"), sendWidth: 10 };
+    const bad = { ...customPresetToOverride({ width: 854, height: 480, fps: 15, bitrate: 650 }), sendWidth: 10 };
     expect(validateSessionQualityOverride(bad)).toMatch(/Send width/);
   });
 });
@@ -261,7 +254,7 @@ describe("StreamSessionManager quality override plumbing", () => {
       await ssm.startStream({
         groupId: "g-1",
         source: { id: "s1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
-        qualityOverride: builtInPresetToOverride("data-saver"),
+        qualityOverride: customPresetToOverride({ width: 640, height: 360, fps: 10, bitrate: 400 }),
       });
       expect(ssm.state).toBe("active");
       const cfg = startSpy.mock.calls[0][1];
@@ -322,7 +315,7 @@ describe("StreamSessionManager quality override plumbing", () => {
       ssm.startStream({
         groupId: "g-1",
         source: { id: "s1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
-        qualityOverride: { ...builtInPresetToOverride("balanced"), sendWidth: 10 },
+        qualityOverride: { ...customPresetToOverride({ width: 854, height: 480, fps: 15, bitrate: 650 }), sendWidth: 10 },
       }),
     ).rejects.toThrow(/Send width/);
   });
@@ -334,7 +327,7 @@ describe("StreamSessionManager quality override plumbing", () => {
       await ssm.startStream({
         groupId: "g-1",
         source: { id: "s1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
-        qualityOverride: builtInPresetToOverride("clear"),
+        qualityOverride: customPresetToOverride({ width: 1280, height: 720, fps: 24, bitrate: 1500 }),
       });
       startSpy.mockClear();
       await ssm.restartStream();
@@ -359,7 +352,7 @@ describe("StreamSessionManager quality override plumbing", () => {
         await ssm.startStream({
           groupId: "g-1",
           source: { id: "s1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
-          qualityOverride: builtInPresetToOverride("data-saver"),
+          qualityOverride: customPresetToOverride({ width: 640, height: 360, fps: 10, bitrate: 400 }),
         });
         await ssm.stopStream();
         // After stop, a fresh start with no override should use the
@@ -417,7 +410,7 @@ describe("Share coordinator accepts explicit groupId + qualityOverride", () => {
       }),
     });
     const { startShare } = await import("../src/renderer/services/share-coordinator.js");
-    const override = builtInPresetToOverride("balanced");
+    const override = customPresetToOverride({ width: 854, height: 480, fps: 15, bitrate: 650 });
     await startShare({
       groupId: "explicit-group",
       source: {

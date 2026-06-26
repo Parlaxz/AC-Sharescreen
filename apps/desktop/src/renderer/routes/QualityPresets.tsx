@@ -327,7 +327,7 @@ export function QualityPresets() {
         type: "quality.viewer.request",
         ...request,
       });
-      setStatusMessage(`Quality request sent to ${hostDeviceId} for stream ${sessionId.slice(0, 8)}.`);
+      setStatusMessage(`Viewer quality override requested for ${hostDeviceId} on stream ${sessionId.slice(0, 8)}.`);
     } else {
       // Fall back to broadcast if peer not found directly
       await conn.broadcast({

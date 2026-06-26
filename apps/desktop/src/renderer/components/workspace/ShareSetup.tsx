@@ -10,10 +10,10 @@ import {
   VolumeX,
   Volume2,
   Headphones,
-  Check,
   RefreshCw,
   AlertTriangle,
   Info,
+  Check,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
@@ -43,7 +43,6 @@ import {
   RadioGroup,
   RadioGroupItem,
 } from "@/components/ui/radio-group";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Label } from "@/components/ui/label";
@@ -62,11 +61,8 @@ import {
 } from "@/stores/main-store";
 import { startShare } from "@/services/share-coordinator";
 import {
-  BUILT_IN_PRESETS,
-  builtInPresetToOverride,
   customPresetToOverride,
   presetSettingsToOverride,
-  type BuiltInPresetKind,
   type SessionQualityOverride,
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
@@ -78,14 +74,11 @@ type SourceTab = "screen" | "window";
 
 type AudioModeValue = "none" | "monitor" | "application";
 
-type PresetKind = BuiltInPresetKind | "custom";
-
 /**
  * Resolve the user's selected preset + custom slider values into a
  * SessionQualityOverride. Returns null when no preset is selected.
  */
 function resolveSelectedQualityOverride(args: {
-  selectedPresetKind: PresetKind | null;
   selectedPresetId: string | null;
   presets: Array<{ id: string; settings: unknown }>;
   customWidth: number;
@@ -94,7 +87,6 @@ function resolveSelectedQualityOverride(args: {
   customBitrate: number;
 }): SessionQualityOverride | null {
   const {
-    selectedPresetKind,
     selectedPresetId,
     presets,
     customWidth,
@@ -102,28 +94,22 @@ function resolveSelectedQualityOverride(args: {
     customFps,
     customBitrate,
   } = args;
-  if (!selectedPresetKind) return null;
-  if (selectedPresetKind === "custom") {
-    return customPresetToOverride({
-      width: customWidth,
-      height: customHeight,
-      fps: customFps,
-      bitrate: customBitrate,
-    });
-  }
-  // If a personal preset is also selected, prefer the personal
-  // preset's video settings when present, otherwise the built-in
-  // baseline.
+  // If a personal preset is selected, use its settings.
   if (selectedPresetId) {
     const preset = presets.find((p) => p.id === selectedPresetId);
     if (preset) {
       return presetSettingsToOverride(
         preset.settings as { video?: Record<string, unknown> } | undefined,
-        selectedPresetKind,
       );
     }
   }
-  return builtInPresetToOverride(selectedPresetKind);
+  // Use Custom values when no personal preset is selected.
+  return customPresetToOverride({
+    width: customWidth,
+    height: customHeight,
+    fps: customFps,
+    bitrate: customBitrate,
+  });
 }
 
 /** User-facing audio mode descriptor used for radio cards. */
@@ -182,27 +168,7 @@ function resolveAudioMode(
   return sourceKind === "screen" ? lastScreen : lastWindow;
 }
 
-/** Standard preset definitions derived from the shared built-in
- *  preset table. Custom slot is appended locally. */
-const STANDARD_PRESETS: {
-  kind: PresetKind;
-  name: string;
-  summary: string;
-  tags: string[];
-}[] = [
-  ...BUILT_IN_PRESETS.map((p) => ({
-    kind: p.kind as PresetKind,
-    name: p.name,
-    summary: p.summary,
-    tags: [] as string[],
-  })),
-  {
-    kind: "custom",
-    name: "Custom",
-    summary: "Manual configuration",
-    tags: ["Custom"],
-  },
-];
+
 
 // ─── Helper: get preload API ───────────────────────────────────────────────
 
@@ -272,9 +238,6 @@ export function ShareSetup() {
   const [audioMode, setAudioMode] = useState<AudioModeValue>(() =>
     resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode),
   );
-  const [selectedPresetKind, setSelectedPresetKind] = useState<PresetKind | null>(
-    null,
-  );
   const [customWidth, setCustomWidth] = useState(1280);
   const [customHeight, setCustomHeight] = useState(720);
   const [customFps, setCustomFps] = useState(24);
@@ -341,7 +304,6 @@ export function ShareSetup() {
       setActiveTab("screen");
       setSelectedSourceId(null);
       setAudioMode(resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode));
-      setSelectedPresetKind(null);
       setSelectedPersonalPresetId(null);
       setSourceError(null);
       setStartingShare(false);
@@ -374,18 +336,19 @@ export function ShareSetup() {
 
   // ── Validation ─────────────────────────────────────────────────────────
   const sourceSelected = selectedSourceId !== null;
-  const presetSelected = selectedPresetKind !== null;
-  const customValid =
-    selectedPresetKind !== "custom" ||
-    (customWidth >= 320 &&
-      customWidth <= 3840 &&
-      customHeight >= 180 &&
-      customHeight <= 2160 &&
-      customFps >= 1 &&
-      customFps <= 60 &&
-      customBitrate >= 100 &&
-      customBitrate <= 20000);
-  const canStart = sourceSelected && presetSelected && customValid;
+  const usingPersonalPreset = selectedPersonalPresetId !== null;
+  const customValuesValid =
+    customWidth >= 320 &&
+    customWidth <= 3840 &&
+    customHeight >= 180 &&
+    customHeight <= 2160 &&
+    customFps >= 1 &&
+    customFps <= 60 &&
+    customBitrate >= 100 &&
+    customBitrate <= 20000;
+  // When a personal preset is selected, Custom slider values are irrelevant.
+  // Only validate Custom sliders when no personal preset is active.
+  const canStart = sourceSelected && (usingPersonalPreset || customValuesValid);
 
   // ── Start sharing ──────────────────────────────────────────────────────
   const handleStartSharing = useCallback(async () => {
@@ -408,7 +371,6 @@ export function ShareSetup() {
       }
 
       const qualityOverride = resolveSelectedQualityOverride({
-        selectedPresetKind,
         selectedPresetId: selectedPersonalPresetId,
         presets: personalPresets,
         customWidth,
@@ -416,11 +378,6 @@ export function ShareSetup() {
         customFps,
         customBitrate,
       });
-      if (!qualityOverride) {
-        toast.error("Sharing failed: select a quality preset");
-        setStartingShare(false);
-        return;
-      }
 
       // Start the real stream via the coordinator (uses SSM internally).
       // Explicit groupId + qualityOverride mean the coordinator never
@@ -435,13 +392,12 @@ export function ShareSetup() {
           fingerprint: null,
           audioMode: audioMode === "none" ? "none" : audioMode,
         },
-        qualityOverride,
+        qualityOverride: qualityOverride ?? undefined,
       });
 
       // Persist source selection
       const api = getApi();
       if (api) {
-        await api.setSource(source.id);
         await api.updateSettings({
           lastSourceId: source.id,
           lastSourceName: source.name,
@@ -463,7 +419,6 @@ export function ShareSetup() {
     startingShare,
     sources,
     selectedSourceId,
-    selectedPresetKind,
     selectedPersonalPresetId,
     personalPresets,
     customWidth,
@@ -707,223 +662,128 @@ export function ShareSetup() {
             {/* ─── Section 4: Quality preset ─────────────────────────── */}
             <section>
               <h3 className="text-sm font-medium text-text-primary mb-3">
-                Quality preset
+                Quality settings
               </h3>
-              <div className="grid grid-cols-2 gap-2">
-                {STANDARD_PRESETS.map((preset) => {
-                  const isSelected = selectedPresetKind === preset.kind;
-                  return (
-                    <motion.div
-                      key={preset.kind}
-                      layout={reduced ? false : true}
-                      transition={springTransition}
-                    >
-                      <Card
-                        className={cn(
-                          "cursor-pointer transition-colors hover:bg-surface-hover",
-                          isSelected &&
-                            "ring-2 ring-accent bg-accent-muted/30",
-                        )}
-                        onClick={() => {
-                          setSelectedPresetKind(preset.kind);
-                          setSelectedPersonalPresetId(null);
-                        }}
-                        role="radio"
-                        aria-checked={isSelected}
-                        tabIndex={0}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setSelectedPresetKind(preset.kind);
-                            setSelectedPersonalPresetId(null);
-                          }
-                        }}
-                      >
-                        <CardContent className="p-3">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium text-text-primary">
-                              {preset.name}
-                            </span>
-                            {isSelected && (
-                              <motion.div
-                                initial={reduced ? false : { scale: 0 }}
-                                animate={{ scale: 1 }}
-                                transition={springTransition}
-                              >
-                                <Check className="h-4 w-4 text-accent" />
-                              </motion.div>
-                            )}
-                          </div>
-                          <p className="text-xs text-text-muted mt-1 font-mono tabular-nums">
-                            {preset.summary}
-                          </p>
-                          {preset.tags.length > 0 && (
-                            <div className="flex gap-1 mt-1.5">
-                              {preset.tags.map((tag) => (
-                                <Badge
-                                  key={tag}
-                                  variant="secondary"
-                                  className="text-[10px] px-1.5 py-0"
-                                >
-                                  {tag}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
-                        </CardContent>
-                      </Card>
-                    </motion.div>
-                  );
-                })}
+
+              {/* Personal preset selector + Custom as default option */}
+              <div className="space-y-1.5 mb-4">
+                <Label className="text-xs text-text-secondary">
+                  Personal preset (optional — uses Custom when none selected)
+                </Label>
+                <Select
+                  value={selectedPersonalPresetId ?? "__none__"}
+                  onValueChange={(v) => {
+                    if (v === "__none__") {
+                      setSelectedPersonalPresetId(null);
+                      return;
+                    }
+                    setSelectedPersonalPresetId(v);
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Custom (no preset)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Custom</SelectItem>
+                    {personalPresets.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        {p.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
-              {/* Personal presets (optional override of the chosen built-in) */}
-              {personalPresets.length > 0 && (
-                <div className="mt-3 space-y-1.5">
-                  <Label className="text-xs text-text-secondary">
-                    Personal preset (optional)
-                  </Label>
-                  <Select
-                    value={selectedPersonalPresetId ?? ""}
-                    onValueChange={(v) => {
-                      if (v === "__none__") {
-                        setSelectedPersonalPresetId(null);
-                        return;
-                      }
-                      setSelectedPersonalPresetId(v);
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Use built-in values" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">Use built-in values</SelectItem>
-                      {personalPresets.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-
-              {/* Custom preset disclosure (animated height) */}
-              <AnimatePresence>
-                {selectedPresetKind === "custom" && (
-                  <motion.div
-                    key="custom-preset"
-                    initial={reduced ? false : { height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={springTransition}
-                    className="overflow-hidden"
-                  >
-                    <Card className="mt-3 border-accent/30">
-                      <CardContent className="p-4 space-y-4">
-                        <h4 className="text-sm font-medium text-text-primary">
-                          Custom quality settings
-                        </h4>
-
-                        {/* Width/Height in a row */}
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <Label className="text-xs text-text-secondary">
-                                Width
-                              </Label>
-                              <span className="text-xs font-mono tabular-nums text-text-primary">
-                                {customWidth}px
-                              </span>
-                            </div>
-                            <Slider
-                              value={[customWidth]}
-                              onValueChange={([v]) =>
-                                setCustomWidth(v ?? 1280)
-                              }
-                              min={320}
-                              max={3840}
-                              step={8}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <Label className="text-xs text-text-secondary">
-                                Height
-                              </Label>
-                              <span className="text-xs font-mono tabular-nums text-text-primary">
-                                {customHeight}px
-                              </span>
-                            </div>
-                            <Slider
-                              value={[customHeight]}
-                              onValueChange={([v]) =>
-                                setCustomHeight(v ?? 720)
-                              }
-                              min={180}
-                              max={2160}
-                              step={8}
-                            />
-                          </div>
-                        </div>
-
-                        {/* FPS slider */}
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <Label className="text-xs text-text-secondary">
-                              Frame rate
-                            </Label>
-                            <span className="text-xs font-mono tabular-nums text-text-primary">
-                              {customFps} fps
-                            </span>
-                          </div>
-                          <Slider
-                            value={[customFps]}
-                            onValueChange={([v]) => setCustomFps(v ?? 24)}
-                            min={1}
-                            max={60}
-                            step={1}
-                          />
-                        </div>
-
-                        {/* Bitrate slider */}
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <Label className="text-xs text-text-secondary">
-                              Bitrate
-                            </Label>
-                            <span className="text-xs font-mono tabular-nums text-text-primary">
-                              {customBitrate} kbps
-                            </span>
-                          </div>
-                          <Slider
-                            value={[customBitrate]}
-                            onValueChange={([v]) =>
-                              setCustomBitrate(v ?? 1500)
-                            }
-                            min={100}
-                            max={20000}
-                            step={50}
-                          />
-                        </div>
-
-                        {!customValid && (
-                          <Alert variant="warning" className="py-2">
-                            <AlertTriangle className="h-4 w-4" />
-                            <AlertTitle className="text-xs">
-                              Value out of range
-                            </AlertTitle>
-                            <AlertDescription className="text-xs">
-                              Resolution must be 320×180–3840×2160, fps 1–60,
-                              bitrate 100–20000 kbps.
-                            </AlertDescription>
-                          </Alert>
-                        )}
-                      </CardContent>
-                    </Card>
-                  </motion.div>
+              {/* Custom quality settings (always visible, dimmed when personal preset active) */}
+              <Card
+                className={cn(
+                  selectedPersonalPresetId ? "opacity-50 pointer-events-none" : "border-accent/30",
                 )}
-              </AnimatePresence>
+              >
+                <CardContent className="p-4 space-y-4">
+                  <h4 className="text-sm font-medium text-text-primary">
+                    Custom quality settings
+                  </h4>
+
+                  {/* Width/Height in a row */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs text-text-secondary">Width</Label>
+                        <span className="text-xs font-mono tabular-nums text-text-primary">
+                          {customWidth}px
+                        </span>
+                      </div>
+                      <Slider
+                        value={[customWidth]}
+                        onValueChange={([v]) => setCustomWidth(v ?? 1280)}
+                        min={320}
+                        max={3840}
+                        step={8}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs text-text-secondary">Height</Label>
+                        <span className="text-xs font-mono tabular-nums text-text-primary">
+                          {customHeight}px
+                        </span>
+                      </div>
+                      <Slider
+                        value={[customHeight]}
+                        onValueChange={([v]) => setCustomHeight(v ?? 720)}
+                        min={180}
+                        max={2160}
+                        step={8}
+                      />
+                    </div>
+                  </div>
+
+                  {/* FPS slider */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-text-secondary">Frame rate</Label>
+                      <span className="text-xs font-mono tabular-nums text-text-primary">
+                        {customFps} fps
+                      </span>
+                    </div>
+                    <Slider
+                      value={[customFps]}
+                      onValueChange={([v]) => setCustomFps(v ?? 24)}
+                      min={1}
+                      max={60}
+                      step={1}
+                    />
+                  </div>
+
+                  {/* Bitrate slider */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-text-secondary">Bitrate</Label>
+                      <span className="text-xs font-mono tabular-nums text-text-primary">
+                        {customBitrate} kbps
+                      </span>
+                    </div>
+                    <Slider
+                      value={[customBitrate]}
+                      onValueChange={([v]) => setCustomBitrate(v ?? 1500)}
+                      min={100}
+                      max={20000}
+                      step={50}
+                    />
+                  </div>
+
+                  {!usingPersonalPreset && !customValuesValid && (
+                    <Alert variant="warning" className="py-2">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertTitle className="text-xs">Value out of range</AlertTitle>
+                      <AlertDescription className="text-xs">
+                        Resolution must be 320×180–3840×2160, fps 1–60, bitrate 100–20000 kbps.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                </CardContent>
+              </Card>
             </section>
 
             {/* ─── Section 5: Confirmation ───────────────────────────── */}
@@ -931,7 +791,7 @@ export function ShareSetup() {
 
             <div className="flex items-center justify-between gap-4">
               <div className="flex-1 min-w-0">
-                {selectedSourceId && selectedPresetKind && (
+                {selectedSourceId && (
                   <p className="text-xs text-text-secondary">
                     Sharing{" "}
                     <span className="font-medium text-text-primary">
@@ -986,11 +846,9 @@ export function ShareSetup() {
                   <TooltipContent side="top">
                     {!sourceSelected
                       ? "Select a source to share"
-                      : !presetSelected
-                        ? "Select a quality preset"
-                        : !customValid
-                          ? "Fix custom quality values"
-                          : ""}
+                      : !usingPersonalPreset && !customValuesValid
+                        ? "Fix custom quality values"
+                        : ""}
                   </TooltipContent>
                 )}
               </Tooltip>

@@ -20,13 +20,18 @@ import {
 import { useStore } from "@/stores/main-store";
 import { startShare, type ShareSource } from "@/services/share-coordinator";
 import {
-  builtInPresetToOverride,
+  customPresetToOverride,
   presetSettingsToOverride,
-  type BuiltInPresetKind,
   type SessionQualityOverride,
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
 import type { QuickShareConfigDTO, CaptureSourceDTO } from "../../../preload/api-types.js";
+
+// ─── Custom default values (module-scope constants, aligned with ShareSetup) ──
+const CUSTOM_DEFAULT_WIDTH = 1280;
+const CUSTOM_DEFAULT_HEIGHT = 720;
+const CUSTOM_DEFAULT_FPS = 24;
+const CUSTOM_DEFAULT_BITRATE_KBPS = 1500;
 
 // ─── Preload API accessor ────────────────────────────────────────────────
 
@@ -125,7 +130,7 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
   // Audio options based on current source kind
   const audioOptions = useMemo(() => audioOptionsForKind(sourceKind), [sourceKind]);
 
-  // Validity check
+  // Validity check: selectedPresetId is truthy for both personal presets and Custom sentinel
   const canStart =
     selectedGroup &&
     selectedSourceId &&
@@ -221,22 +226,23 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
   }, [sourceKind, lastScreenAudioMode, lastWindowAudioMode]);
 
   // ── Resolve quality override from selected preset id ────────────
+  // The sentinel "__custom__" means Custom mode with VP9 defaults.
+  // Personal preset IDs are looked up in the presets list.
   const resolveQualityOverride = useCallback(
     (presetId: string): SessionQualityOverride | null => {
       if (!presetId) return null;
-      // Built-in synthetic IDs are encoded as `builtin:<kind>`.
-      if (presetId.startsWith("builtin:")) {
-        const kind = presetId.slice("builtin:".length) as BuiltInPresetKind;
-        if (kind === "data-saver" || kind === "balanced" || kind === "clear") {
-          return builtInPresetToOverride(kind);
-        }
-        return null;
+      if (presetId === "__custom__") {
+        return customPresetToOverride({
+          width: CUSTOM_DEFAULT_WIDTH,
+          height: CUSTOM_DEFAULT_HEIGHT,
+          fps: CUSTOM_DEFAULT_FPS,
+          bitrate: CUSTOM_DEFAULT_BITRATE_KBPS,
+        });
       }
       const preset = presets.find((p) => p.id === presetId);
       if (!preset) return null;
       return presetSettingsToOverride(
         preset.settings as { video?: Record<string, unknown> } | undefined,
-        "balanced",
       );
     },
     [presets],
@@ -443,7 +449,7 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
               </Select>
             </div>
 
-            {/* Preset — built-in slots + personal presets */}
+            {/* Preset — Custom always available + personal presets */}
             <div className="space-y-1.5">
               <Label>Quality preset</Label>
               <Select value={selectedPresetId} onValueChange={setSelectedPresetId} disabled={starting}>
@@ -451,21 +457,9 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
                   <SelectValue placeholder="Select a preset" />
                 </SelectTrigger>
                 <SelectContent>
-                  {/* Built-in presets are always present. The actual
-                      SessionQualityOverride for a personal preset is
-                      computed from its settings, so all entries use
-                      the same plumbing. */}
-                  {(["data-saver", "balanced", "clear"] as BuiltInPresetKind[]).map(
-                    (kind) => {
-                      const def = builtInPresetToOverride(kind);
-                      const syntheticId = `builtin:${kind}`;
-                      return (
-                        <SelectItem key={syntheticId} value={syntheticId}>
-                          {`${kind === "data-saver" ? "Data saver" : kind === "balanced" ? "Balanced" : "Clear"} — ${def.sendWidth}×${def.sendHeight} @ ${def.sendFps} fps · ${def.videoBitrateKbps} kbps`}
-                        </SelectItem>
-                      );
-                    },
-                  )}
+                  <SelectItem value="__custom__">
+                    Custom — {CUSTOM_DEFAULT_WIDTH}×{CUSTOM_DEFAULT_HEIGHT} @ {CUSTOM_DEFAULT_FPS} fps · {CUSTOM_DEFAULT_BITRATE_KBPS} kbps
+                  </SelectItem>
                   {presets.map((p) => (
                     <SelectItem key={p.id} value={p.id}>
                       {p.name}
