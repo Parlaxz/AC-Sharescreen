@@ -24,6 +24,7 @@ vi.mock("@screenlink/vdo-adapter", () => {
   class MockSDK {
     private dataHandler: ((d: unknown, p: string) => void) | null = null;
     private peerJoinedHandler: ((u: string) => void) | null = null;
+    private dataChannelOpenHandler: ((u: string) => void) | null = null;
     private peerLeftHandler: ((u: string) => void) | null = null;
     private stateHandler: ((s: string) => void) | null = null;
     public sent: { to: string; payload: Record<string, unknown> }[] = [];
@@ -36,20 +37,44 @@ vi.mock("@screenlink/vdo-adapter", () => {
     public announceId: string | null = null;
     public _stopFn = vi.fn();
 
-    on(event: string, listener: (...args: unknown[]) => void) {
+    on(_event: string, _listener: (...args: unknown[]) => void) {
+      // No-op — using addEventListener instead
+    }
+    off(_event: string, _listener: (...args: unknown[]) => void) {
+      // No-op
+    }
+    /** Map of event listeners registered via addEventListener */
+    private eventListeners = new Map<string, Set<(...args: unknown[]) => void>>();
+
+    addEventListener(event: string, listener: (...args: unknown[]) => void) {
+      if (!this.eventListeners.has(event)) {
+        this.eventListeners.set(event, new Set());
+      }
+      this.eventListeners.get(event)!.add(listener);
       if (event === "dataReceived") this.dataHandler = listener as (d: unknown, p: string) => void;
       if (event === "peerConnected") this.peerJoinedHandler = listener as (u: string) => void;
+      if (event === "dataChannelOpen") this.dataChannelOpenHandler = listener as (u: string) => void;
       if (event === "peerDisconnected") this.peerLeftHandler = listener as (u: string) => void;
       if (event === "disconnected" || event === "reconnected" || event === "reconnectFailed") {
         this.stateHandler = listener as (s: string) => void;
       }
     }
-    off(_event: string, _listener: (...args: unknown[]) => void) {
-      // No-op for the same reason as mock-vdo-sdk.ts
+    removeEventListener(event: string, listener: (...args: unknown[]) => void) {
+      const set = this.eventListeners.get(event);
+      if (set) set.delete(listener);
+      if (event === "dataReceived") this.dataHandler = null;
+      if (event === "peerConnected") this.peerJoinedHandler = null;
+      if (event === "dataChannelOpen") this.dataChannelOpenHandler = null;
+      if (event === "peerDisconnected") this.peerLeftHandler = null;
+      if (event === "disconnected" || event === "reconnected" || event === "reconnectFailed") {
+        this.stateHandler = null;
+      }
     }
     removeAllListeners() {
+      this.eventListeners.clear();
       this.dataHandler = null;
       this.peerJoinedHandler = null;
+      this.dataChannelOpenHandler = null;
       this.peerLeftHandler = null;
       this.stateHandler = null;
     }
@@ -79,12 +104,14 @@ vi.mock("@screenlink/vdo-adapter", () => {
       this.announceId = options.streamID ?? "announce";
       return { stop: this._stopFn, streamID: this.announceId! };
     }
-    async sendData(data: unknown, options: { uuid?: string }) {
+    sendData(data: unknown, options: { uuid?: string }): boolean {
       this.sent.push({ to: options.uuid ?? "*", payload: data as Record<string, unknown> });
       if (options.uuid && this.onSend) this.onSend(data, options.uuid);
+      return true;
     }
     deliver(data: unknown, from: string) { this.dataHandler?.(data, from); }
     peerJoined(u: string) { this.peerJoinedHandler?.(u); }
+    dataChannelOpened(u: string) { this.dataChannelOpenHandler?.(u); }
     peerLeft(u: string) { this.peerLeftHandler?.(u); }
   }
   return {
@@ -126,6 +153,7 @@ interface MockSDKInstance {
   onSend?: (data: unknown, to: string) => void;
   deliver: (data: unknown, from: string) => void;
   peerJoined: (uuid: string) => void;
+  dataChannelOpened: (uuid: string) => void;
 }
 
 async function tick(): Promise<void> {
@@ -212,8 +240,8 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
 
     aliceSdk.peerJoined("bob");
     bobSdk.peerJoined("alice");
-    await alice.broadcastHello();
-    await bob.broadcastHello();
+    aliceSdk.dataChannelOpened("bob");
+    bobSdk.dataChannelOpened("alice");
     for (let i = 0; i < 5; i++) await tick();
 
     expect(aliceRecord.online).toContain("bob");
@@ -256,8 +284,8 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
     // Establish mappings so group.state.update can be routed.
     aliceSdk.peerJoined("bob");
     bobSdk.peerJoined("alice");
-    await alice.broadcastHello();
-    await bob.broadcastHello();
+    aliceSdk.dataChannelOpened("bob");
+    bobSdk.dataChannelOpened("alice");
     await tick();
     await tick();
 

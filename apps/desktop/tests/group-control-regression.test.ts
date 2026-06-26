@@ -23,6 +23,8 @@ interface MockSDK {
   sendData: ReturnType<typeof vi.fn>;
   on: ReturnType<typeof vi.fn>;
   off: ReturnType<typeof vi.fn>;
+  addEventListener: ReturnType<typeof vi.fn>;
+  removeEventListener: ReturnType<typeof vi.fn>;
   state: { connected: boolean; roomJoined: boolean; room: string | null };
   announceId: string | null;
   handlers: Map<string, ((...args: unknown[]) => void)[]>;
@@ -45,13 +47,15 @@ function makeFakeSDK(): MockSDK {
       sdk.announceId = opts?.streamID ?? "announce-id";
       return { stop: stopFn, streamID: sdk.announceId! };
     }),
-    sendData: vi.fn().mockResolvedValue(undefined),
-    on: vi.fn((event, listener) => {
+    sendData: vi.fn().mockReturnValue(true),
+    on: vi.fn(),
+    off: vi.fn(),
+    addEventListener: vi.fn((event, listener) => {
       const list = handlers.get(event) ?? [];
       list.push(listener);
       handlers.set(event, list);
     }),
-    off: vi.fn((event, listener) => {
+    removeEventListener: vi.fn((event, listener) => {
       const list = handlers.get(event) ?? [];
       handlers.set(event, list.filter((l) => l !== listener));
     }),
@@ -145,7 +149,7 @@ describe("SDK endpoint and lifecycle", () => {
     expect(opts.room).toBe(CONTROL_ROOM);
     expect(opts.streamID).toBe("alice");
     expect(opts.password).toBe(GROUP_SECRET);
-    expect(opts.mode).toBe("full");
+    expect(opts.mode).toBe("half");
     expect(opts.view).toEqual({ audio: false, video: false });
   });
 
@@ -274,7 +278,9 @@ describe("Pending-announcement queue", () => {
       "stream.started",
       { type: "stream.started", groupId: GROUP_ID, logicalStreamId: "stream-1" },
     );
-    expect(result).toBe("sent");
+    // With zero connected peers, broadcast has no recipients → queued,
+    // which is the correct behavior for the "no confirmed recipients" gate.
+    expect(result).toBe("queued");
   });
 
   it("queues when connection is unavailable", async () => {

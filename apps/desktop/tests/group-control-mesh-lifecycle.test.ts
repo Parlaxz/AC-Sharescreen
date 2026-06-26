@@ -21,10 +21,12 @@ interface MockSDK {
   sendData: ReturnType<typeof vi.fn>;
   on: ReturnType<typeof vi.fn>;
   off: ReturnType<typeof vi.fn>;
+  addEventListener: ReturnType<typeof vi.fn>;
+  removeEventListener: ReturnType<typeof vi.fn>;
   removeAllListeners?: ReturnType<typeof vi.fn>;
   state: { connected: boolean; roomJoined: boolean; room: string | null };
   announceId: string | null;
-  /** Handlers installed via on() for the test to fire */
+  /** Handlers installed via addEventListener() for the test to fire */
   handlers: Map<string, ((...args: unknown[]) => void)[]>;
 }
 
@@ -44,13 +46,15 @@ function makeFakeSDK(): MockSDK {
       sdk.announceId = opts?.streamID ?? "announce-id";
       return { stop: stopFn, streamID: sdk.announceId! };
     }),
-    sendData: vi.fn().mockResolvedValue(undefined),
-    on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+    sendData: vi.fn().mockReturnValue(true),
+    on: vi.fn(),
+    off: vi.fn(),
+    addEventListener: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
       const list = handlers.get(event) ?? [];
       list.push(listener);
       handlers.set(event, list);
     }),
-    off: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+    removeEventListener: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
       const list = handlers.get(event) ?? [];
       handlers.set(event, list.filter((l) => l !== listener));
     }),
@@ -278,12 +282,12 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     // The last-created SDK corresponds to this connection. Index
     // from the end to avoid any leakage from earlier tests.
     const sdk = createdSdks[createdSdks.length - 1]!;
-    const peerConnected = sdk.handlers.get("peerConnected")?.[0]!;
-    peerConnected({ detail: { uuid: "peer-bob", connection: {} } });
+    const dataChannelOpen = sdk.handlers.get("dataChannelOpen")?.[0]!;
+    dataChannelOpen({ detail: { uuid: "peer-bob", connection: {} } });
     await tick();
-    void peerConnected; // silence linter
+    void dataChannelOpen; // silence linter
 
-    // peerConnected alone tracks the peer for hello response; the
+    // The data-channel-ready event supplies the usable route; the
     // device-id mapping is established when the peer sends a hello.
     const { buildEnvelope } = await import("@screenlink/shared");
     const hello = await buildEnvelope(
@@ -320,8 +324,8 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     });
     await conn.start();
     const sdk = createdSdks[createdSdks.length - 1]!;
-    // Simulate a peer connecting
-    sdk.handlers.get("peerConnected")?.[0]({ detail: { uuid: "peer-bob" } });
+    // Simulate a usable data channel opening for the peer.
+    sdk.handlers.get("dataChannelOpen")?.[0]({ detail: { uuid: "peer-bob" } });
     // Wait for the connection to emit a group.hello to the new peer.
     const helloSent = await waitFor(() =>
       sdk.sendData.mock.calls.some((c) => (c[0] as { type: string }).type === "group.hello"),
@@ -365,8 +369,8 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     const sdk = createdSdks[createdSdks.length - 1]!;
     sdk.sendData.mockClear();
 
-    // Simulate a peer connecting and a hello exchange
-    sdk.handlers.get("peerConnected")?.[0]({ detail: { uuid: "peer-bob" } });
+    // Simulate a usable data channel opening and a hello exchange.
+    sdk.handlers.get("dataChannelOpen")?.[0]({ detail: { uuid: "peer-bob" } });
     await tick();
     const { buildEnvelope } = await import("@screenlink/shared");
     const hello = await buildEnvelope(
@@ -404,7 +408,7 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     await conn.start();
     const sdk = createdSdks[createdSdks.length - 1]!;
     sdk.sendData.mockClear();
-    sdk.handlers.get("peerConnected")?.[0]({ detail: { uuid: "peer-bob" } });
+    sdk.handlers.get("dataChannelOpen")?.[0]({ detail: { uuid: "peer-bob" } });
     await tick();
     const { buildEnvelope } = await import("@screenlink/shared");
     const hello = await buildEnvelope(

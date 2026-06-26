@@ -173,6 +173,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
+  const watchedSessionId = useMemo(
+    () => Object.keys(watchedStreamsBySessionId)[0] ?? null,
+    [watchedStreamsBySessionId],
+  );
 
   // ── Local state ──────────────────────────────────────────────────
   const [isPaused, setIsPaused] = useState(false);
@@ -216,8 +220,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     if (currentStreamId) {
       return streams.find((s) => s.logicalStreamId === currentStreamId) ?? streams[0] ?? null;
     }
+    if (watchedSessionId) {
+      return streams.find((s) => s.mediaSessionId === watchedSessionId) ?? streams[0] ?? null;
+    }
     return streams[0] ?? null;
-  }, [selectedGroupId, activeStreamsByGroup, currentStreamId]);
+  }, [selectedGroupId, activeStreamsByGroup, currentStreamId, watchedSessionId]);
 
   // Set initial stream ID
   useEffect(() => {
@@ -274,8 +281,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
     const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
 
-    // Determine the watch target from watched info or active stream
-    const targetSessionId = wInfo?.sessionId;
+    // Determine the watch target from watched info or active stream.
+    // Use watchedInfo.sessionId if available, otherwise fall back to
+    // currentStream.mediaSessionId. This ensures local self-preview works
+    // when the host watches their own stream without sending remote join requests.
+    const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
     const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
     const targetLogicalStreamId = cStream?.logicalStreamId;
 

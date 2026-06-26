@@ -1,6 +1,7 @@
 import {
   GroupControlConnection,
   type ConnectionState,
+  type BroadcastResult,
 } from "./group-control-connection.js";
 import type { GroupMemberRecord } from "@screenlink/shared";
 
@@ -45,7 +46,7 @@ export class GroupConnectionManager {
   // ── Pending-announcement queue ─────────────────────────────────────
   /**
    * Group-scoped pending lifecycle messages. When group control reconnects,
-   * the latest message per (logicalStreamId, type) is flushed.
+   * pending messages are flushed.
    * Key: groupId. Value: Map of "logicalStreamId:type" -> PendingLifecycleMessage.
    */
   private pendingLifecycle = new Map<string, Map<string, PendingLifecycleMessage>>();
@@ -160,10 +161,10 @@ export class GroupConnectionManager {
     this.emitStates();
   }
 
-  async broadcast(groupId: string, payload: Record<string, unknown>): Promise<void> {
+  async broadcast(groupId: string, payload: Record<string, unknown>): Promise<BroadcastResult> {
     const conn = this.connections.get(groupId);
-    if (!conn) return;
-    await conn.broadcast(payload);
+    if (!conn) return { attempted: 0, sent: 0, failed: 0 };
+    return conn.broadcast(payload);
   }
 
   // ── Readiness API ─────────────────────────────────────────────────
@@ -279,8 +280,9 @@ export class GroupConnectionManager {
    * Duplicate entries for the same (logicalStreamId, type) replace older
    * pending entries. When the group reconnects, queued messages are flushed.
    *
-   * Returns "sent" if the message was broadcast immediately, or "queued"
-   * if it was stored for later delivery.
+   * Returns "sent" if the message was broadcast with at least one confirmed
+   * recipient, or "queued" if it was stored for later delivery (or had zero
+   * recipients).
    */
   async sendOrQueueStreamLifecycle(
     groupId: string,
@@ -293,8 +295,15 @@ export class GroupConnectionManager {
     if (conn && conn.state === "connected") {
       // Send immediately
       try {
-        await conn.broadcast(payload);
-        return "sent";
+        const result = await conn.broadcast(payload);
+        // Require at least 1 sent recipient to consider it "sent".
+        // Zero confirmed recipients → queue for later.
+        if (result.sent > 0) {
+          return "sent";
+        }
+        console.log(
+          `[group-control] broadcast for ${type} had zero confirmed recipients (attempted=${result.attempted}), queuing`,
+        );
       } catch (err) {
         // Broadcast failed — queue as fallback
         console.warn(
@@ -310,10 +319,11 @@ export class GroupConnectionManager {
   }
 
   /**
-   * Flush queued lifecycle messages for a specific group.
+   * Flush queued lifecycle messages for a specific group, removing
+   * only delivered/expired entries. Does NOT delete the whole queue.
    * Called when the group control connection reconnects.
    */
-  flushPendingLifecycle(groupId: string): void {
+  async flushPendingLifecycle(groupId: string): Promise<void> {
     const queue = this.pendingLifecycle.get(groupId);
     if (!queue || queue.size === 0) return;
 
@@ -321,11 +331,12 @@ export class GroupConnectionManager {
     if (!conn || conn.state !== "connected") return;
 
     const now = Date.now();
-    const entries = Array.from(queue.entries());
+    const deliveredKeys: string[] = [];
 
-    for (const [, msg] of entries) {
+    for (const [key, msg] of queue) {
       // Drop stale messages older than TTL
       if (now - msg.enqueuedAt > PENDING_TTL_MS) {
+        deliveredKeys.push(key);
         continue;
       }
       // Do not announce a stopped stream for a logicalStreamId that was
@@ -334,39 +345,54 @@ export class GroupConnectionManager {
       if (msg.type === "stream.stopped") {
         // Check if there was a pending start/restart for this stream that
         // was never flushed. If not, skip.
-        const hasPendingStart = entries.some(
-          ([, e]) =>
+        const hasPendingStart = Array.from(queue.values()).some(
+          (e) =>
             e.logicalStreamId === msg.logicalStreamId &&
             (e.type === "stream.started" || e.type === "stream.restarted"),
         );
         if (!hasPendingStart) {
-          // The start was never flushed, so don't send a stale stop.
+          deliveredKeys.push(key);
           continue;
         }
       }
-      conn.broadcast(msg.payload).catch((err: unknown) => {
+      // Broadcast the pending message
+      try {
+        const result = await conn.broadcast(msg.payload);
+        // If at least 1 recipient got it, mark as delivered.
+        // Otherwise keep it for the next flush attempt.
+        if (result.sent > 0) {
+          deliveredKeys.push(key);
+          console.log("[group-control] flushed pending lifecycle:", msg.type, "for stream", msg.logicalStreamId);
+        }
+      } catch (err: unknown) {
         console.warn(
           "[group-control] failed to flush pending",
           msg.type,
           (err instanceof Error ? err.message : String(err)),
         );
-      });
+        // Keep in queue for retry
+      }
     }
 
-    // Only clear the queue after successfully iterating all entries,
-    // so failures during broadcast don't cause message loss.
-    this.pendingLifecycle.delete(groupId);
+    // Remove only delivered/expired entries, NOT the whole queue.
+    for (const key of deliveredKeys) {
+      queue.delete(key);
+    }
+
+    // If queue is empty, clean up the group entry.
+    if (queue.size === 0) {
+      this.pendingLifecycle.delete(groupId);
+    }
   }
 
   /**
-   * Send queued lifecycle messages to a specific peer without clearing
-   * the queue. Called when a new peer comes online after the hello
+   * Send queued lifecycle messages to a specific peer after the hello
    * handshake completes (identity mapping is established).
    *
-   * Unlike flushPendingLifecycle (which clears the queue), this method
-   * keeps the queue intact so messages can still be flushed on reconnect.
+   * Removes only entries that were confirmed delivered (or expired).
+   * Failed deliveries remain queued for later retry.
    */
-  flushPendingLifecycleToPeer(groupId: string, peerUuid: string): void {
+  async flushPendingLifecycleToPeer(groupId: string, peerUuid: string): Promise<void> {
     const queue = this.pendingLifecycle.get(groupId);
     if (!queue || queue.size === 0) return;
 
@@ -375,25 +401,37 @@ export class GroupConnectionManager {
 
     const now = Date.now();
     const entries = Array.from(queue.entries());
+    const deliveredKeys: string[] = [];
 
-    for (const [, msg] of entries) {
-      if (now - msg.enqueuedAt > PENDING_TTL_MS) continue;
+    for (const [key, msg] of entries) {
+      if (now - msg.enqueuedAt > PENDING_TTL_MS) {
+        deliveredKeys.push(key);
+        continue;
+      }
       if (msg.type === "stream.stopped") {
         const hasPendingStart = entries.some(
           ([, e]) =>
             e.logicalStreamId === msg.logicalStreamId &&
             (e.type === "stream.started" || e.type === "stream.restarted"),
         );
-        if (!hasPendingStart) continue;
+        if (!hasPendingStart) {
+          deliveredKeys.push(key);
+          continue;
+        }
       }
-      conn.sendToPeer(peerUuid, msg.payload).catch((err: unknown) => {
-        console.warn(
-          "[group-control] failed to send pending",
-          msg.type,
-          "to peer",
-          (err instanceof Error ? err.message : String(err)),
-        );
-      });
+
+      const delivered = await conn.sendToPeer(peerUuid, msg.payload);
+      if (delivered) {
+        deliveredKeys.push(key);
+        console.log("[group-control] delivered queued lifecycle to peer:", msg.type, msg.logicalStreamId, peerUuid);
+      }
+    }
+
+    for (const key of deliveredKeys) {
+      queue.delete(key);
+    }
+    if (queue.size === 0) {
+      this.pendingLifecycle.delete(groupId);
     }
   }
 
@@ -481,7 +519,7 @@ export class GroupConnectionManager {
   private onConnectionStateChange(groupId: string, _oldState: ConnectionState, newState: ConnectionState): void {
     if (newState === "connected") {
       console.log("[group-control] connection reconnected — flushing pending lifecycle messages for", groupId);
-      this.flushPendingLifecycle(groupId);
+      this.flushPendingLifecycle(groupId).catch(() => {});
     }
   }
 

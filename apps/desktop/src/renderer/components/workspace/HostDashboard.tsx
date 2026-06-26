@@ -18,6 +18,7 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import { useStore } from "@/stores/main-store";
+import { getRuntime } from "@/services/phase3-runtime";
 import { stopShare } from "@/services/share-coordinator";
 
 function formatLiveDuration(seconds: number): string {
@@ -83,6 +84,38 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const handleStopSharing = useCallback(async () => {
     setStopConfirmOpen(false);
     await stopShare();
+  }, []);
+
+  const handlePreview = useCallback(() => {
+    const s = useStore.getState();
+    const runtime = getRuntime();
+    const sessionManager = runtime?.getStreamSessionManager();
+    const targetGroupId = sessionManager?.currentGroupId ?? s.selectedGroupId;
+    const targetMediaSessionId = sessionManager?.currentMediaSessionId;
+    const targetLogicalStreamId = sessionManager?.currentLogicalStreamId;
+    const localDeviceId = runtime?.deviceId ?? sessionManager?.hostDeviceId ?? null;
+    const streams = targetGroupId ? (s.activeStreamsByGroup[targetGroupId] ?? []) : [];
+    const localStream = streams.find((stream) => {
+      if (targetMediaSessionId && stream.mediaSessionId === targetMediaSessionId) return true;
+      if (targetLogicalStreamId && stream.logicalStreamId === targetLogicalStreamId) return true;
+      if (localDeviceId && stream.hostDeviceId === localDeviceId) return true;
+      return false;
+    }) ?? null;
+
+    if (localStream && targetGroupId) {
+      s.setWatchedStreams({
+        [localStream.mediaSessionId]: {
+          hostDeviceId: localStream.hostDeviceId,
+          hostName: localStream.hostDisplayName,
+          startedAt: localStream.startedAt,
+        },
+      });
+      s.setSelectedGroupId(targetGroupId);
+      s.setIsViewing(true);
+      s.setViewStatus("connecting");
+    }
+
+    s.navigate("viewer");
   }, []);
 
   if (loading || !isSharing) {
@@ -172,10 +205,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             <RefreshCw className="h-3.5 w-3.5" />
             Change source
           </Button>
-          <Button variant="outline" size="sm" onClick={() => {
-            const s = useStore.getState();
-            s.navigate("viewer");
-          }}>
+          <Button variant="outline" size="sm" onClick={handlePreview}>
             <Eye className="h-3.5 w-3.5" />
             Preview
           </Button>

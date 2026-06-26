@@ -129,10 +129,20 @@ export class Phase3Runtime {
             type: "stream.state.request",
           }).catch(() => {});
 
+          // Also send our fresh stream state snapshot so the peer immediately
+          // learns about active streams without waiting for stream.started.
+          const streams = this.activeStreamRegistry.getStreamsByGroup(groupId);
+          if (streams.length > 0) {
+            void conn.sendToPeer(peerUuid, {
+              type: "stream.state.snapshot",
+              streams,
+            }).catch(() => {});
+          }
+
           // Flush any pending stream lifecycle messages to this new peer.
           // This runs after the hello handshake completes (identity mapping
           // is established), so sendToPeer can resolve the peer UUID.
-          this.connManager.flushPendingLifecycleToPeer(groupId, peerUuid);
+          void this.connManager.flushPendingLifecycleToPeer(groupId, peerUuid).catch(() => {});
         }
       }
     });

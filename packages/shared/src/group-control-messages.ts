@@ -274,11 +274,26 @@ export const GroupHelloPayloadSchema = z.object({
   deviceId: z.string(),
   displayName: z.string().min(1).max(100),
   protocolVersion: z.number().int().positive(),
+  /** Complete durable GroupMemberRecord for immediate member merge. */
+  member: z.object({
+    deviceId: z.string(),
+    displayName: z.string().min(1).max(100),
+    firstSeenAt: z.number().int().positive(),
+    profileStamp: HybridTimestampSchema,
+  }).optional(),
 }).strict();
 
 export const GroupHelloResponsePayloadSchema = z.object({
   deviceId: z.string(),
   displayName: z.string().min(1).max(100),
+  protocolVersion: z.number().int().positive(),
+  /** Complete durable GroupMemberRecord for immediate member merge. */
+  member: z.object({
+    deviceId: z.string(),
+    displayName: z.string().min(1).max(100),
+    firstSeenAt: z.number().int().positive(),
+    profileStamp: HybridTimestampSchema,
+  }).optional(),
 }).strict();
 
 export const GroupStateUpdatePayloadSchema = z.object({

@@ -33,8 +33,10 @@ export interface ViewOptions {
 
 export interface SendDataOptions {
   uuid: string;
-  type: "publisher" | "viewer";
+  /** @deprecated Use `preference` instead. Supported by SDK 1.3.18. */
+  type?: "publisher" | "viewer";
   allowFallback: boolean;
+  preference?: "any" | "all" | "publisher" | "viewer";
 }
 
 export interface ConnectionEntry {
