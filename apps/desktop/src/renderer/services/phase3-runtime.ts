@@ -7,6 +7,7 @@ import { ViewerMediaBinding } from "./viewer-media-binding.js";
 import { RestartCoordinator } from "./restart-coordinator.js";
 import { QualityCoordinator } from "./quality-coordinator.js";
 import { MediaStatsPoller } from "./media-stats-service.js";
+import { showNotification } from "./notifications.js";
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
 /**
@@ -215,17 +216,36 @@ export class Phase3Runtime {
     // Step 5: Start the connection
     await this.connManager.addGroup(config);
 
+    const conn = this.connManager.getConnection(config.groupId);
+
+    // Step 6: Broadcast member presence notifications.
+    // The local user "joined" the group and is now "online".
+    if (conn && conn.state === "connected") {
+      void conn.broadcastMemberJoined(config.nodeId, config.displayName).catch(() => {});
+      void conn.broadcastMemberOnline(config.nodeId, config.displayName).catch(() => {});
+    }
+
     // Step 7: Broadcast full state snapshot immediately so peers get our state
     // without waiting for the 30s anti-entropy timer.
     const syncState = this.syncService.getSyncState(config.groupId);
-    if (syncState) {
-      const conn = this.connManager.getConnection(config.groupId);
-      if (conn && conn.state === "connected") {
-        void conn.broadcast({
-          type: "group.state.update",
-          state: syncState.state,
-        }).catch(() => {});
-      }
+    if (syncState && conn && conn.state === "connected") {
+      void conn.broadcast({
+        type: "group.state.update",
+        state: syncState.state,
+      }).catch(() => {});
+    }
+
+    // Step 8: Replay any queued member events that arrived during startup
+    // (e.g. "member.joined" notifications from peers we connected to).
+    const groupName = syncState?.state.name.value ?? config.groupId;
+    const recentEvents = this.messageRouter.drainRecentMemberEvents(config.groupId);
+    for (const evt of recentEvents) {
+      showNotification({
+        title: "ScreenLink",
+        body: evt.type === "joined"
+          ? `${evt.memberDisplayName} joined ${groupName}`
+          : `${evt.memberDisplayName} is online in ${groupName}`,
+      });
     }
   }
 

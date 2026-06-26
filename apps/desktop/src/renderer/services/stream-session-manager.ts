@@ -201,6 +201,16 @@ export class StreamSessionManager {
   }
 
   /**
+   * Get the raw capture stream from getDisplayMedia.
+   * Returns null when no stream is active. Used for self-viewing
+   * preview — the local viewer attaches this stream directly to a
+   * <video> element instead of going through the VDO relay.
+   */
+  getCaptureStream(): MediaStream | null {
+    return this.captureStream;
+  }
+
+  /**
    * Gate 4.4 — read back the actual capture dimensions and FPS from
    * the current video track. Returns zeros if no track is active.
    */
@@ -525,24 +535,30 @@ export class StreamSessionManager {
         }
       }
 
-      // Announce stream.stopped
-      if (lastGroupId && lastLogicalStreamId) {
-        const connManager = this.runtime.getConnectionManager();
-        await connManager.broadcast(lastGroupId, {
-          type: "stream.stopped",
-          groupId: lastGroupId,
-          hostDeviceId: lastHostDeviceId,
-          logicalStreamId: lastLogicalStreamId,
-        });
-      }
-
-      // Remove local registry entry
+      // Remove local registry entry FIRST so the UI updates instantly.
+      // The previous order (broadcast → handleStopped) waited for the
+      // mesh broadcast to resolve before clearing the local store, which
+      // could keep the "Live" badge visible for several seconds if a
+      // peer was slow or unreachable. We notify peers in the background
+      // after the local state is already consistent.
       if (lastGroupId && lastLogicalStreamId) {
         this.runtime.getActiveStreamRegistry().handleStopped({
           groupId: lastGroupId,
           hostDeviceId: lastHostDeviceId,
           logicalStreamId: lastLogicalStreamId,
         });
+      }
+
+      // Announce stream.stopped to peers (fire-and-forget so the local
+      // stop is not blocked by peer reachability). Errors are best-effort.
+      if (lastGroupId && lastLogicalStreamId) {
+        const connManager = this.runtime.getConnectionManager();
+        void connManager.broadcast(lastGroupId, {
+          type: "stream.stopped",
+          groupId: lastGroupId,
+          hostDeviceId: lastHostDeviceId,
+          logicalStreamId: lastLogicalStreamId,
+        }).catch(() => {});
       }
 
       // Stop publication/capture

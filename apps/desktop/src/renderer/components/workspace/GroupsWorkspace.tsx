@@ -43,6 +43,7 @@ import { useStore } from "@/stores/main-store";
 import { getInitials } from "@/lib/utils";
 import { MembersList } from "./MembersList.js";
 import { copyGroupInviteFromUi } from "@/services/invite-copy";
+import { joinGroupAction } from "@/services/group-actions";
 
 /**
  * GroupsWorkspace — Watermelon-only groups management page (replaces legacy routes/Groups.tsx).
@@ -82,14 +83,30 @@ export function GroupsWorkspace() {
         toast.error("API not available");
         return;
       }
+      // createGroupAction calls api.createGroup, attaches the record to
+      // the runtime, updates the store, AND calls store.selectGroup()
+      // which navigates to the freshly-created group's overview page.
+      // We need the invite link to copy to the clipboard, so call the
+      // IPC directly first and then attach the resulting record.
+      const trimmed = newName.trim() || "Group";
       const result = (await api.createGroup({
-        groupName: newName.trim() || "Group",
-      })) as { record?: unknown; invite?: unknown; link?: string };
+        groupName: trimmed,
+      })) as {
+        record?: Parameters<typeof import("@/services/group-record-helper").attachGroupRecordToRuntime>[0];
+        invite?: unknown;
+        link?: string;
+      };
       if (result.link) {
         await api.clipboardWriteText(result.link);
         toast("Group created! Invite link copied");
       } else {
         toast("Group created");
+      }
+      if (result.record) {
+        const { attachGroupRecordToRuntime } = await import(
+          "@/services/group-record-helper"
+        );
+        await attachGroupRecordToRuntime(result.record);
       }
       setNewName("");
       setCreateOpen(false);
@@ -109,7 +126,9 @@ export function GroupsWorkspace() {
         toast.error("API not available");
         return;
       }
-      await api.joinGroup({ link: joinLink.trim() });
+      // joinGroupAction attaches the record to the runtime, updates the
+      // store, and navigates to the joined group's overview.
+      await joinGroupAction(joinLink.trim());
       setJoinLink("");
       setJoinOpen(false);
       toast("Joined group");

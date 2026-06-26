@@ -1,5 +1,6 @@
 import { ViewerClient } from "@screenlink/vdo-adapter";
 import { getRuntime } from "./phase3-runtime.js";
+import type { Phase3Runtime } from "./phase3-runtime.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,10 @@ export class ViewerSession {
   private videoElement: HTMLVideoElement | null = null;
   private _receivedStream: MediaStream | null = null;
   private _destructed = false;
+
+  // Self-viewing support — when the host is the local device,
+  // we pipe the capture stream directly instead of VDO relay.
+  private selfViewEndedHandler: (() => void) | null = null;
 
   // Session identity (set by start)
   private groupId = "";
@@ -177,6 +182,15 @@ export class ViewerSession {
         return;
       }
 
+      // ── Self-viewing ──────────────────────────────────────────────
+      // When the host is the local device, pipe the capture stream
+      // directly instead of going through the VDO relay. This lets
+      // the host preview their own share in the ViewerWorkspace.
+      if (this.hostDeviceId === runtime.deviceId) {
+        await this.startSelfView(runtime);
+        return;
+      }
+
       const connManager = runtime.getConnectionManager();
       const conn = connManager.getConnection(this.groupId);
       if (!conn) {
@@ -282,6 +296,46 @@ export class ViewerSession {
     }
   }
 
+  /**
+   * Self-viewing: host is the local device, so pipe the capture stream
+   * directly to the video element instead of routing through VDO relay.
+   *
+   * Monitors the capture video track's "ended" event to automatically
+   * transition the viewer state when the user stops sharing.
+   */
+  private async startSelfView(runtime: Phase3Runtime): Promise<void> {
+    this.setState("connecting");
+
+    const ssm = runtime.getStreamSessionManager();
+    const captureStream = ssm.getCaptureStream();
+    if (!captureStream) {
+      this.setError("no local capture stream");
+      return;
+    }
+
+    this._receivedStream = captureStream;
+    this.onStreamReceived?.(captureStream);
+
+    if (this.videoElement) {
+      this.videoElement.srcObject = captureStream;
+      await this.videoElement.play().catch(() => {});
+    }
+
+    this.setState("watching");
+
+    // Watch for the capture track ending (user stops sharing).
+    const track = captureStream.getVideoTracks()[0];
+    if (track) {
+      const onEnded = () => {
+        track.removeEventListener("ended", onEnded);
+        this.selfViewEndedHandler = null;
+        this.stop();
+      };
+      this.selfViewEndedHandler = onEnded;
+      track.addEventListener("ended", onEnded);
+    }
+  }
+
   // ── Internal helpers ────────────────────────────────────────────────
 
   private setState(state: ViewerSessionState): void {
@@ -299,6 +353,17 @@ export class ViewerSession {
   }
 
   private cleanupClient(): void {
+    // Remove self-view track-end listener
+    if (this.selfViewEndedHandler) {
+      if (this._receivedStream) {
+        const track = this._receivedStream.getVideoTracks()[0];
+        if (track) {
+          track.removeEventListener("ended", this.selfViewEndedHandler);
+        }
+      }
+      this.selfViewEndedHandler = null;
+    }
+
     if (this.viewerClient) {
       try {
         this.viewerClient.stopViewing().catch(() => {});

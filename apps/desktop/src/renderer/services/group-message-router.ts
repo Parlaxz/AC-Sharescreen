@@ -6,6 +6,7 @@ import type { ViewerMediaBinding } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
 import type { QualityCoordinator } from "./quality-coordinator.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
+import { showNotification } from "./notifications.js";
 
 /**
  * C1: GroupMessageRouter (Stages 4–5)
@@ -43,9 +44,23 @@ export interface JoinResponseData {
   requestId?: string;
 }
 
+export interface RecentMemberEvent {
+  type: "joined" | "online";
+  memberDeviceId: string;
+  memberDisplayName: string;
+  at: number;
+}
+
 export class GroupMessageRouter {
   private pingTimestamps = new Map<string, number>();
   private pongTimestamps = new Map<string, number>();
+
+  /**
+   * Per-group ring buffer of recent member events (joined/online).
+   * Used to replay notifications when the local user comes online.
+   */
+  private recentMemberEvents = new Map<string, RecentMemberEvent[]>();
+  private static readonly MAX_RECENT_EVENTS_PER_GROUP = 50;
 
   /** Pending join request resolvers keyed by requestId */
   private joinResponseResolvers = new Map<string, {
@@ -117,6 +132,53 @@ export class GroupMessageRouter {
     //    is correctly narrowed to GroupControlPayloadMap[T] instead of
     //    a discriminated union.
     if (!parseGroupMessagePayload(type, envelope.payload).ok) return;
+
+    // ── group.member.joined / group.member.online → notification ──
+    if (type === "group.member.joined") {
+      const parsed = parseGroupMessagePayload("group.member.joined", envelope.payload);
+      if (!parsed.ok) return;
+      const data = parsed.data;
+
+      // Record in per-group ring buffer for replay later.
+      let events = this.recentMemberEvents.get(groupId);
+      if (!events) {
+        events = [];
+        this.recentMemberEvents.set(groupId, events);
+      }
+      events.push({
+        type: "joined",
+        memberDeviceId: data.memberDeviceId,
+        memberDisplayName: data.memberDisplayName,
+        at: data.joinedAt,
+      });
+      if (events.length > GroupMessageRouter.MAX_RECENT_EVENTS_PER_GROUP) {
+        events.splice(0, events.length - GroupMessageRouter.MAX_RECENT_EVENTS_PER_GROUP);
+      }
+
+      // Fire desktop notification.
+      const syncState = this.syncService.getSyncState(groupId);
+      const groupName = syncState?.state.name.value ?? groupId;
+      showNotification({
+        title: "ScreenLink",
+        body: `${data.memberDisplayName} joined ${groupName}`,
+      });
+      return;
+    }
+
+    if (type === "group.member.online") {
+      const parsed = parseGroupMessagePayload("group.member.online", envelope.payload);
+      if (!parsed.ok) return;
+      const data = parsed.data;
+
+      // Fire desktop notification.
+      const syncState = this.syncService.getSyncState(groupId);
+      const groupName = syncState?.state.name.value ?? groupId;
+      showNotification({
+        title: "ScreenLink",
+        body: `${data.memberDisplayName} is online in ${groupName}`,
+      });
+      return;
+    }
 
     // ── group.state.*, group.member.* → GroupSyncService ──────────
     if (
@@ -259,6 +321,16 @@ export class GroupMessageRouter {
       void this.routeStreamMessage(groupId, envelope, r.data);
       return;
     }
+  }
+
+  /**
+   * Drain and return all recent member events for a group.
+   * Used by Phase3Runtime after addGroup to replay queued notifications.
+   */
+  drainRecentMemberEvents(groupId: string): RecentMemberEvent[] {
+    const events = this.recentMemberEvents.get(groupId) ?? [];
+    this.recentMemberEvents.delete(groupId);
+    return events;
   }
 
   /**

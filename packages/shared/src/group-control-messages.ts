@@ -13,6 +13,8 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "group.state.request",
   "group.state.update",
   "group.member.update",
+  "group.member.joined",
+  "group.member.online",
   "group.presence",
   "stream.state.request",
   "stream.state.snapshot",
@@ -316,6 +318,20 @@ export const GroupMemberUpdatePayloadSchema = z.object({
   }).strict(),
 }).strict();
 
+export const GroupMemberJoinedPayloadSchema = z.object({
+  memberDeviceId: z.string(),
+  memberDisplayName: z.string(),
+  joinedAt: z.number(),
+  groupId: z.string(),
+}).strict();
+
+export const GroupMemberOnlinePayloadSchema = z.object({
+  memberDeviceId: z.string(),
+  memberDisplayName: z.string(),
+  onlineAt: z.number(),
+  groupId: z.string(),
+}).strict();
+
 export const GroupPresencePayloadSchema = z.object({
   deviceId: z.string(),
   displayName: z.string().optional(),
@@ -535,6 +551,8 @@ export type GroupControlPayloadMap = {
   "group.state.request": z.infer<typeof GroupStateRequestPayloadSchema>;
   "group.state.update": z.infer<typeof GroupStateUpdatePayloadSchema>;
   "group.member.update": z.infer<typeof GroupMemberUpdatePayloadSchema>;
+  "group.member.joined": z.infer<typeof GroupMemberJoinedPayloadSchema>;
+  "group.member.online": z.infer<typeof GroupMemberOnlinePayloadSchema>;
   "group.presence": z.infer<typeof GroupPresencePayloadSchema>;
   "stream.state.request": z.infer<typeof StreamStateRequestPayloadSchema>;
   "stream.state.snapshot": z.infer<typeof StreamStateSnapshotPayloadSchema>;
@@ -565,6 +583,8 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "group.state.request": GroupStateRequestPayloadSchema,
   "group.state.update": GroupStateUpdatePayloadSchema,
   "group.member.update": GroupMemberUpdatePayloadSchema,
+  "group.member.joined": GroupMemberJoinedPayloadSchema,
+  "group.member.online": GroupMemberOnlinePayloadSchema,
   "group.presence": GroupPresencePayloadSchema,
   "stream.state.request": StreamStateRequestPayloadSchema,
   "stream.state.snapshot": StreamStateSnapshotPayloadSchema,

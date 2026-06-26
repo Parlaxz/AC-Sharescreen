@@ -213,6 +213,23 @@ export class ProcessAudioController {
   /** Forward a PCM packet to the worklet, checking stream-generation. */
   private handlePcmPacket(packet: any): void {
     if (!this.workletNode || this.closed_) return;
+    if (!packet || typeof packet !== "object") return;
+
+    // Defensive: validate pcmData is a usable ArrayBuffer before use.
+    // PcmBridge forwards the raw payload.buffer as pcmData — a plain
+    // ArrayBuffer (NOT a typed array view). Some MessagePort transfers
+    // can also deliver it as a Uint8Array view, so accept both.
+    const raw: unknown = packet.pcmData;
+    let sourceBuffer: ArrayBuffer | null = null;
+    if (raw instanceof ArrayBuffer) {
+      sourceBuffer = raw;
+    } else if (ArrayBuffer.isView(raw) && (raw as { buffer?: unknown }).buffer instanceof ArrayBuffer) {
+      sourceBuffer = (raw as { buffer: ArrayBuffer }).buffer;
+    }
+    if (!sourceBuffer || sourceBuffer.byteLength === 0) {
+      // Nothing to forward — silently drop empty/invalid packets.
+      return;
+    }
 
     if (this.currentStreamGeneration < 0) {
       this.currentStreamGeneration = packet.streamGeneration;
@@ -221,19 +238,21 @@ export class ProcessAudioController {
     }
 
     if (packet.flags & 2 || packet.droppedPackets > 0) {
-      this.workletNode.port.postMessage({ type: 'pcm:discontinuity' });
+      this.workletNode.port.postMessage({ type: "pcm:discontinuity" });
     }
 
-    const pcmFloat32 = new Float32Array(packet.pcmData);
+    // Construct a Float32 view over a COPY of the source buffer, since
+    // pcmData is the actual ArrayBuffer the main process transferred
+    // (or a Uint8Array view of it). The copy keeps the buffer
+    // transferable for postMessage while preserving the original.
+    const copy = sourceBuffer.slice(0);
+    const pcmFloat32 = new Float32Array(copy);
     // MessagePort's structured-clone overload needs an ArrayBuffer (or
-    // ArrayBufferLike); Float32Array.buffer is shared with the typed
-    // array, but the postMessage signature infers it as ArrayBuffer.
-    const payloadBuffer = packet.pcmData.byteLength > 0
-      ? [packet.pcmData.buffer.slice(0)] as ArrayBuffer[]
-      : undefined;
+    // ArrayBufferLike); transfer a copy of the underlying buffer to
+    // avoid structured-clone of large PCM payloads.
     (this.workletNode.port as unknown as { postMessage: (msg: unknown, transfer?: unknown[]) => void }).postMessage(
-      { type: 'pcm:data', data: pcmFloat32, frameCount: packet.frameCount },
-      payloadBuffer,
+      { type: "pcm:data", data: pcmFloat32, frameCount: packet.frameCount },
+      [copy],
     );
   }
 

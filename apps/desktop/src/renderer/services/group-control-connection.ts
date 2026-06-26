@@ -268,6 +268,105 @@ export class GroupControlConnection {
   }
 
   /**
+   * Broadcast a `group.member.joined` notification to all connected peers.
+   * The payload does not include a `type` field so that the `.strict()` Zod
+   * schema on the receiving end does not reject it.
+   */
+  async broadcastMemberJoined(memberDeviceId: string, memberDisplayName: string): Promise<void> {
+    if (!this.sdk) throw new Error("Not connected");
+    const payload: Record<string, unknown> = {
+      memberDeviceId,
+      memberDisplayName,
+      joinedAt: Date.now(),
+      groupId: this.opts.groupId,
+    };
+    const input = makeInput("group.member.joined", this.opts.nodeId, this.opts.groupId, payload, this.clock);
+    const envelope = await buildEnvelope(input, this.opts.groupSecret);
+    const peers = this.connectedPeers;
+    for (const peerUuid of peers) {
+      try {
+        await this.sdk.sendData(envelope as unknown as Record<string, unknown>, {
+          uuid: peerUuid,
+          type: "publisher",
+          allowFallback: false,
+        });
+      } catch {
+        // best effort
+      }
+    }
+  }
+
+  /**
+   * Broadcast a `group.member.online` notification to all connected peers.
+   * The payload does not include a `type` field for strict-schema compatibility.
+   */
+  async broadcastMemberOnline(memberDeviceId: string, memberDisplayName: string): Promise<void> {
+    if (!this.sdk) throw new Error("Not connected");
+    const payload: Record<string, unknown> = {
+      memberDeviceId,
+      memberDisplayName,
+      onlineAt: Date.now(),
+      groupId: this.opts.groupId,
+    };
+    const input = makeInput("group.member.online", this.opts.nodeId, this.opts.groupId, payload, this.clock);
+    const envelope = await buildEnvelope(input, this.opts.groupSecret);
+    const peers = this.connectedPeers;
+    for (const peerUuid of peers) {
+      try {
+        await this.sdk.sendData(envelope as unknown as Record<string, unknown>, {
+          uuid: peerUuid,
+          type: "publisher",
+          allowFallback: false,
+        });
+      } catch {
+        // best effort
+      }
+    }
+  }
+
+  /**
+   * Send a `group.member.joined` message to a specific peer without including
+   * a `type` field in the payload (strict-schema compatible).
+   */
+  private async sendMemberJoinedToPeer(peerUuid: string, memberDeviceId: string, memberDisplayName: string): Promise<void> {
+    if (!this.sdk || !peerUuid) return;
+    const payload: Record<string, unknown> = {
+      memberDeviceId,
+      memberDisplayName,
+      joinedAt: Date.now(),
+      groupId: this.opts.groupId,
+    };
+    const input = makeInput("group.member.joined", this.opts.nodeId, this.opts.groupId, payload, this.clock);
+    const envelope = await buildEnvelope(input, this.opts.groupSecret);
+    await this.sdk.sendData(envelope as unknown as Record<string, unknown>, {
+      uuid: peerUuid,
+      type: "publisher",
+      allowFallback: false,
+    });
+  }
+
+  /**
+   * Send a `group.member.online` message to a specific peer without including
+   * a `type` field in the payload (strict-schema compatible).
+   */
+  private async sendMemberOnlineToPeer(peerUuid: string, memberDeviceId: string, memberDisplayName: string): Promise<void> {
+    if (!this.sdk || !peerUuid) return;
+    const payload: Record<string, unknown> = {
+      memberDeviceId,
+      memberDisplayName,
+      onlineAt: Date.now(),
+      groupId: this.opts.groupId,
+    };
+    const input = makeInput("group.member.online", this.opts.nodeId, this.opts.groupId, payload, this.clock);
+    const envelope = await buildEnvelope(input, this.opts.groupSecret);
+    await this.sdk.sendData(envelope as unknown as Record<string, unknown>, {
+      uuid: peerUuid,
+      type: "publisher",
+      allowFallback: false,
+    });
+  }
+
+  /**
    * Check whether the sender identity on an envelope matches the established
    * mapping for this peer UUID.
    *
@@ -357,6 +456,12 @@ export class GroupControlConnection {
           displayName: this.opts.displayName,
           protocolVersion: GROUP_PROTOCOL_VERSION,
         }).catch(() => {});
+        // If we are already connected, tell the new peer about ourselves
+        // as an existing member (spec: existing online users tell the new
+        // user about themselves).
+        if (this._state === "connected") {
+          this.sendMemberJoinedToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
+        }
       },
       peerDisconnected: (raw: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
@@ -413,9 +518,13 @@ export class GroupControlConnection {
               }).catch(() => {});
               // After authenticated handshake, request state.
               this.requestFullStateFromPeer(uuid).catch(() => {});
+              // Tell the peer we are online now.
+              this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
             } else if (!oldPeer) {
               // New peer we already greeted — also request state.
               this.requestFullStateFromPeer(uuid).catch(() => {});
+              // Tell the peer we are online now.
+              this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
             }
             return;
           }
@@ -430,6 +539,8 @@ export class GroupControlConnection {
               this.peerToDevice.set(uuid, deviceId);
               this.deviceToPeer.set(deviceId, uuid);
               this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
+              // Tell the peer we are online now (first identity mapping).
+              this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
             }
             // After authenticated handshake, request state.
             this.requestFullStateFromPeer(uuid).catch(() => {});
