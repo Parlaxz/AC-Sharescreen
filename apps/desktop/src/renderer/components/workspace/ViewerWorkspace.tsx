@@ -180,8 +180,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ── Local state ──────────────────────────────────────────────────
   const [isPaused, setIsPaused] = useState(false);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(() => {
+    try {
+      const stored = localStorage.getItem("screenlink:viewer-volume");
+      return stored !== null ? parseFloat(stored) : 1;
+    } catch { return 1; }
+  });
+  const [isMuted, setIsMuted] = useState(() => {
+    try {
+      return localStorage.getItem("screenlink:viewer-muted") === "true";
+    } catch { return false; }
+  });
   const [quality, setQuality] = useState<QualityLevel>("custom");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
@@ -197,13 +206,33 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const { visible: controlsVisible, show: showControls, keepVisible, hide: hideControls } =
     useControlsAutoHide(3000);
 
-  // Fullscreen change listener
+  // Fullscreen change listener — use Electron IPC when available
   useEffect(() => {
+    const api = (window as unknown as { screenlink?: { onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void } }).screenlink;
+    if (api) {
+      // Use Electron native fullscreen events
+      const unsubscribe = api.onFullscreenChanged((isFs) => {
+        setIsFullscreen(isFs);
+      });
+      return unsubscribe;
+    }
+    // Fallback for non-Electron environments
     const handler = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
     document.addEventListener("fullscreenchange", handler);
     return () => document.removeEventListener("fullscreenchange", handler);
+  }, []);
+
+  // Listen for viewer keyboard shortcut events
+  useEffect(() => {
+    const handleToggleMute = () => {
+      setIsMuted((m) => !m);
+    };
+    window.addEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
+    return () => {
+      window.removeEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
+    };
   }, []);
 
   // Sync volume via ref (volume is a DOM property, not a JSX attribute)
@@ -212,6 +241,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       videoRef.current.volume = volume;
     }
   }, [volume]);
+
+  // Persist volume to localStorage
+  useEffect(() => {
+    try { localStorage.setItem("screenlink:viewer-volume", String(volume)); } catch {}
+  }, [volume]);
+
+  // Persist mute state to localStorage
+  useEffect(() => {
+    try { localStorage.setItem("screenlink:viewer-muted", String(isMuted)); } catch {}
+  }, [isMuted]);
 
   // ── Derive current stream info ───────────────────────────────────
   const currentStream = useMemo(() => {
@@ -331,6 +370,41 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     };
   }, [isViewing]);
 
+  // ── Detect stream stop via store changes ──────────────────────────
+  useEffect(() => {
+    if (!isViewing) return;
+
+    const unsubscribe = useStore.subscribe((state, prevState) => {
+      // Check if our watched stream was removed from activeStreamsByGroup
+      if (!selectedGroupId) return;
+      const prevStreams = prevState.activeStreamsByGroup[selectedGroupId] ?? [];
+      const currStreams = state.activeStreamsByGroup[selectedGroupId] ?? [];
+
+      // If we had streams before and now none, the host stopped
+      if (prevStreams.length > 0 && currStreams.length === 0 && sessionRef.current) {
+        sessionRef.current.stop();
+        sessionRef.current.destroy();
+        sessionRef.current = null;
+        setViewStatus("ended");
+      }
+
+      // Also check if our specific watched session was removed
+      const prevWatched = prevState.watchedStreamsBySessionId;
+      const currWatched = state.watchedStreamsBySessionId;
+      const watchedId = Object.keys(prevWatched)[0];
+      if (watchedId && prevWatched[watchedId] && !currWatched[watchedId]) {
+        if (sessionRef.current) {
+          sessionRef.current.stop();
+          sessionRef.current.destroy();
+          sessionRef.current = null;
+        }
+        setViewStatus("ended");
+      }
+    });
+
+    return unsubscribe;
+  }, [isViewing, selectedGroupId, setViewStatus]);
+
   // Bind video element to session whenever ref is available
   useEffect(() => {
     if (sessionRef.current && videoRef.current) {
@@ -340,7 +414,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ── Callbacks ────────────────────────────────────────────────────
 
-  const handleExit = useCallback(() => {
+  const handleExit = useCallback(async () => {
     // Stop the session
     if (sessionRef.current) {
       sessionRef.current.stop();
@@ -349,16 +423,28 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
     setIsViewing(false);
     setViewStatus("");
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
+    // Exit fullscreen if active
+    if (isFullscreen) {
+      const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
+      if (api) {
+        await api.toggleFullscreen();
+      } else if (document.fullscreenElement) {
+        void document.exitFullscreen();
+      }
     }
-  }, [setIsViewing, setViewStatus]);
+  }, [setIsViewing, setViewStatus, isFullscreen]);
 
-  const handleToggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
+  const handleToggleFullscreen = useCallback(async () => {
+    const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean>; onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void } }).screenlink;
+    if (api) {
+      await api.toggleFullscreen();
     } else {
-      void document.documentElement.requestFullscreen();
+      // Fallback for non-Electron environments
+      if (document.fullscreenElement) {
+        void document.exitFullscreen();
+      } else {
+        void document.documentElement.requestFullscreen();
+      }
     }
     toggleFocusMode();
   }, [toggleFocusMode]);
@@ -776,11 +862,16 @@ function ViewerShell({
     }
   }, [viewStatus]);
 
-  const handleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
+  const handleFullscreen = useCallback(async () => {
+    const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
+    if (api) {
+      await api.toggleFullscreen();
     } else {
-      void document.documentElement.requestFullscreen();
+      if (document.fullscreenElement) {
+        void document.exitFullscreen();
+      } else {
+        void document.documentElement.requestFullscreen();
+      }
     }
     toggleFocusMode();
   }, [toggleFocusMode]);

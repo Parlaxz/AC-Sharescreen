@@ -356,6 +356,31 @@ export class PublisherManager {
 
     // Log sender presence immediately after publish
     this.logSenderDiagnostics('after-publish');
+
+    // Post-publish bitrate readback: verify the sender encoding
+    // actually has the requested maxBitrate (in bps).
+    try {
+      const sdk = publisher.getSDK();
+      if (sdk) {
+        for (const [, group] of sdk.connections) {
+          const pc = group.publisher?.pc;
+          if (!pc) continue;
+          const sender = pc.getSenders().find(s => s.track?.kind === "video");
+          if (!sender) continue;
+          const params = sender.getParameters();
+          const appliedBitrate = params.encodings?.[0]?.maxBitrate ?? 0;
+          const requestedBps = config.videoBitrate * 1000;
+          console.log('[PublisherManager] post-publish bitrate readback', {
+            requestedKbps: config.videoBitrate,
+            requestedBps,
+            appliedBps: appliedBitrate,
+            match: appliedBitrate === requestedBps,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[PublisherManager] Post-publish bitrate readback failed:', err);
+    }
   }
 
   /**

@@ -82,6 +82,22 @@ export interface PersistedSettings {
   lastQuickShareGroupId: string | null;
   lastQuickShareSourceKind: "screen" | "window" | null;
   lastQuickSharePresetId: string | null;
+  /** Last successful share settings for "Use last settings" restoration */
+  lastShareSettings: {
+    sourceKind: "screen" | "window";
+    audioMode: "none" | "monitor" | "application";
+    selectedPresetId: string | null;
+    customQuality: {
+      resolutionValue: string;
+      customWidth: number;
+      customHeight: number;
+      fps: number;
+      bitrate: number;
+      codec: string;
+      contentHint: string;
+      degradationPreference: string;
+    };
+  } | null;
 }
 
 const CURRENT_VERSION = 3;
@@ -155,6 +171,7 @@ function getDefaults(): PersistedSettings {
     lastQuickShareGroupId: null,
     lastQuickShareSourceKind: null,
     lastQuickSharePresetId: null,
+    lastShareSettings: null,
   };
 }
 
@@ -181,6 +198,11 @@ function applyMigrations(raw: unknown): PersistedSettings {
       lastQuickShareSourceKind: s.lastQuickShareSourceKind ?? null,
       lastQuickSharePresetId: s.lastQuickSharePresetId ?? null,
     };
+  }
+
+  // v3→current: add lastShareSettings if missing
+  if (s.lastShareSettings === undefined) {
+    s.lastShareSettings = null;
   }
 
   // Normalize audio mode for current version

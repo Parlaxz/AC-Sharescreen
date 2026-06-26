@@ -93,10 +93,63 @@ export function useKeyboardShortcuts() {
       return;
     }
 
-    // Esc — Close overlay or exit fullscreen (Section 14)
+    // ── Viewer-specific shortcuts (only when on viewer page) ──────────
+    const page = useStore.getState().currentPage;
+    if (page === "viewer") {
+      // F — Toggle fullscreen
+      if (event.key === "f" || event.key === "F") {
+        if (!ctrl && !alt && !event.shiftKey) {
+          event.preventDefault();
+          const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
+          if (api) {
+            void api.toggleFullscreen();
+          } else if (document.fullscreenElement) {
+            void document.exitFullscreen();
+          } else {
+            void document.documentElement.requestFullscreen();
+          }
+          useStore.getState().toggleFocusMode();
+          return;
+        }
+      }
+
+      // M — Toggle mute
+      if ((event.key === "m" || event.key === "M") && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-mute"));
+        return;
+      }
+
+      // I — Toggle info panel
+      if ((event.key === "i" || event.key === "I") && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-info"));
+        return;
+      }
+
+      // S — Toggle settings panel
+      if ((event.key === "s" || event.key === "S") && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"));
+        return;
+      }
+    }
+
+    // Esc — Close overlay, exit fullscreen, or exit viewer
     if (event.key === "Escape") {
+      const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
+      const currentPage = useStore.getState().currentPage;
       if (document.fullscreenElement) {
-        void document.exitFullscreen();
+        if (api) {
+          void api.toggleFullscreen();
+        } else {
+          void document.exitFullscreen();
+        }
+      } else if (currentPage === "viewer") {
+        // Exit viewer on Esc when not fullscreen
+        useStore.getState().setIsViewing(false);
+        useStore.getState().setViewStatus("");
+        useStore.getState().navigate("overview");
       }
       return;
     }

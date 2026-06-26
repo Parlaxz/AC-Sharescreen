@@ -706,6 +706,19 @@ export class StreamSessionManager {
         ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
 
+      // Bitrate readback: log the effective bitrate after precedence resolution
+      // so we can verify a custom 300 Kbps override reaches the publisher.
+      console.log("[stream-session] effective video bitrate", {
+        overrideKbps: ov?.videoBitrateKbps ?? null,
+        groupDefaultKbps: quality?.video?.videoBitrateKbps ?? null,
+        fallbackKbps: DEFAULT_VIDEO_BITRATE_KBPS,
+        effectiveKbps: videoBitrate,
+        effectiveBps: videoBitrate * 1000,
+        source: ov?.videoBitrateKbps != null ? "override"
+          : quality?.video?.videoBitrateKbps != null ? "group-default"
+          : "fallback",
+      });
+
       // Gate 4.4: apply capture constraints and read back actual
       // dimensions so downstream code operates on real values.
       await this.applyCaptureConstraints(this.currentTrack, {

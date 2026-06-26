@@ -289,6 +289,21 @@ export interface PersistedSettings {
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
+  lastShareSettings: {
+    sourceKind: "screen" | "window";
+    audioMode: "none" | "monitor" | "application";
+    selectedPresetId: string | null;
+    customQuality: {
+      resolutionValue: string;
+      customWidth: number;
+      customHeight: number;
+      fps: number;
+      bitrate: number;
+      codec: string;
+      contentHint: string;
+      degradationPreference: string;
+    };
+  } | null;
 }
 
 /** Protocol response envelope for helper IPC calls */

@@ -328,6 +328,35 @@ export function ShareSetup() {
     }
   }, [openShareSetup]);
 
+  // Restore last share settings when dialog opens
+  useEffect(() => {
+    if (!openShareSetup) return;
+    let cancelled = false;
+    const api = getApi();
+    if (!api) return;
+    void api.getSettings().then((settings) => {
+      if (cancelled) return;
+      const last = settings.lastShareSettings;
+      if (!last) return;
+      setActiveTab(last.sourceKind);
+      setAudioMode(resolveAudioMode(last.sourceKind, last.audioMode, lastScreenAudioMode, lastWindowAudioMode));
+      setSelectedPersonalPresetId(last.selectedPresetId);
+      if (last.customQuality) {
+        setCustomQuality({
+          resolutionValue: last.customQuality.resolutionValue,
+          customWidth: last.customQuality.customWidth,
+          customHeight: last.customQuality.customHeight,
+          fps: last.customQuality.fps,
+          bitrate: last.customQuality.bitrate,
+          codec: last.customQuality.codec,
+          contentHint: last.customQuality.contentHint,
+          degradationPreference: last.customQuality.degradationPreference,
+        });
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [openShareSetup, lastScreenAudioMode, lastWindowAudioMode]);
+
   // Load personal presets while the dialog is open.
   useEffect(() => {
     if (!openShareSetup) return;
@@ -396,12 +425,18 @@ export function ShareSetup() {
         qualityOverride: qualityOverride ?? undefined,
       });
 
-      // Persist source selection
+      // Persist source selection and full share settings
       const api = getApi();
       if (api) {
         await api.updateSettings({
           lastSourceId: source.id,
           lastSourceName: source.name,
+          lastShareSettings: {
+            sourceKind: source.kind,
+            audioMode: audioMode === "none" ? "none" : audioMode,
+            selectedPresetId: selectedPersonalPresetId,
+            customQuality,
+          },
         });
       }
 

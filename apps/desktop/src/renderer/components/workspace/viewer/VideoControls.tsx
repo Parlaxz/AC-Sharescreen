@@ -121,7 +121,7 @@ export function VideoControls({
   onExit,
   visible,
   isLive,
-  hideQuality = true,
+  hideQuality = false,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),

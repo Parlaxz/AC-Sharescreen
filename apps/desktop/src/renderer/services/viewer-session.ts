@@ -373,6 +373,11 @@ export class ViewerSession {
           if (typeof (this._receivedStream as unknown as Record<string, unknown>).addTrack === "function") {
             this._receivedStream.addTrack(track);
           }
+          // Listen for remote track ending (host stopped sharing)
+          // Defensive: only addEventListener if track supports it (not all test mocks do)
+          if (typeof track.addEventListener === "function") {
+            track.addEventListener("ended", handleRemoteTrackEnded, { once: true });
+          }
         }
 
         // Attach to video element if bound
@@ -393,6 +398,22 @@ export class ViewerSession {
       events.on("trackAdded", handleTrackEvent);
       // Backward compat: older event shape
       events.on("track", handleTrackEvent);
+
+      // Monitor remote track ended events (host stopped sharing)
+      // Use 2s debounce to avoid mistaking brief interruptions for intentional stops
+      let remoteTrackEndedTimer: ReturnType<typeof setTimeout> | null = null;
+      const handleRemoteTrackEnded = (): void => {
+        if (!this.isCurrent()) return;
+        if (remoteTrackEndedTimer) clearTimeout(remoteTrackEndedTimer);
+        remoteTrackEndedTimer = setTimeout(() => {
+          remoteTrackEndedTimer = null;
+          if (!this.isCurrent()) return;
+          // If still in watching state after debounce, the stream likely ended
+          if (this._state === "watching") {
+            this.stop();
+          }
+        }, 2000);
+      };
 
       // Also handle remoteAdded for older SDK signaling
       events.on("remoteAdded", () => {
