@@ -1,7 +1,3 @@
-import type {
-  CreateGroupResponseDTO,
-  GroupRecordDTO,
-} from "../../preload/api-types.js";
 import { attachGroupRecordToRuntime } from "./group-record-helper.js";
 import { getApi } from "./get-api.js";
 
@@ -18,7 +14,7 @@ export async function createGroupAction(groupName: string): Promise<string> {
 
   // Call the real createGroup IPC handler.
   // Real shape: { record: GroupRecordDTO, invite: string, link: string }
-  const response = (await api.createGroup({ groupName })) as CreateGroupResponseDTO;
+  const response = await api.createGroup({ groupName });
 
   // Attach the group record to runtime + renderer store
   const groupId = await attachGroupRecordToRuntime(response.record);
@@ -39,7 +35,7 @@ export async function joinGroupAction(inviteLink: string): Promise<string> {
 
   // Call the real joinGroup IPC handler.
   // Real shape: GroupRecordDTO (the record directly)
-  const record = (await api.joinGroup({ link: inviteLink })) as GroupRecordDTO;
+  const record = await api.joinGroup({ link: inviteLink });
 
   // Attach the group record to runtime + renderer store
   const groupId = await attachGroupRecordToRuntime(record);

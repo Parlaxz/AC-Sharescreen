@@ -27,16 +27,16 @@ export interface ScreenLinkAPI {
   safeStorageAvailable: () => Promise<boolean>;
 
   // Groups
-  listGroups: () => Promise<unknown[]>;
-  getGroup: (groupId: string) => Promise<unknown | null>;
-  createGroup: (input: { groupName: string }) => Promise<unknown>;
-  joinGroup: (input: { link: string }) => Promise<unknown>;
+  listGroups: () => Promise<GroupRecordDTO[]>;
+  getGroup: (groupId: string) => Promise<GroupRecordDTO | null>;
+  createGroup: (input: { groupName: string }) => Promise<CreateGroupResponseDTO>;
+  joinGroup: (input: { link: string }) => Promise<GroupRecordDTO>;
   getGroupInvite: (groupId: string) => Promise<{ link: string } | null>;
   updateGroupSharedState: (groupId: string, state: unknown) => Promise<unknown | null>;
   updateGroupClock: (groupId: string, stamp: unknown) => Promise<void>;
   setGroupNotifications: (groupId: string, enabled: boolean) => Promise<void>;
   leaveGroup: (groupId: string) => Promise<void>;
-  getGroupConnectionConfig: (groupId: string) => Promise<unknown | null>;
+  getGroupConnectionConfig: (groupId: string) => Promise<GroupConnectionConfigDTO | null>;
 
   // Quality presets
   listQualityPresets: () => Promise<unknown[]>;
@@ -123,13 +123,21 @@ export interface ScreenLinkAPI {
 // ─── Group IPC response DTOs ───────────────────────────────────────────
 
 /**
- * Record returned from createGroup / joinGroup IPC handlers.
- * Contains the group metadata needed to bootstrap runtime state.
+ * Record returned from createGroup / joinGroup / listGroups / getGroup IPC
+ * handlers. Mirrors the main-process `LocalGroupRecord` from `group-store.ts`.
+ *
+ * `encryptedGroupSecret` is the safe-to-serialize ciphertext form — the
+ * decrypted group secret is never exposed through this DTO.
  */
 export interface GroupRecordDTO {
-  id: string;
+  groupId: string;
+  controlRoomId: string;
+  encryptedGroupSecret: string;
   sharedState: GroupSharedState;
   lastClock: HybridTimestamp;
+  joinedAt: number;
+  notificationsEnabled: boolean;
+  creatorDeviceId?: string;
 }
 
 /**
@@ -143,12 +151,14 @@ export interface CreateGroupResponseDTO {
 }
 
 /**
- * Shape returned by getGroupConnectionConfig IPC handler:
- *   { controlRoomId, groupSecret }
+ * Shape returned by getGroupConnectionConfig IPC handler.
+ * Mirrors the main-process `GroupConnectionConfig` from `group-store.ts`.
  */
 export interface GroupConnectionConfigDTO {
+  groupId: string;
   controlRoomId: string;
   groupSecret: string;
+  nodeId: string;
 }
 
 // ─── Quick Share types ─────────────────────────────────────────────────

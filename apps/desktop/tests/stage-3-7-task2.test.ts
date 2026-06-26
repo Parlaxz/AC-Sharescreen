@@ -126,9 +126,13 @@ function makeSharedState(): SharedGroupState {
 
 function makeGroupRecord(overrides?: Partial<GroupRecordDTO>): GroupRecordDTO {
   return {
-    id: defaultGroupId,
+    groupId: defaultGroupId,
+    controlRoomId: "control-room-abc",
+    encryptedGroupSecret: "encrypted-placeholder",
     sharedState: makeSharedState() as unknown as GroupSharedState,
     lastClock: makeStamp("node-1"),
+    joinedAt: 1,
+    notificationsEnabled: true,
     ...overrides,
   };
 }
@@ -142,10 +146,13 @@ function makeCreateGroupResponse(overrides?: Partial<CreateGroupResponseDTO>): C
   };
 }
 
-function makeConnectionConfig(): GroupConnectionConfigDTO {
+function makeConnectionConfig(overrides?: Partial<GroupConnectionConfigDTO>): GroupConnectionConfigDTO {
   return {
+    groupId: defaultGroupId,
     controlRoomId: "control-room-abc",
     groupSecret: "group-secret-xyz",
+    nodeId: "node-1",
+    ...overrides,
   };
 }
 
@@ -326,9 +333,12 @@ describe("Task 2 — Group Create/Join DTO & Runtime Integration", () => {
     const { createGroupAction } = await import("../src/renderer/services/group-actions.js");
 
     const response = makeCreateGroupResponse({
-      record: makeGroupRecord({ id: "uuid-123" }),
+      record: makeGroupRecord({ groupId: "uuid-123" }),
     });
     mockApi.createGroup.mockResolvedValueOnce(response);
+    mockApi.getGroupConnectionConfig.mockResolvedValueOnce(
+      makeConnectionConfig({ groupId: "uuid-123" }),
+    );
 
     const groupId = await createGroupAction("Test");
     expect(groupId).toBe("uuid-123");
@@ -363,8 +373,11 @@ describe("Task 2 — Group Create/Join DTO & Runtime Integration", () => {
   it("joinGroup response uses real record shape (GroupRecordDTO directly)", async () => {
     const { joinGroupAction } = await import("../src/renderer/services/group-actions.js");
 
-    const record = makeGroupRecord({ id: "join-uuid-456" });
+    const record = makeGroupRecord({ groupId: "join-uuid-456" });
     mockApi.joinGroup.mockResolvedValueOnce(record);
+    mockApi.getGroupConnectionConfig.mockResolvedValueOnce(
+      makeConnectionConfig({ groupId: "join-uuid-456" }),
+    );
 
     const groupId = await joinGroupAction("screenlink://...");
     expect(groupId).toBe("join-uuid-456");
@@ -673,13 +686,21 @@ describe("Task 2 — Quality control removal", () => {
 // ─── API type shape verification ──────────────────────────────────────────
 
 describe("Task 2 — API type shape correctness", () => {
-  it("GroupRecordDTO has id, sharedState, and lastClock", () => {
+  it("GroupRecordDTO has groupId, sharedState, lastClock, and persistence metadata", () => {
     const record: GroupRecordDTO = {
-      id: "test-id",
+      groupId: "test-id",
+      controlRoomId: "room-1",
+      encryptedGroupSecret: "encrypted-placeholder",
       sharedState: makeSharedState() as unknown as GroupSharedState,
       lastClock: makeStamp(),
+      joinedAt: 1,
+      notificationsEnabled: true,
     };
-    expect(record.id).toBe("test-id");
+    expect(record.groupId).toBe("test-id");
+    expect(record.controlRoomId).toBe("room-1");
+    expect(typeof record.encryptedGroupSecret).toBe("string");
+    expect(record.joinedAt).toBe(1);
+    expect(record.notificationsEnabled).toBe(true);
     expect((record.sharedState as unknown as SharedGroupState).groupId).toBe("test-group-uuid");
     expect((record.sharedState as unknown as SharedGroupState).name.value).toBe("Test Group");
   });
@@ -691,17 +712,170 @@ describe("Task 2 — API type shape correctness", () => {
       link: "screenlink://...",
     };
     expect(response.record).toBeDefined();
-    expect(response.record.id).toBeDefined();
+    expect(response.record.groupId).toBeDefined();
     expect(typeof response.invite).toBe("string");
     expect(typeof response.link).toBe("string");
   });
 
-  it("GroupConnectionConfigDTO has controlRoomId and groupSecret", () => {
+  it("GroupConnectionConfigDTO has groupId, controlRoomId, groupSecret, and nodeId", () => {
     const config: GroupConnectionConfigDTO = {
+      groupId: "g-1",
       controlRoomId: "room-1",
       groupSecret: "secret-1",
+      nodeId: "node-1",
     };
+    expect(config.groupId).toBe("g-1");
     expect(config.controlRoomId).toBe("room-1");
     expect(config.groupSecret).toBe("secret-1");
+    expect(config.nodeId).toBe("node-1");
+  });
+});
+
+// ─── Integration-contract regression: real GroupStore shape ────────────────
+
+/**
+ * Reproduces the production bug where the renderer's DTO used `id` instead of
+ * `groupId`, causing `getGroupConnectionConfig(undefined)`. The fixtures here
+ * match the exact shape `GroupStore.create()` / `GroupStore.import()` returns.
+ */
+describe("Task 2 — GroupStore / attachGroupRecordToRuntime contract", () => {
+  beforeEach(() => {
+    useStore.getState().reset();
+    setupMockApi();
+    setupMockRuntime();
+  });
+
+  afterEach(() => {
+    cleanupMocks();
+  });
+
+  function makeRealShapeRecord(overrides?: Partial<GroupRecordDTO>): GroupRecordDTO {
+    return {
+      groupId: "real-group-id",
+      controlRoomId: "room-id",
+      encryptedGroupSecret: "encrypted",
+      sharedState: makeSharedState() as unknown as GroupSharedState,
+      lastClock: makeStamp("node-1"),
+      joinedAt: 1,
+      notificationsEnabled: true,
+      ...overrides,
+    };
+  }
+
+  it("createGroup action threads the real-shape groupId through to the runtime", async () => {
+    mockApi.getGroupConnectionConfig.mockResolvedValue({
+      groupId: "real-group-id",
+      controlRoomId: "room-id",
+      groupSecret: "real-secret",
+      nodeId: "node-1",
+    });
+    mockApi.createGroup.mockResolvedValueOnce({
+      record: makeRealShapeRecord(),
+      invite: JSON.stringify({ version: 1, groupId: "real-group-id" }),
+      link: "screenlink://group?v=1&data=real",
+    });
+
+    const { createGroupAction } = await import(
+      "../src/renderer/services/group-actions.js"
+    );
+    const groupId = await createGroupAction("Real Group");
+
+    // 1. getGroupConnectionConfig was called with the real groupId
+    expect(mockApi.getGroupConnectionConfig).toHaveBeenCalledWith("real-group-id");
+    // 2. never called with undefined
+    const calls = (mockApi.getGroupConnectionConfig as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    for (const call of calls) {
+      expect(call[0]).not.toBeUndefined();
+    }
+    // 3. runtime.addGroup received the real groupId
+    expect(mockRuntimeAddGroup).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: "real-group-id" }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    // 4. Zustand stored the group under the real groupId key
+    const state = useStore.getState();
+    expect(state.groupsById["real-group-id"]).toBeDefined();
+    expect(state.groupOrder).toContain("real-group-id");
+    // 5. The selected group is the real groupId
+    expect(state.selectedGroupId).toBe("real-group-id");
+    expect(groupId).toBe("real-group-id");
+  });
+
+  it("joinGroup action threads the real-shape groupId through to the runtime", async () => {
+    mockApi.getGroupConnectionConfig.mockResolvedValue({
+      groupId: "real-group-id",
+      controlRoomId: "room-id",
+      groupSecret: "real-secret",
+      nodeId: "node-1",
+    });
+    mockApi.joinGroup.mockResolvedValueOnce(makeRealShapeRecord());
+
+    const { joinGroupAction } = await import(
+      "../src/renderer/services/group-actions.js"
+    );
+    const groupId = await joinGroupAction("screenlink://invite?v=1");
+
+    expect(mockApi.getGroupConnectionConfig).toHaveBeenCalledWith("real-group-id");
+    const calls = (mockApi.getGroupConnectionConfig as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    for (const call of calls) {
+      expect(call[0]).not.toBeUndefined();
+    }
+    expect(mockRuntimeAddGroup).toHaveBeenCalledWith(
+      expect.objectContaining({ groupId: "real-group-id" }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    const state = useStore.getState();
+    expect(state.groupsById["real-group-id"]).toBeDefined();
+    expect(state.groupOrder).toContain("real-group-id");
+    expect(state.selectedGroupId).toBe("real-group-id");
+    expect(groupId).toBe("real-group-id");
+  });
+
+  it("createGroup rejects when record is missing groupId before any IPC call", async () => {
+    mockApi.getGroupConnectionConfig.mockClear();
+    // Build a malformed record (still satisfies the typed surface) by passing
+    // through unknown and clearing groupId.
+    mockApi.createGroup.mockResolvedValueOnce({
+      record: {
+        ...makeRealShapeRecord(),
+        groupId: "",
+      } as unknown as GroupRecordDTO,
+      invite: "{}",
+      link: "x",
+    });
+
+    const { createGroupAction } = await import(
+      "../src/renderer/services/group-actions.js"
+    );
+
+    await expect(createGroupAction("Bad")).rejects.toThrow(
+      /Invalid group record: missing groupId/,
+    );
+    // getGroupConnectionConfig must never be called for an invalid record.
+    expect(mockApi.getGroupConnectionConfig).not.toHaveBeenCalled();
+  });
+
+  it("createGroup rejects when the connection config refers to a different group", async () => {
+    mockApi.getGroupConnectionConfig.mockResolvedValueOnce({
+      groupId: "some-other-group",
+      controlRoomId: "room-id",
+      groupSecret: "real-secret",
+      nodeId: "node-1",
+    });
+    mockApi.createGroup.mockResolvedValueOnce({
+      record: makeRealShapeRecord(),
+      invite: "{}",
+      link: "x",
+    });
+
+    const { createGroupAction } = await import(
+      "../src/renderer/services/group-actions.js"
+    );
+
+    await expect(createGroupAction("Mismatch")).rejects.toThrow(
+      /does not match group record/,
+    );
   });
 });
