@@ -1,14 +1,15 @@
 {
 	"name": "screenlink",
 	"private": true,
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "ScreenLink - Private screen sharing with permanent links",
 	"scripts": {
-		"build": "pnpm build:shared && pnpm build:vdo-adapter && pnpm build:desktop",
+		"build": "pnpm build:shared && pnpm build:vdo-adapter && node scripts/check-version-consistency.mjs && pnpm build:desktop",
 		"build:shared": "pnpm --filter @screenlink/shared build",
 		"build:vdo-adapter": "pnpm --filter @screenlink/vdo-adapter build",
 		"build:desktop": "pnpm --filter @screenlink/desktop build",
 		"build:desktop:renderer": "pnpm --filter @screenlink/desktop exec vite build",
+		"check:version-consistency": "node scripts/check-version-consistency.mjs",
 		"build:installer": "pnpm build && cd apps/desktop && npx electron-builder --win --x64",
 		"audio-helper:configure": "cmake -S native/audio-helper -B native/audio-helper/build -G \"Visual Studio 17 2022\" -A x64",
 		"audio-helper:build": "cmake --build native/audio-helper/build --config Release",
