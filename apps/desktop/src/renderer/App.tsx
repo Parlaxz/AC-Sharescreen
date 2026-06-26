@@ -34,6 +34,18 @@ export function App() {
 
   const currentPage = useStore((state) => state.currentPage);
   const isSharing = useStore((state) => state.isSharing);
+  const sharingGroupId = useStore((state) => state.sharingGroupId);
+  const selectedGroupId = useStore((state) => state.selectedGroupId);
+
+  // Host dashboard only renders automatically when:
+  //  - a stream is active; AND
+  //  - the user has selected the group the stream is publishing to.
+  // Selecting another group while streaming shows that group's normal
+  // Overview. The local stream still belongs to the original group.
+  const hostInSelectedGroup =
+    isSharing &&
+    sharingGroupId !== null &&
+    selectedGroupId === sharingGroupId;
 
   // Command palette state (Ctrl+K)
   const [commandOpen, setCommandOpen] = useState(false);
@@ -93,8 +105,10 @@ export function App() {
       case "home":
         return <HomePage />;
       case "overview":
-        // When sharing, render HostDashboard instead of GroupOverview
-        if (isSharing) {
+        // Host dashboard only renders when the user is currently on
+        // the group the active share is publishing to. Selecting a
+        // different group while sharing shows that group's Overview.
+        if (hostInSelectedGroup) {
           return <HostDashboard />;
         }
         return <GroupOverview />;

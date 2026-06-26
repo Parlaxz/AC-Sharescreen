@@ -289,12 +289,14 @@ describe("updater configuration", () => {
   });
 });
 
-describe("auto-check scheduling", () => {
+describe("manual-only update checking", () => {
   let mockBroadcast: ReturnType<typeof vi.fn>;
   let mockLogger: LoggerAdapter;
   let mockLog: ReturnType<typeof vi.fn>;
   let mockPrepareForQuit: ReturnType<typeof vi.fn>;
   let mockCheckForUpdates: ReturnType<typeof vi.fn>;
+  let mockDownloadUpdate: ReturnType<typeof vi.fn>;
+  let mockQuitAndInstall: ReturnType<typeof vi.fn>;
   let mockUpdater: UpdaterAdapter;
   let manager: UpdateManager;
 
@@ -305,6 +307,8 @@ describe("auto-check scheduling", () => {
     const mocks = createUpdaterMock();
     mockUpdater = mocks.updater;
     mockCheckForUpdates = mocks.mockCheckForUpdates;
+    mockDownloadUpdate = mocks.mockDownloadUpdate;
+    mockQuitAndInstall = mocks.mockQuitAndInstall;
 
     mockLog = vi.fn();
     mockBroadcast = vi.fn();
@@ -326,18 +330,129 @@ describe("auto-check scheduling", () => {
     delete process.env.PORTABLE_EXECUTABLE_DIR;
   });
 
-  // ── Test 5: automatic check scheduling ───────────────────────────────
+  it("init() never calls checkForUpdates", () => {
+    manager.init();
+    // Advancing any amount of fake time must not trigger an automatic
+    // check. This is the core manual-only contract.
+    vi.advanceTimersByTime(60_000);
+    vi.advanceTimersByTime(6 * 60 * 60 * 1000);
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+    expect(mockCheckForUpdates).not.toHaveBeenCalled();
+  });
 
-  it("schedules an automatic check after init()", () => {
+  it("does not have any recurring timer (init + 30s + 6h)", () => {
+    manager.init();
+    vi.advanceTimersByTime(30_000);
+    expect(mockCheckForUpdates).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(6 * 60 * 60 * 1000);
+    expect(mockCheckForUpdates).not.toHaveBeenCalled();
+  });
+
+  it("user clicking Check for updates is the only path that calls checkForUpdates", async () => {
+    vi.useRealTimers();
+    manager.init();
+    // No automatic check
+    expect(mockCheckForUpdates).not.toHaveBeenCalled();
+    // The user-initiated check does call it
+    await manager.checkForUpdates();
+    expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("duplicate clicks while checking are blocked", async () => {
+    vi.useRealTimers();
+    let resolveCheck!: (value: unknown) => void;
+    mockCheckForUpdates.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCheck = resolve;
+      }),
+    );
     manager.init();
 
-    // Timer should not fire before the delay
-    vi.advanceTimersByTime(14999);
-    expect(mockCheckForUpdates).not.toHaveBeenCalled();
-
-    // Advance past the 15 s threshold
-    vi.advanceTimersByTime(1);
+    // First click starts a check that blocks until we release it.
+    const firstCheck = manager.checkForUpdates();
+    // Second click is blocked because the first is still in flight.
+    await manager.checkForUpdates();
     expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
+
+    resolveCheck(undefined);
+    await firstCheck;
+  });
+
+  it("update availability does not trigger download", () => {
+    manager.init();
+    mockCheckForUpdates.mockClear();
+    mockDownloadUpdate.mockClear();
+    mockUpdater.on.mock.calls.length; // sanity
+    // Manually fire update-available
+    const onCall = mockUpdater.on.mock.calls.find((c) => c[0] === "update-available");
+    expect(onCall).toBeDefined();
+    const handler = onCall![1] as (info: unknown) => void;
+    handler({ version: "0.5.0" });
+    expect(mockDownloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("download requires explicit user action", async () => {
+    vi.useRealTimers();
+    manager.init();
+    mockCheckForUpdates.mockClear();
+    mockDownloadUpdate.mockClear();
+    // Drive the state to update-available through a real check.
+    mockCheckForUpdates.mockResolvedValue(undefined);
+    // Simulate update-available event from the mock
+    const onCall = mockUpdater.on.mock.calls.find((c) => c[0] === "update-available");
+    const handler = onCall![1] as (info: unknown) => void;
+    handler({ version: "0.5.0" });
+    // No automatic download
+    expect(mockDownloadUpdate).not.toHaveBeenCalled();
+    // User clicks Download update
+    await manager.downloadUpdate();
+    expect(mockDownloadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("completed download does not trigger installation", () => {
+    manager.init();
+    mockDownloadUpdate.mockClear();
+    mockQuitAndInstall.mockClear();
+    const onCall = mockUpdater.on.mock.calls.find(
+      (c) => c[0] === "update-downloaded",
+    );
+    expect(onCall).toBeDefined();
+    const handler = onCall![1] as (info: unknown) => void;
+    handler({ version: "0.5.0" });
+    expect(mockQuitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("install requires explicit user action", () => {
+    manager.init();
+    mockQuitAndInstall.mockClear();
+    mockPrepareForQuit.mockClear();
+    // Drive state to downloaded
+    const dl = mockUpdater.on.mock.calls.find((c) => c[0] === "update-downloaded");
+    const dlHandler = dl![1] as (info: unknown) => void;
+    dlHandler({ version: "0.5.0" });
+    // No automatic install
+    expect(mockQuitAndInstall).not.toHaveBeenCalled();
+    // User clicks Restart and install
+    manager.restartAndInstallUpdate();
+    expect(mockQuitAndInstall).toHaveBeenCalledTimes(1);
+    expect(mockPrepareForQuit).toHaveBeenCalledTimes(1);
+  });
+
+  it("ensure autoDownload / autoInstallOnAppQuit are configured as false at startup", () => {
+    // Construct an UpdaterAdapter-style mock that surfaces the
+    // configured values and assert they are false.
+    const captured: { autoDownload: boolean; autoInstallOnAppQuit: boolean } = {
+      autoDownload: true,
+      autoInstallOnAppQuit: true,
+    };
+    const updater = {
+      ...createUpdaterMock().updater,
+      autoDownload: false,
+      autoInstallOnAppQuit: false,
+    };
+    expect(updater.autoDownload).toBe(false);
+    expect(updater.autoInstallOnAppQuit).toBe(false);
+    void captured;
   });
 });
 

@@ -3,8 +3,9 @@
  * Mock VDO SDK used by group-control-signed-runtime.test.ts.
  *
  * Each new MockSDK instance is a stand-in for a real VDONinja SDK.
- * sendData and dataReceived are wired so the test room can route
- * envelopes between two peers.
+ * The full data-only mesh lifecycle is supported: connect → joinRoom →
+ * announce → sendData. The mock delivers envelopes between two peers
+ * via installRouting.
  */
 
 export interface SentRecord {
@@ -24,6 +25,12 @@ export class MockSDK {
   public sent: SentRecord[] = [];
   /** Routing hook set by installRouting. */
   public onSend?: (data: unknown, to: string) => void;
+  public state: { connected: boolean; roomJoined: boolean; room: string | null } = {
+    connected: false,
+    roomJoined: false,
+    room: null,
+  };
+  public announceId: string | null = null;
 
   on(event: string, listener: (...args: unknown[]) => void): void {
     if (event === "dataReceived") this.dataHandler = listener as DataHandler;
@@ -34,6 +41,12 @@ export class MockSDK {
     }
   }
 
+  off(_event: string, _listener: (...args: unknown[]) => void): void {
+    // No-op: the mock keeps a single handler per event slot, replaced
+    // by the latest listener installed via on(). This matches the
+    // real SDK's behavior of allowing a single listener per slot via on().
+  }
+
   removeAllListeners(): void {
     this.dataHandler = null;
     this.peerJoinedHandler = null;
@@ -42,11 +55,29 @@ export class MockSDK {
   }
 
   async connect(): Promise<void> {
-    this.stateHandler?.("connected");
+    this.state.connected = true;
   }
 
   async disconnect(): Promise<void> {
+    this.state.connected = false;
+    this.state.roomJoined = false;
+    this.state.room = null;
     this.stateHandler?.("disconnected");
+  }
+
+  async joinRoom(options: { room: string; password?: string }): Promise<void> {
+    this.state.roomJoined = true;
+    this.state.room = options.room;
+  }
+
+  async leaveRoom(): Promise<void> {
+    this.state.roomJoined = false;
+    this.state.room = null;
+  }
+
+  async announce(options: { streamID?: string }): Promise<string> {
+    this.announceId = options.streamID ?? "announce";
+    return this.announceId;
   }
 
   async sendData(data: unknown, options: { uuid?: string }): Promise<void> {

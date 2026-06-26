@@ -521,12 +521,12 @@ describe("initializeAppRuntime startup", () => {
           lastClock: { wallTimeMs: 200, counter: 0, nodeId: "n2" },
         },
       ]),
-      getGroupConnectionConfig: vi.fn().mockResolvedValue({
-        groupId: "g-1",
-        controlRoomId: "cr-1",
-        groupSecret: "secret-1",
+      getGroupConnectionConfig: vi.fn().mockImplementation(async (groupId: string) => ({
+        groupId,
+        controlRoomId: `cr-${groupId}`,
+        groupSecret: `secret-${groupId}`,
         nodeId: "dev-1",
-      }),
+      })),
       updateGroupSharedState: vi.fn().mockResolvedValue(undefined),
       updateGroupClock: vi.fn().mockResolvedValue(undefined),
     } as unknown as import("../../src/preload/api-types.js").ScreenLinkAPI;

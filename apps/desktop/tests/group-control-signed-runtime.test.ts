@@ -28,6 +28,12 @@ vi.mock("@screenlink/vdo-adapter", () => {
     private stateHandler: ((s: string) => void) | null = null;
     public sent: { to: string; payload: Record<string, unknown> }[] = [];
     public onSend?: (data: unknown, to: string) => void;
+    public state: { connected: boolean; roomJoined: boolean; room: string | null } = {
+      connected: false,
+      roomJoined: false,
+      room: null,
+    };
+    public announceId: string | null = null;
 
     on(event: string, listener: (...args: unknown[]) => void) {
       if (event === "dataReceived") this.dataHandler = listener as (d: unknown, p: string) => void;
@@ -37,14 +43,34 @@ vi.mock("@screenlink/vdo-adapter", () => {
         this.stateHandler = listener as (s: string) => void;
       }
     }
+    off(_event: string, _listener: (...args: unknown[]) => void) {
+      // No-op for the same reason as mock-vdo-sdk.ts
+    }
     removeAllListeners() {
       this.dataHandler = null;
       this.peerJoinedHandler = null;
       this.peerLeftHandler = null;
       this.stateHandler = null;
     }
-    async connect() { this.stateHandler?.("connected"); }
-    async disconnect() { this.stateHandler?.("disconnected"); }
+    async connect() { this.state.connected = true; }
+    async disconnect() {
+      this.state.connected = false;
+      this.state.roomJoined = false;
+      this.state.room = null;
+      this.stateHandler?.("disconnected");
+    }
+    async joinRoom(options: { room: string; password?: string }) {
+      this.state.roomJoined = true;
+      this.state.room = options.room;
+    }
+    async leaveRoom() {
+      this.state.roomJoined = false;
+      this.state.room = null;
+    }
+    async announce(options: { streamID?: string }) {
+      this.announceId = options.streamID ?? "announce";
+      return this.announceId;
+    }
     async sendData(data: unknown, options: { uuid?: string }) {
       this.sent.push({ to: options.uuid ?? "*", payload: data as Record<string, unknown> });
       if (options.uuid && this.onSend) this.onSend(data, options.uuid);
@@ -97,6 +123,41 @@ interface MockSDKInstance {
 async function tick(): Promise<void> {
   await new Promise<void>((r) => setImmediate(r));
   await new Promise<void>((r) => setImmediate(r));
+}
+
+async function waitFor<T>(getter: () => T | null, maxTicks = 30): Promise<T> {
+  for (let i = 0; i < maxTicks; i++) {
+    const result = getter();
+    if (result !== null && result !== undefined) return result;
+    await tick();
+  }
+  throw new Error("waitFor timed out");
+}
+
+/**
+ * Wait until `getter()` has reported the same value as `expected` for
+ * at least 3 consecutive ticks. This proves the count is stable and
+ * no further asynchronous messages are in flight.
+ */
+async function waitForStableCount(
+  getter: () => number,
+  expected: number,
+  stableTicks = 3,
+  maxTicks = 30,
+): Promise<number> {
+  let stable = 0;
+  for (let i = 0; i < maxTicks; i++) {
+    if (getter() === expected) {
+      stable++;
+      if (stable >= stableTicks) return expected;
+    } else {
+      stable = 0;
+    }
+    await tick();
+  }
+  // Return whatever the current count is rather than throwing — the
+  // assertion below will surface the discrepancy.
+  return getter();
 }
 
 function installRouting(alice: MockSDKInstance, bob: MockSDKInstance) {
@@ -197,13 +258,14 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
       type: "group.state.update",
       state: { foo: "bar" },
     });
-    for (let i = 0; i < 5; i++) await tick();
-    for (let i = 0; i < 5 && aliceRecord.messages.length < 1; i++) await tick();
-    const before = aliceRecord.messages.length;
-    expect(before).toBe(1);
-    // After valid message routing, before should be 1.
-    // (The "hello" type messages are handled by the connection and don't
-    //  reach onMessage because the connection intercepts them in routeMessage.)
+    // Wait for at least one group.state.update from Bob to reach Alice.
+    const validUpdateCount = await waitFor(() => {
+      const updates = aliceRecord.messages.filter(
+        (m) => m.type === "group.state.update",
+      );
+      return updates.length > 0 ? updates.length : null;
+    });
+    expect(validUpdateCount).toBeGreaterThanOrEqual(1);
 
     // Deliver a tampered envelope directly to Alice's SDK.
     const tampered = {
@@ -218,10 +280,13 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
       mac: "0".repeat(64),
     };
     aliceSdk.deliver(tampered, "bob");
-    for (let i = 0; i < 5; i++) await tick();
-    // Tampered must be rejected, so messages.length should still equal
-    // the value after the valid message.
-    expect(aliceRecord.messages.length).toBe(before);
+    for (let i = 0; i < 10; i++) await tick();
+    // Tampered must be rejected, so the count of valid
+    // group.state.update messages must remain unchanged.
+    const updatesAfter = aliceRecord.messages.filter(
+      (m) => m.type === "group.state.update",
+    ).length;
+    expect(updatesAfter).toBe(validUpdateCount);
 
     await alice.destroy();
     await bob.destroy();

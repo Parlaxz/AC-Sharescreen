@@ -56,6 +56,8 @@ export function GroupDashboard() {
   const setGroupNavPage = useStore((s) => s.setGroupNavPage);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const navigate = useStore((s) => s.navigate);
+  const setOpenCreateGroupDialog = useStore((s) => s.setOpenCreateGroupDialog);
+  const setOpenJoinGroupDialog = useStore((s) => s.setOpenJoinGroupDialog);
 
   const group = selectedGroupId ? groupsById[selectedGroupId] : null;
   const memberCount = group
@@ -181,10 +183,23 @@ export function GroupDashboard() {
             Select or create a group
           </p>
           <div className="flex flex-col gap-2 w-full max-w-[160px]">
-            <Button size="sm" onClick={() => navigate("home")}>
+            <Button
+              size="sm"
+              onClick={() => {
+                setOpenCreateGroupDialog(true);
+                navigate("home");
+              }}
+            >
               Create group
             </Button>
-            <Button variant="outline" size="sm" onClick={() => navigate("home")}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setOpenJoinGroupDialog(true);
+                navigate("home");
+              }}
+            >
               Join group
             </Button>
           </div>

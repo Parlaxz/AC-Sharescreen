@@ -109,6 +109,12 @@ export class GroupSyncService {
       await this.persistence.persistClock(groupId, clock);
     }
 
+    // Always publish the resulting state to the renderer store so the
+    // membership view reflects the local member even when the local
+    // device was already present in the persisted state. Two-PC sync
+    // requires the local view to be authoritative from the first frame.
+    this.onStateUpdated?.(groupId, initialState);
+
     this.startAntiEntropy(groupId);
   }
 

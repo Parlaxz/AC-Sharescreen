@@ -10,6 +10,7 @@ import {
   DedupSet,
 } from "@screenlink/shared";
 import { getSDKConstructor } from "@screenlink/vdo-adapter";
+import { extractPeerUuid, extractDataAndUuid } from "./sdk-event-normalizer.js";
 
 export type ConnectionState = "idle" | "starting" | "connected" | "reconnecting" | "stopping" | "destroyed" | "failed";
 
@@ -49,20 +50,59 @@ function makeInput(
   };
 }
 
-// Loose alias for the VDO SDK instance type — the constructor export
-// shape isn't a perfect ConstructorType so the renderer uses this
-// narrower alias for sdk fields and handlers.
+/**
+ * The actual shape of the installed `@vdoninja/sdk` 1.3.18 instance.
+ *
+ * The data-only mesh lifecycle used here is:
+ *
+ *   1. `connect()`         — establish the signaling WebSocket
+ *   2. `joinRoom()`        — enter the data-only control room
+ *   3. `announce()`        — make this peer discoverable in the room
+ *   4. `sendData()`        — push authenticated envelopes to peers
+ *
+ * The mesh is "connected" only after announce() has resolved.
+ * Room identity = controlRoomId; media publication is a separate
+ * SDK instance owned by PublisherManager.
+ */
 type VDONinjaSDKInstance = {
+  VERSION?: string;
+  state?: {
+    connected?: boolean;
+    publishing?: boolean;
+    viewing?: boolean;
+    roomJoined?: boolean;
+    room?: string;
+  };
+  streams?: Map<string, unknown>;
+  connections?: Map<string, unknown>;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  removeAllListeners(): void;
+  joinRoom(options: { room: string; password?: string; uuid?: string }): Promise<void>;
+  leaveRoom(): Promise<void>;
+  announce(options: { streamID?: string }): Promise<string>;
+  view(streamId: string, options?: unknown): Promise<unknown>;
+  stopViewing(streamId?: string): Promise<void>;
+  sendData(payload: unknown, options: unknown): Promise<unknown>;
+  addEventListener(event: string, listener: (...args: unknown[]) => void): void;
+  removeEventListener(event: string, listener: (...args: unknown[]) => void): void;
   on(event: string, listener: (...args: unknown[]) => void): void;
-  sendData(data: unknown, options: unknown): Promise<void>;
-  connections?: Map<string, unknown>;
+  off(event: string, listener: (...args: unknown[]) => void): void;
 };
+
+/** Per-instance event listener references so we can remove them on destroy. */
+interface BoundHandlers {
+  peerConnected: (event: unknown) => void;
+  peerDisconnected: (event: unknown) => void;
+  dataReceived: (data: unknown, peerUuid?: unknown) => void;
+  disconnected: (event: unknown) => void;
+  reconnected: (event: unknown) => void;
+  reconnectFailed: (event: unknown) => void;
+  roomJoined: (event: unknown) => void;
+}
 
 export class GroupControlConnection {
   private sdk: VDONinjaSDKInstance | null = null;
+  private handlers: BoundHandlers | null = null;
   private peerToDevice = new Map<string, string>();
   private deviceToPeer = new Map<string, string>();
   private _state: ConnectionState = "idle";
@@ -71,6 +111,8 @@ export class GroupControlConnection {
   private startGeneration = 0;
   private dedupSet = new DedupSet();
   private clock: HybridTimestamp;
+  /** Pending hello responses to throttle duplicates. */
+  private peersAwaitingHello = new Set<string>();
 
   constructor(opts: GroupControlConnectionOptions) {
     this.opts = opts;
@@ -101,6 +143,14 @@ export class GroupControlConnection {
     return this.peerToDevice.get(peerUuid) ?? null;
   }
 
+  /**
+   * Start the data-only control mesh:
+   *   1. connect() to signaling
+   *   2. joinRoom() with controlRoomId as the room and groupSecret as the room password
+   *   3. announce() with our own nodeId (so peers can identify us in the room)
+   *
+   * The connection is only marked "connected" once announce() resolves.
+   */
   async start(): Promise<void> {
     if (this.destroyed) return;
     if (this._state === "starting" || this._state === "connected") return;
@@ -119,23 +169,46 @@ export class GroupControlConnection {
         debug: false,
         maxReconnectAttempts: 5,
         reconnectDelay: 2000,
+        // Data-only: no auto-pings, no media publication.
       });
 
       this.sdk = sdk;
       this.setupEventHandlers(gen);
 
+      // Step 1: signaling WebSocket
       await sdk.connect();
       if (gen !== this.startGeneration || this.destroyed) {
-        await sdk.disconnect().catch(() => {});
+        await this.teardownSdk().catch(() => {});
         return;
       }
+
+      // Step 2: enter the data-only control room. The group secret is
+      // the room password; only members with the password reach this room.
+      await sdk.joinRoom({
+        room: this.opts.controlRoomId,
+        password: this.opts.controlRoomId,
+      });
+      if (gen !== this.startGeneration || this.destroyed) {
+        await this.teardownSdk().catch(() => {});
+        return;
+      }
+
+      // Step 3: announce our presence so peers can identify us.
+      await sdk.announce({ streamID: this.opts.nodeId });
+      if (gen !== this.startGeneration || this.destroyed) {
+        await this.teardownSdk().catch(() => {});
+        return;
+      }
+
+      // Step 4: handshake — also send a hello immediately to anyone who
+      // was already in the room before us.
       this.setState("connected");
-      // Send hello to any already-connected peers
       this.broadcastHello().catch(() => {});
     } catch (err) {
       if (this.destroyed || gen !== this.startGeneration) return;
       this.setState("failed");
       this.opts.onError(err instanceof Error ? err : new Error(String(err)));
+      await this.teardownSdk().catch(() => {});
     }
   }
 
@@ -143,15 +216,11 @@ export class GroupControlConnection {
     this.destroyed = true;
     this.startGeneration++;
     this.setState("destroyed");
-    const sdk = this.sdk;
-    this.sdk = null;
-    if (sdk) {
-      try { sdk.removeAllListeners?.(); } catch { /* ignore */ }
-      try { await sdk.disconnect(); } catch { /* ignore */ }
-    }
+    await this.teardownSdk();
     const allDeviceIds = Array.from(this.deviceToPeer.keys());
     this.peerToDevice.clear();
     this.deviceToPeer.clear();
+    this.peersAwaitingHello.clear();
     for (const deviceId of allDeviceIds) {
       this.opts.onPeerOffline(deviceId);
     }
@@ -214,10 +283,8 @@ export class GroupControlConnection {
   private checkSenderIdentity(peerUuid: string, envelope: GroupControlEnvelope): boolean {
     const mappedDeviceId = this.peerToDevice.get(peerUuid);
     if (!mappedDeviceId) {
-      // Peer UUID not yet mapped – identity not yet established, allow.
       return true;
     }
-    // Peer UUID IS mapped.  The senderDeviceId MUST match.
     return envelope.senderDeviceId === mappedDeviceId;
   }
 
@@ -228,117 +295,196 @@ export class GroupControlConnection {
     }
   }
 
+  private async teardownSdk(): Promise<void> {
+    const sdk = this.sdk;
+    this.sdk = null;
+    if (!sdk) return;
+
+    if (this.handlers) {
+      try { sdk.off("peerConnected", this.handlers.peerConnected as never); } catch { /* ignore */ }
+      try { sdk.off("peerDisconnected", this.handlers.peerDisconnected as never); } catch { /* ignore */ }
+      try { sdk.off("dataReceived", this.handlers.dataReceived as never); } catch { /* ignore */ }
+      try { sdk.off("disconnected", this.handlers.disconnected as never); } catch { /* ignore */ }
+      try { sdk.off("reconnected", this.handlers.reconnected as never); } catch { /* ignore */ }
+      try { sdk.off("reconnectFailed", this.handlers.reconnectFailed as never); } catch { /* ignore */ }
+      try { sdk.off("roomJoined", this.handlers.roomJoined as never); } catch { /* ignore */ }
+      this.handlers = null;
+    }
+
+    try { await sdk.leaveRoom(); } catch { /* ignore */ }
+    try { await sdk.disconnect(); } catch { /* ignore */ }
+  }
+
+  /**
+   * After an authenticated handshake with a peer, request the
+   * complete group and stream state.
+   */
+  private async requestFullStateFromPeer(peerUuid: string): Promise<void> {
+    if (!this.sdk) return;
+    try {
+      await this.sendToPeer(peerUuid, { type: "group.state.request" });
+    } catch { /* best effort */ }
+    try {
+      await this.sendToPeer(peerUuid, { type: "stream.state.request" });
+    } catch { /* best effort */ }
+  }
+
   private setupEventHandlers(gen: number): void {
     const sdk = this.sdk;
     if (!sdk) return;
 
-    sdk.on("peerConnected", (peerUuid: unknown) => {
-      const pUuid = String(peerUuid);
-      if (gen !== this.startGeneration || this.destroyed) return;
-      this.sendToPeer(pUuid, {
-        type: "group.hello",
-        deviceId: this.opts.nodeId,
-        displayName: this.opts.displayName,
-        protocolVersion: GROUP_PROTOCOL_VERSION,
-      }).catch(() => {});
-    });
-
-    sdk.on("peerDisconnected", (peerUuid: unknown) => {
-      const pUuid = String(peerUuid);
-      if (gen !== this.startGeneration || this.destroyed) return;
-      const deviceId = this.peerToDevice.get(pUuid);
-      if (deviceId) {
-        this.peerToDevice.delete(pUuid);
-        this.deviceToPeer.delete(deviceId);
-        this.opts.onPeerOffline(deviceId);
-      }
-    });
-
-    sdk.on("dataReceived", async (data: unknown, peerUuid: unknown) => {
-      const pUuid = String(peerUuid);
-      if (gen !== this.startGeneration || this.destroyed) return;
-      try {
-        // Use full validateEnvelope (checks schema, version, group ID, MAC, size, dedup) (B11)
-        const result = await validateEnvelope(data, this.opts.groupId, this.opts.groupSecret, this.dedupSet);
-        if (!result.ok) return;
-        const validatedEnvelope = result.data;
-
-        // Authenticated control-peer identity enforcement (Stage 15):
-        // After a peer UUID is mapped to a device ID via hello/hello.response,
-        // every later envelope from that peer must satisfy
-        // envelope.senderDeviceId === mappedDeviceId or be rejected.
-        // Also prevents hello/hello.response remapping a peer UUID to a
-        // different device ID without disconnect.
-        if (!this.checkSenderIdentity(pUuid, validatedEnvelope)) {
+    const handlers: BoundHandlers = {
+      peerConnected: (raw: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        const { uuid, valid, malformed } = extractPeerUuid(raw);
+        if (!valid || !uuid) {
+          // Reject events with no valid peer UUID — never accept
+          // `[object Object]` as a peer identifier.
+          this.opts.onError(new Error(
+            malformed
+              ? "peerConnected: SDK emitted event without a usable UUID"
+              : "peerConnected: empty peer UUID",
+          ));
           return;
         }
 
-        // Handle hello messages (B13)
-        if (validatedEnvelope.type === "group.hello") {
-          const deviceId = validatedEnvelope.senderDeviceId;
-          const displayName = validatedEnvelope.payload?.displayName as string;
-          if (!deviceId) return;
-
-          // Map if not already mapped
-          const oldPeer = this.deviceToPeer.get(deviceId);
-          if (!oldPeer || oldPeer !== pUuid) {
-            if (oldPeer) this.peerToDevice.delete(oldPeer);
-            this.peerToDevice.set(pUuid, deviceId);
-            this.deviceToPeer.set(deviceId, pUuid);
-            this.opts.onPeerOnline(deviceId, displayName);
-
-            // Send hello.response once
-            this.sendToPeer(pUuid, {
-              type: "group.hello.response",
-              deviceId: this.opts.nodeId,
-              displayName: this.opts.displayName,
-            }).catch(() => {});
-          }
-          return; // Don't forward hello to message handler
+        // Mark that we owe this peer a hello.response after we receive theirs.
+        this.peersAwaitingHello.add(uuid);
+        // Send a hello immediately so the new peer can map us.
+        this.sendToPeer(uuid, {
+          type: "group.hello",
+          deviceId: this.opts.nodeId,
+          displayName: this.opts.displayName,
+          protocolVersion: GROUP_PROTOCOL_VERSION,
+        }).catch(() => {});
+      },
+      peerDisconnected: (raw: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        const { uuid } = extractPeerUuid(raw);
+        if (!uuid) return;
+        this.peersAwaitingHello.delete(uuid);
+        const deviceId = this.peerToDevice.get(uuid);
+        if (deviceId) {
+          this.peerToDevice.delete(uuid);
+          this.deviceToPeer.delete(deviceId);
+          this.opts.onPeerOffline(deviceId);
         }
-
-        if (validatedEnvelope.type === "group.hello.response") {
-          const deviceId = validatedEnvelope.senderDeviceId;
-          if (!deviceId) return;
-
-          const oldPeer = this.deviceToPeer.get(deviceId);
-          if (!oldPeer || oldPeer !== pUuid) {
-            if (oldPeer) this.peerToDevice.delete(oldPeer);
-            this.peerToDevice.set(pUuid, deviceId);
-            this.deviceToPeer.set(deviceId, pUuid);
-            this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
-          }
-          // DO NOT respond to a response
+      },
+      dataReceived: async (dataArg: unknown, peerArg?: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        const { data, uuid, malformed } = extractDataAndUuid(dataArg, peerArg);
+        if (!uuid) {
+          this.opts.onError(new Error(
+            malformed
+              ? "dataReceived: SDK emitted event without a usable UUID"
+              : "dataReceived: empty peer UUID",
+          ));
           return;
         }
 
-        this.opts.onMessage(validatedEnvelope);
-      } catch {
-        // Invalid message
-      }
-    });
+        try {
+          const result = await validateEnvelope(data, this.opts.groupId, this.opts.groupSecret, this.dedupSet);
+          if (!result.ok) return;
+          const validatedEnvelope = result.data;
 
-    sdk.on("disconnected", () => {
-      if (gen !== this.startGeneration || this.destroyed) return;
-      this.setState("reconnecting");
-      // Snapshot and notify all peers offline (B14)
-      const allDeviceIds = Array.from(this.deviceToPeer.keys());
-      this.peerToDevice.clear();
-      this.deviceToPeer.clear();
-      for (const deviceId of allDeviceIds) {
-        this.opts.onPeerOffline(deviceId);
-      }
-    });
+          if (!this.checkSenderIdentity(uuid, validatedEnvelope)) {
+            return;
+          }
 
-    sdk.on("reconnected", () => {
-      if (gen !== this.startGeneration || this.destroyed) return;
-      this.setState("connected");
-      this.broadcastHello().catch(() => {});
-    });
+          if (validatedEnvelope.type === "group.hello") {
+            const deviceId = validatedEnvelope.senderDeviceId;
+            const displayName = validatedEnvelope.payload?.displayName as string;
+            if (!deviceId) return;
 
-    sdk.on("reconnectFailed", () => {
-      if (gen !== this.startGeneration || this.destroyed) return;
-      this.setState("failed");
-    });
+            const oldPeer = this.deviceToPeer.get(deviceId);
+            if (!oldPeer || oldPeer !== uuid) {
+              if (oldPeer) this.peerToDevice.delete(oldPeer);
+              this.peerToDevice.set(uuid, deviceId);
+              this.deviceToPeer.set(deviceId, uuid);
+              this.opts.onPeerOnline(deviceId, displayName);
+            }
+            // If we owe a hello.response, send it now and request full state.
+            if (this.peersAwaitingHello.has(uuid)) {
+              this.peersAwaitingHello.delete(uuid);
+              this.sendToPeer(uuid, {
+                type: "group.hello.response",
+                deviceId: this.opts.nodeId,
+                displayName: this.opts.displayName,
+              }).catch(() => {});
+              // After authenticated handshake, request state.
+              this.requestFullStateFromPeer(uuid).catch(() => {});
+            } else if (!oldPeer) {
+              // New peer we already greeted — also request state.
+              this.requestFullStateFromPeer(uuid).catch(() => {});
+            }
+            return;
+          }
+
+          if (validatedEnvelope.type === "group.hello.response") {
+            const deviceId = validatedEnvelope.senderDeviceId;
+            if (!deviceId) return;
+
+            const oldPeer = this.deviceToPeer.get(deviceId);
+            if (!oldPeer || oldPeer !== uuid) {
+              if (oldPeer) this.peerToDevice.delete(oldPeer);
+              this.peerToDevice.set(uuid, deviceId);
+              this.deviceToPeer.set(deviceId, uuid);
+              this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
+            }
+            // After authenticated handshake, request state.
+            this.requestFullStateFromPeer(uuid).catch(() => {});
+            return;
+          }
+
+          this.opts.onMessage(validatedEnvelope);
+        } catch {
+          // Invalid message
+        }
+      },
+      disconnected: (_raw: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        this.setState("reconnecting");
+        // Mark every connected peer as offline until the mesh recovers.
+        const allDeviceIds = Array.from(this.deviceToPeer.keys());
+        this.peerToDevice.clear();
+        this.deviceToPeer.clear();
+        this.peersAwaitingHello.clear();
+        for (const deviceId of allDeviceIds) {
+          this.opts.onPeerOffline(deviceId);
+        }
+      },
+      reconnected: (_raw: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        this.setState("connected");
+        // After reconnect, repeat the hello + state requests so the mesh
+        // re-converges quickly. The first peerConnected for an already-known
+        // device will trigger the hello.response + state request handshake.
+        this.broadcastHello().catch(() => {});
+        // Re-request state from every peer we knew about (best effort, will
+        // fail until peerConnected fires again — that's fine).
+        for (const peerUuid of Array.from(this.peersAwaitingHello)) {
+          this.requestFullStateFromPeer(peerUuid).catch(() => {});
+        }
+      },
+      reconnectFailed: (_raw: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        this.setState("failed");
+      },
+      roomJoined: (_raw: unknown) => {
+        // Informational — the connection is only marked "connected" after
+        // announce() resolves, not at roomJoined. Keep this hook so the
+        // mesh state can be inspected at the seam.
+      },
+    };
+
+    this.handlers = handlers;
+
+    sdk.on("peerConnected", handlers.peerConnected as never);
+    sdk.on("peerDisconnected", handlers.peerDisconnected as never);
+    sdk.on("dataReceived", handlers.dataReceived as never);
+    sdk.on("disconnected", handlers.disconnected as never);
+    sdk.on("reconnected", handlers.reconnected as never);
+    sdk.on("reconnectFailed", handlers.reconnectFailed as never);
+    sdk.on("roomJoined", handlers.roomJoined as never);
   }
 }

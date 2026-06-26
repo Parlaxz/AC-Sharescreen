@@ -38,35 +38,39 @@ describe("WindowManager window configuration", () => {
   });
 });
 
-// ─── 2. DevTools gating tests ───────────────────────────────────────────
+// ─── 2. DevTools shortcut behavior tests (Stage 7 — Ctrl+Shift+I) ─────
 
-describe("DevTools gating", () => {
+describe("DevTools shortcut", () => {
   const wmPath = path.join(mainRoot, "window-manager.ts");
   const wmSrc = readFileSafe(wmPath);
 
-  it("openDevTools is guarded by SCREENLINK_OPEN_DEVTOOLS or --devtools", () => {
-    const devToolsLine = wmSrc.split("\n").findIndex((l) => l.includes("openDevTools"));
-    expect(devToolsLine).not.toBe(-1);
-
-    // Check the guard context: should check env var or argv
-    const lines = wmSrc.split("\n");
-    const context = lines.slice(Math.max(0, devToolsLine - 5), devToolsLine + 2).join("\n");
-    const hasGuard =
-      context.includes("SCREENLINK_OPEN_DEVTOOLS") ||
-      context.includes("--devtools") ||
-      context.includes("devtools");
-    expect(hasGuard).toBe(true);
+  it("Ctrl+Shift+I is bound via before-input-event in window-manager.ts", () => {
+    // The keyboard shortcut handler is registered on the webContents
+    // before-input-event. The handler toggles DevTools unconditionally
+    // (no environment flag, no developer-mode requirement).
+    expect(wmSrc).toContain("before-input-event");
+    expect(wmSrc).toMatch(/control\s*===\s*true\s*&&\s*input\.shift\s*===\s*true\s*&&\s*key\s*===\s*"i"/);
   });
 
-  it("openDevTools is not gated only by NODE_ENV or VITE_DEV_SERVER_URL", () => {
-    const lines = wmSrc.split("\n");
-    const devToolsLine = lines.findIndex((l) => l.includes("openDevTools"));
-    expect(devToolsLine).not.toBe(-1);
+  it("event.preventDefault is called for the matching shortcut", () => {
+    // The before-input-event handler calls event.preventDefault() so
+    // the browser default for Ctrl+Shift+I is suppressed.
+    expect(wmSrc).toMatch(/event\.preventDefault\(\)/);
+  });
 
-    // The guard should NOT just be NODE_ENV === "development"
-    const context = lines.slice(Math.max(0, devToolsLine - 5), devToolsLine + 2).join("\n");
-    const onlyDevEnv = context.includes('NODE_ENV === "development"') && !context.includes("SCREENLINK_OPEN_DEVTOOLS") && !context.includes("--devtools");
-    expect(onlyDevEnv).toBe(false);
+  it("toggleDevTools calls openDevTools and closeDevTools on the webContents", () => {
+    expect(wmSrc).toContain("openDevTools");
+    expect(wmSrc).toContain("closeDevTools");
+  });
+
+  it("toggleDevTools no longer requires --devtools or developer mode", () => {
+    // The legacy gating via isDevToolsAllowed() has been removed. The
+    // toggle must NOT consult any guard before opening DevTools.
+    expect(wmSrc).not.toMatch(/isDevToolsAllowed/);
+  });
+
+  it("Cmd+Option+I (macOS) is also recognized", () => {
+    expect(wmSrc).toMatch(/input\.meta\s*===\s*true\s*&&\s*input\.alt\s*===\s*true/);
   });
 });
 

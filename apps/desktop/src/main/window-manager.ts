@@ -8,13 +8,8 @@ const __dirname = path.dirname(__filename);
 export class WindowManager {
   private window: BrowserWindow | null = null;
   private isQuitting = false;
-  private developerMode = false;
-  private devToolsFlag = process.argv.includes("--devtools");
 
-  constructor(
-    private preloadPath: string,
-    private getDeveloperMode?: () => boolean,
-  ) {
+  constructor(private preloadPath: string) {
     app.on("before-quit", () => {
       this.isQuitting = true;
     });
@@ -83,24 +78,8 @@ export class WindowManager {
     return this.window;
   }
 
-  setDeveloperMode(enabled: boolean): void {
-    this.developerMode = enabled;
-  }
-
-  private isDevToolsAllowed(): boolean {
-    if (!app.isPackaged) {
-      return true;
-    }
-
-    if (this.devToolsFlag || this.developerMode) {
-      return true;
-    }
-
-    return this.getDeveloperMode?.() === true;
-  }
-
   toggleDevTools(): void {
-    if (!this.window || !this.isDevToolsAllowed()) {
+    if (!this.window) {
       return;
     }
 
@@ -109,8 +88,7 @@ export class WindowManager {
       return;
     }
 
-    // Gated by isDevToolsAllowed(): unpackaged/dev builds, developerMode,
-    // or an explicit --devtools launch flag in packaged builds.
+    // Ctrl+Shift+I always toggles DevTools in development and packaged builds.
     this.window.webContents.openDevTools({ mode: "bottom" });
   }
 

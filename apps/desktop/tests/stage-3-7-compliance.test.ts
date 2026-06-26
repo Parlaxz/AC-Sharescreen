@@ -153,41 +153,30 @@ describe("Competing UI library prohibition", () => {
   });
 });
 
-// ─── 3. Unconditional openDevTools detection ─────────────────────────────
+// ─── 3. Ctrl+Shift+I DevTools toggle (Stage 7 — Fix 1) ─────────────────
 
-describe("openDevTools production safety", () => {
+describe("Ctrl+Shift+I DevTools toggle", () => {
   const windowManagerTs = readFileSafe(path.join(mainRoot, "window-manager.ts"));
 
-  it("openDevTools is guarded by SCREENLINK_OPEN_DEVTOOLS or --devtools", () => {
-    const lines = windowManagerTs.split("\n");
-
-    // Find the openDevTools call
-    const devToolsLine = lines.findIndex((l) => l.includes("openDevTools"));
-    expect(devToolsLine).not.toBe(-1);
-
-    // Check the context: it should be inside an explicit opt-in guard
-    const contextLines = lines.slice(Math.max(0, devToolsLine - 5), devToolsLine + 2);
-    const hasGuard = contextLines.some(
-      (l) =>
-        l.includes("SCREENLINK_OPEN_DEVTOOLS") ||
-        l.includes("--devtools"),
-    );
-    expect(hasGuard).toBe(true);
+  it("window-manager binds the Ctrl+Shift+I shortcut on before-input-event", () => {
+    expect(windowManagerTs).toContain("before-input-event");
+    expect(windowManagerTs).toMatch(/input\.control\s*===\s*true/);
+    expect(windowManagerTs).toMatch(/input\.shift\s*===\s*true/);
   });
 
-  it("no unconditional openDevTools call in window-manager.ts", () => {
-    const lines = windowManagerTs.split("\n");
-    const devToolsLines = lines
-      .map((l, i) => ({ line: l, index: i }))
-      .filter(({ line }) => line.includes("openDevTools"));
+  it("event.preventDefault is called for the matching shortcut", () => {
+    expect(windowManagerTs).toContain("event.preventDefault()");
+  });
 
-    for (const { line, index } of devToolsLines) {
-      const context = lines.slice(Math.max(0, index - 5), index + 1);
-      const isGuarded = context.some(
-        (l) => l.includes("SCREENLINK_OPEN_DEVTOOLS") || l.includes("--devtools"),
-      );
-      expect(isGuarded).toBe(true);
-    }
+  it("DevTools open/close calls are present in the toggle path", () => {
+    expect(windowManagerTs).toContain("openDevTools");
+    expect(windowManagerTs).toContain("closeDevTools");
+  });
+
+  it("the legacy isDevToolsAllowed gate has been removed", () => {
+    // Ctrl+Shift+I is the trigger; no environment flag / developer mode
+    // is required to open DevTools.
+    expect(windowManagerTs).not.toMatch(/isDevToolsAllowed/);
   });
 });
 

@@ -141,10 +141,11 @@ function getErrorCode(err: unknown): { code: ErrorCode; safeMessage: string } {
 
 export class UpdateManager {
   private state: UpdateStatus;
-  private autoCheckTimer: ReturnType<typeof setTimeout> | null = null;
   private isDestroyed = false;
   private isDownloading = false;
   private isInstalling = false;
+  /** Indicates whether a check is currently in flight (prevents duplicate clicks). */
+  private checkInFlight = false;
 
   constructor(
     private updater: UpdaterAdapter,
@@ -165,8 +166,10 @@ export class UpdateManager {
   }
 
   /**
-   * Initialize the updater: configure electron-updater and schedule
-   * the first automatic check.
+   * Initialize the updater: configure electron-updater and bind the
+   * event listeners. NO automatic check is performed. NO timer is
+   * scheduled. The only normal path that calls `updater.checkForUpdates()`
+   * is the user clicking "Check for updates" in User Settings.
    */
   init(): void {
     if (this.isDestroyed) return;
@@ -191,19 +194,26 @@ export class UpdateManager {
     this.logger.log("info", "updater", "blockmap_base_url", {
       url: this.updater.previousBlockmapBaseUrlOverride,
     });
-
-    // Schedule the first automatic check after ~15 seconds
-    this.scheduleAutoCheck(15000);
   }
 
   /**
    * Manually check for an update. Returns the current status.
-   * If already checking or downloading, returns status without starting a new check.
+   *
+   * Only the user's explicit "Check for updates" click in Settings
+   * should call this. Duplicate clicks while a check is in flight are
+   * blocked. The method does NOT schedule any follow-up checks.
    */
   async checkForUpdates(): Promise<UpdateStatus> {
     if (this.isDestroyed) return this.getStatus();
 
     if (!this.state.updaterSupported) {
+      return this.getStatus();
+    }
+
+    if (this.checkInFlight) {
+      this.logger.log("info", "updater", "check_skipped", {
+        reason: "check already in flight",
+      });
       return this.getStatus();
     }
 
@@ -219,6 +229,7 @@ export class UpdateManager {
       return this.getStatus();
     }
 
+    this.checkInFlight = true;
     this.setState({
       phase: "checking",
       checkStartedAt: Date.now(),
@@ -245,6 +256,8 @@ export class UpdateManager {
           : safeMessage,
       });
       return this.getStatus();
+    } finally {
+      this.checkInFlight = false;
     }
   }
 
@@ -336,7 +349,6 @@ export class UpdateManager {
    */
   destroy(): void {
     this.isDestroyed = true;
-    this.clearAutoCheckTimer();
     this.updater.removeAllListeners();
     this.logger.log("info", "updater", "updater_destroyed", {});
   }
@@ -519,77 +531,6 @@ export class UpdateManager {
         errorMessage: safeMessage,
       });
     });
-  }
-
-  private scheduleAutoCheck(delayMs: number): void {
-    if (this.isDestroyed) return;
-    this.clearAutoCheckTimer();
-
-    this.autoCheckTimer = setTimeout(() => {
-      if (this.isDestroyed) return;
-      this.performAutoCheck().catch((err) => {
-        this.logger.log("error", "updater", "auto_check_error", {
-          errorDetail: String(err),
-        });
-      });
-    }, delayMs);
-  }
-
-  private async performAutoCheck(): Promise<void> {
-    if (this.isDestroyed) return;
-
-    // Skip auto-check if we're in a state that shouldn't be disrupted
-    const phase = this.state.phase as string;
-    if (
-      phase === "downloading" ||
-      phase === "installing" ||
-      phase === "downloaded"
-    ) {
-      this.logger.log("info", "updater", "auto_check_skipped", {
-        reason: `phase is ${phase}`,
-      });
-      this.scheduleAutoCheck(6 * 60 * 60 * 1000);
-      return;
-    }
-
-    this.logger.log("info", "updater", "auto_check_started", {});
-    this.setState({
-      phase: "checking",
-      checkStartedAt: Date.now(),
-    });
-
-    try {
-      await this.updater.checkForUpdates();
-    } catch (err: unknown) {
-      const { code, safeMessage } = getErrorCode(err);
-      this.logger.log("warn", "updater", "auto_check_failed", {
-        errorCode: code,
-        errorDetail: String(err),
-      });
-
-      // Don't replace a useful state with a network error
-      if (
-        this.state.phase !== "update-available" &&
-        this.state.phase !== "downloaded" &&
-        this.state.phase !== "downloading"
-      ) {
-        this.setState({
-          phase: "error",
-          errorCode: code,
-          errorMessage: safeMessage,
-        });
-      }
-    }
-
-    // Schedule the next check
-    this.scheduleAutoCheck(6 * 60 * 60 * 1000);
-  }
-
-  private clearAutoCheckTimer(): void {
-    if (this.autoCheckTimer !== null) {
-      clearTimeout(this.autoCheckTimer);
-      this.autoCheckTimer = null;
-    }
   }
 
   private setState(partial: Partial<UpdateStatus>): void {

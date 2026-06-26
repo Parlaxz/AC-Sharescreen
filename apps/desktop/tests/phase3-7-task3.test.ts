@@ -260,7 +260,10 @@ describe("Task 3 WindowManager DevTools toggle", () => {
     expect(lastWindow.webContents.closeDevTools).not.toHaveBeenCalled();
   });
 
-  it("packaged gating blocks DevTools when developer mode is disabled", async () => {
+  it("Ctrl+Shift+I opens DevTools in a packaged build regardless of developer mode", async () => {
+    // Stage 7 — Fix 1: DevTools shortcut must work in installed builds
+    // without any environment variable, --devtools flag, or developer-mode
+    // setting. Developer mode is irrelevant to the toggle.
     mockIsPackaged = true;
     const { WindowManager } = await import("../src/main/window-manager.js");
     const manager = new WindowManager("preload.js", () => false);
@@ -268,13 +271,15 @@ describe("Task 3 WindowManager DevTools toggle", () => {
     const preventDefault = vi.fn();
     beforeInputHandler?.({ preventDefault }, { control: true, shift: true, key: "i" });
     expect(preventDefault).toHaveBeenCalledTimes(1);
-    expect(lastWindow.webContents.openDevTools).not.toHaveBeenCalled();
+    expect(lastWindow.webContents.openDevTools).toHaveBeenCalledTimes(1);
   });
 
-  it("packaged gating allows DevTools when developer mode is enabled", async () => {
+  it("Ctrl+Shift+I opens DevTools in a packaged build even without a developer-mode callback", async () => {
+    // No callback means there is no developer-mode source at all. The
+    // toggle must still work in a packaged build.
     mockIsPackaged = true;
     const { WindowManager } = await import("../src/main/window-manager.js");
-    const manager = new WindowManager("preload.js", () => true);
+    const manager = new WindowManager("preload.js");
     manager.create();
     const preventDefault = vi.fn();
     beforeInputHandler?.({ preventDefault }, { control: true, shift: true, key: "i" });

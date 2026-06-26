@@ -778,9 +778,28 @@ export class StreamSessionManager {
       });
     }
 
+    // Always clear the active sharing group reference in the store when
+    // the session is destroyed. Otherwise selecting another group after
+    // restart would show stale "Host" UI for the wrong group. Fire-and-
+    // forget so the destroy() promise resolves promptly.
+    void this.clearSharingGroupInStore();
+
     this.cleanupPublisher().catch(() => {});
     this.resetSessionState();
     this._state = "destroyed";
+  }
+
+  private async clearSharingGroupInStore(): Promise<void> {
+    try {
+      // Dynamic import via a top-level safe accessor to avoid a circular
+      // dependency at module init. The store module imports many renderer
+      // modules, so a static import here would create a cycle.
+      const storeModule = await import("../stores/main-store.js");
+      const s = storeModule.useStore.getState();
+      s.setSharingGroupId(null);
+      s.setIsSharing(false);
+      s.setLocalShareState("idle");
+    } catch { /* best effort — store may be unavailable in test envs */ }
   }
 
   /**

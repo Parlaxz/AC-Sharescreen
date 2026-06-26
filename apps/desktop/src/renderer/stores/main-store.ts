@@ -73,6 +73,7 @@ export interface AppState {
 
   // Sharing state (Phase 3)
   isSharing: boolean;
+  sharingGroupId: string | null;
   isDegraded: boolean;
   sourceId: string | null;
   sourceName: string;
@@ -134,6 +135,7 @@ export interface AppState {
   homeNavigate: () => void;
   toggleFocusMode: () => void;
   setIsSharing: (sharing: boolean) => void;
+  setSharingGroupId: (groupId: string | null) => void;
   setIsDegraded: (degraded: boolean) => void;
   setSource: (input: { id: string; name: string; kind: "screen" | "window"; displayId: string; fingerprint: string | null } | string, name?: string) => void;
   setCaptureInfo: (width: number, height: number, fps: number) => void;
@@ -172,6 +174,7 @@ const initialState = {
   showContextPanel: false,
   groupNavPage: "overview" as GroupNavPage,
   isSharing: false,
+  sharingGroupId: null as string | null,
   isDegraded: false,
   sourceId: null as string | null,
   sourceName: "",
@@ -228,6 +231,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({ currentPage: "home" });
   },
   setIsSharing: (sharing) => set({ isSharing: sharing }),
+  setSharingGroupId: (sharingGroupId) => set({ sharingGroupId }),
   setIsDegraded: (degraded) => set({ isDegraded: degraded }),
 
   setSource: (input, name) => {

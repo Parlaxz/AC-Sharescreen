@@ -164,12 +164,14 @@ export async function startShare(input: StartShareInput): Promise<void> {
     }
 
     store.setIsSharing(true);
+    store.setSharingGroupId(input.groupId);
     store.setLocalShareState("sharing");
   } catch (err) {
     // Clear approved source on failure if possible.
     if (api) {
       api.setSource(null).catch(() => {});
     }
+    store.setSharingGroupId(null);
     store.setLocalShareState("error");
     throw err;
   }
@@ -226,6 +228,7 @@ export async function stopShare(): Promise<void> {
     // Stop is best-effort; reset store regardless of errors
   } finally {
     store.setIsSharing(false);
+    store.setSharingGroupId(null);
     store.setLocalShareState("idle");
     store.setIsDegraded(false);
   }

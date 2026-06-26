@@ -46,7 +46,6 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
@@ -67,6 +66,12 @@ import {
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
+import {
+  QualityEditorFields,
+  type QualityEditorFieldsValue,
+  resolveResolution,
+  qualityEditorFieldsValid,
+} from "./QualityEditorFields.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -77,23 +82,16 @@ type AudioModeValue = "none" | "monitor" | "application";
 /**
  * Resolve the user's selected preset + custom slider values into a
  * SessionQualityOverride. Returns null when no preset is selected.
+ *
+ * The Custom flow carries the full set of quality knobs (resolution,
+ * FPS, bitrate, codec, content hint, degradation preference).
  */
 function resolveSelectedQualityOverride(args: {
   selectedPresetId: string | null;
   presets: Array<{ id: string; settings: unknown }>;
-  customWidth: number;
-  customHeight: number;
-  customFps: number;
-  customBitrate: number;
+  customQuality: QualityEditorFieldsValue;
 }): SessionQualityOverride | null {
-  const {
-    selectedPresetId,
-    presets,
-    customWidth,
-    customHeight,
-    customFps,
-    customBitrate,
-  } = args;
+  const { selectedPresetId, presets, customQuality } = args;
   // If a personal preset is selected, use its settings.
   if (selectedPresetId) {
     const preset = presets.find((p) => p.id === selectedPresetId);
@@ -104,11 +102,15 @@ function resolveSelectedQualityOverride(args: {
     }
   }
   // Use Custom values when no personal preset is selected.
+  const { width, height } = resolveResolution(customQuality);
   return customPresetToOverride({
-    width: customWidth,
-    height: customHeight,
-    fps: customFps,
-    bitrate: customBitrate,
+    width,
+    height,
+    fps: customQuality.fps,
+    bitrate: customQuality.bitrate,
+    codec: customQuality.codec,
+    contentHint: customQuality.contentHint,
+    degradationPreference: customQuality.degradationPreference,
   });
 }
 
@@ -238,10 +240,16 @@ export function ShareSetup() {
   const [audioMode, setAudioMode] = useState<AudioModeValue>(() =>
     resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode),
   );
-  const [customWidth, setCustomWidth] = useState(1280);
-  const [customHeight, setCustomHeight] = useState(720);
-  const [customFps, setCustomFps] = useState(24);
-  const [customBitrate, setCustomBitrate] = useState(1500);
+  const [customQuality, setCustomQuality] = useState<QualityEditorFieldsValue>({
+    resolutionValue: "1280x720",
+    customWidth: 1280,
+    customHeight: 720,
+    fps: 24,
+    bitrate: 1500,
+    codec: "vp9",
+    contentHint: "detail",
+    degradationPreference: "maintain-resolution",
+  });
   const [startingShare, setStartingShare] = useState(false);
   // Personal presets loaded from the persistent quality-preset API.
   const [personalPresets, setPersonalPresets] = useState<
@@ -307,10 +315,16 @@ export function ShareSetup() {
       setSelectedPersonalPresetId(null);
       setSourceError(null);
       setStartingShare(false);
-      setCustomWidth(1280);
-      setCustomHeight(720);
-      setCustomFps(24);
-      setCustomBitrate(1500);
+      setCustomQuality({
+        resolutionValue: "1280x720",
+        customWidth: 1280,
+        customHeight: 720,
+        fps: 24,
+        bitrate: 1500,
+        codec: "vp9",
+        contentHint: "detail",
+        degradationPreference: "maintain-resolution",
+      });
     }
   }, [openShareSetup]);
 
@@ -337,17 +351,7 @@ export function ShareSetup() {
   // ── Validation ─────────────────────────────────────────────────────────
   const sourceSelected = selectedSourceId !== null;
   const usingPersonalPreset = selectedPersonalPresetId !== null;
-  const customValuesValid =
-    customWidth >= 320 &&
-    customWidth <= 3840 &&
-    customHeight >= 180 &&
-    customHeight <= 2160 &&
-    customFps >= 1 &&
-    customFps <= 60 &&
-    customBitrate >= 100 &&
-    customBitrate <= 20000;
-  // When a personal preset is selected, Custom slider values are irrelevant.
-  // Only validate Custom sliders when no personal preset is active.
+  const customValuesValid = qualityEditorFieldsValid(customQuality) === null;
   const canStart = sourceSelected && (usingPersonalPreset || customValuesValid);
 
   // ── Start sharing ──────────────────────────────────────────────────────
@@ -373,10 +377,7 @@ export function ShareSetup() {
       const qualityOverride = resolveSelectedQualityOverride({
         selectedPresetId: selectedPersonalPresetId,
         presets: personalPresets,
-        customWidth,
-        customHeight,
-        customFps,
-        customBitrate,
+        customQuality,
       });
 
       // Start the real stream via the coordinator (uses SSM internally).
@@ -421,10 +422,7 @@ export function ShareSetup() {
     selectedSourceId,
     selectedPersonalPresetId,
     personalPresets,
-    customWidth,
-    customHeight,
-    customFps,
-    customBitrate,
+    customQuality,
     setOpenShareSetup,
     navigate,
     audioMode,
@@ -704,81 +702,17 @@ export function ShareSetup() {
                   <h4 className="text-sm font-medium text-text-primary">
                     Custom quality settings
                   </h4>
-
-                  {/* Width/Height in a row */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs text-text-secondary">Width</Label>
-                        <span className="text-xs font-mono tabular-nums text-text-primary">
-                          {customWidth}px
-                        </span>
-                      </div>
-                      <Slider
-                        value={[customWidth]}
-                        onValueChange={([v]) => setCustomWidth(v ?? 1280)}
-                        min={320}
-                        max={3840}
-                        step={8}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs text-text-secondary">Height</Label>
-                        <span className="text-xs font-mono tabular-nums text-text-primary">
-                          {customHeight}px
-                        </span>
-                      </div>
-                      <Slider
-                        value={[customHeight]}
-                        onValueChange={([v]) => setCustomHeight(v ?? 720)}
-                        min={180}
-                        max={2160}
-                        step={8}
-                      />
-                    </div>
-                  </div>
-
-                  {/* FPS slider */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs text-text-secondary">Frame rate</Label>
-                      <span className="text-xs font-mono tabular-nums text-text-primary">
-                        {customFps} fps
-                      </span>
-                    </div>
-                    <Slider
-                      value={[customFps]}
-                      onValueChange={([v]) => setCustomFps(v ?? 24)}
-                      min={1}
-                      max={60}
-                      step={1}
-                    />
-                  </div>
-
-                  {/* Bitrate slider */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs text-text-secondary">Bitrate</Label>
-                      <span className="text-xs font-mono tabular-nums text-text-primary">
-                        {customBitrate} kbps
-                      </span>
-                    </div>
-                    <Slider
-                      value={[customBitrate]}
-                      onValueChange={([v]) => setCustomBitrate(v ?? 1500)}
-                      min={100}
-                      max={20000}
-                      step={50}
-                    />
-                  </div>
-
+                  <QualityEditorFields
+                    value={customQuality}
+                    onChange={setCustomQuality}
+                    disabled={startingShare || usingPersonalPreset}
+                  />
                   {!usingPersonalPreset && !customValuesValid && (
                     <Alert variant="warning" className="py-2">
                       <AlertTriangle className="h-4 w-4" />
                       <AlertTitle className="text-xs">Value out of range</AlertTitle>
                       <AlertDescription className="text-xs">
-                        Resolution must be 320×180–3840×2160, fps 1–60, bitrate 100–20000 kbps.
+                        Resolution must be 256×144–3840×2160, fps 1–60, bitrate 100–20000 kbps.
                       </AlertDescription>
                     </Alert>
                   )}

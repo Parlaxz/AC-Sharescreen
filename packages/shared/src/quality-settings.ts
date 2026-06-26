@@ -135,11 +135,11 @@ export interface ViewerQualityRequest {
 
 export const RANGES = {
   videoBitrateKbps: { min: 100, max: 20_000 },
-  sendWidth: { min: 320, max: 3840 },
-  sendHeight: { min: 180, max: 2160 },
+  sendWidth: { min: 256, max: 3840 },
+  sendHeight: { min: 144, max: 2160 },
   sendFps: { min: 1, max: 60 },
-  captureWidth: { min: 320, max: 3840 },
-  captureHeight: { min: 180, max: 2160 },
+  captureWidth: { min: 256, max: 3840 },
+  captureHeight: { min: 144, max: 2160 },
   captureFps: { min: 1, max: 60 },
   scaleResolutionDownBy: { min: 1, max: 8 },
   audioBitrateKbps: { min: 16, max: 256 },

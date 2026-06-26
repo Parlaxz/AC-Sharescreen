@@ -107,6 +107,10 @@ export function presetSettingsToOverride(
 /**
  * Build a SessionQualityOverride from raw custom slider values.
  * Default codec is VP9 for new Custom flows and runtime fallback.
+ *
+ * Accepts an optional content hint and degradation preference so the
+ * Custom flow surfaces every quality knob exposed by the user-facing
+ * preset editor.
  */
 export function customPresetToOverride(input: {
   width: number;
@@ -114,6 +118,8 @@ export function customPresetToOverride(input: {
   fps: number;
   bitrate: number;
   codec?: string;
+  contentHint?: string;
+  degradationPreference?: string;
 }): SessionQualityOverride {
   return {
     videoBitrateKbps: input.bitrate,
@@ -124,12 +130,18 @@ export function customPresetToOverride(input: {
     captureHeight: input.height,
     captureFps: input.fps,
     codec: input.codec ?? DEFAULT_CODEC,
+    contentHint: input.contentHint,
+    degradationPreference: input.degradationPreference,
   };
 }
 
 /**
  * Validate that an override falls inside the accepted ranges.
  * Returns an error message when invalid, or null when valid.
+ *
+ * Width 256–3840 px, Height 144–2160 px, FPS 1–60, Bitrate 100–20_000 kbps.
+ * The lower height bound is 144 (not 180) so that real 144p
+ * (`256×144`) is accepted.
  */
 export function validateSessionQualityOverride(
   q: SessionQualityOverride,
@@ -143,34 +155,34 @@ export function validateSessionQualityOverride(
   }
   if (
     !Number.isFinite(q.sendWidth) ||
-    q.sendWidth < 320 ||
+    q.sendWidth < 256 ||
     q.sendWidth > 3840
   ) {
-    return "Send width must be between 320 and 3840";
+    return "Send width must be between 256 and 3840";
   }
   if (
     !Number.isFinite(q.sendHeight) ||
-    q.sendHeight < 180 ||
+    q.sendHeight < 144 ||
     q.sendHeight > 2160
   ) {
-    return "Send height must be between 180 and 2160";
+    return "Send height must be between 144 and 2160";
   }
   if (!Number.isFinite(q.sendFps) || q.sendFps < 1 || q.sendFps > 60) {
     return "Send FPS must be between 1 and 60";
   }
   if (
     !Number.isFinite(q.captureWidth) ||
-    q.captureWidth < 320 ||
+    q.captureWidth < 256 ||
     q.captureWidth > 3840
   ) {
-    return "Capture width must be between 320 and 3840";
+    return "Capture width must be between 256 and 3840";
   }
   if (
     !Number.isFinite(q.captureHeight) ||
-    q.captureHeight < 180 ||
+    q.captureHeight < 144 ||
     q.captureHeight > 2160
   ) {
-    return "Capture height must be between 180 and 2160";
+    return "Capture height must be between 144 and 2160";
   }
   if (
     !Number.isFinite(q.captureFps) ||

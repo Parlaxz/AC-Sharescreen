@@ -214,7 +214,7 @@ describe("StreamSessionManager (Stage 4)", () => {
   });
 
   it("restartStream is no-op when destroyed", async () => {
-    ssm.destroy();
+    await ssm.destroy();
     await expect(ssm.restartStream()).resolves.toBeUndefined();
     expect(ssm.state).toBe("destroyed");
   });

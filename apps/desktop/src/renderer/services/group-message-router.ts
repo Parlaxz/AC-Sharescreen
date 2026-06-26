@@ -256,7 +256,7 @@ export class GroupMessageRouter {
     if (type.startsWith("stream.")) {
       const r = parseGroupMessagePayload(type, envelope.payload);
       if (!r.ok) return;
-      void this.routeStreamMessage(type, envelope, r.data);
+      void this.routeStreamMessage(groupId, envelope, r.data);
       return;
     }
   }
@@ -388,34 +388,84 @@ export class GroupMessageRouter {
 
   // ── Private ──────────────────────────────────────────────────
 
+  /**
+   * Envelope-group / payload-group safety check. Every stream-scoped
+   * message carries a `groupId` field. The envelope itself also carries
+   * a `groupId` in the signed header. Both must agree and must match
+   * the routing group; otherwise the payload is rejected as a
+   * cross-group leak.
+   */
+  private validatePayloadGroup(
+    groupId: string,
+    payloadGroup: unknown,
+    where: string,
+  ): boolean {
+    if (typeof payloadGroup !== "string" || payloadGroup.length === 0) return true;
+    if (payloadGroup !== groupId) {
+      // Surface a safe diagnostic without logging group secrets.
+      console.warn(
+        `[GroupMessageRouter] ${where}: rejected cross-group payload (routing=${groupId.length} chars, payload=${payloadGroup.length} chars)`,
+      );
+      return false;
+    }
+    return true;
+  }
+
   private async routeStreamMessage(
     groupId: string,
     envelope: GroupControlEnvelope,
     _validatedPayload: unknown,
   ): Promise<void> {
     const type = envelope.type;
+    const payload = _validatedPayload as Record<string, unknown> | undefined;
 
     switch (type) {
-      case "stream.started":
-        this.streamRegistry.handleStarted(_validatedPayload as never);
+      case "stream.started": {
+        if (!this.validatePayloadGroup(groupId, payload?.groupId, "stream.started")) return;
+        this.streamRegistry.handleStarted(payload as never);
         break;
+      }
 
-      case "stream.heartbeat":
-        this.streamRegistry.handleHeartbeat(_validatedPayload as never);
+      case "stream.heartbeat": {
+        if (!this.validatePayloadGroup(groupId, payload?.groupId, "stream.heartbeat")) return;
+        this.streamRegistry.handleHeartbeat(payload as never);
         break;
+      }
 
-      case "stream.stopped":
-        this.streamRegistry.handleStopped(_validatedPayload as never);
+      case "stream.stopped": {
+        if (!this.validatePayloadGroup(groupId, payload?.groupId, "stream.stopped")) return;
+        this.streamRegistry.handleStopped(payload as never);
         break;
+      }
+
+      case "stream.restarted": {
+        if (!this.validatePayloadGroup(groupId, payload?.groupId, "stream.restarted")) return;
+        this.streamRegistry.handleStarted(payload as never);
+        break;
+      }
 
       case "stream.state.snapshot": {
-        const snapshotPayload = _validatedPayload as { streams: unknown[] };
-        this.streamRegistry.handleSnapshot(snapshotPayload?.streams as never ?? []);
+        const rawStreams = (payload as { streams?: unknown[] } | undefined)?.streams ?? [];
+        // Filter the snapshot to only entries whose groupId matches the
+        // routing group. Never insert a stream from another group.
+        const filtered: unknown[] = [];
+        for (const entry of rawStreams) {
+          if (!entry || typeof entry !== "object") continue;
+          const eg = (entry as { groupId?: unknown }).groupId;
+          if (eg === groupId) {
+            filtered.push(entry);
+          } else {
+            console.warn(
+              `[GroupMessageRouter] stream.state.snapshot: discarded entry (routing groupId does not match payload groupId)`,
+            );
+          }
+        }
+        this.streamRegistry.handleSnapshot(filtered as never);
         break;
       }
 
       case "stream.state.request":
-        // Respond with snapshot of our current streams
+        // Respond with snapshot of our current streams, scoped to this group.
         await this.respondWithSnapshot(groupId, envelope);
         break;
 
@@ -431,7 +481,9 @@ export class GroupMessageRouter {
     const peerUuid = conn.peerForDevice(request.senderDeviceId);
     if (!peerUuid) return;
 
-    const streams = this.streamRegistry.getAllStreams();
+    // Only return streams that belong to this group — never leak
+    // streams from other groups into the response.
+    const streams = this.streamRegistry.getStreamsByGroup(groupId);
     await conn.sendToPeer(peerUuid, {
       type: "stream.state.snapshot",
       streams,

@@ -60,6 +60,14 @@ import { saveSettings } from "@/services/settings-actions";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
+import {
+  QualityEditorFields,
+  RESOLUTION_OPTIONS,
+  type QualityEditorFieldsValue,
+  resolveResolution,
+  qualityEditorFieldsValid,
+} from "./QualityEditorFields.js";
+
 interface PresetRecord {
   id: string;
   name: string;
@@ -88,28 +96,6 @@ function presetSummary(settings: Record<string, unknown>): {
   };
 }
 
-const RESOLUTION_OPTIONS = [
-  { value: "3840x2160", label: "3840×2160 (4K)" },
-  { value: "2560x1440", label: "2560×1440 (1440p)" },
-  { value: "1920x1080", label: "1920×1080 (1080p)" },
-  { value: "1280x720", label: "1280×720 (720p)" },
-  { value: "854x480", label: "854×480 (480p)" },
-];
-
-const CODEC_OPTIONS = [
-  { value: "h264", label: "H264" },
-  { value: "vp8", label: "VP8" },
-  { value: "vp9", label: "VP9" },
-  { value: "av1", label: "AV1" },
-];
-
-const CONTENT_HINT_OPTIONS = [
-  { value: "auto", label: "Auto" },
-  { value: "text", label: "Text" },
-  { value: "detail", label: "Detail" },
-  { value: "motion", label: "Motion" },
-];
-
 // ─── QualityPresetsPage ─────────────────────────────────────────────────────
 
 /**
@@ -136,11 +122,16 @@ export function QualityPresetsPage() {
 
   // ── Form state ──────────────────────────────────────────────────
   const [formName, setFormName] = useState("");
-  const [formResolution, setFormResolution] = useState("1920x1080");
-  const [formFps, setFormFps] = useState(30);
-  const [formBitrate, setFormBitrate] = useState(4000);
-  const [formCodec, setFormCodec] = useState("vp9");
-  const [formContentHint, setFormContentHint] = useState("motion");
+  const [formQuality, setFormQuality] = useState<QualityEditorFieldsValue>({
+    resolutionValue: "1920x1080",
+    customWidth: 1280,
+    customHeight: 720,
+    fps: 30,
+    bitrate: 4000,
+    codec: "vp9",
+    contentHint: "motion",
+    degradationPreference: "maintain-resolution",
+  });
   const [formSaving, setFormSaving] = useState(false);
 
   // ── Delete dialog ───────────────────────────────────────────────
@@ -176,11 +167,16 @@ export function QualityPresetsPage() {
   // ── Form helpers ────────────────────────────────────────────────
   const resetForm = useCallback(() => {
     setFormName("");
-    setFormResolution("1920x1080");
-    setFormFps(30);
-    setFormBitrate(4000);
-    setFormCodec("vp9");
-    setFormContentHint("motion");
+    setFormQuality({
+      resolutionValue: "1920x1080",
+      customWidth: 1280,
+      customHeight: 720,
+      fps: 30,
+      bitrate: 4000,
+      codec: "vp9",
+      contentHint: "motion",
+      degradationPreference: "maintain-resolution",
+    });
     setFormSaving(false);
   }, []);
 
@@ -192,15 +188,26 @@ export function QualityPresetsPage() {
 
   const openEditEditor = useCallback(
     (preset: PresetRecord) => {
-      const s = presetSummary(preset.settings);
-      setFormName(preset.name);
-      setFormResolution(s.resolution.replace("×", "x"));
-      setFormFps(s.fps);
-      setFormBitrate(s.bitrate);
-      // Infer codec + content hint from settings
       const video = (preset.settings.video as Record<string, unknown>) ?? {};
-      setFormCodec((video.codec as string) ?? "vp9");
-      setFormContentHint((video.contentHint as string) ?? "motion");
+      const w = (video.sendWidth as number) ?? 1280;
+      const h = (video.sendHeight as number) ?? 720;
+      // Match the saved w×h to a known resolution option, otherwise
+      // fall back to Custom with the explicit dimensions preserved.
+      const matched = RESOLUTION_OPTIONS.find(
+        (o) => o.value !== "custom" && o.width === w && o.height === h,
+      );
+      setFormName(preset.name);
+      setFormQuality({
+        resolutionValue: matched?.value ?? "custom",
+        customWidth: w,
+        customHeight: h,
+        fps: (video.sendFps as number) ?? 30,
+        bitrate: (video.videoBitrateKbps as number) ?? 4000,
+        codec: (video.codec as string) ?? "vp9",
+        contentHint: (video.contentHint as string) ?? "motion",
+        degradationPreference:
+          (video.degradationPreference as string) ?? "maintain-resolution",
+      });
       setEditingId(preset.id);
       setEditorOpen(true);
     },
@@ -210,13 +217,12 @@ export function QualityPresetsPage() {
   // ── Save (create or update) ─────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!formName.trim() || formSaving) return;
+    if (qualityEditorFieldsValid(formQuality) !== null) return;
     setFormSaving(true);
 
-    const [wStr, hStr] = formResolution.split("x");
-    const w = parseInt(wStr ?? "1920", 10);
-    const h = parseInt(hStr ?? "1080", 10);
-    const f = formFps;
-    const b = formBitrate;
+    const { width: w, height: h } = resolveResolution(formQuality);
+    const f = formQuality.fps;
+    const b = formQuality.bitrate;
 
     const settings = {
       schemaVersion: 1,
@@ -228,14 +234,14 @@ export function QualityPresetsPage() {
         captureWidth: w,
         captureHeight: h,
         captureFps: f,
-        codec: formCodec,
-        contentHint: formContentHint,
+        codec: formQuality.codec,
+        contentHint: formQuality.contentHint,
         preserveAspectRatio: true,
         preventUpscale: true,
         resolutionMode: "target-dimensions",
         scaleResolutionDownBy: 1,
         h264Profile: "auto",
-        degradationPreference: "maintain-resolution",
+        degradationPreference: formQuality.degradationPreference,
         scalabilityMode: null,
         cursorMode: "always",
         rtpPriority: "medium",
@@ -277,11 +283,7 @@ export function QualityPresetsPage() {
   }, [
     editingId,
     formName,
-    formResolution,
-    formFps,
-    formBitrate,
-    formCodec,
-    formContentHint,
+    formQuality,
     formSaving,
     loadPresets,
   ]);
@@ -548,96 +550,11 @@ export function QualityPresetsPage() {
               />
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="preset-resolution">Resolution</Label>
-              <Select
-                value={formResolution}
-                onValueChange={setFormResolution}
-                disabled={formSaving}
-              >
-                <SelectTrigger id="preset-resolution">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {RESOLUTION_OPTIONS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="preset-fps">FPS</Label>
-              <Input
-                id="preset-fps"
-                type="number"
-                value={formFps}
-                onChange={(e) =>
-                  setFormFps(parseInt(e.target.value, 10) || 30)
-                }
-                min={1}
-                max={120}
-                disabled={formSaving}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="preset-bitrate">Bitrate (kbps)</Label>
-              <Input
-                id="preset-bitrate"
-                type="number"
-                value={formBitrate}
-                onChange={(e) =>
-                  setFormBitrate(parseInt(e.target.value, 10) || 1000)
-                }
-                min={100}
-                max={50000}
-                disabled={formSaving}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="preset-codec">Codec</Label>
-              <Select
-                value={formCodec}
-                onValueChange={setFormCodec}
-                disabled={formSaving}
-              >
-                <SelectTrigger id="preset-codec">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CODEC_OPTIONS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="preset-content-hint">Content hint</Label>
-              <Select
-                value={formContentHint}
-                onValueChange={setFormContentHint}
-                disabled={formSaving}
-              >
-                <SelectTrigger id="preset-content-hint">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CONTENT_HINT_OPTIONS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
+            <QualityEditorFields
+              value={formQuality}
+              onChange={setFormQuality}
+              disabled={formSaving}
+            />
           </div>
 
           <SheetFooter className="mt-6">
