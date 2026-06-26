@@ -8,8 +8,13 @@ const __dirname = path.dirname(__filename);
 export class WindowManager {
   private window: BrowserWindow | null = null;
   private isQuitting = false;
+  private developerMode = false;
+  private devToolsFlag = process.argv.includes("--devtools");
 
-  constructor(private preloadPath: string) {
+  constructor(
+    private preloadPath: string,
+    private getDeveloperMode?: () => boolean,
+  ) {
     app.on("before-quit", () => {
       this.isQuitting = true;
     });
@@ -57,17 +62,56 @@ export class WindowManager {
       this.window.loadURL("screenlink://app/index.html");
     }
 
-    // Open DevTools only when explicitly requested — not merely because
-    // a dev server URL is present. Gate on SCREENLINK_OPEN_DEVTOOLS env
-    // var or --devtools command-line flag.
-    const shouldOpenDevTools =
-      process.env.SCREENLINK_OPEN_DEVTOOLS === "1" ||
-      process.argv.includes("--devtools");
-    if (shouldOpenDevTools) {
-      this.window.webContents.openDevTools({ mode: "bottom" });
-    }
+    this.window.webContents.on("before-input-event", (event, input) => {
+      const key = String(input.key ?? "").toLowerCase();
+      const isCtrlShiftI =
+        input.control === true && input.shift === true && key === "i";
+      const isMacDevTools =
+        process.platform === "darwin" &&
+        input.meta === true &&
+        input.alt === true &&
+        key === "i";
+
+      if (!isCtrlShiftI && !isMacDevTools) {
+        return;
+      }
+
+      event.preventDefault();
+      this.toggleDevTools();
+    });
 
     return this.window;
+  }
+
+  setDeveloperMode(enabled: boolean): void {
+    this.developerMode = enabled;
+  }
+
+  private isDevToolsAllowed(): boolean {
+    if (!app.isPackaged) {
+      return true;
+    }
+
+    if (this.devToolsFlag || this.developerMode) {
+      return true;
+    }
+
+    return this.getDeveloperMode?.() === true;
+  }
+
+  toggleDevTools(): void {
+    if (!this.window || !this.isDevToolsAllowed()) {
+      return;
+    }
+
+    if (this.window.webContents.isDevToolsOpened()) {
+      this.window.webContents.closeDevTools();
+      return;
+    }
+
+    // Gated by isDevToolsAllowed(): unpackaged/dev builds, developerMode,
+    // or an explicit --devtools launch flag in packaged builds.
+    this.window.webContents.openDevTools({ mode: "bottom" });
   }
 
   show(): void {

@@ -82,6 +82,12 @@ interface VideoControlsProps {
   visible: boolean;
   /** Whether this is a live stream (vs VOD/recording) */
   isLive: boolean;
+  /**
+   * Hide the quality selector button.
+   * Default true because no real viewer-quality request path exists.
+   * Set to false when quality-client integration is available.
+   */
+  hideQuality?: boolean;
 }
 
 // ─── VideoControls ────────────────────────────────────────────────────────
@@ -115,6 +121,7 @@ export function VideoControls({
   onExit,
   visible,
   isLive,
+  hideQuality = true,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),
@@ -217,22 +224,24 @@ export function VideoControls({
 
           {/* ── Right group ─────────────────────────────────────── */}
           <div className="flex items-center gap-1">
-            {/* Quality popover */}
-            <QualityPopover current={quality} onSelect={onQualitySelect}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
-                    aria-label="Video quality"
-                  >
-                    <Settings2 className="h-3.5 w-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">Quality</TooltipContent>
-              </Tooltip>
-            </QualityPopover>
+            {/* Quality popover — hidden by default (no real viewer-quality request wiring) */}
+            {!hideQuality && (
+              <QualityPopover current={quality} onSelect={onQualitySelect}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
+                      aria-label="Video quality"
+                    >
+                      <Settings2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">Quality</TooltipContent>
+                </Tooltip>
+              </QualityPopover>
+            )}
 
             {/* Stream switcher */}
             <StreamSwitcher

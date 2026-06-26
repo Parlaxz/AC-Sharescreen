@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useCallback } from "react";
 import { Settings, MoreHorizontal, Wifi, WifiOff, Monitor, Eye, Loader2, RefreshCw, Download } from "lucide-react";
 // Monitor is used in the overflow menu for "Start sharing"
 import { motion, AnimatePresence } from "motion/react";
@@ -16,10 +16,9 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { Switch } from "@/components/ui/switch";
 import { cn, getInitials } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
-import { SettingsSheet } from "@/components/workspace/SettingsSheet";
+import { useIdentityStore } from "@/stores/identity-store";
 
 /**
  * User dock status states (Section 7.1).
@@ -46,21 +45,30 @@ export type UserStatus =
  *  - motion/AnimatePresence (status text transitions)
  */
 export function UserDock() {
-  const [userStatus, setUserStatus] = useState<UserStatus>("Ready");
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [launchAtLogin, setLaunchAtLogin] = useState(false);
-  const [autoResume, setAutoResume] = useState(false);
-  const [displayName, setDisplayName] = useState("User");
+  const displayName = useIdentityStore((s) => s.localDisplayName);
+  const navigate = useStore((s) => s.navigate);
+  const isSharing = useStore((s) => s.isSharing);
+  const isViewing = useStore((s) => s.isViewing);
+  const localShareState = useStore((s) => s.localShareState);
+  const viewStatus = useStore((s) => s.viewStatus);
+  const selectedGroupId = useStore((s) => s.selectedGroupId);
+  const groupConnectionStateById = useStore((s) => s.groupConnectionStateById);
 
-  useEffect(() => {
-    const api = (window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-    if (!api) return;
-    void api.getSettings().then((settings) => {
-      setDisplayName(settings.hostDisplayName ?? settings.deviceIdentity?.displayName ?? "User");
-      setLaunchAtLogin(settings.launchAtLogin ?? false);
-      setAutoResume(settings.autoResumeLastMonitor ?? false);
-    }).catch(() => {});
-  }, []);
+  const userStatus: UserStatus = (() => {
+    if (viewStatus === "reconnecting") return "Reconnecting";
+    if (localShareState === "starting" || viewStatus === "connecting") {
+      return "Connecting";
+    }
+    if (isSharing) return "Sharing";
+    if (isViewing) return "Watching";
+    const selectedConnectionState = selectedGroupId
+      ? groupConnectionStateById[selectedGroupId]?.state
+      : null;
+    if (selectedConnectionState === "error" || selectedConnectionState === "disconnected") {
+      return "Offline";
+    }
+    return "Ready";
+  })();
 
   const statusConfig = useCallback((status: UserStatus) => {
     switch (status) {
@@ -121,19 +129,16 @@ export function UserDock() {
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
-            size="icon"
-            className="h-7 w-7 flex-shrink-0"
-            aria-label="Settings"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <Settings className="h-4 w-4" />
-          </Button>
+              size="icon"
+              className="h-7 w-7 flex-shrink-0"
+              aria-label="Settings"
+              onClick={() => navigate("user-settings")}
+            >
+              <Settings className="h-4 w-4" />
+            </Button>
         </TooltipTrigger>
         <TooltipContent side="top">Settings</TooltipContent>
       </Tooltip>
-
-      {/* ─── Settings sheet ─────────────────────────────── */}
-      <SettingsSheet open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       {/* ─── Overflow menu ─────────────────────────────── */}
       <DropdownMenu>
@@ -169,51 +174,6 @@ export function UserDock() {
             }}
           >
             Diagnostics
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onClick={() => {
-              /* TODO: check for updates */
-            }}
-          >
-            Check for updates
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <div className="flex items-center justify-between px-2 py-1.5">
-            <span className="text-sm text-text-primary">Launch at login</span>
-            <Switch
-              checked={launchAtLogin}
-              onCheckedChange={(checked) => {
-                setLaunchAtLogin(checked);
-                const api = (window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-                if (api) {
-                  void api.updateSettings({ launchAtLogin: checked }).catch(() => {});
-                }
-              }}
-              aria-label="Toggle launch at login"
-            />
-          </div>
-          <div className="flex items-center justify-between px-2 py-1.5">
-            <span className="text-sm text-text-primary">Auto-resume last share</span>
-            <Switch
-              checked={autoResume}
-              onCheckedChange={(checked) => {
-                setAutoResume(checked);
-                const api = (window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }).screenlink;
-                if (api) {
-                  void api.updateSettings({ autoResumeLastMonitor: checked }).catch(() => {});
-                }
-              }}
-              aria-label="Toggle auto-resume"
-            />
-          </div>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            className="text-danger"
-            onClick={() => {
-              /* TODO: quit completely */
-            }}
-          >
-            Quit completely
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

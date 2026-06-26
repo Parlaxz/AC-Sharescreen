@@ -119,7 +119,7 @@ export function registerIpcHandlers(
     }
   });
 
-  ipcMain.handle("set-source", async (_event, sourceId: string) => {
+  ipcMain.handle("set-source", async (_event, sourceId: string | null) => {
     setApprovedSource(sourceId);
   });
 

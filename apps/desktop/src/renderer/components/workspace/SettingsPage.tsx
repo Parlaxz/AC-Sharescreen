@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 import { RefreshCw, AlertTriangle } from "lucide-react";
@@ -14,13 +14,14 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from "@/components/ui/tooltip";
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import { useStore } from "@/stores/main-store";
 import {
   loadSettings,
   saveSettings,
@@ -28,201 +29,122 @@ import {
   loadQuickShareConfig,
   saveQuickShareConfig,
 } from "@/services/settings-actions";
-import type { PersistedSettings } from "../../../preload/api-types.js";
+import { useIdentityStore } from "@/stores/identity-store";
+import { getRuntime } from "@/services/phase3-runtime";
+import type { PersistedSettings, QuickShareConfigDTO } from "../../../preload/api-types.js";
 
-/**
- * Only the controls that are backed by a real persisted API are
- * rendered. The save path preserves all other fields in
- * hostQualityLimits and writes the user's own values to the correct
- * nested location. Success is reported only after persistence
- * completes.
- */
-interface FormState {
+interface SettingsForm {
   displayName: string;
   launchAtLogin: boolean;
   autoResumeLastMonitor: boolean;
   notificationsEnabled: boolean;
+  maxVideoBitrateKbps: number;
+  maxWidth: number;
+  maxHeight: number;
+  maxFps: number;
   allowViewerQualityRequests: boolean;
+  defaultCodec: "vp9" | "av1" | "h264" | "vp8";
   quickShareEnabled: boolean;
   quickShareAccelerator: string;
 }
 
-export function SettingsPage() {
-  // ── Load state ──────────────────────────────────────────
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+const DEFAULT_FORM: SettingsForm = {
+  displayName: "User",
+  launchAtLogin: false,
+  autoResumeLastMonitor: false,
+  notificationsEnabled: true,
+  maxVideoBitrateKbps: 5000,
+  maxWidth: 1920,
+  maxHeight: 1080,
+  maxFps: 60,
+  allowViewerQualityRequests: true,
+  defaultCodec: "vp9",
+  quickShareEnabled: true,
+  quickShareAccelerator: "Alt+Shift+S",
+};
 
-  // ── Form state ──────────────────────────────────────────
-  const [form, setForm] = useState<FormState>({
-    displayName: "",
-    launchAtLogin: false,
-    autoResumeLastMonitor: false,
-    notificationsEnabled: true,
-    allowViewerQualityRequests: true,
-    quickShareEnabled: true,
-    quickShareAccelerator: "Super+Alt+S",
-  });
-  const [dirty, setDirty] = useState(false);
-  const [displayNameDirty, setDisplayNameDirty] = useState(false);
+const DEFAULT_AUDIO_SETTINGS = {
+  bitrateKbps: 64,
+  channels: "stereo" as const,
+  bitrateMode: "vbr" as const,
+  dtx: false,
+  fec: true,
+  packetDurationMs: 20 as const,
+  redundantAudio: false,
+};
 
-  // ── Load settings on mount ──────────────────────────────
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const [settings, quickShare] = await Promise.all([
-        loadSettings(),
-        loadQuickShareConfig(),
-      ]);
-      setForm({
-        displayName:
-          settings.hostDisplayName ?? settings.deviceIdentity?.displayName ?? "",
-        launchAtLogin: settings.launchAtLogin ?? false,
-        autoResumeLastMonitor: settings.autoResumeLastMonitor ?? false,
-        notificationsEnabled: settings.notificationsEnabled ?? true,
-        allowViewerQualityRequests:
-          settings.hostQualityLimits?.allowViewerQualityRequests ?? true,
-        quickShareEnabled: quickShare.shortcutEnabled,
-        quickShareAccelerator: quickShare.shortcutAccelerator,
-      });
-    } catch (err) {
-      setLoadError(
-        err instanceof Error ? err.message : "Failed to load settings",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+const CODEC_OPTIONS: Array<{ value: SettingsForm["defaultCodec"]; label: string }> = [
+  { value: "vp9", label: "VP9" },
+  { value: "av1", label: "AV1" },
+  { value: "h264", label: "H.264" },
+  { value: "vp8", label: "VP8" },
+];
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+function buildForm(
+  settings: PersistedSettings,
+  quickShare: QuickShareConfigDTO,
+): SettingsForm {
+  return {
+    displayName: settings.deviceIdentity.displayName ?? settings.hostDisplayName ?? DEFAULT_FORM.displayName,
+    launchAtLogin: settings.launchAtLogin ?? DEFAULT_FORM.launchAtLogin,
+    autoResumeLastMonitor: settings.autoResumeLastMonitor ?? DEFAULT_FORM.autoResumeLastMonitor,
+    notificationsEnabled: settings.notificationsEnabled ?? DEFAULT_FORM.notificationsEnabled,
+    maxVideoBitrateKbps:
+      settings.hostQualityLimits?.maxVideoBitrateKbps ?? DEFAULT_FORM.maxVideoBitrateKbps,
+    maxWidth: settings.hostQualityLimits?.maxWidth ?? DEFAULT_FORM.maxWidth,
+    maxHeight: settings.hostQualityLimits?.maxHeight ?? DEFAULT_FORM.maxHeight,
+    maxFps: settings.hostQualityLimits?.maxFps ?? DEFAULT_FORM.maxFps,
+    allowViewerQualityRequests:
+      settings.hostQualityLimits?.allowViewerQualityRequests ?? DEFAULT_FORM.allowViewerQualityRequests,
+    defaultCodec:
+      (settings.globalQualityDefaults?.video?.codec === "av1" ||
+      settings.globalQualityDefaults?.video?.codec === "h264" ||
+      settings.globalQualityDefaults?.video?.codec === "vp8" ||
+      settings.globalQualityDefaults?.video?.codec === "vp9"
+        ? settings.globalQualityDefaults.video.codec
+        : DEFAULT_FORM.defaultCodec),
+    quickShareEnabled: quickShare.shortcutEnabled,
+    quickShareAccelerator: quickShare.shortcutAccelerator,
+  };
+}
 
-  // ── Field change helper ─────────────────────────────────
-  const updateField = useCallback(
-    <K extends keyof FormState>(key: K, value: FormState[K]) => {
-      setForm((prev) => ({ ...prev, [key]: value }));
-      if (key === "displayName") {
-        setDisplayNameDirty(true);
-      } else {
-        setDirty(true);
-      }
-    },
-    [],
+function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
+  return (
+    a.displayName === b.displayName &&
+    a.launchAtLogin === b.launchAtLogin &&
+    a.autoResumeLastMonitor === b.autoResumeLastMonitor &&
+    a.notificationsEnabled === b.notificationsEnabled &&
+    a.maxVideoBitrateKbps === b.maxVideoBitrateKbps &&
+    a.maxWidth === b.maxWidth &&
+    a.maxHeight === b.maxHeight &&
+    a.maxFps === b.maxFps &&
+    a.allowViewerQualityRequests === b.allowViewerQualityRequests &&
+    a.defaultCodec === b.defaultCodec &&
+    a.quickShareEnabled === b.quickShareEnabled &&
+    a.quickShareAccelerator === b.quickShareAccelerator
   );
+}
 
-  // ── Save: build the correct payload and write ───────────
-  const handleSave = useCallback(async () => {
-    setSaving(true);
-    try {
-      // Display name persists via its own dedicated call.
-      if (displayNameDirty && form.displayName.trim()) {
-        await updateDisplayName(form.displayName.trim());
-        setDisplayNameDirty(false);
-      }
+function isNonNegativeInteger(value: number): boolean {
+  return Number.isInteger(value) && value >= 0;
+}
 
-      // Build the general-settings partial. The viewer-requests
-      // control is stored under hostQualityLimits, so we must merge
-      // with the existing nested object instead of overwriting it.
-      const partial: Record<string, unknown> = {};
-
-      // Always send the top-level scalar fields when they exist in
-      // the form (cheap, idempotent).
-      partial.launchAtLogin = form.launchAtLogin;
-      partial.autoResumeLastMonitor = form.autoResumeLastMonitor;
-      partial.notificationsEnabled = form.notificationsEnabled;
-
-      // hostQualityLimits.allowViewerQualityRequests: merge with
-      // existing values to preserve the other limits.
-      try {
-        const current: PersistedSettings = await loadSettings();
-        partial.hostQualityLimits = {
-          ...(current.hostQualityLimits ?? {}),
-          allowViewerQualityRequests: form.allowViewerQualityRequests,
-        };
-      } catch {
-        // If we cannot read current settings, write the field with
-        // safe defaults.
-        partial.hostQualityLimits = {
-          maxVideoBitrateKbps: 5000,
-          maxWidth: 1920,
-          maxHeight: 1080,
-          maxFps: 60,
-          allowViewerQualityRequests: form.allowViewerQualityRequests,
-        };
-      }
-
-      await saveSettings(partial);
-
-      // Quick share config has its own preload method.
-      await saveQuickShareConfig({
-        shortcutEnabled: form.quickShareEnabled,
-        shortcutAccelerator: form.quickShareAccelerator,
-      });
-
-      // Re-read to confirm persistence. Only show success if the
-      // round-trip reads back the value we wrote.
-      const [confirmed, confirmedQs] = await Promise.all([
-        loadSettings(),
-        loadQuickShareConfig(),
-      ]);
-      const ok =
-        confirmed.launchAtLogin === form.launchAtLogin &&
-        confirmed.autoResumeLastMonitor === form.autoResumeLastMonitor &&
-        confirmed.notificationsEnabled === form.notificationsEnabled &&
-        confirmed.hostQualityLimits?.allowViewerQualityRequests ===
-          form.allowViewerQualityRequests &&
-        confirmedQs.shortcutEnabled === form.quickShareEnabled &&
-        confirmedQs.shortcutAccelerator === form.quickShareAccelerator;
-      if (!ok) {
-        throw new Error("Saved settings could not be verified");
-      }
-
-      setDirty(false);
-      toast.success("Settings saved");
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to save settings";
-      toast.error(message);
-    } finally {
-      setSaving(false);
-    }
-  }, [form, displayNameDirty]);
-
-  // ── Switch row helper ───────────────────────────────────
-  const SwitchRow = ({
-    id,
-    label,
-    tooltip,
-    checked,
-    onCheckedChange,
-  }: {
-    id: string;
-    label: string;
-    tooltip: string;
-    checked: boolean;
-    onCheckedChange: (v: boolean) => void;
-  }) => (
+function SwitchRow({
+  id,
+  label,
+  checked,
+  onCheckedChange,
+}: {
+  id: string;
+  label: string;
+  checked: boolean;
+  onCheckedChange: (value: boolean) => void;
+}) {
+  return (
     <div className="flex items-center justify-between py-1.5">
-      <div className="flex items-center gap-2">
-        <Label
-          htmlFor={id}
-          className="text-sm text-text-primary cursor-pointer"
-        >
-          {label}
-        </Label>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-surface-3 text-[10px] text-text-muted cursor-help">
-              ?
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="top" className="max-w-xs">
-            {tooltip}
-          </TooltipContent>
-        </Tooltip>
-      </div>
+      <Label htmlFor={id} className="text-sm text-text-primary cursor-pointer">
+        {label}
+      </Label>
       <AnimatePresence mode="wait">
         <motion.div
           key={checked ? "on" : "off"}
@@ -241,8 +163,157 @@ export function SettingsPage() {
       </AnimatePresence>
     </div>
   );
+}
 
-  // ── Loading state ───────────────────────────────────────
+export function SettingsPage() {
+  const [form, setForm] = useState<SettingsForm>(DEFAULT_FORM);
+  const [cleanBaseline, setCleanBaseline] = useState<SettingsForm>(DEFAULT_FORM);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const setLocalIdentity = useIdentityStore((s) => s.setLocalIdentity);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [settings, quickShare] = await Promise.all([
+        loadSettings(),
+        loadQuickShareConfig(),
+      ]);
+      const nextForm = buildForm(settings, quickShare);
+      setForm(nextForm);
+      setCleanBaseline(nextForm);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to load settings");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const updateField = useCallback(<K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const isDirty = useMemo(() => !formsEqual(form, cleanBaseline), [form, cleanBaseline]);
+
+  const validateForm = useCallback((): string | null => {
+    const trimmedName = form.displayName.trim();
+    if (trimmedName.length < 1 || trimmedName.length > 100) {
+      return "Display Name must be 1–100 characters";
+    }
+    if (!isNonNegativeInteger(form.maxVideoBitrateKbps)) {
+      return "Maximum bitrate must be a nonnegative integer";
+    }
+    if (!isNonNegativeInteger(form.maxWidth)) {
+      return "Maximum width must be a nonnegative integer";
+    }
+    if (!isNonNegativeInteger(form.maxHeight)) {
+      return "Maximum height must be a nonnegative integer";
+    }
+    if (!isNonNegativeInteger(form.maxFps)) {
+      return "Maximum FPS must be a nonnegative integer";
+    }
+    if (!form.quickShareAccelerator.trim()) {
+      return "Quick Share accelerator is required";
+    }
+    return null;
+  }, [form]);
+
+  const handleSave = useCallback(async () => {
+    if (saving) {
+      return;
+    }
+
+    const validationError = validateForm();
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      const trimmedDisplayName = form.displayName.trim();
+      const returnedIdentity = await updateDisplayName(trimmedDisplayName);
+      setLocalIdentity({
+        deviceId: returnedIdentity.deviceId,
+        displayName: returnedIdentity.displayName,
+      });
+
+      const settingsAfterNameSave = await loadSettings();
+      if (settingsAfterNameSave.deviceIdentity.displayName !== trimmedDisplayName) {
+        throw new Error("Display Name verification failed");
+      }
+
+      const mergedSettingsPartial: Partial<PersistedSettings> = {
+        launchAtLogin: form.launchAtLogin,
+        autoResumeLastMonitor: form.autoResumeLastMonitor,
+        notificationsEnabled: form.notificationsEnabled,
+        hostQualityLimits: {
+          ...(settingsAfterNameSave.hostQualityLimits ?? {
+            maxVideoBitrateKbps: DEFAULT_FORM.maxVideoBitrateKbps,
+            maxWidth: DEFAULT_FORM.maxWidth,
+            maxHeight: DEFAULT_FORM.maxHeight,
+            maxFps: DEFAULT_FORM.maxFps,
+            allowViewerQualityRequests: DEFAULT_FORM.allowViewerQualityRequests,
+          }),
+          maxVideoBitrateKbps: form.maxVideoBitrateKbps,
+          maxWidth: form.maxWidth,
+          maxHeight: form.maxHeight,
+          maxFps: form.maxFps,
+          allowViewerQualityRequests: form.allowViewerQualityRequests,
+        },
+        globalQualityDefaults: {
+          schemaVersion: 1,
+          video: {
+            ...(settingsAfterNameSave.globalQualityDefaults?.video ?? {}),
+            codec: form.defaultCodec,
+          },
+          audio: settingsAfterNameSave.globalQualityDefaults?.audio ?? DEFAULT_AUDIO_SETTINGS,
+        },
+      };
+
+      await saveSettings(mergedSettingsPartial);
+      await saveQuickShareConfig({
+        shortcutEnabled: form.quickShareEnabled,
+        shortcutAccelerator: form.quickShareAccelerator.trim(),
+      });
+
+      const [verifiedSettings, verifiedQuickShare] = await Promise.all([
+        loadSettings(),
+        loadQuickShareConfig(),
+      ]);
+
+      const verifiedForm = buildForm(verifiedSettings, verifiedQuickShare);
+      if (!formsEqual(verifiedForm, {
+        ...form,
+        displayName: trimmedDisplayName,
+        quickShareAccelerator: form.quickShareAccelerator.trim(),
+      })) {
+        throw new Error("Saved settings could not be verified");
+      }
+
+      setLocalIdentity({
+        deviceId: verifiedSettings.deviceIdentity.deviceId,
+        displayName: verifiedSettings.deviceIdentity.displayName,
+      });
+      getRuntime()?.updateLocalDisplayName(verifiedSettings.deviceIdentity.displayName);
+
+      setForm(verifiedForm);
+      setCleanBaseline(verifiedForm);
+      toast.success("Settings saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save settings");
+    } finally {
+      setSaving(false);
+    }
+  }, [form, saving, setLocalIdentity, validateForm]);
+
   if (loading) {
     return (
       <div className="h-full overflow-auto p-5 space-y-5">
@@ -254,7 +325,6 @@ export function SettingsPage() {
     );
   }
 
-  // ── Error state ─────────────────────────────────────────
   if (loadError) {
     return (
       <div className="h-full overflow-auto p-5">
@@ -262,12 +332,7 @@ export function SettingsPage() {
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>Failed to load settings</AlertTitle>
           <AlertDescription>{loadError}</AlertDescription>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-2"
-            onClick={load}
-          >
+          <Button variant="outline" size="sm" className="mt-2" onClick={load}>
             <RefreshCw className="h-3.5 w-3.5 mr-1" />
             Retry
           </Button>
@@ -276,7 +341,6 @@ export function SettingsPage() {
     );
   }
 
-  // ── Render form ─────────────────────────────────────────
   return (
     <div className="h-full overflow-auto p-5 space-y-5">
       <div className="flex items-center justify-between">
@@ -284,26 +348,20 @@ export function SettingsPage() {
         <Button
           variant="default"
           size="sm"
-          disabled={(!dirty && !displayNameDirty) || saving}
+          disabled={!isDirty || saving}
           onClick={handleSave}
         >
           {saving ? "Saving…" : "Save settings"}
         </Button>
       </div>
 
-      {/* ─── Profile ──────────────────────────────────────── */}
       <Card>
         <CardHeader>
           <CardTitle>Profile</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1.5">
-            <Label
-              htmlFor="display-name"
-              className="text-sm text-text-primary"
-            >
-              Display name
-            </Label>
+            <Label htmlFor="display-name">Display Name</Label>
             <Input
               id="display-name"
               value={form.displayName}
@@ -315,7 +373,6 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* ─── Startup ──────────────────────────────────────── */}
       <Card>
         <CardHeader>
           <CardTitle>Startup</CardTitle>
@@ -323,23 +380,20 @@ export function SettingsPage() {
         <CardContent className="space-y-1">
           <SwitchRow
             id="launch-at-login"
-            label="Launch at Windows login"
-            tooltip="ScreenLink starts automatically when you log into Windows. Requires system permission."
+            label="Launch at login"
             checked={form.launchAtLogin}
-            onCheckedChange={(v) => updateField("launchAtLogin", v)}
+            onCheckedChange={(value) => updateField("launchAtLogin", value)}
           />
           <Separator />
           <SwitchRow
-            id="auto-resume"
-            label="Auto-resume last monitor share"
-            tooltip="On startup, automatically resume sharing your last-used monitor without confirmation."
+            id="auto-resume-last-monitor"
+            label="Auto-resume last monitor/source"
             checked={form.autoResumeLastMonitor}
-            onCheckedChange={(v) => updateField("autoResumeLastMonitor", v)}
+            onCheckedChange={(value) => updateField("autoResumeLastMonitor", value)}
           />
         </CardContent>
       </Card>
 
-      {/* ─── Notifications ────────────────────────────────── */}
       <Card>
         <CardHeader>
           <CardTitle>Notifications</CardTitle>
@@ -347,31 +401,98 @@ export function SettingsPage() {
         <CardContent className="space-y-1">
           <SwitchRow
             id="notifications-enabled"
-            label="Enable general notifications"
-            tooltip="Receive general system notifications from ScreenLink."
+            label="General notifications enabled"
             checked={form.notificationsEnabled}
-            onCheckedChange={(v) => updateField("notificationsEnabled", v)}
+            onCheckedChange={(value) => updateField("notificationsEnabled", value)}
           />
         </CardContent>
       </Card>
 
-      {/* ─── Host quality ──────────────────────────────────── */}
       <Card>
         <CardHeader>
-          <CardTitle>Host quality</CardTitle>
+          <CardTitle>Host quality limits</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-1">
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="max-video-bitrate">Maximum bitrate</Label>
+              <Input
+                id="max-video-bitrate"
+                type="number"
+                min={0}
+                value={form.maxVideoBitrateKbps}
+                onChange={(e) => updateField("maxVideoBitrateKbps", parseInt(e.target.value || "0", 10) || 0)}
+                disabled={saving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="max-width">Maximum width</Label>
+              <Input
+                id="max-width"
+                type="number"
+                min={0}
+                value={form.maxWidth}
+                onChange={(e) => updateField("maxWidth", parseInt(e.target.value || "0", 10) || 0)}
+                disabled={saving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="max-height">Maximum height</Label>
+              <Input
+                id="max-height"
+                type="number"
+                min={0}
+                value={form.maxHeight}
+                onChange={(e) => updateField("maxHeight", parseInt(e.target.value || "0", 10) || 0)}
+                disabled={saving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="max-fps">Maximum FPS</Label>
+              <Input
+                id="max-fps"
+                type="number"
+                min={0}
+                value={form.maxFps}
+                onChange={(e) => updateField("maxFps", parseInt(e.target.value || "0", 10) || 0)}
+                disabled={saving}
+              />
+            </div>
+          </div>
+          <Separator />
           <SwitchRow
-            id="allow-viewer-requests"
+            id="allow-viewer-quality-requests"
             label="Allow viewer quality requests"
-            tooltip="Allow viewers to request quality changes to your stream. Disable to always use your preset."
             checked={form.allowViewerQualityRequests}
-            onCheckedChange={(v) => updateField("allowViewerQualityRequests", v)}
+            onCheckedChange={(value) => updateField("allowViewerQualityRequests", value)}
           />
         </CardContent>
       </Card>
 
-      {/* ─── Quick Share ──────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Streaming default</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1.5">
+          <Label htmlFor="default-codec">Default codec</Label>
+          <Select
+            value={form.defaultCodec}
+            onValueChange={(value) => updateField("defaultCodec", value as SettingsForm["defaultCodec"])}
+          >
+            <SelectTrigger id="default-codec">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {CODEC_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>Quick Share</CardTitle>
@@ -379,24 +500,17 @@ export function SettingsPage() {
         <CardContent className="space-y-3">
           <SwitchRow
             id="quick-share-enabled"
-            label="Enable global Quick Share shortcut"
-            tooltip="Registers the system-wide shortcut used to open Quick Share."
+            label="Enabled"
             checked={form.quickShareEnabled}
-            onCheckedChange={(v) => updateField("quickShareEnabled", v)}
+            onCheckedChange={(value) => updateField("quickShareEnabled", value)}
           />
           <div className="space-y-1.5">
-            <Label
-              htmlFor="quick-share-accelerator"
-              className="text-sm text-text-primary"
-            >
-              Shortcut accelerator
-            </Label>
+            <Label htmlFor="quick-share-accelerator">Accelerator</Label>
             <Input
               id="quick-share-accelerator"
               value={form.quickShareAccelerator}
               onChange={(e) => updateField("quickShareAccelerator", e.target.value)}
-              placeholder="Super+Alt+S"
-              disabled={!form.quickShareEnabled}
+              disabled={saving}
             />
           </div>
         </CardContent>

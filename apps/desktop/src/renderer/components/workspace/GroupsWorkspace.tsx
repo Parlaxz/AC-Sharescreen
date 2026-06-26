@@ -42,6 +42,7 @@ import { Separator } from "@/components/ui/separator";
 import { useStore } from "@/stores/main-store";
 import { getInitials } from "@/lib/utils";
 import { MembersList } from "./MembersList.js";
+import { copyGroupInviteFromUi } from "@/services/invite-copy";
 
 /**
  * GroupsWorkspace — Watermelon-only groups management page (replaces legacy routes/Groups.tsx).
@@ -119,33 +120,7 @@ export function GroupsWorkspace() {
   }, [joinLink]);
 
   const handleCopyInviteLink = useCallback(async (groupId: string) => {
-    try {
-      const api = (
-        window as unknown as { screenlink?: import("../../../preload/api-types.js").ScreenLinkAPI }
-      ).screenlink;
-      if (api) {
-        await api.clipboardWriteText(
-          `https://screenlink.app/invite/${groupId}`,
-        );
-        toast("Invite link copied");
-      } else {
-        await navigator.clipboard.writeText(
-          `https://screenlink.app/invite/${groupId}`,
-        );
-        toast("Invite link copied");
-      }
-    } catch {
-      // Fallback
-      const ta = document.createElement("textarea");
-      ta.value = `https://screenlink.app/invite/${groupId}`;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      toast("Invite link copied");
-    }
+    await copyGroupInviteFromUi(groupId, "Invite link copied");
   }, []);
 
   const handleLeaveGroup = useCallback(
@@ -387,7 +362,7 @@ export function GroupsWorkspace() {
                 id="join-link"
                 value={joinLink}
                 onChange={(e) => setJoinLink(e.target.value)}
-                placeholder="https://screenlink.app/invite/..."
+                placeholder="Paste invite link or code"
               />
             </div>
           </div>

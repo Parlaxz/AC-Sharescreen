@@ -143,6 +143,8 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
 
     aliceSdk.peerJoined("bob");
     bobSdk.peerJoined("alice");
+    await alice.broadcastHello();
+    await bob.broadcastHello();
     for (let i = 0; i < 5; i++) await tick();
 
     expect(aliceRecord.online).toContain("bob");
@@ -185,6 +187,8 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
     // Establish mappings so group.state.update can be routed.
     aliceSdk.peerJoined("bob");
     bobSdk.peerJoined("alice");
+    await alice.broadcastHello();
+    await bob.broadcastHello();
     await tick();
     await tick();
 
@@ -194,7 +198,9 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
       state: { foo: "bar" },
     });
     for (let i = 0; i < 5; i++) await tick();
+    for (let i = 0; i < 5 && aliceRecord.messages.length < 1; i++) await tick();
     const before = aliceRecord.messages.length;
+    expect(before).toBe(1);
     // After valid message routing, before should be 1.
     // (The "hello" type messages are handled by the connection and don't
     //  reach onMessage because the connection intercepts them in routeMessage.)

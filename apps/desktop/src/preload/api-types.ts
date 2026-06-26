@@ -1,9 +1,9 @@
-import type { AudioMode } from "@screenlink/shared";
+import type { AudioMode, GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
 export interface ScreenLinkAPI {
   // Sources
   getSources: () => Promise<CaptureSourceDTO[]>;
-  setSource: (sourceId: string) => Promise<void>;
+  setSource: (sourceId: string | null) => Promise<void>;
   getSourceFingerprint: (sourceId: string) => Promise<Record<string, unknown> | null>;
   // Settings
   getSettings: () => Promise<PersistedSettings>;
@@ -119,6 +119,39 @@ export interface ScreenLinkAPI {
 }
 
 // ─── Quick Share types ───────────────────────────────────────────────────────
+
+// ─── Group IPC response DTOs ───────────────────────────────────────────
+
+/**
+ * Record returned from createGroup / joinGroup IPC handlers.
+ * Contains the group metadata needed to bootstrap runtime state.
+ */
+export interface GroupRecordDTO {
+  id: string;
+  sharedState: GroupSharedState;
+  lastClock: HybridTimestamp;
+}
+
+/**
+ * Shape returned by createGroup IPC handler:
+ *   { record, invite, link }
+ */
+export interface CreateGroupResponseDTO {
+  record: GroupRecordDTO;
+  invite: string;
+  link: string;
+}
+
+/**
+ * Shape returned by getGroupConnectionConfig IPC handler:
+ *   { controlRoomId, groupSecret }
+ */
+export interface GroupConnectionConfigDTO {
+  controlRoomId: string;
+  groupSecret: string;
+}
+
+// ─── Quick Share types ─────────────────────────────────────────────────
 
 export interface QuickShareConfigDTO {
   shortcutEnabled: boolean;

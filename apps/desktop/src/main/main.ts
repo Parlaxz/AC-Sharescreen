@@ -82,8 +82,9 @@ app.whenReady().then(() => {
   // ── Services ───────────────────────────────────────────────────────────
   const preloadPath = path.join(__dirname, "../preload/index.js");
 
-  windowManager = new WindowManager(preloadPath);
   settingsStore = new SettingsStore();
+  windowManager = new WindowManager(preloadPath, () => settingsStore.get().developerMode);
+  windowManager.setDeveloperMode(settingsStore.get().developerMode);
   secureStore = new SecureStore();
   logManager = new LogManager();
   loginItemManager = new LoginItemManager();

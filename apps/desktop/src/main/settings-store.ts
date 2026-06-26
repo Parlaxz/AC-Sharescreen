@@ -187,6 +187,16 @@ function applyMigrations(raw: unknown): PersistedSettings {
   if (s.lastAudioMode !== undefined) {
     s.lastAudioMode = normalizeAudioMode(s.lastAudioMode);
   }
+
+  // Stage 3.7 Task 1: Migrate stale synthetic built-in preset IDs to null.
+  // These were previously persisted by Quick Share as `builtin:<kind>`.
+  if (
+    typeof s.lastQuickSharePresetId === "string" &&
+    s.lastQuickSharePresetId.startsWith("builtin:")
+  ) {
+    s.lastQuickSharePresetId = null;
+  }
+
   return s as PersistedSettings;
 }
 
@@ -249,8 +259,8 @@ export class SettingsStore {
   private backupPath: string;
   private settings: PersistedSettings;
 
-  constructor() {
-    const userDataPath = app.getPath("userData");
+  constructor(basePath?: string) {
+    const userDataPath = basePath ?? app.getPath("userData");
     this.filePath = path.join(userDataPath, "settings.json");
     this.backupPath = path.join(userDataPath, "settings.json.bak");
     this.settings = this.load();

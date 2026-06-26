@@ -21,13 +21,34 @@ export interface StartShareInput {
 }
 
 /**
+ * Resolve the preload API (window.screenlink) for source approval.
+ * Returns null when the API is unavailable (tests, SSR).
+ */
+function getScreenlinkApi():
+  | { setSource: (id: string | null) => Promise<void> }
+  | null {
+  try {
+    const api = (
+      window as unknown as {
+        screenlink?: { setSource?: (id: string | null) => Promise<void> };
+      }
+    ).screenlink;
+    return api?.setSource ? (api as { setSource: (id: string | null) => Promise<void> }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Start sharing the given source in the given group using the given
  * optional quality override.
  *
- * Uses the Phase3 runtime's StreamSessionManager for the real stream
- * lifecycle (capture → publish → register → heartbeat). Updates the
- * Zustand store on success/failure. Preserves audio-degrade behavior
- * from StreamSessionManager.
+ * Approval order:
+ *   1) validate inputs
+ *   2) resolve preload API
+ *   3) call screenlink.setSource(source.id) — pre-approve the source
+ *   4) StreamSessionManager.startStream
+ *   5) on failure, clear approved source via setSource(null) if possible
  *
  * Throws on failure. Callers (ShareSetup, QuickShareDialog) are
  * responsible for showing toasts and closing their dialogs.
@@ -64,8 +85,24 @@ export async function startShare(input: StartShareInput): Promise<void> {
   });
   store.setLocalShareState("starting");
 
+  // Step 1: Pre-approve the capture source via the main process.
+  const api = getScreenlinkApi();
+  if (api) {
+    try {
+      await api.setSource(input.source.id);
+    } catch (approvalErr) {
+      store.setLocalShareState("error");
+      throw new Error(
+        `Source approval failed: ${approvalErr instanceof Error ? approvalErr.message : String(approvalErr)}`,
+      );
+    }
+  }
+
   const runtime = getRuntime();
   if (!runtime) {
+    if (api) {
+      api.setSource(null).catch(() => {});
+    }
     store.setLocalShareState("error");
     throw new Error("Phase3 runtime not available");
   }
@@ -129,6 +166,10 @@ export async function startShare(input: StartShareInput): Promise<void> {
     store.setIsSharing(true);
     store.setLocalShareState("sharing");
   } catch (err) {
+    // Clear approved source on failure if possible.
+    if (api) {
+      api.setSource(null).catch(() => {});
+    }
     store.setLocalShareState("error");
     throw err;
   }
@@ -155,14 +196,20 @@ export async function startShareLegacy(source: ShareSource): Promise<void> {
  *
  * Uses the Phase3 runtime's StreamSessionManager.stopStream for clean
  * teardown (broadcast stream.stopped, remove registry entry, close
- * viewer mappings, stop publication/capture). Resets store state on
- * completion.
+ * viewer mappings, stop publication/capture). Clears the approved
+ * capture source via setSource(null). Resets store state on completion.
  *
  * Safe to call when no share is active or when runtime is unavailable.
  */
 export async function stopShare(): Promise<void> {
   const store = useStore.getState();
   store.setLocalShareState("stopping");
+
+  // Clear the approved capture source.
+  const api = getScreenlinkApi();
+  if (api) {
+    api.setSource(null).catch(() => {});
+  }
 
   const runtime = getRuntime();
   if (!runtime) {

@@ -9,7 +9,16 @@ import {
 } from "@screenlink/shared";
 import { ProcessAudioController } from "../audio/ProcessAudioController.js";
 import type { SessionQualityOverride } from "./share-quality.js";
-import { validateSessionQualityOverride } from "./share-quality.js";
+import {
+  validateSessionQualityOverride,
+  DEFAULT_VIDEO_BITRATE_KBPS,
+  DEFAULT_SEND_WIDTH,
+  DEFAULT_SEND_HEIGHT,
+  DEFAULT_SEND_FPS,
+  DEFAULT_CODEC,
+  DEFAULT_CONTENT_HINT,
+  DEFAULT_DEGRADATION_PREFERENCE,
+} from "./share-quality.js";
 
 /**
  * Stream session state machine:
@@ -320,29 +329,25 @@ export class StreamSessionManager {
       // Derive effective publication settings with this precedence:
       //   1) session quality override (if any)
       //   2) group default
-      //   3) hardcoded fallback
+      //   3) hardcoded fallback from shared constants
       const ov = this._sessionQualityOverride;
       const videoBitrate =
-        ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? 650;
-      const videoWidth = ov?.sendWidth ?? quality?.video?.sendWidth ?? 854;
-      const videoHeight = ov?.sendHeight ?? quality?.video?.sendHeight ?? 480;
-      const videoFps = ov?.sendFps ?? quality?.video?.sendFps ?? 15;
-      // Stage 17: Additional fields from group defaults. Codec/content
-      // hint/degradation are taken from the session override only when
-      // explicitly present, otherwise from group defaults. Built-in
-      // presets omit these so the existing defaults remain in effect.
-      const codec = ov?.codec ?? quality?.video?.codec ?? "auto";
+        ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? DEFAULT_VIDEO_BITRATE_KBPS;
+      const videoWidth = ov?.sendWidth ?? quality?.video?.sendWidth ?? DEFAULT_SEND_WIDTH;
+      const videoHeight = ov?.sendHeight ?? quality?.video?.sendHeight ?? DEFAULT_SEND_HEIGHT;
+      const videoFps = ov?.sendFps ?? quality?.video?.sendFps ?? DEFAULT_SEND_FPS;
+      const codec = ov?.codec ?? quality?.video?.codec ?? DEFAULT_CODEC;
       const contentHint =
-        ov?.contentHint ?? quality?.video?.contentHint ?? "detail";
+        ov?.contentHint ?? quality?.video?.contentHint ?? DEFAULT_CONTENT_HINT;
       const degradationPreference =
         ov?.degradationPreference ??
         quality?.video?.degradationPreference ??
-        "maintain-resolution";
+        DEFAULT_DEGRADATION_PREFERENCE;
       const captureWidth =
-        ov?.captureWidth ?? quality?.video?.captureWidth ?? 854;
+        ov?.captureWidth ?? quality?.video?.captureWidth ?? DEFAULT_SEND_WIDTH;
       const captureHeight =
-        ov?.captureHeight ?? quality?.video?.captureHeight ?? 480;
-      const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? 15;
+        ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
+      const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
 
       // 0. Generate VDO credentials
       const vdoStreamId = generateVdoStreamId();
@@ -628,27 +633,27 @@ export class StreamSessionManager {
       // application below. Precedence remains:
       //   1) active session quality override (preserved across restart)
       //   2) group default
-      //   3) hardcoded fallback
+      //   3) hardcoded fallback from shared constants
       const syncState = this.runtime.getSyncService().getSyncState(oldGroupId);
       const quality = syncState?.state?.defaultQuality?.value ?? null;
       const ov = this._sessionQualityOverride;
       const videoBitrate =
-        ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? 650;
-      const videoWidth = ov?.sendWidth ?? quality?.video?.sendWidth ?? 854;
-      const videoHeight = ov?.sendHeight ?? quality?.video?.sendHeight ?? 480;
-      const videoFps = ov?.sendFps ?? quality?.video?.sendFps ?? 15;
-      const codec = ov?.codec ?? quality?.video?.codec ?? "auto";
+        ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? DEFAULT_VIDEO_BITRATE_KBPS;
+      const videoWidth = ov?.sendWidth ?? quality?.video?.sendWidth ?? DEFAULT_SEND_WIDTH;
+      const videoHeight = ov?.sendHeight ?? quality?.video?.sendHeight ?? DEFAULT_SEND_HEIGHT;
+      const videoFps = ov?.sendFps ?? quality?.video?.sendFps ?? DEFAULT_SEND_FPS;
+      const codec = ov?.codec ?? quality?.video?.codec ?? DEFAULT_CODEC;
       const contentHint =
-        ov?.contentHint ?? quality?.video?.contentHint ?? "detail";
+        ov?.contentHint ?? quality?.video?.contentHint ?? DEFAULT_CONTENT_HINT;
       const degradationPreference =
         ov?.degradationPreference ??
         quality?.video?.degradationPreference ??
-        "maintain-resolution";
+        DEFAULT_DEGRADATION_PREFERENCE;
       const captureWidth =
-        ov?.captureWidth ?? quality?.video?.captureWidth ?? 854;
+        ov?.captureWidth ?? quality?.video?.captureWidth ?? DEFAULT_SEND_WIDTH;
       const captureHeight =
-        ov?.captureHeight ?? quality?.video?.captureHeight ?? 480;
-      const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? 15;
+        ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
+      const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
 
       // Gate 4.4: apply capture constraints and read back actual
       // dimensions so downstream code operates on real values.
@@ -946,9 +951,14 @@ export class StreamSessionManager {
    * track where the underlying getDisplayMedia track supports them.
    * After applying, read back the actual settings and store them
    * so the rest of the pipeline never has to guess at the real
-   * capture dimensions. Capture constraints that the source does
-   * not support are silently dropped (the readback reflects
-   * reality).
+   * capture dimensions.
+   *
+   * Constraint application:
+   * - When capabilities expose ranges, clamp requested values to
+   *   the supported range before applying using ideal constraints.
+   * - Unsupported constraints (applyConstraints rejects) are silently
+   *   dropped — the readback reflects whatever the source produced.
+   * - Always reads back actual track settings as the source of truth.
    */
   private async applyCaptureConstraints(
     track: MediaStreamTrack,
@@ -960,9 +970,27 @@ export class StreamSessionManager {
       frameRate?: { max?: number; min?: number };
     };
     const constraints: MediaTrackConstraints = {};
-    if (caps.width) constraints.width = { ideal: requested.captureWidth };
-    if (caps.height) constraints.height = { ideal: requested.captureHeight };
-    if (caps.frameRate) constraints.frameRate = { ideal: requested.captureFps };
+    if (caps.width) {
+      const clamped = Math.max(
+        caps.width.min ?? 1,
+        Math.min(requested.captureWidth, caps.width.max ?? requested.captureWidth),
+      );
+      constraints.width = { ideal: clamped };
+    }
+    if (caps.height) {
+      const clamped = Math.max(
+        caps.height.min ?? 1,
+        Math.min(requested.captureHeight, caps.height.max ?? requested.captureHeight),
+      );
+      constraints.height = { ideal: clamped };
+    }
+    if (caps.frameRate) {
+      const clamped = Math.max(
+        caps.frameRate.min ?? 1,
+        Math.min(requested.captureFps, caps.frameRate.max ?? requested.captureFps),
+      );
+      constraints.frameRate = { ideal: clamped };
+    }
     try {
       await track.applyConstraints(constraints);
     } catch {

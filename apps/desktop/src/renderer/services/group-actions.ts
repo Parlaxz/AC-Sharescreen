@@ -1,24 +1,13 @@
-import type { ScreenLinkAPI } from "../../preload/api-types.js";
-import { useStore } from "../stores/main-store.js";
+import type {
+  CreateGroupResponseDTO,
+  GroupRecordDTO,
+} from "../../preload/api-types.js";
+import { attachGroupRecordToRuntime } from "./group-record-helper.js";
+import { getApi } from "./get-api.js";
 
 /**
- * Get the preload ScreenLinkAPI bridge.
- * Returns null if running outside Electron or if window is unavailable.
- */
-function getApi(): ScreenLinkAPI | null {
-  try {
-    return (
-      (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink ?? null
-    );
-  } catch {
-    // window may not be defined (e.g. Node.js test environment)
-    return null;
-  }
-}
-
-/**
- * Create a new group via the preload API, then update the store
- * and navigate to its overview.
+ * Create a new group via the preload API, attach it to the runtime,
+ * update the store, and navigate to its overview.
  *
  * Returns the new group ID on success.
  * Throws if the API is unavailable or the request fails.
@@ -27,54 +16,19 @@ export async function createGroupAction(groupName: string): Promise<string> {
   const api = getApi();
   if (!api) throw new Error("screenlink API not available");
 
-  // Call the real createGroup IPC handler
-  const result = (await api.createGroup({ groupName })) as {
-    groupId: string;
-    sharedState: {
-      name: { value: string };
-      members: Record<string, unknown>;
-    };
-  };
+  // Call the real createGroup IPC handler.
+  // Real shape: { record: GroupRecordDTO, invite: string, link: string }
+  const response = (await api.createGroup({ groupName })) as CreateGroupResponseDTO;
 
-  const groupId = result.groupId;
-  const groupName_ = result.sharedState.name.value;
-  const members = result.sharedState.members;
-
-  // Normalize members to the store's shape
-  const normalizedMembers: Record<
-    string,
-    { deviceId: string; displayName: string }
-  > = {};
-  for (const [k, v] of Object.entries(members)) {
-    const m = v as { deviceId?: string; displayName?: string };
-    normalizedMembers[k] = {
-      deviceId: m.deviceId ?? k,
-      displayName: m.displayName ?? k,
-    };
-  }
-
-  // Update store
-  const store = useStore.getState();
-  const newGroupsById = {
-    ...store.groupsById,
-    [groupId]: {
-      id: groupId,
-      name: groupName_,
-      members: normalizedMembers,
-    },
-  };
-  const newGroupOrder = [...store.groupOrder, groupId];
-  store.setGroups(newGroupsById, newGroupOrder);
-
-  // Select the new group and navigate to overview
-  store.selectGroup(groupId);
+  // Attach the group record to runtime + renderer store
+  const groupId = await attachGroupRecordToRuntime(response.record);
 
   return groupId;
 }
 
 /**
- * Join a group via invite link through the preload API, then update
- * the store and navigate to its overview.
+ * Join a group via invite link through the preload API, attach it to
+ * the runtime, update the store, and navigate to its overview.
  *
  * Returns the joined group ID on success.
  * Throws if the API is unavailable or the request fails.
@@ -83,49 +37,12 @@ export async function joinGroupAction(inviteLink: string): Promise<string> {
   const api = getApi();
   if (!api) throw new Error("screenlink API not available");
 
-  // Call the real joinGroup IPC handler
-  const result = (await api.joinGroup({ link: inviteLink })) as {
-    groupId: string;
-    sharedState: {
-      name: { value: string };
-      members: Record<string, unknown>;
-    };
-  };
+  // Call the real joinGroup IPC handler.
+  // Real shape: GroupRecordDTO (the record directly)
+  const record = (await api.joinGroup({ link: inviteLink })) as GroupRecordDTO;
 
-  const groupId = result.groupId;
-  const groupName = result.sharedState.name.value;
-  const members = result.sharedState.members;
-
-  // Normalize members
-  const normalizedMembers: Record<
-    string,
-    { deviceId: string; displayName: string }
-  > = {};
-  for (const [k, v] of Object.entries(members)) {
-    const m = v as { deviceId?: string; displayName?: string };
-    normalizedMembers[k] = {
-      deviceId: m.deviceId ?? k,
-      displayName: m.displayName ?? k,
-    };
-  }
-
-  // Update store
-  const store = useStore.getState();
-  const newGroupsById = {
-    ...store.groupsById,
-    [groupId]: {
-      id: groupId,
-      name: groupName,
-      members: normalizedMembers,
-    },
-  };
-  const newGroupOrder = store.groupOrder.includes(groupId)
-    ? store.groupOrder
-    : [...store.groupOrder, groupId];
-  store.setGroups(newGroupsById, newGroupOrder);
-
-  // Select the joined group and navigate to overview
-  store.selectGroup(groupId);
+  // Attach the group record to runtime + renderer store
+  const groupId = await attachGroupRecordToRuntime(record);
 
   return groupId;
 }

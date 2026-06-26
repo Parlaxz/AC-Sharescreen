@@ -9,7 +9,7 @@ import {
 import { GroupConnectionManager } from "../src/renderer/services/group-connection-manager.js";
 import type { GroupSyncService, SyncPersistenceAdapter } from "../src/renderer/services/group-sync-service.js";
 import { useStore } from "../src/renderer/stores/main-store.js";
-import { initializeAppRuntime } from "../src/renderer/App.js";
+import { initializeAppRuntime } from "../src/renderer/services/initialize-app-runtime.js";
 
 // ─── Mock helpers ───────────────────────────────────────────────────────────
 
