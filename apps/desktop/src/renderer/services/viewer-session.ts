@@ -1,17 +1,20 @@
 import { ViewerClient } from "@screenlink/vdo-adapter";
 import { getRuntime } from "./phase3-runtime.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
+import { extractTrackEvent } from "./sdk-event-normalizer.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /**
- * Minimal event surface of ViewerClient needed for the join flow.
- * The @screenlink/vdo-adapter does not export a public interface for
- * these SDK-level events, so we scope the unknown cast to this one
- * local helper rather than repeating it at every call site.
+ * ViewerClient event surface corrected for SDK 1.3.18 EventTarget semantics.
+ *
+ * SDK 1.3.18 fires events as CustomEvent where the payload lives under
+ * `event.detail`. The old positional-arg pattern `(track, stream)` is wrong;
+ * the correct handler signature receives a single Event object.
  */
 interface ViewerClientEvents {
-  on(event: "track", listener: (track: MediaStreamTrack, stream: MediaStream) => void): void;
+  on(event: "track", listener: (event: { detail: unknown }) => void): void;
+  on(event: "trackAdded", listener: (event: { detail: unknown }) => void): void;
   on(event: "remoteAdded", listener: () => void): void;
 }
 
@@ -45,6 +48,11 @@ export interface ViewerSessionEvents {
   onError?: (error: string) => void;
 }
 
+// ─── Constants ─────────────────────────────────────────────────────────────
+
+/** Max time (ms) to wait for a video track after view() before timing out. */
+const VIEWER_READINESS_TIMEOUT_MS = 15_000;
+
 // ─── ViewerSession ─────────────────────────────────────────────────────────
 
 /**
@@ -61,6 +69,13 @@ export interface ViewerSessionEvents {
  * The caller (typically ViewerWorkspace) binds a <video> element via
  * `bindVideoElement()`. When the remote MediaStream arrives, it is
  * automatically attached to that element.
+ *
+ * ABANDONED FLOW PREVENTION:
+ *   A generation counter is incremented on every start() call. After every
+ *   awaited operation in runJoinFlow(), the flow verifies its generation is
+ *   still current. If destroy() or a new start() replaces the session, old
+ *   flows exit immediately without creating ViewerClient, calling view(),
+ *   sending bind, mutating state, or attaching tracks.
  */
 export class ViewerSession {
   private _state: ViewerSessionState = "idle";
@@ -68,6 +83,16 @@ export class ViewerSession {
   private videoElement: HTMLVideoElement | null = null;
   private _receivedStream: MediaStream | null = null;
   private _destructed = false;
+
+  /** Generation counter: incremented on start(), checked after every await. */
+  private static nextGeneration = 0;
+  private _generation = -1;
+
+  /** Readiness timeout handle for cleanup. */
+  private _readinessTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Track IDs already in the received stream (deduplication). */
+  private _trackIdsInStream = new Set<string>();
 
   // Self-viewing support — when the host is the local device,
   // we pipe the capture stream directly instead of VDO relay.
@@ -116,7 +141,20 @@ export class ViewerSession {
       this.videoElement = options.videoElement;
     }
 
+    // Bump generation to invalidate any prior in-flight flow
+    ViewerSession.nextGeneration++;
+    this._generation = ViewerSession.nextGeneration;
+
     await this.runJoinFlow();
+  }
+
+  /**
+   * Check whether this session's generation is still current.
+   * After every await in runJoinFlow(), this guard prevents abandoned
+   * flows from continuing.
+   */
+  private isCurrent(): boolean {
+    return !this._destructed && this._generation === ViewerSession.nextGeneration;
   }
 
   /**
@@ -126,9 +164,27 @@ export class ViewerSession {
   bindVideoElement(el: HTMLVideoElement | null): void {
     this.videoElement = el;
     if (el && this._receivedStream) {
-      el.srcObject = this._receivedStream;
-      el.play().catch(() => {});
+      this.attachStreamToElement(el, this._receivedStream);
     }
+  }
+
+  /**
+   * Attach a MediaStream to a video element with autoplay and playsInline.
+   * Calls play() and surfaces autoplay failures.
+   * Applies current muted/volume state.
+   */
+  private attachStreamToElement(el: HTMLVideoElement, stream: MediaStream): void {
+    el.srcObject = stream;
+    el.autoplay = true;
+    el.playsInline = true;
+
+    // Preserve current mute/volume state — do NOT force el.muted = false.
+    // The caller manages mute via volume/muted refs (e.g. media controls).
+
+    el.play().catch((reason) => {
+      // Surface real autoplay failures rather than swallowing them
+      console.warn('[ViewerSession] video.play() failed (autoplay may be blocked):', reason);
+    });
   }
 
   /**
@@ -139,6 +195,12 @@ export class ViewerSession {
     if (this._destructed) return;
     this.cleanupClient();
     this._receivedStream = null;
+    this._trackIdsInStream.clear();
+
+    // Bump generation so in-flight flows from prior retry are abandoned
+    ViewerSession.nextGeneration++;
+    this._generation = ViewerSession.nextGeneration;
+
     await this.runJoinFlow();
   }
 
@@ -147,8 +209,10 @@ export class ViewerSession {
    */
   stop(): void {
     if (this._state === "ended") return;
+    this.cancelReadinessTimer();
     this.cleanupClient();
     this._receivedStream = null;
+    this._trackIdsInStream.clear();
     this.setState("ended");
   }
 
@@ -159,8 +223,10 @@ export class ViewerSession {
   destroy(): void {
     if (this._destructed) return;
     this._destructed = true;
+    this.cancelReadinessTimer();
     this.cleanupClient();
     this._receivedStream = null;
+    this._trackIdsInStream.clear();
     this.videoElement = null;
     this._state = "ended";
     this.onStateChange = null;
@@ -171,7 +237,7 @@ export class ViewerSession {
   // ── Join flow ───────────────────────────────────────────────────────
 
   private async runJoinFlow(): Promise<void> {
-    if (this._destructed) return;
+    if (!this.isCurrent()) return;
 
     this.setState("requesting-join");
 
@@ -217,9 +283,15 @@ export class ViewerSession {
         requestId,
       });
 
+      // GENERATION CHECK
+      if (!this.isCurrent()) return;
+
       // 3) Wait for stream.join.response
       this.setState("waiting-for-host");
       const response = await runtime.waitForJoinResponse(requestId, 30_000);
+
+      // GENERATION CHECK
+      if (!this.isCurrent()) return;
 
       if (!response.accepted) {
         this.setError(response.reason ?? "join rejected");
@@ -236,23 +308,91 @@ export class ViewerSession {
 
       this.setState("accepted");
 
+      // GENERATION CHECK
+      if (!this.isCurrent()) return;
+
       // 5) Create ViewerClient and connect
       this.setState("connecting-media");
       const viewerClient = new ViewerClient();
       this.viewerClient = viewerClient;
 
-      // Register track event to capture the received MediaStream
-      // (cast scoped to asEventTarget — single documented escape hatch)
+      // Register track event handlers to capture the received MediaStream.
+      // SDK 1.3.18 fires trackAdded (primary) with
+      //   CustomEvent detail = { track, uuid, streamID }
+      // Older SDK paths may fire the "track" event with
+      //   CustomEvent detail = { track, streams, uuid }.
+      // We use the extractTrackEvent helper to normalize both shapes safely.
       const events = asEventTarget(viewerClient);
-      events.on("track", (track, stream) => {
-        this._receivedStream = stream;
-        if (this.videoElement) {
-          this.videoElement.srcObject = stream;
-          this.videoElement.play().catch(() => {});
+
+      const handleTrackEvent = (event: { detail: unknown }): void => {
+        // Abandoned-flow guard: if this session was destroyed/replaced, skip
+        if (!this.isCurrent()) return;
+
+        const normalized = extractTrackEvent(event);
+        if (!normalized.valid || !normalized.track) return;
+
+        const track = normalized.track as MediaStreamTrack;
+
+        // Only video tracks should trigger the watching transition
+        const isVideo = track.kind === "video";
+
+        // Create or get the stable received stream.
+        // On first track event, prefer streams[0] from the SDK event (when
+        // available and valid), otherwise create a new MediaStream (or fall
+        // back to a plain object in test environments where MediaStream is
+        // unavailable).
+        if (!this._receivedStream) {
+          if (
+            normalized.streams.length > 0 &&
+            normalized.streams[0] !== null &&
+            typeof normalized.streams[0] === "object"
+          ) {
+            this._receivedStream = normalized.streams[0] as MediaStream;
+            // Seed the dedupe set with any tracks already in the adopted
+            // stream so we do not insert the same track a second time.
+            if (typeof (this._receivedStream as unknown as Record<string, unknown>).getTracks === "function") {
+              const existing = this._receivedStream.getTracks();
+              for (const t of existing) {
+                this._trackIdsInStream.add(t.id);
+              }
+            }
+          } else {
+            try {
+              this._receivedStream = new MediaStream();
+            } catch {
+              // Non-browser environment (tests): use a plain object
+              this._receivedStream = { addTrack: () => {} } as unknown as MediaStream;
+            }
+          }
         }
-        this.onStreamReceived?.(stream);
-        this.setState("watching");
-      });
+
+        // Avoid duplicate track insertion
+        if (track.id && !this._trackIdsInStream.has(track.id)) {
+          this._trackIdsInStream.add(track.id);
+          // Defensive: only call addTrack if the stream supports it
+          if (typeof (this._receivedStream as unknown as Record<string, unknown>).addTrack === "function") {
+            this._receivedStream.addTrack(track);
+          }
+        }
+
+        // Attach to video element if bound
+        if (this.videoElement && this._receivedStream) {
+          this.attachStreamToElement(this.videoElement, this._receivedStream);
+        }
+
+        this.onStreamReceived?.(this._receivedStream);
+
+        // Only transition to watching when a live video track is received
+        if (isVideo) {
+          this.cancelReadinessTimer();
+          this.setState("watching");
+        }
+      };
+
+      // Primary: SDK 1.3.18 trackAdded (real Alice/Bob watch path)
+      events.on("trackAdded", handleTrackEvent);
+      // Backward compat: older event shape
+      events.on("track", handleTrackEvent);
 
       // Also handle remoteAdded for older SDK signaling
       events.on("remoteAdded", () => {
@@ -270,29 +410,79 @@ export class ViewerSession {
       const vdoPassword = response.password ?? responseMediaSessionId;
       await viewerClient.createAndConnect(vdoPassword);
 
+      // GENERATION CHECK
+      if (!this.isCurrent()) return;
+
       // View the stream
       const vdoStreamId = response.streamId ?? this.logicalStreamId;
       await viewerClient.view(vdoStreamId, runtime.displayName ?? "Viewer");
 
+      // GENERATION CHECK
+      if (!this.isCurrent()) return;
+
       // 6) Send media.bind
+      // Wait for data channel to open, then send with preference: "any".
+      // The sendMediaBind method now handles waiting for dataChannelOpen
+      // and bounded retry internally.
       const sdk = viewerClient.getSDK();
       if (sdk && joinToken) {
         for (const [publisherUuid] of sdk.connections) {
           try {
             await viewerClient.sendMediaBind(publisherUuid, joinToken, responseMediaSessionId);
-          } catch {
-            // One will succeed
+            console.log('[ViewerSession] media.bind delivered to', publisherUuid.slice(0, 8) + '…');
+          } catch (err) {
+            console.warn('[ViewerSession] media.bind failed for', publisherUuid.slice(0, 8) + '…', err);
           }
         }
       }
 
-      // If media already arrived before media.bind, state is already "watching"
+      // GENERATION CHECK
+      if (!this.isCurrent()) return;
+
+      // 7) Viewer readiness timeout
+      // If after view() we only received audio (no video track), remain
+      // "connecting-media" and start a timeout to surface the error.
       if (this._state !== "watching") {
-        this.setState("watching");
+        this.startReadinessTimeout();
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.setError(message);
+    }
+  }
+
+  /**
+   * Start viewer readiness timeout. If no video track arrives within
+   * VIEWER_READINESS_TIMEOUT_MS, emit a precise error.
+   */
+  private startReadinessTimeout(): void {
+    this.cancelReadinessTimer();
+    this._readinessTimer = setTimeout(() => {
+      this._readinessTimer = null;
+
+      // Only fire if still waiting for video
+      if (this._destructed || this._state === "watching" || this._state === "error" || this._state === "ended") return;
+
+      // Gather diagnostics for the timeout error
+      const stream = this._receivedStream;
+      const videoTracks = stream?.getVideoTracks() ?? [];
+      const audioTracks = stream?.getAudioTracks() ?? [];
+
+      console.warn('[ViewerSession] readiness timeout', {
+        state: this._state,
+        hasReceivedStream: stream !== null,
+        videoTrackCount: videoTracks.length,
+        audioTrackCount: audioTracks.length,
+      });
+
+      this.setError("Connected, but no video track was received");
+    }, VIEWER_READINESS_TIMEOUT_MS);
+  }
+
+  private cancelReadinessTimer(): void {
+    if (this._readinessTimer) {
+      clearTimeout(this._readinessTimer);
+      this._readinessTimer = null;
     }
   }
 
@@ -347,6 +537,7 @@ export class ViewerSession {
 
   private setError(error: string): void {
     if (this._destructed) return;
+    this.cancelReadinessTimer();
     this._state = "error";
     this.onStateChange?.("error");
     this.onError?.(error);

@@ -29,6 +29,20 @@ export interface DataEventDetail {
 }
 
 /**
+ * Shape of the detail object emitted for `track` / `trackAdded` events.
+ * SDK 1.3.18 fires CustomEvent with detail = { track, streams, uuid }.
+ */
+export interface TrackEventDetail {
+  /** The received MediaStreamTrack */
+  track?: unknown;
+  /** MediaStream array the track belongs to (array of 1 for normal usage) */
+  streams?: unknown;
+  /** UUID of the remote peer that sent this track */
+  uuid?: unknown;
+  [key: string]: unknown;
+}
+
+/**
  * Result of extracting a peer UUID from a raw SDK event argument.
  * The raw argument can be a string UUID (rare), an Event object whose
  * detail.uuid is the UUID, or any other value (which we reject).
@@ -138,4 +152,70 @@ export function extractDataAndUuid(
   }
 
   return { data: null, uuid: null, malformed: true };
+}
+
+/**
+ * Extract track, streams, and UUID from a `track` event object fired by SDK 1.3.18.
+ *
+ * The SDK fires CustomEvent with `event.detail = { track: MediaStreamTrack, streams: MediaStream[], uuid }`.
+ * Returns `valid: false` when the event cannot be normalized; callers must treat that as a no-op.
+ *
+ * In node test environments where `MediaStreamTrack`/`MediaStream` are unavailable,
+ * duck-type checking is used: a `track` is accepted if it has `kind`, `id`, `enabled`, `readyState` properties.
+ */
+export function extractTrackEvent(
+  event: unknown,
+): { track: unknown; streams: unknown[]; uuid: string | null; valid: boolean } {
+  if (!event || typeof event !== "object") {
+    return { track: null, streams: [], uuid: null, valid: false };
+  }
+
+  const detail = (event as { detail?: unknown }).detail;
+  if (!detail || typeof detail !== "object") {
+    return { track: null, streams: [], uuid: null, valid: false };
+  }
+
+  const trackDetail = detail as TrackEventDetail;
+  const track = trackDetail.track;
+
+  // Accept a track if it looks like a MediaStreamTrack (duck-type for test compat)
+  const trackValid =
+    track !== null &&
+    track !== undefined &&
+    typeof track === "object" &&
+    "kind" in (track as object) &&
+    "id" in (track as object);
+
+  // Extract streams array if present
+  let streams: unknown[] = [];
+  if (Array.isArray(trackDetail.streams)) {
+    streams = trackDetail.streams;
+  }
+
+  // Extract UUID from the detail object
+  const uuidResult = extractPeerUuid(detail);
+
+  return {
+    track: trackValid ? track : null,
+    streams,
+    uuid: uuidResult.valid ? uuidResult.uuid : null,
+    valid: trackValid,
+  };
+}
+
+/**
+ * Extract data and UUID from a `dataReceived` event fired by SDK 1.3.18.
+ *
+ * The SDK fires CustomEvent with `event.detail = { data, uuid, streamID }`.
+ * Wraps extractDataAndUuid for a cleaner single-arg return type.
+ */
+export function extractDataReceivedEvent(
+  event: unknown,
+): { data: unknown; uuid: string | null; valid: boolean } {
+  const result = extractDataAndUuid(event, undefined);
+  return {
+    data: result.data,
+    uuid: result.uuid,
+    valid: !result.malformed && result.uuid !== null,
+  };
 }

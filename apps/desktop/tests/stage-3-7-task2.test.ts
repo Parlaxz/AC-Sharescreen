@@ -294,9 +294,18 @@ function setupMockRuntime() {
   mockViewerClientDisconnect.mockResolvedValue(undefined);
   mockViewerClientGetSDK.mockReturnValue({ connections: [] });
   mockViewerClientSendMediaBind.mockResolvedValue(undefined);
+  // SDK 1.3.18 fires track events as CustomEvent with event.detail = { track, streams, uuid }.
+  // Fire a video track so the join flow transitions to "watching".
   mockViewerClientOn.mockImplementation((event: string, cb: (...args: any[]) => void) => {
-    // Store handler for later invocation if needed
-    return undefined;
+    if (event === "track") {
+      cb({
+        detail: {
+          track: { kind: "video", id: "vt-default", enabled: true, readyState: "live" },
+          streams: [{ id: "s-default" }],
+          uuid: "peer-viewer",
+        },
+      });
+    }
   });
   mockViewerClientConstructor.mockClear();
 }
@@ -575,16 +584,18 @@ describe("Task 2 — ViewerSession", () => {
     const { ViewerSession } = await import("../src/renderer/services/viewer-session.js");
     const session = new ViewerSession();
 
-    // Simulate track event firing after creation
+    // Simulate track event firing after creation with SDK 1.3.18 event-detail shape:
+    // handler receives (event) where event.detail = { track, streams, uuid }
+    // Fire synchronously so the state transition to "watching" is observable after start().
     mockViewerClientOn.mockImplementation((event: string, cb: (...args: any[]) => void) => {
       if (event === "track") {
-        // Fire the track event after a microtask to simulate async arrival
-        setTimeout(() => {
-          cb(
-            { kind: "video" } as MediaStreamTrack,
-            { getTracks: () => [] } as MediaStream,
-          );
-        }, 0);
+        cb({
+          detail: {
+            track: { kind: "video", id: "vt-1", enabled: true, readyState: "live" },
+            streams: [{ id: "s-1" }],
+            uuid: "peer-1",
+          },
+        });
       }
     });
 

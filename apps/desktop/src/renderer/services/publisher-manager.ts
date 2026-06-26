@@ -1,6 +1,7 @@
 import { HostPublisher } from "@screenlink/vdo-adapter";
 import type { MediaStatsSnapshot } from "./media-stats-service.js";
 import type { ProcessAudioController } from "../audio/ProcessAudioController.js";
+import { extractDataReceivedEvent } from "./sdk-event-normalizer.js";
 
 export type AudioState = "disabled" | "active" | "error";
 
@@ -215,24 +216,47 @@ export class PublisherManager {
       throw new Error(`audio-track-missing-before-publish:${this.appliedAudioMode}`);
     }
 
+    // ── Pre-publish diagnostics ───────────────────────────────────
+    // Safely log combined stream counts, track states, and video settings.
+    const videoTrack = stream.getVideoTracks()[0];
+    const audioTracks = stream.getAudioTracks();
+    const videoSettings = videoTrack?.getSettings?.() ?? null;
+
     console.log('[PublisherManager] combined stream', {
       managerInstanceId: this.instanceId,
       videoTracks: stream.getVideoTracks().length,
-      audioTracks: stream.getAudioTracks().length,
+      audioTracks: audioTracks.length,
       controllerId: this.audioController?.getInstanceId?.() ?? null,
     });
 
-    // Log combined stream contents for diagnostics
-    console.table(
-      stream.getTracks().map((track) => ({
-        id: track.id,
-        kind: track.kind,
-        enabled: track.enabled,
-        muted: track.muted,
-        readyState: track.readyState,
-        label: track.label,
+    console.log('[PublisherManager] pre-publish track diagnostics', {
+      videoTrack: videoTrack ? {
+        id: videoTrack.id,
+        kind: videoTrack.kind,
+        enabled: videoTrack.enabled,
+        muted: videoTrack.muted,
+        readyState: videoTrack.readyState,
+        label: videoTrack.label,
+        contentHint: (videoTrack as MediaStreamTrack & { contentHint?: string }).contentHint,
+      } : null,
+      videoSettings: videoSettings ? {
+        width: videoSettings.width,
+        height: videoSettings.height,
+        frameRate: videoSettings.frameRate,
+        deviceId: videoSettings.deviceId ? '(present)' : undefined,
+      } : null,
+      audioTracks: audioTracks.map((t) => ({
+        id: t.id,
+        kind: t.kind,
+        enabled: t.enabled,
+        muted: t.muted,
+        readyState: t.readyState,
+        label: t.label,
       })),
-    );
+      requestedVideoBitrate: config.videoBitrate,
+      requestedResolution: `${config.videoWidth}x${config.videoHeight} @ ${config.videoFps}fps`,
+      requestedCodec: config.codec ?? 'auto',
+    });
 
     const publisher = new HostPublisher();
 
@@ -245,21 +269,36 @@ export class PublisherManager {
     });
 
     // Register dataReceived handler for media.bind messages (Stage 5)
-    // Uses the actual media peer UUID from the VDO SDK callback.
+    // Uses EventTarget CustomEvent semantics (SDK 1.3.18): the SDK passes
+    // a single Event argument whose detail = { data, uuid, streamID }.
+    // The extractDataReceivedEvent helper normalizes this safely.
     if (this.mediaBindHandler) {
       const sdk = publisher.getSDK();
       if (sdk) {
-        sdk.on("dataReceived", (data: unknown, peerUuid: unknown) => {
-          const pUuid = String(peerUuid);
-          // data is the raw payload received via the VDO data channel
-          // Only forward messages with type "media.bind" to prevent
-          // processing non-bind messages as bind payloads.
-          if (data && typeof data === "object") {
-            const msg = data as Record<string, unknown>;
-            if (msg.type === "media.bind" && msg.token && typeof msg.token === "string") {
-              this.mediaBindHandler!(pUuid, msg.token);
-            }
+        sdk.on("dataReceived", (...args: unknown[]) => {
+          const normalized = extractDataReceivedEvent(args[0]);
+          if (!normalized.valid || !normalized.data) return;
+          const data = normalized.data as Record<string, unknown>;
+          if (data.type === "media.bind" && data.token && typeof data.token === "string") {
+            this.mediaBindHandler!(normalized.uuid!, data.token);
+            console.log('[PublisherManager] media.bind consumed', {
+              peerUuid: normalized.uuid?.slice(0, 8) + '…',
+              bindType: 'media.bind',
+            });
           }
+        });
+      }
+    }
+
+    // Register peerConnected handler for viewer-connected sender diagnostics.
+    // When a viewer peer connects (after successful binding), log the resolved
+    // video and audio senders for debugging.
+    // Defensive check: if SDK mock or older SDK doesn't support .on, skip.
+    {
+      const sdk = publisher.getSDK();
+      if (sdk && typeof (sdk as { on?: unknown }).on === "function") {
+        (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on("peerConnected", (...args: unknown[]) => {
+          this.logSenderDiagnostics('viewer-connected');
         });
       }
     }
@@ -319,26 +358,40 @@ export class PublisherManager {
     this.config = config;
     this.setState("sharing");
 
-    // Log audio sender presence immediately after publish
+    // Log sender presence immediately after publish
+    this.logSenderDiagnostics('after-publish');
+  }
+
+  /**
+   * Log sender diagnostics for all publisher peer connections.
+   * Context label distinguishes initial publish vs viewer-connected re-evaluation.
+   * Never logs tokens or other secrets.
+   */
+  private logSenderDiagnostics(context: string): void {
+    if (!this.publisher) return;
     try {
-      const sdk = publisher.getSDK();
-      if (sdk) {
-        const entries = Array.from(sdk.connections.entries());
-        const senders = entries.flatMap(([, g]) => {
-          const pc = g.publisher?.pc;
-          return pc ? pc.getSenders() : [];
-        });
-        console.table(
-          senders.map((s) => ({
-            kind: s.track?.kind,
-            trackId: s.track?.id,
-            enabled: s.track?.enabled,
-            readyState: s.track?.readyState,
-          })),
-        );
+      const sdk = this.publisher.getSDK();
+      if (!sdk) return;
+      const entries = Array.from(sdk.connections.entries());
+      const allSenders = entries.flatMap(([uuid, g]) => {
+        const pc = g.publisher?.pc;
+        if (!pc) return [];
+        return pc.getSenders().map((s) => ({
+          peer: uuid.slice(0, 8) + '…',
+          kind: s.track?.kind ?? 'null',
+          trackId: s.track?.id?.slice(0, 8) + '…',
+          enabled: s.track?.enabled,
+          muted: s.track?.muted,
+          readyState: s.track?.readyState,
+        }));
+      });
+      if (allSenders.length > 0) {
+        console.log(`[PublisherManager] sender diagnostics [${context}]`, allSenders);
+      } else {
+        console.log(`[PublisherManager] no senders yet [${context}]`);
       }
     } catch (err) {
-      console.warn("[PublisherManager] Sender diagnostic failed:", err);
+      console.warn(`[PublisherManager] Sender diagnostic failed [${context}]:`, err);
     }
   }
 

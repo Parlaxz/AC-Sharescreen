@@ -23,6 +23,16 @@ export class ViewerClient {
   /** Stage 8: Tracked requested codec for applying preferences on new connections */
   private _requestedCodec: string = "auto";
 
+  /**
+   * Per-UUID data channel waiter state.
+   * Each target UUID gets its own promise so one peer opening cannot
+   * consume another peer's waiter. SDK 1.3.18 fires `dataChannelOpen`
+   * as a CustomEvent with `event.detail.uuid` or (defensively) a direct
+   * string UUID as the first argument.
+   */
+  private _dataChannelWaiters = new Map<string, { promise: Promise<void>; resolve: () => void }>();
+  private _dataChannelsOpened = new Set<string>();
+
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
     if (this.sdk) {
@@ -82,7 +92,45 @@ export class ViewerClient {
       this.applyCodecPreferencesOnExistingConnections();
     });
 
+    // Set up dataChannelOpen tracking.
+    // In SDK 1.3.18, this fires as a CustomEvent with detail = { uuid }.
+    this.setupDataChannelOpenHandler();
+
     await withTimeout(this.sdk!.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
+  }
+
+  /**
+   * Register the dataChannelOpen handler that resolves per-UUID waiters.
+   * SDK 1.3.18 CustomEvent with detail.uuid pinpoints which peer's channel opened.
+   * Defensively also accepts a direct string UUID as the first argument.
+   */
+  private setupDataChannelOpenHandler(): void {
+    if (!this.sdk) return;
+    this.sdk.on("dataChannelOpen", (...args: unknown[]) => {
+      const raw = args[0];
+      let uuid: string | undefined;
+
+      // 1) Direct string UUID (defensive fallback for legacy / tests)
+      if (typeof raw === "string" && raw.trim().length > 0 && raw.trim() !== "[object Object]") {
+        uuid = raw.trim();
+      }
+      // 2) EventTarget / CustomEvent with detail.uuid (SDK 1.3.18 standard path)
+      else if (raw && typeof raw === "object") {
+        const detail = (raw as { detail?: { uuid?: string } }).detail;
+        if (detail && typeof detail.uuid === "string") {
+          uuid = detail.uuid;
+        }
+      }
+
+      if (uuid) {
+        this._dataChannelsOpened.add(uuid);
+        const waiter = this._dataChannelWaiters.get(uuid);
+        if (waiter) {
+          waiter.resolve();
+          this._dataChannelWaiters.delete(uuid);
+        }
+      }
+    });
   }
 
   /**
@@ -127,12 +175,50 @@ export class ViewerClient {
   }
 
   /**
+   * Wait for the VDO data channel to open for a specific peer UUID.
+   * If the channel is already recorded as open, resolves immediately.
+   * Otherwise creates a per-UUID waiter promise that resolves when the
+   * next dataChannelOpen event matches this UUID.
+   * Times out after `timeout` ms (default 15s).
+   *
+   * Per-UUID state prevents one peer's dataChannelOpen from racing
+   * and consuming another peer's waiter.
+   *
+   * Safe to call before `createAndConnect` — will wait until SDK is created
+   * and the data channel opens.
+   */
+  async waitForDataChannelOpen(
+    targetUuid: string,
+    timeout = 15_000,
+  ): Promise<void> {
+    // Already open
+    if (this._dataChannelsOpened.has(targetUuid)) return;
+
+    // Get or create a per-UUID waiter
+    let waiter = this._dataChannelWaiters.get(targetUuid);
+    if (!waiter) {
+      let resolve: () => void;
+      const promise = new Promise<void>((r) => { resolve = r; });
+      waiter = { promise, resolve: resolve! };
+      this._dataChannelWaiters.set(targetUuid, waiter);
+    }
+
+    // Wait for this UUID's data channel to open
+    await withTimeout(
+      waiter.promise,
+      timeout,
+      `Data channel open timed out for peer ${targetUuid}`,
+    );
+  }
+
+  /**
    * Send a media.bind message to the publisher over the VDO data channel.
    * Uses the actual media SDK connection (not the group control channel).
    *
-   * The targetUuid should be the publisher's media peer UUID (obtained during
-   * the group control join flow). The publisher uses this actual media peer UUID
-   * to validate the binding.
+   * Waits for the data channel to open before sending. Retries on failure
+   * with bounded attempts. Does NOT force the deprecated `type: "publisher"`
+   * routing — uses `preference: "any"` so the SDK routes through any available
+   * data channel.
    *
    * Stage 5: Correct media.bind transport uses the actual media SDK data channel,
    * not the group control envelope senderDeviceId.
@@ -150,7 +236,27 @@ export class ViewerClient {
       mediaSessionId: mediaSessionId ?? "",
     };
 
-    await sendControlMessage(this.sdk, payload, targetUuid, "publisher");
+    // Wait for data channel to open before sending
+    await this.waitForDataChannelOpen(targetUuid);
+
+    // Attempt to send with bounded retry
+    const maxAttempts = 5;
+    const retryDelayMs = 500;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await sendControlMessage(this.sdk, payload, targetUuid);
+        return; // Success — stop
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
+        }
+      }
+    }
+
+    throw lastError ?? new Error("media.bind send failed after max attempts");
   }
 
   /**

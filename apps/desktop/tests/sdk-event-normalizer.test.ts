@@ -8,7 +8,7 @@
  * letting `String(event)` produce the literal `[object Object]`.
  */
 import { describe, it, expect } from "vitest";
-import { extractPeerUuid, extractDataAndUuid } from "../src/renderer/services/sdk-event-normalizer.js";
+import { extractPeerUuid, extractDataAndUuid, extractTrackEvent, extractDataReceivedEvent } from "../src/renderer/services/sdk-event-normalizer.js";
 
 describe("extractPeerUuid", () => {
   it("accepts a direct string UUID", () => {
@@ -128,5 +128,93 @@ describe("extractDataAndUuid", () => {
     );
     expect(r.uuid).toBe("peer-4");
     expect(r.malformed).toBe(false);
+  });
+});
+
+describe("extractTrackEvent", () => {
+  const mockTrack = { kind: "video", id: "track-1", enabled: true, readyState: "live", label: "test" };
+
+  it("extracts track, streams, and uuid from an Event-style detail object", () => {
+    const r = extractTrackEvent({
+      detail: { track: mockTrack, streams: [{ id: "stream-1" }], uuid: "peer-video-1" },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.track).toBe(mockTrack);
+    expect(r.streams).toHaveLength(1);
+    expect(r.uuid).toBe("peer-video-1");
+  });
+
+  it("returns empty streams when detail has no streams field", () => {
+    const r = extractTrackEvent({
+      detail: { track: mockTrack, uuid: "peer-video-2" },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.track).toBe(mockTrack);
+    expect(r.streams).toEqual([]);
+    expect(r.uuid).toBe("peer-video-2");
+  });
+
+  it("returns valid=false when event is null", () => {
+    const r = extractTrackEvent(null);
+    expect(r.valid).toBe(false);
+    expect(r.track).toBeNull();
+    expect(r.uuid).toBeNull();
+  });
+
+  it("returns valid=false when event is a plain string", () => {
+    const r = extractTrackEvent("[object Object]");
+    expect(r.valid).toBe(false);
+  });
+
+  it("returns valid=false when detail lacks a track-like object", () => {
+    const r = extractTrackEvent({
+      detail: { notTrack: "nope", uuid: "peer-x" },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.track).toBeNull();
+  });
+
+  it("returns uuid=null when detail has no uuid", () => {
+    const r = extractTrackEvent({
+      detail: { track: mockTrack },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.track).toBe(mockTrack);
+    expect(r.uuid).toBeNull();
+  });
+
+  it("evaluates duck-typed track objects (non-MediaStreamTrack) as valid", () => {
+    const duckTrack = { kind: "video", id: "duck-1", enabled: true, readyState: "live" };
+    const r = extractTrackEvent({
+      detail: { track: duckTrack, uuid: "peer-duck" },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.track).toBe(duckTrack);
+  });
+});
+
+describe("extractDataReceivedEvent", () => {
+  it("extracts data and uuid from single-arg Event object", () => {
+    const dataPayload = { type: "media.bind", token: "abc123" };
+    const r = extractDataReceivedEvent({
+      detail: { data: dataPayload, uuid: "peer-data-1" },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.data).toBe(dataPayload);
+    expect(r.uuid).toBe("peer-data-1");
+  });
+
+  it("returns valid=false for malformed event", () => {
+    const r = extractDataReceivedEvent("[object Object]");
+    expect(r.valid).toBe(false);
+    expect(r.uuid).toBeNull();
+  });
+
+  it("returns valid=false for event with no uuid in detail", () => {
+    const r = extractDataReceivedEvent({
+      detail: { data: { foo: "bar" } },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.uuid).toBeNull();
   });
 });

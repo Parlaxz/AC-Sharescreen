@@ -1,11 +1,22 @@
 import { ProtocolError, MAX_CONTROL_PAYLOAD_SIZE } from "@screenlink/shared";
 import type { VDONinjaSDK } from "./sdk-types.js";
 
+/**
+ * Send a control message via the VDO Ninja SDK data channel.
+ *
+ * Uses `preference: "any"` (SDK 1.3.18) instead of the deprecated `type` field
+ * so the SDK can route through any available data channel rather than forcing
+ * a specific connection type. This is critical for the media.bind message
+ * which must reach the host publisher.
+ *
+ * The caller is responsible for ensuring the data channel is open before
+ * invoking this function. If `allowFallback` is true, the SDK may fall back
+ * to alternative routing if the primary data channel is unavailable.
+ */
 export async function sendControlMessage(
   sdk: VDONinjaSDK,
   payload: unknown,
   targetUuid: string,
-  targetType: "publisher" | "viewer",
 ): Promise<void> {
   const serialized = JSON.stringify(payload);
   if (serialized.length > MAX_CONTROL_PAYLOAD_SIZE) {
@@ -14,7 +25,7 @@ export async function sendControlMessage(
 
   await sdk.sendData(payload, {
     uuid: targetUuid,
-    type: targetType,
-    allowFallback: false,
+    preference: "any",
+    allowFallback: true,
   });
 }
