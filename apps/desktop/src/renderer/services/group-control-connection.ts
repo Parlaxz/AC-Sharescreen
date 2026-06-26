@@ -15,6 +15,15 @@ import { extractPeerUuid, extractDataAndUuid } from "./sdk-event-normalizer.js";
 
 export type ConnectionState = "idle" | "starting" | "connected" | "reconnecting" | "stopping" | "destroyed" | "failed";
 
+export interface ControlMeshDiagnostics {
+  connected: boolean;
+  peerCount: number;
+  peerIds: string[];
+  peerRtts: Record<string, number | undefined>;
+  signalingServer: string;
+  roomId: string;
+}
+
 export interface GroupControlConnectionOptions {
   groupId: string;
   controlRoomId: string;
@@ -164,6 +173,17 @@ export class GroupControlConnection {
     return new Map(this.deviceToPeer);
   }
 
+  getDiagnostics(): ControlMeshDiagnostics {
+    return {
+      connected: this._state === "connected",
+      peerCount: this.peerToDevice.size,
+      peerIds: Array.from(this.peerToDevice.keys()),
+      peerRtts: {},
+      signalingServer: "wss://wss.vdo.ninja",
+      roomId: this.opts.controlRoomId,
+    };
+  }
+
   peerForDevice(deviceId: string): string | null {
     return this.deviceToPeer.get(deviceId) ?? null;
   }
@@ -216,7 +236,7 @@ export class GroupControlConnection {
       console.log("[group-control] starting autoConnect (WebSocket + room join + announce)");
       const result = await sdk.autoConnect({
         room: this.opts.controlRoomId,
-        mode: "full",
+        mode: "half",
         view: { audio: false, video: false },
         password: this.opts.groupSecret,
         streamID: this.opts.nodeId,

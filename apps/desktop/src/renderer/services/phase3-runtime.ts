@@ -128,6 +128,11 @@ export class Phase3Runtime {
           void conn.sendToPeer(peerUuid, {
             type: "stream.state.request",
           }).catch(() => {});
+
+          // Flush any pending stream lifecycle messages to this new peer.
+          // This runs after the hello handshake completes (identity mapping
+          // is established), so sendToPeer can resolve the peer UUID.
+          this.connManager.flushPendingLifecycleToPeer(groupId, peerUuid);
         }
       }
     });

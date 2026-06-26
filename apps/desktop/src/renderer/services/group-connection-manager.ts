@@ -323,9 +323,6 @@ export class GroupConnectionManager {
     const now = Date.now();
     const entries = Array.from(queue.entries());
 
-    // Clear the queue before sending so failures don't cause double-flush.
-    this.pendingLifecycle.delete(groupId);
-
     for (const [, msg] of entries) {
       // Drop stale messages older than TTL
       if (now - msg.enqueuedAt > PENDING_TTL_MS) {
@@ -351,6 +348,49 @@ export class GroupConnectionManager {
         console.warn(
           "[group-control] failed to flush pending",
           msg.type,
+          (err instanceof Error ? err.message : String(err)),
+        );
+      });
+    }
+
+    // Only clear the queue after successfully iterating all entries,
+    // so failures during broadcast don't cause message loss.
+    this.pendingLifecycle.delete(groupId);
+  }
+
+  /**
+   * Send queued lifecycle messages to a specific peer without clearing
+   * the queue. Called when a new peer comes online after the hello
+   * handshake completes (identity mapping is established).
+   *
+   * Unlike flushPendingLifecycle (which clears the queue), this method
+   * keeps the queue intact so messages can still be flushed on reconnect.
+   */
+  flushPendingLifecycleToPeer(groupId: string, peerUuid: string): void {
+    const queue = this.pendingLifecycle.get(groupId);
+    if (!queue || queue.size === 0) return;
+
+    const conn = this.connections.get(groupId);
+    if (!conn || conn.state !== "connected") return;
+
+    const now = Date.now();
+    const entries = Array.from(queue.entries());
+
+    for (const [, msg] of entries) {
+      if (now - msg.enqueuedAt > PENDING_TTL_MS) continue;
+      if (msg.type === "stream.stopped") {
+        const hasPendingStart = entries.some(
+          ([, e]) =>
+            e.logicalStreamId === msg.logicalStreamId &&
+            (e.type === "stream.started" || e.type === "stream.restarted"),
+        );
+        if (!hasPendingStart) continue;
+      }
+      conn.sendToPeer(peerUuid, msg.payload).catch((err: unknown) => {
+        console.warn(
+          "[group-control] failed to send pending",
+          msg.type,
+          "to peer",
           (err instanceof Error ? err.message : String(err)),
         );
       });

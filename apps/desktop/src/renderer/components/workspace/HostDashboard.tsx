@@ -71,6 +71,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const viewerCount = useStore((s) => s.viewerCount);
   const sessionDuration = useStore((s) => s.sessionDuration);
   const localShareState = useStore((s) => s.localShareState);
+  const onlineDeviceIdsByGroup = useStore((s) => s.onlineDeviceIdsByGroup);
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
 
@@ -171,6 +172,13 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             <RefreshCw className="h-3.5 w-3.5" />
             Change source
           </Button>
+          <Button variant="outline" size="sm" onClick={() => {
+            const s = useStore.getState();
+            s.navigate("viewer");
+          }}>
+            <Eye className="h-3.5 w-3.5" />
+            Preview
+          </Button>
           {isDegraded ? (
             <Badge variant="warning" className="text-[10px] px-1.5 py-0">
               <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />
@@ -185,6 +193,11 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
           <div className="flex items-center gap-2.5 text-xs text-text-secondary">
             <span className={`h-2 w-2 rounded-full ${connectionClass}`} />
             <span>{connectionLabel}</span>
+            {selectedGroupId && (
+              <span className="ml-auto text-text-muted">
+                {onlineDeviceIdsByGroup[selectedGroupId]?.length ?? 0} peer{(onlineDeviceIdsByGroup[selectedGroupId]?.length ?? 0) !== 1 ? 's' : ''}
+              </span>
+            )}
           </div>
         </CardContent>
       </Card>

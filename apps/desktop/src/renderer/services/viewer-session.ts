@@ -318,6 +318,7 @@ export class ViewerSession {
 
     if (this.videoElement) {
       this.videoElement.srcObject = captureStream;
+      this.videoElement.muted = true; // Prevent audio feedback in self-view
       await this.videoElement.play().catch(() => {});
     }
 
