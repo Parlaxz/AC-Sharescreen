@@ -40,6 +40,15 @@ export async function attachGroupRecordToRuntime(
   const api = getApi();
   if (!api) throw new Error("screenlink API not available");
 
+  // Validate the record shape up front. The main-process `GroupStore` always
+  // returns records with a `groupId`; anything else would produce an
+  // `getGroupConnectionConfig(undefined)` IPC call and leave the renderer in
+  // an unrecoverable state.
+  const groupId = record.groupId;
+  if (typeof groupId !== "string" || groupId.length === 0) {
+    throw new Error("Invalid group record: missing groupId");
+  }
+
   // 1) Resolve runtime
   const runtime = getRuntime();
   if (!runtime || runtime.isDestroyed()) {
@@ -52,18 +61,24 @@ export async function attachGroupRecordToRuntime(
   const displayName = identity.displayName;
 
   // 3) Fetch connection config
-  const config = (await api.getGroupConnectionConfig(record.id)) as GroupConnectionConfigDTO | null;
+  const config = (await api.getGroupConnectionConfig(groupId)) as GroupConnectionConfigDTO | null;
   if (!config) {
-    throw new Error(`No connection config found for group ${record.id}`);
+    throw new Error(`No connection config found for group ${groupId}`);
   }
   if (!config.controlRoomId || !config.groupSecret) {
-    throw new Error(`Invalid connection config for group ${record.id}: missing controlRoomId or groupSecret`);
+    throw new Error(`Invalid connection config for group ${groupId}: missing controlRoomId or groupSecret`);
+  }
+  // Sanity-check that the config refers to the same group. A mismatched
+  // groupId means the persisted store is out of sync with the config blob,
+  // and silently accepting it would let the wrong group attach.
+  if (config.groupId && config.groupId !== groupId) {
+    throw new Error("Group connection config does not match group record");
   }
 
   // 4) Call runtime.addGroup
   await runtime.addGroup(
     {
-      groupId: record.id,
+      groupId,
       controlRoomId: config.controlRoomId,
       groupSecret: config.groupSecret,
       nodeId,
@@ -80,21 +95,21 @@ export async function attachGroupRecordToRuntime(
   const store = useStore.getState();
   const newGroupsById = {
     ...store.groupsById,
-    [record.id]: {
-      id: record.id,
+    [groupId]: {
+      id: groupId,
       name: groupName,
       members,
     },
   };
-  const newGroupOrder = store.groupOrder.includes(record.id)
+  const newGroupOrder = store.groupOrder.includes(groupId)
     ? store.groupOrder
-    : [...store.groupOrder, record.id];
+    : [...store.groupOrder, groupId];
   store.setGroups(newGroupsById, newGroupOrder);
 
   // 6) Select and navigate
-  store.selectGroup(record.id);
+  store.selectGroup(groupId);
 
-  return record.id;
+  return groupId;
 }
 
 /**

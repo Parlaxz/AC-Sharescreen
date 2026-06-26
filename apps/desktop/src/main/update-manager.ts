@@ -9,6 +9,7 @@
  */
 
 import { app } from "electron";
+import { compareVersions } from "./version-compare.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -385,11 +386,53 @@ export class UpdateManager {
     });
 
     this.updater.on("update-available", (info: any) => {
-      const version = info?.version ?? "unknown";
-      this.logger.log("info", "updater", "update_available", { version });
+      const rawVersion = info?.version;
+      const comparison = compareVersions(this.state.currentVersion, rawVersion);
+
+      this.logger.log("info", "updater", "update_available_received", {
+        rawVersion: rawVersion ?? null,
+        normalizedAvailable: comparison.normalizedAvailable,
+        normalizedCurrent: comparison.normalizedCurrent,
+        reason: comparison.reason,
+      });
+
+      if (!comparison.isNewer) {
+        // Stale, equal, lower, malformed, or missing versions are never
+        // advertised as updates. We log the reason and fall through to
+        // an up-to-date (or error) state so the renderer never displays
+        // a misleading version.
+        this.logger.log("info", "updater", "update_available_suppressed", {
+          reason: comparison.reason,
+          rawVersion: rawVersion ?? null,
+        });
+
+        if (comparison.normalizedAvailable === null) {
+          // Malformed metadata: surface a safe error rather than
+          // pretending the app is up to date.
+          this.setState({
+            phase: "error",
+            availableVersion: undefined,
+            lastCheckedAt: Date.now(),
+            errorCode: "invalid-update-metadata",
+            errorMessage:
+              "Update metadata received from the server is invalid. Please try again later.",
+          });
+        } else {
+          // Equal or lower: treat as up-to-date.
+          this.setState({
+            phase: "up-to-date",
+            availableVersion: undefined,
+            lastCheckedAt: Date.now(),
+            errorCode: undefined,
+            errorMessage: undefined,
+          });
+        }
+        return;
+      }
+
       this.setState({
         phase: "update-available",
-        availableVersion: version,
+        availableVersion: comparison.normalizedAvailable!,
         lastCheckedAt: Date.now(),
         errorCode: undefined,
         errorMessage: undefined,

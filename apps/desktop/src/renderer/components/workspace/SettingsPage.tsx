@@ -31,6 +31,7 @@ import {
 } from "@/services/settings-actions";
 import { useIdentityStore } from "@/stores/identity-store";
 import { getRuntime } from "@/services/phase3-runtime";
+import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSection";
 import type { PersistedSettings, QuickShareConfigDTO } from "../../../preload/api-types.js";
 
 interface SettingsForm {
@@ -490,6 +491,15 @@ export function SettingsPage() {
               ))}
             </SelectContent>
           </Select>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Updates</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <UpdatesSettingsSection />
         </CardContent>
       </Card>
 

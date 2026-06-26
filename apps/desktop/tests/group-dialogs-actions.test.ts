@@ -15,23 +15,31 @@ function mockPreloadApi(overrides: Record<string, unknown> = {}) {
   const api = {
     createGroup: vi.fn().mockResolvedValue({
       record: {
-        id: "new-group-uuid",
+        groupId: "new-group-uuid",
+        controlRoomId: "room-1",
+        encryptedGroupSecret: "encrypted-placeholder",
         sharedState: {
           name: { value: "Test Group" },
           members: {},
         },
         lastClock: { wallTimeMs: 1, counter: 0, nodeId: "dev-1" },
+        joinedAt: 1,
+        notificationsEnabled: true,
       },
       invite: {},
       link: "invite-code-1",
     }),
     joinGroup: vi.fn().mockResolvedValue({
-      id: "joined-group-uuid",
+      groupId: "joined-group-uuid",
+      controlRoomId: "room-2",
+      encryptedGroupSecret: "encrypted-placeholder",
       sharedState: {
         name: { value: "Joined Group" },
         members: { "dev-1": { deviceId: "dev-1", displayName: "Me" } },
       },
       lastClock: { wallTimeMs: 1, counter: 0, nodeId: "dev-1" },
+      joinedAt: 1,
+      notificationsEnabled: true,
     }),
     getDeviceIdentity: vi.fn().mockResolvedValue({
       deviceId: "dev-1",

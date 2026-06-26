@@ -72,6 +72,13 @@ function main() {
     process.exit(1);
   }
 
+  // Defensive: ensure the new value still satisfies the same semver regex
+  // used at runtime. This guards against typos in CLI arguments.
+  if (!SEMVER_RE.test(rootCheck.version)) {
+    console.error(`ERROR: New version "${rootCheck.version}" is not valid semver.`);
+    process.exit(1);
+  }
+
   console.log(`\nVersion set to ${version} — all packages match.`);
 }
 
