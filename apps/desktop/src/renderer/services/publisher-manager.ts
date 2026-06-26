@@ -44,7 +44,6 @@ export interface PublisherEvents {
 
 export class PublisherManager {
   private publisher: HostPublisher | null = null;
-  private captureStream: MediaStream | null = null;
   private audioController: ProcessAudioController | null = null;
   private combinedStream: MediaStream | null = null;
   private audioTrack: MediaStreamTrack | null = null;
@@ -72,10 +71,6 @@ export class PublisherManager {
 
   getPublisher(): HostPublisher | null {
     return this.publisher;
-  }
-
-  getCaptureStream(): MediaStream | null {
-    return this.captureStream;
   }
 
   getAudioTrack(): MediaStreamTrack | null {
@@ -128,8 +123,8 @@ export class PublisherManager {
     this._audioState = "disabled";
   }
 
-  private buildCombinedStream(): MediaStream {
-    const videoTracks = this.captureStream?.getVideoTracks() ?? [];
+  private buildCombinedStream(baseStream: MediaStream): MediaStream {
+    const videoTracks = baseStream.getVideoTracks();
     const audioController = this.audioController;
     const audioTrack = audioController?.getTrack() ?? null;
 
@@ -178,42 +173,12 @@ export class PublisherManager {
     this.events.onStateChange(newState);
   }
 
-  async startCapture(config: PublisherConfig): Promise<MediaStream> {
-    this.config = config;
-    this.setState("selecting-source");
-
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
-      this.captureStream = stream;
-      this.setState("starting");
-
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
-        this.stopCapture().catch(() => {});
-        this.events.onTrackEnded();
-      });
-
-      return stream;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      this.setState("error");
-      this.events.onError(error);
-      throw error;
-    }
-  }
-
   async startPublishing(stream: MediaStream, config: PublisherConfig): Promise<void> {
+    let originalStream = stream;
     // If we have an audio controller, build a combined stream with video + audio
     if (this.audioController) {
-      this.combinedStream = this.buildCombinedStream();
+      this.combinedStream = this.buildCombinedStream(stream);
       stream = this.combinedStream;
-    }
-
-    // Publication invariant: if audio mode was applied, audio track must be present
-    if (this.appliedAudioMode !== 'none' && !stream.getAudioTracks().length) {
-      throw new Error(`audio-track-missing-before-publish:${this.appliedAudioMode}`);
     }
 
     // ── Pre-publish diagnostics ───────────────────────────────────
@@ -303,6 +268,45 @@ export class PublisherManager {
       }
     }
 
+    // Stage 17: Apply contentHint to the video track from group defaults (BEFORE publish)
+    if (config.contentHint && config.contentHint !== "auto") {
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack && typeof videoTrack.contentHint !== "undefined") {
+        videoTrack.contentHint = config.contentHint as MediaStreamTrack["contentHint"];
+      }
+    }
+
+    // ── Pre-publish invariants ───────────────────────────────────
+    const vt = stream.getVideoTracks()[0];
+    if (!vt) {
+      throw new Error("video-track-missing-before-publish");
+    }
+    if (vt.kind !== "video") {
+      throw new Error("video-track-wrong-kind-before-publish");
+    }
+    if (vt.readyState !== "live") {
+      throw new Error("video-track-not-live-before-publish");
+    }
+    if (!vt.enabled) {
+      throw new Error("video-track-disabled-before-publish");
+    }
+
+    if (this.combinedStream) {
+      const originalVideoTrack = originalStream.getVideoTracks()[0];
+      const combinedVideoTrack = this.combinedStream.getVideoTracks()[0];
+      if (!combinedVideoTrack || combinedVideoTrack !== originalVideoTrack) {
+        throw new Error("video-track-lost-in-combined-stream");
+      }
+    }
+
+    if (this.audioController) {
+      const audioTracks = stream.getAudioTracks();
+      const hasLiveAudio = audioTracks.some(t => t.readyState === "live");
+      if (!hasLiveAudio) {
+        throw new Error("audio-track-missing-before-publish");
+      }
+    }
+
     console.log('[PublisherManager] Publishing stream...');
     await publisher.publish(stream, {
       streamID: config.streamId,
@@ -316,14 +320,6 @@ export class PublisherManager {
       },
       audioBitrate: 64000, // 64 kbps for Opus stereo
     });
-
-    // Stage 17: Apply contentHint to the video track from group defaults
-    if (config.contentHint && config.contentHint !== "auto") {
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack && typeof videoTrack.contentHint !== "undefined") {
-        videoTrack.contentHint = config.contentHint as MediaStreamTrack["contentHint"];
-      }
-    }
 
     // Stage 17: Apply degradationPreference to sender encoding parameters
     if (config.degradationPreference) {
@@ -423,15 +419,12 @@ export class PublisherManager {
           this.audioController = null;
         }
 
-        // 3. Stop combined stream tracks
+        // 3. Stop audio tracks from combined stream (video track is owned by StreamSessionManager)
         if (this.combinedStream) {
-          this.combinedStream.getTracks().forEach(t => t.stop());
+          this.combinedStream.getAudioTracks().forEach(t => t.stop());
           this.combinedStream = null;
         }
 
-        // 4. Stop capture stream tracks
-        this.captureStream?.getTracks().forEach(t => t.stop());
-        this.captureStream = null;
         this.audioTrack = null;
         this.appliedAudioMode = 'none';
         this._audioState = "disabled";

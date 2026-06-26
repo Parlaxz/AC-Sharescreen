@@ -108,10 +108,10 @@ describe('PublisherManager source invariants', () => {
     expect(content).toContain('throw new Error(`publisher-audio-track-${audioTrack.readyState}`)');
   });
 
-  it('startPublishing has publication invariant for non-none audio mode', () => {
+  it('startPublishing has publication invariant for audio controller', () => {
     const content = fs.readFileSync(publisherManagerPath, 'utf-8');
     expect(content).toContain('audio-track-missing-before-publish');
-    expect(content).toContain("throw new Error(`audio-track-missing-before-publish:${this.appliedAudioMode}`)");
+    expect(content).toContain('throw new Error("audio-track-missing-before-publish")');
   });
 
   it('stopCapture closes controller with shutdown owner', () => {
@@ -236,6 +236,8 @@ describe('PublisherManager runtime - audio controller ownership', () => {
 
 describe('PublisherManager runtime - buildCombinedStream behavior', () => {
   let mgr: any;
+  let baseStream: any;
+  let makeStream: ReturnType<typeof makeBrowserStubs>['makeStream'];
 
   beforeEach(async () => {
     stubMediaStream();
@@ -246,9 +248,10 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
       onError: () => {},
       onTrackEnded: () => {},
     });
-    const { makeTrack, makeStream } = makeBrowserStubs();
-    const videoTrack = makeTrack('video', 'live');
-    mgr['captureStream'] = makeStream([videoTrack]);
+    const stubs = makeBrowserStubs();
+    makeStream = stubs.makeStream;
+    const videoTrack = stubs.makeTrack('video', 'live');
+    baseStream = makeStream([videoTrack]);
   });
 
   it('includes audio track when controller state is rendering', () => {
@@ -256,7 +259,7 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
     mgr['audioController'] = ctrl;
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    const combined = mgr['buildCombinedStream']();
+    const combined = mgr['buildCombinedStream'](baseStream);
     expect(combined.getAudioTracks().length).toBe(1);
     expect(combined.getAudioTracks()[0]).toBe(ctrl.getTrack());
   });
@@ -266,7 +269,7 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
     mgr['audioController'] = ctrl;
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    const combined = mgr['buildCombinedStream']();
+    const combined = mgr['buildCombinedStream'](baseStream);
     expect(combined.getAudioTracks().length).toBe(1);
   });
 
@@ -275,7 +278,7 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
     mgr['audioController'] = ctrl;
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    const combined = mgr['buildCombinedStream']();
+    const combined = mgr['buildCombinedStream'](baseStream);
     expect(combined.getAudioTracks().length).toBe(0);
   });
 
@@ -284,7 +287,7 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
     mgr['audioController'] = ctrl;
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    const combined = mgr['buildCombinedStream']();
+    const combined = mgr['buildCombinedStream'](baseStream);
     expect(combined.getAudioTracks().length).toBe(0);
   });
 
@@ -293,7 +296,7 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
     mgr['audioController'] = ctrl;
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    expect(() => mgr['buildCombinedStream']()).toThrow('publisher-audio-track-wrong-kind');
+    expect(() => mgr['buildCombinedStream'](baseStream)).toThrow('publisher-audio-track-wrong-kind');
   });
 
   it('throws on non-live track readyState', () => {
@@ -301,7 +304,7 @@ describe('PublisherManager runtime - buildCombinedStream behavior', () => {
     mgr['audioController'] = ctrl;
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    expect(() => mgr['buildCombinedStream']()).toThrow('publisher-audio-track-ended');
+    expect(() => mgr['buildCombinedStream'](baseStream)).toThrow('publisher-audio-track-ended');
   });
 });
 
@@ -310,6 +313,7 @@ describe('PublisherManager runtime - publication invariant', () => {
   const mockSDKRef = vi.hoisted(() => ({ connections: new Map() as Map<any, any> }));
 
   let mgr: any;
+  let makeStream: ReturnType<typeof makeBrowserStubs>['makeStream'];
 
   beforeEach(async () => {
     stubMediaStream();
@@ -332,25 +336,25 @@ describe('PublisherManager runtime - publication invariant', () => {
       onTrackEnded: () => {},
     });
 
-    const { makeTrack, makeStream } = makeBrowserStubs();
-    const videoTrack = makeTrack('video', 'live');
-    mgr['captureStream'] = makeStream([videoTrack]);
+    const stubs = makeBrowserStubs();
+    makeStream = stubs.makeStream;
   });
 
-  it('throws audio-track-missing when mode set but no audio track in stream', async () => {
+  it('throws audio-track-missing when audioController set but combined stream has no audio', async () => {
+    const ctrl = createMockController('loading');
+    mgr['audioController'] = ctrl;
+    mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
-    mgr['audioController'] = null;
-    mgr['audioTrack'] = null;
 
-    const { makeStream } = makeBrowserStubs();
-    const stream = makeStream([...mgr['captureStream'].getTracks()]);
+    const videoTrack = makeBrowserStubs().makeTrack('video', 'live');
+    const stream = makeStream([videoTrack]);
 
     await expect(
       mgr['startPublishing'](stream, {
         sourceId: 'test', password: 'test', streamId: 'test',
         videoBitrate: 1000, videoWidth: 1280, videoHeight: 720, videoFps: 30,
       }),
-    ).rejects.toThrow('audio-track-missing-before-publish:system');
+    ).rejects.toThrow('audio-track-missing-before-publish');
   });
 
   it('succeeds when mode set and audio track present', async () => {
@@ -359,9 +363,8 @@ describe('PublisherManager runtime - publication invariant', () => {
     mgr['audioTrack'] = ctrl.getTrack();
     mgr['appliedAudioMode'] = 'system';
 
-    const { makeStream } = makeBrowserStubs();
-    const stream = makeStream([...mgr['captureStream'].getTracks()]);
-    stream.addTrack(ctrl.getTrack());
+    const videoTrack = makeBrowserStubs().makeTrack('video', 'live');
+    const stream = makeStream([videoTrack]);
 
     await expect(
       mgr['startPublishing'](stream, {
@@ -373,13 +376,13 @@ describe('PublisherManager runtime - publication invariant', () => {
     expect(mgr.getState()).toBe('sharing');
   });
 
-  it('skips invariant when mode is none', async () => {
+  it('skips invariant when no audio controller', async () => {
     mgr['audioController'] = null;
     mgr['audioTrack'] = null;
     mgr['appliedAudioMode'] = 'none';
 
-    const { makeStream } = makeBrowserStubs();
-    const stream = makeStream([...mgr['captureStream'].getTracks()]);
+    const videoTrack = makeBrowserStubs().makeTrack('video', 'live');
+    const stream = makeStream([videoTrack]);
 
     await expect(
       mgr['startPublishing'](stream, {
@@ -510,8 +513,8 @@ describe('Regression: audio track survives ownership transfer', () => {
   it('no silent video-only fallback when audio mode is set', () => {
     const content = fs.readFileSync(publisherManagerPath, 'utf-8');
     expect(content).toContain('audio-track-missing-before-publish');
-    expect(content).toContain("this.appliedAudioMode !== 'none'");
-    expect(content).toContain('!stream.getAudioTracks().length');
+    expect(content).toContain('this.audioController');
+    expect(content).toContain('audioTracks.some(t => t.readyState === "live")');
   });
 
   it('no clearAudioController calls in Phase 3 Dashboard (audio managed via PublisherManager)', () => {
