@@ -36,10 +36,10 @@ const config = {
     perMachine: false,
     allowToChangeInstallationDirectory: true,
     // Stable artifact name that includes the version
-    artifactName: "ScreenLink Setup ${version}.${ext}",
+    artifactName: "ScreenLink-Setup-${version}.${ext}",
   },
   portable: {
-    artifactName: "ScreenLink ${version}.${ext}",
+    artifactName: "ScreenLink-Portable-${version}.${ext}",
     // Portable builds cannot self-update — prevent electron-updater from
     // selecting the portable artifact as the update target
     unicode: false,

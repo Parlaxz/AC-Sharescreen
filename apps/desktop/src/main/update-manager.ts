@@ -131,7 +131,7 @@ function getErrorCode(err: unknown): { code: ErrorCode; safeMessage: string } {
   }
 
   if (msg.includes("download") || msg.includes("404") || msg.includes("not found")) {
-    return { code: "missing-release-artifact", safeMessage: "Update artifact could not be found. The release may still be processing." };
+    return { code: "missing-release-artifact", safeMessage: "Update artifact could not be found. The release may be incomplete or still processing." };
   }
 
   return { code: "unknown-updater-failure", safeMessage: "An unexpected update error occurred. Please try again later." };

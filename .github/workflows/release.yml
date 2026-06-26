@@ -2,24 +2,34 @@
 # ScreenLink — Windows x64 Release Workflow
 #
 # Triggered by:
-#   1. A GitHub Release being published (release.published)
-#   2. Manual workflow_dispatch to retry an existing release
+#   Manual workflow_dispatch that creates a draft release, builds everything,
+#   uploads artifacts, verifies integrity, and publishes the draft.
 #
 # Builds the native audio helper, TypeScript packages, and the Electron desktop
-# app, then uploads updater metadata and installers to the existing GitHub Release.
+# app, then uploads updater metadata and installers to the draft GitHub Release.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Release ScreenLink (Windows x64)
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing published release tag to retry (e.g. v0.1.1)"
+        description: "Release tag to build and publish (e.g. v0.2.5)"
         required: true
         type: string
+      release_type:
+        description: "Type of release"
+        required: false
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - prerelease
+
+concurrency:
+  group: release-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
 
 # Required to upload assets to releases
 permissions:
@@ -33,10 +43,7 @@ jobs:
   build-and-release:
     name: Build and release
     runs-on: windows-latest
-    # Do not run on draft or prerelease — stable channel only
-    if: >
-      (github.event_name == 'release' && github.event.release.prerelease == false) ||
-      github.event_name == 'workflow_dispatch'
+    # Always run — only workflow_dispatch triggers this workflow
 
     outputs:
       tag: ${{ steps.determine-tag.outputs.tag }}
@@ -51,11 +58,7 @@ jobs:
         id: determine-tag
         shell: pwsh
         run: |
-          if ("${{ github.event_name }}" -eq "release") {
-            $tag = "${{ github.event.release.tag_name }}"
-          } else {
-            $tag = "${{ github.event.inputs.tag }}"
-          }
+          $tag = "${{ github.event.inputs.tag }}"
           Write-Host "tag=$tag"
           echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
@@ -73,8 +76,7 @@ jobs:
           Write-Host "version=$version"
           echo "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Verify release exists (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Ensure draft release exists
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -82,15 +84,22 @@ jobs:
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $release = gh release view "$tag" --json isDraft,isPrerelease 2>$null
           if (-not $release) {
-            Write-Host "::error::Release '$tag' does not exist or is not accessible."
-            exit 1
+            Write-Host "Creating draft release for $tag..."
+            gh release create "$tag" --draft --title "$tag" --notes ""
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Failed to create draft release for $tag"
+              exit 1
+            }
+            Write-Host "Draft release created."
+          } else {
+            $releaseObj = $release | ConvertFrom-Json
+            if ($releaseObj.isDraft -or ($releaseObj.isPrerelease -and "${{ github.event.inputs.release_type }}" -eq "stable")) {
+              Write-Host "Using existing draft release for $tag"
+            } else {
+              Write-Host "::error::Release $tag is already published. Cannot modify."
+              exit 1
+            }
           }
-          $releaseObj = $release | ConvertFrom-Json
-          if ($releaseObj.isDraft -or $releaseObj.isPrerelease) {
-            Write-Host "::error::Release '$tag' is a draft or prerelease. Only published stable releases can be retried."
-            exit 1
-          }
-          Write-Host "Release '$tag' verified."
 
       # ── 2. Check out exact tag ──────────────────────────────────────
       - name: Check out exact tag
@@ -227,10 +236,6 @@ jobs:
         shell: pwsh
         working-directory: apps/desktop
         run: |
-          # Remove previous release output
-          if (Test-Path "../../release") {
-            Remove-Item -Recurse -Force "../../release"
-          }
           npx electron-builder --win --x64 --config electron-builder.config.cjs --publish never
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::error::Electron Builder packaging failed"
@@ -267,19 +272,19 @@ jobs:
           }
 
           # Setup EXE
-          $setupExe = Get-ChildItem "$releaseDir/ScreenLink Setup *.exe" -ErrorAction SilentlyContinue
+          $setupExe = Get-ChildItem "$releaseDir/ScreenLink-Setup-*.exe" -ErrorAction SilentlyContinue
           if (-not $setupExe) {
-            $errors += "ScreenLink Setup EXE not found in $releaseDir"
+            $errors += "ScreenLink-Setup EXE not found in $releaseDir"
           }
 
           # Blockmap
-          $blockmap = Get-ChildItem "$releaseDir/ScreenLink Setup *.exe.blockmap" -ErrorAction SilentlyContinue
+          $blockmap = Get-ChildItem "$releaseDir/ScreenLink-Setup-*.exe.blockmap" -ErrorAction SilentlyContinue
           if (-not $blockmap) {
-            $errors += "ScreenLink Setup blockmap not found in $releaseDir"
+            $errors += "ScreenLink-Setup blockmap not found in $releaseDir"
           }
 
           # Portable EXE
-          $portableExe = Get-ChildItem "$releaseDir/ScreenLink *.exe" | Where-Object { $_.Name -notlike "*Setup*" }
+          $portableExe = Get-ChildItem "$releaseDir/ScreenLink-Portable-*.exe" -ErrorAction SilentlyContinue
           if (-not $portableExe) {
             $errors += "Portable EXE not found in $releaseDir"
           }
@@ -348,6 +353,34 @@ jobs:
           Write-Host "  latest.yml: present"
           Write-Host "  app-update.yml: present (no token)"
 
+          # Verify latest.yml 'path' matches the actual setup filename
+          if (Test-Path "$releaseDir/latest.yml") {
+              $ymlContent = Get-Content "$releaseDir/latest.yml" -Raw
+              # Extract the 'path' field
+              $ymlPath = ($ymlContent | Select-String '(?<=^path: ).*$' -Raw | ForEach-Object { $_.Trim() })
+              $actualSetupName = $setupExe.Name
+              if ($ymlPath -ne $actualSetupName) {
+                  $errors += "latest.yml path '$ymlPath' does not match actual setup filename '$actualSetupName'"
+              }
+
+              # Extract the 'url' field from files array
+              $ymlUrl = ($ymlContent | Select-String '(?<=^  - url: ).*$' -Raw | ForEach-Object { $_.Trim() })
+              if ($ymlUrl -and $ymlUrl -ne $actualSetupName) {
+                  $errors += "latest.yml url '$ymlUrl' does not match actual setup filename '$actualSetupName'"
+              }
+
+              # Verify blockmap path
+              $expectedBlockmap = "$actualSetupName.blockmap"
+              if ($blockmap.Name -ne $expectedBlockmap) {
+                  $errors += "Blockmap name '$($blockmap.Name)' does not match expected '$expectedBlockmap'"
+              }
+          }
+
+          if ($errors.Count -gt 0) {
+              foreach ($e in $errors) { Write-Host "::error::$e" }
+              exit 1
+          }
+
       # ── 10. Upload artifacts to existing release ──────────────────────
       - name: Upload artifacts to release
         shell: pwsh
@@ -370,6 +403,7 @@ jobs:
           )
 
           $allAssets = $requiredAssets + $optionalAssets
+          $uploadErrors = @()
 
           foreach ($asset in $allAssets) {
             $path = "$releaseDir/$asset"
@@ -377,11 +411,16 @@ jobs:
               Write-Host "Uploading $asset..."
               gh release upload "$tag" "$path" --clobber
               if ($LASTEXITCODE -ne 0) {
-                Write-Host "::warning::Failed to upload $asset"
+                $uploadErrors += "Failed to upload $asset"
               }
             } else {
-              Write-Host "::warning::Asset not found for upload: $asset"
+              $uploadErrors += "Asset not found for upload: $asset"
             }
+          }
+
+          if ($uploadErrors.Count -gt 0) {
+            foreach ($e in $uploadErrors) { Write-Host "::error::$e" }
+            exit 1
           }
 
           Write-Host "Upload complete."
@@ -422,11 +461,107 @@ jobs:
 
           Write-Host "All required assets verified on release '$tag'."
 
-      # ── 12. Job summary ──────────────────────────────────────────────
+      # ── 12. SHA-512 verification ──────────────────────────────────────
+      - name: Verify artifact SHA-512 match
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+
+          # Download latest.yml from the release
+          gh release download "$tag" --pattern "latest.yml" --output "${{ runner.temp }}/verified-latest.yml" --clobber
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Failed to download latest.yml for verification"
+              exit 1
+          }
+
+          $ymlContent = Get-Content "${{ runner.temp }}/verified-latest.yml" -Raw
+
+          # Parse path and sha512 using regex
+          $setupPath = ($ymlContent | Select-String '(?<=^path: ).*$' -Raw | ForEach-Object { $_.Trim() })
+          $expectedSha = ($ymlContent | Select-String '(?<=^sha512: ).*' -Raw | ForEach-Object { $_.Trim() })
+
+          if (-not $setupPath -or -not $expectedSha) {
+              Write-Host "::error::Could not parse path or sha512 from latest.yml"
+              exit 1
+          }
+
+          Write-Host "Downloading $setupPath from release $tag..."
+          gh release download "$tag" --pattern "$setupPath" --output "${{ runner.temp }}/verified-setup.exe" --clobber
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::Failed to download $setupPath for verification"
+              exit 1
+          }
+
+          $actualSha = (Get-FileHash "${{ runner.temp }}/verified-setup.exe" -Algorithm SHA512).Hash.ToLower()
+          $expectedShaNormalized = $expectedSha.ToLower()
+
+          if ($actualSha -ne $expectedShaNormalized) {
+              Write-Host "::error::SHA-512 mismatch! Expected: $expectedSha, Got: $actualSha"
+              exit 1
+          }
+
+          Write-Host "SHA-512 verification PASSED for $setupPath"
+
+      # ── 13. HTTP URL verification ─────────────────────────────────────
+      - name: Verify download URLs return HTTP 200
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          $ymlContent = Get-Content "${{ runner.temp }}/verified-latest.yml" -Raw
+          $setupPath = ($ymlContent | Select-String '(?<=^path: ).*$' -Raw | ForEach-Object { $_.Trim() })
+
+          $baseUrl = "https://github.com/Parlaxz/AC-Sharescreen/releases/download/$tag"
+
+          $urlsToCheck = @(
+              "$baseUrl/$setupPath",
+              "$baseUrl/$setupPath.blockmap",
+              "$baseUrl/latest.yml"
+          )
+
+          $errors = @()
+          foreach ($url in $urlsToCheck) {
+              try {
+                  $response = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30
+                  if ($response.StatusCode -eq 200) {
+                      Write-Host "OK: $url"
+                  } else {
+                      $errors += "HTTP $($response.StatusCode) for $url"
+                  }
+              } catch {
+                  $errors += "Failed to check $url : $_"
+              }
+          }
+
+          if ($errors.Count -gt 0) {
+              foreach ($e in $errors) { Write-Host "::error::$e" }
+              exit 1
+          }
+          Write-Host "All download URLs return HTTP 200."
+
+      # ── 14. Publish release ───────────────────────────────────────────
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          $releaseType = "${{ github.event.inputs.release_type }}"
+
+          if ($releaseType -eq "prerelease") {
+            gh release edit "$tag" --draft=false --prerelease
+            Write-Host "Draft published as prerelease: $tag"
+          } else {
+            gh release edit "$tag" --draft=false --latest
+            Write-Host "Draft published as latest stable: $tag"
+          }
+
+      # ── 15. Job summary ──────────────────────────────────────────────
       - name: Generate job summary
         shell: pwsh
         run: |
-          $trigger = if ("${{ github.event_name }}" -eq "release") { "Release published" } else { "Manual retry" }
+          $trigger = "Manual dispatch (${{ github.event.inputs.release_type }})"
           & scripts/generate-release-summary.ps1 `
             -Trigger $trigger `
             -Tag "${{ steps.determine-tag.outputs.tag }}" `
