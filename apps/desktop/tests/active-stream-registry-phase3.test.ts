@@ -949,41 +949,42 @@ describe("StreamSessionManager Phase 3 — identity wiring", () => {
     expect(sessionManager.hostDeviceId).toBe("my-device-123");
     expect(sessionManager.hostDisplayName).toBe("My Display");
 
-    // Now start a stream and verify broadcast uses real identity
-    const broadcastSpy = vi.spyOn(runtime.getConnectionManager(), "broadcast");
+    // Now start a stream and verify sendOrQueueStreamLifecycle uses real identity
+    const lifecycleSpy = vi.spyOn(runtime.getConnectionManager(), "sendOrQueueStreamLifecycle");
 
     await sessionManager.startStream({
       groupId: "test-g-identity",
       source: { id: "source-1", name: "My Screen", kind: "screen", displayId: null, fingerprint: null },
     });
 
-    // The last broadcast should be the stream.started message
-    const lastCall = broadcastSpy.mock.lastCall;
-    expect(lastCall).not.toBeNull();
-    const payload = lastCall![1] as Record<string, unknown>;
+    // The sendOrQueueStreamLifecycle should have been called with stream.started
+    const lifecycleCall = lifecycleSpy.mock.calls.find(
+      (c: unknown[]) => c[2] === "stream.started",
+    );
+    expect(lifecycleCall).toBeDefined();
+    const payload = lifecycleCall![3] as Record<string, unknown>;
     expect(payload.hostDeviceId).toBe("my-device-123");
     expect(payload.hostDisplayName).toBe("My Display");
-    expect(payload.type).toBe("stream.started");
   });
 
   it("broadcasts use real identity in heartbeat", async () => {
     const sessionManager = runtime.getStreamSessionManager();
     sessionManager.setDeviceIdentity("heartbeat-device", "Heartbeat User");
 
-    const broadcastSpy = vi.spyOn(runtime.getConnectionManager(), "broadcast");
+    // Spy on both lifecycle and broadcast (heartbeat uses broadcast)
+    const lifecycleSpy = vi.spyOn(runtime.getConnectionManager(), "sendOrQueueStreamLifecycle");
 
     await sessionManager.startStream({
       groupId: "test-g-heartbeat",
       source: { id: "source-1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
     });
 
-    // Find the heartbeat broadcast (there should be one started broadcast first)
-    // Check the started broadcast
-    const startedCall = broadcastSpy.mock.calls.find(
-      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.started"
+    // Check the started lifecycle message
+    const startedCall = lifecycleSpy.mock.calls.find(
+      (c: unknown[]) => c[2] === "stream.started"
     );
     expect(startedCall).toBeDefined();
-    const startedPayload = startedCall![1] as Record<string, unknown>;
+    const startedPayload = startedCall![3] as Record<string, unknown>;
     expect(startedPayload.hostDeviceId).toBe("heartbeat-device");
   });
 

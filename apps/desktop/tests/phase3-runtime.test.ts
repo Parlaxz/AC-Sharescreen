@@ -405,7 +405,11 @@ describe("Phase3Runtime class", () => {
 
   it("one SDK connection per group across acquire/release/acquire cycle", async () => {
     const connAddSpy = vi.fn().mockResolvedValue(undefined);
-    const syncInitSpy = vi.fn();
+    const syncInitSpy = vi.fn().mockResolvedValue({
+      state: makeMockState(),
+      localMemberWasInserted: false,
+      localMember: { deviceId: "n1", displayName: "U1", firstSeenAt: Date.now(), profileStamp: { wallTimeMs: 1000, counter: 0, nodeId: "n1" } },
+    });
 
     const runtime1 = await acquirePhase3Runtime();
     vi.spyOn(runtime1.getConnectionManager(), "addGroup").mockImplementation(connAddSpy);

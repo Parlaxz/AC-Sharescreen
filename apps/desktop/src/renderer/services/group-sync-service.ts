@@ -72,7 +72,7 @@ export class GroupSyncService {
     persistedStamp: HybridTimestamp | undefined,
     localDeviceId: string,
     localDisplayName: string,
-  ): Promise<void> {
+  ): Promise<{ state: GroupSharedState; localMemberWasInserted: boolean; localMember: GroupMemberRecord }> {
     const clock = createHybridClock(localDeviceId, persistedStamp);
     let memberInserted = false;
 
@@ -116,6 +116,92 @@ export class GroupSyncService {
     this.onStateUpdated?.(groupId, initialState);
 
     this.startAntiEntropy(groupId);
+
+    const localMember = { ...initialState.members[localDeviceId]! } as GroupMemberRecord;
+    return { state: initialState, localMemberWasInserted: memberInserted, localMember };
+  }
+
+  /**
+   * Insert or update a remote member record in the group state.
+   * Performs sender authenticity checks and logical-time-based conflict resolution.
+   * Returns whether the member was inserted and/or updated.
+   */
+  async mergeRemoteMember(
+    groupId: string,
+    member: GroupMemberRecord,
+    senderDeviceId: string,
+  ): Promise<{ inserted: boolean; updated: boolean }> {
+    const sync = this.syncStates.get(groupId);
+    if (!sync) return { inserted: false, updated: false };
+
+    // Sender identity check: only the device itself can self-announce
+    if (member.deviceId !== senderDeviceId) return { inserted: false, updated: false };
+
+    const existing = sync.state.members[member.deviceId];
+    const now = Date.now();
+
+    if (!existing) {
+      // New member — always accept
+      mergeRemote(sync.clock, member.profileStamp, now);
+      sync.state = applyGroupStateDelta(sync.state, {
+        members: { [member.deviceId]: member },
+      });
+
+      if (this.persistence) {
+        await this.persistence.persistState(groupId, sync.state);
+        await this.persistence.persistClock(groupId, sync.clock);
+      }
+      sync.lastSyncAt = now;
+      this.onStateUpdated?.(groupId, sync.state);
+
+      await this.broadcastDelta(groupId, { members: { [member.deviceId]: member } }, member.profileStamp);
+      return { inserted: true, updated: false };
+    }
+
+    // Compare by logical time only (wallTimeMs + counter), ignoring nodeId
+    const logicalCmp = this.compareLogicalTimeOnly(member.profileStamp, existing.profileStamp);
+    if (logicalCmp > 0) {
+      // Remote is strictly newer — accept
+      mergeRemote(sync.clock, member.profileStamp, now);
+      sync.state = applyGroupStateDelta(sync.state, {
+        members: { [member.deviceId]: member },
+      });
+
+      if (this.persistence) {
+        await this.persistence.persistState(groupId, sync.state);
+        await this.persistence.persistClock(groupId, sync.clock);
+      }
+      sync.lastSyncAt = now;
+      this.onStateUpdated?.(groupId, sync.state);
+
+      await this.broadcastDelta(groupId, { members: { [member.deviceId]: member } }, member.profileStamp);
+      return { inserted: false, updated: true };
+    }
+
+    if (logicalCmp === 0 && member.displayName !== existing.displayName) {
+      // Equal logical time, different value — deterministic tiebreaker
+      // Lower nodeId wins (same rule as mergeGroupSharedState)
+      if (member.profileStamp.nodeId < existing.profileStamp.nodeId) {
+        mergeRemote(sync.clock, member.profileStamp, now);
+        sync.state = applyGroupStateDelta(sync.state, {
+          members: { [member.deviceId]: member },
+        });
+
+        if (this.persistence) {
+          await this.persistence.persistState(groupId, sync.state);
+          await this.persistence.persistClock(groupId, sync.clock);
+        }
+        sync.lastSyncAt = now;
+        this.onStateUpdated?.(groupId, sync.state);
+
+        await this.broadcastDelta(groupId, { members: { [member.deviceId]: member } }, member.profileStamp);
+        return { inserted: false, updated: true };
+      }
+    }
+    // logicalCmp < 0: local is newer — ignore
+    // logicalCmp === 0 && same displayName: no change — ignore
+
+    return { inserted: false, updated: false };
   }
 
   removeGroup(groupId: string): void {
@@ -463,7 +549,7 @@ export class GroupSyncService {
    * ignoring nodeId. Returns -1, 0, or 1. This matches the internal
    * compareLogicalTime used by mergeGroupSharedState in groups.ts.
    */
-  private compareLogicalTimeOnly(
+  public compareLogicalTimeOnly(
     a: HybridTimestamp,
     b: HybridTimestamp,
   ): number {

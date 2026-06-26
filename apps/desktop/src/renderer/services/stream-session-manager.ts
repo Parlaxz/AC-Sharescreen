@@ -296,16 +296,13 @@ export class StreamSessionManager {
   /**
    * Start a new stream session.
    *
-   * Full order within practical Stage 4 scope:
-   *   1) idle validation
-   *   2) generate VDO credentials
-   *   3) create PublisherManager
-   *   4) capture display media (getDisplayMedia)
-   *   5) publish to VDO
-   *   6) register local stream before broadcasting
-   *   7) announce stream.started
-   *   8) start heartbeat
-   *   9) expose active state
+   * Two-phase design:
+   *   Phase A (fatal):  validation, capture, audio setup, publish, local registration
+   *   Phase B (non-fatal): stream.started announcement, heartbeat, active state
+   *
+   * A transient control-channel failure during Phase B does NOT destroy
+   * the successfully published media stream. The announcement is queued
+   * for delivery when the group control connection recovers.
    */
   async startStream(input: StartStreamInput): Promise<void> {
     if (this._state !== "idle" && this._state !== "failed") return;
@@ -331,6 +328,7 @@ export class StreamSessionManager {
     this._isAudioDegraded = false;
     this._sessionQualityOverride = input.qualityOverride ?? null;
 
+    // ── Phase A: Critical media startup (any failure is fatal) ────────
     try {
       // 0. Read group defaults from sync service (Stage 15)
       const syncState = this.runtime.getSyncService().getSyncState(input.groupId);
@@ -372,7 +370,7 @@ export class StreamSessionManager {
         onStats: () => {
           // Stats flow through store in future
         },
-        onError: (err) => console.error("[SSM] Publisher error:", err),
+        onError: (err) => console.error("[stream-session] Publisher error:", err),
         onTrackEnded: () => {
           // If display capture track ends, stop the stream
           this.stopStream().catch(() => {});
@@ -427,7 +425,7 @@ export class StreamSessionManager {
               : input.source.kind,
           );
         } catch (err) {
-          console.warn("[SSM] Audio setup failed, continuing with video only:", err);
+          console.warn("[stream-session] Audio setup failed, continuing with video only:", err);
           this._isAudioDegraded = true;
         }
       }
@@ -457,10 +455,21 @@ export class StreamSessionManager {
       // when peers respond with snapshots.
       const registry = this.runtime.getActiveStreamRegistry();
       registry.registerLocalStream(this.buildAnnouncement());
+    } catch (err) {
+      this._state = "failed";
+      // Clean up on failure — this tears down the publisher, stops capture,
+      // and removes any partial registration.
+      console.error("[stream-session] Phase A (media startup) failed:", err instanceof Error ? err.message : String(err));
+      await this.cleanupPublisher();
+      throw err;
+    }
 
-      // 5. Announce stream.started to group
+    // ── Phase B: Control announcement (non-fatal) ─────────────────────
+    // Media is published and locally registered. A transient group-control
+    // failure must not destroy the media stream.
+    try {
       const connManager = this.runtime.getConnectionManager();
-      await connManager.broadcast(this.groupId, {
+      const lifecyclePayload: Record<string, unknown> = {
         type: "stream.started",
         logicalStreamId: this.logicalStreamId,
         mediaSessionId: this.mediaSessionId,
@@ -475,18 +484,35 @@ export class StreamSessionManager {
         streamRevision: this.streamRevision,
         mediaJoinMetadata: "",
         replacesSessionId: null,
-      });
+      };
 
-      // 6. Start heartbeat timer (every 10s)
-      this.startHeartbeat();
-
-      this._state = "active";
+      const result = await connManager.sendOrQueueStreamLifecycle(
+        this.groupId!,
+        this.logicalStreamId!,
+        "stream.started",
+        lifecyclePayload,
+      );
+      console.log(
+        "[stream-session] stream.started",
+        result === "sent" ? "sent" : "queued for later delivery",
+        "—",
+        this.logicalStreamId,
+      );
     } catch (err) {
-      this._state = "failed";
-      // Clean up on failure
-      await this.cleanupPublisher();
-      throw err;
+      // Phase B failure is non-fatal — the media stream remains active.
+      // The announcement was already queued by sendOrQueueStreamLifecycle
+      // if the connection was unavailable.
+      console.warn(
+        "[stream-session] stream.started broadcast failed (non-fatal):",
+        err instanceof Error ? err.message : String(err),
+      );
     }
+
+    // Start heartbeat timer (every 10s)
+    this.startHeartbeat();
+
+    this._state = "active";
+    console.log("[stream-session] stream active —", this.logicalStreamId);
   }
 
   /**
@@ -495,8 +521,9 @@ export class StreamSessionManager {
    * Full stop flow (Stage 4):
    *   active/restarting → stopping
    *   stop heartbeat
-   *   broadcast stream.stopped
-   *   remove local registry stream
+   *   remove local registry stream (immediate)
+   *   clear pending lifecycle messages (so stale starts are not flushed)
+   *   queue stream.stopped or broadcast
    *   reject pending joins
    *   close viewer mappings
    *   stop publication/capture
@@ -536,11 +563,6 @@ export class StreamSessionManager {
       }
 
       // Remove local registry entry FIRST so the UI updates instantly.
-      // The previous order (broadcast → handleStopped) waited for the
-      // mesh broadcast to resolve before clearing the local store, which
-      // could keep the "Live" badge visible for several seconds if a
-      // peer was slow or unreachable. We notify peers in the background
-      // after the local state is already consistent.
       if (lastGroupId && lastLogicalStreamId) {
         this.runtime.getActiveStreamRegistry().handleStopped({
           groupId: lastGroupId,
@@ -549,16 +571,24 @@ export class StreamSessionManager {
         });
       }
 
-      // Announce stream.stopped to peers (fire-and-forget so the local
-      // stop is not blocked by peer reachability). Errors are best-effort.
+      // Clear any pending start/restart lifecycle messages for this stream
+      // so they are not flushed after reconnect.
       if (lastGroupId && lastLogicalStreamId) {
         const connManager = this.runtime.getConnectionManager();
-        void connManager.broadcast(lastGroupId, {
-          type: "stream.stopped",
-          groupId: lastGroupId,
-          hostDeviceId: lastHostDeviceId,
-          logicalStreamId: lastLogicalStreamId,
-        }).catch(() => {});
+        connManager.clearPendingForStream(lastGroupId, lastLogicalStreamId);
+
+        // Queue or broadcast stream.stopped (fire-and-forget; errors are non-fatal)
+        void connManager.sendOrQueueStreamLifecycle(
+          lastGroupId,
+          lastLogicalStreamId,
+          "stream.stopped",
+          {
+            type: "stream.stopped",
+            groupId: lastGroupId,
+            hostDeviceId: lastHostDeviceId,
+            logicalStreamId: lastLogicalStreamId,
+          },
+        ).catch(() => {});
       }
 
       // Stop publication/capture
@@ -578,6 +608,9 @@ export class StreamSessionManager {
    * and VDO credentials, restart publication with current defaults, and
    * broadcast stream.restarted.
    *
+   * Two-phase design mirrors startStream: Phase A (media) is fatal,
+   * Phase B (announcement) is non-fatal.
+   *
    * Transitions: active → restarting → active
    */
   async restartStream(): Promise<void> {
@@ -593,6 +626,8 @@ export class StreamSessionManager {
     this._state = "restarting";
     this.stopHeartbeat();
 
+    // ── Phase A: Critical media restart (any failure is fatal) ────────
+    let newMediaSessionId: string;
     try {
       // 1. Stop current publication and audio cleanly
       await this.cleanupPublisher();
@@ -604,7 +639,7 @@ export class StreamSessionManager {
       this.currentTrack = null;
 
       // 2. Generate new media session identifiers
-      const newMediaSessionId = crypto.randomUUID();
+      newMediaSessionId = crypto.randomUUID();
       this.mediaSessionId = newMediaSessionId;
       this.startedAt = Date.now();
       this.streamRevision++;
@@ -619,7 +654,7 @@ export class StreamSessionManager {
       this.publisherManager = new PublisherManager({
         onStateChange: () => {},
         onStats: () => {},
-        onError: (err) => console.error("[SSM] Publisher error:", err),
+        onError: (err) => console.error("[stream-session] Publisher error:", err),
         onTrackEnded: () => {
           this.stopStream().catch(() => {});
         },
@@ -690,7 +725,7 @@ export class StreamSessionManager {
               : oldSourceKind;
           await this.setupSourceAudio(oldSourceId, oldSourceKind, restartEffectiveKind);
         } catch (err) {
-          console.warn("[SSM] Audio setup failed during restart:", err);
+          console.warn("[stream-session] Audio setup failed during restart:", err);
           this._isAudioDegraded = true;
         }
       }
@@ -715,10 +750,17 @@ export class StreamSessionManager {
       // 9. Register locally before broadcasting
       const registry = this.runtime.getActiveStreamRegistry();
       registry.registerLocalStream(this.buildAnnouncement());
+    } catch (err) {
+      this._state = "failed";
+      console.error("[stream-session] Phase A (media restart) failed:", err instanceof Error ? err.message : String(err));
+      await this.cleanupPublisher();
+      throw err;
+    }
 
-      // 10. Broadcast stream.restarted with replacesSessionId
+    // ── Phase B: Control announcement (non-fatal) ─────────────────────
+    try {
       const connManager = this.runtime.getConnectionManager();
-      await connManager.broadcast(oldGroupId, {
+      const lifecyclePayload: Record<string, unknown> = {
         type: "stream.restarted",
         logicalStreamId: oldLogicalStreamId,
         mediaSessionId: newMediaSessionId,
@@ -735,16 +777,30 @@ export class StreamSessionManager {
         mediaJoinMetadata: "",
         replacesSessionId: oldMediaSessionId,
         isAudioDegraded: this._isAudioDegraded,
-      });
+      };
 
-      // 11. Start heartbeat
-      this.startHeartbeat();
-      this._state = "active";
+      const result = await connManager.sendOrQueueStreamLifecycle(
+        oldGroupId,
+        oldLogicalStreamId,
+        "stream.restarted",
+        lifecyclePayload,
+      );
+      console.log(
+        "[stream-session] stream.restarted",
+        result === "sent" ? "sent" : "queued for later delivery",
+        "—",
+        oldLogicalStreamId,
+      );
     } catch (err) {
-      this._state = "failed";
-      await this.cleanupPublisher();
-      throw err;
+      console.warn(
+        "[stream-session] stream.restarted broadcast failed (non-fatal):",
+        err instanceof Error ? err.message : String(err),
+      );
     }
+
+    // 11. Start heartbeat
+    this.startHeartbeat();
+    this._state = "active";
   }
 
   /**
@@ -780,12 +836,18 @@ export class StreamSessionManager {
     // Broadcast stream.stopped and remove registry entry
     if (wasActive && lastGroupId && lastLogicalStreamId) {
       const connManager = this.runtime.getConnectionManager();
-      connManager.broadcast(lastGroupId, {
-        type: "stream.stopped",
-        groupId: lastGroupId,
-        hostDeviceId: lastHostDeviceId,
-        logicalStreamId: lastLogicalStreamId,
-      }).catch(() => {});
+      connManager.clearPendingForStream(lastGroupId, lastLogicalStreamId);
+      void connManager.sendOrQueueStreamLifecycle(
+        lastGroupId,
+        lastLogicalStreamId,
+        "stream.stopped",
+        {
+          type: "stream.stopped",
+          groupId: lastGroupId,
+          hostDeviceId: lastHostDeviceId,
+          logicalStreamId: lastLogicalStreamId,
+        },
+      ).catch(() => {});
 
       this.runtime.getActiveStreamRegistry().handleStopped({
         groupId: lastGroupId,

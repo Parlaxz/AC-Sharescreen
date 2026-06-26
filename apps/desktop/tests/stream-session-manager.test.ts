@@ -17,7 +17,11 @@ function makeMockRuntime(): Phase3Runtime {
   };
   const connManager = {
     broadcast: vi.fn().mockResolvedValue(undefined),
+    sendOrQueueStreamLifecycle: vi.fn().mockResolvedValue("sent" as const),
     getConnection: vi.fn().mockReturnValue(null),
+    isConnected: vi.fn().mockReturnValue(false),
+    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    clearPendingForStream: vi.fn(),
   };
   const viewerBinding = {
     removeViewer: vi.fn(),
@@ -144,7 +148,7 @@ describe("StreamSessionManager (Stage 4)", () => {
     expect(ssm.state).toBe("idle");
   });
 
-  it("stopStream broadcasts stream.stopped and cleans up when active", async () => {
+  it("stopStream queues stream.stopped and cleans up when active", async () => {
     const connManager = runtime.getConnectionManager();
     const registry = runtime.getActiveStreamRegistry();
 
@@ -157,10 +161,12 @@ describe("StreamSessionManager (Stage 4)", () => {
 
     await ssm.stopStream();
 
-    expect(connManager.broadcast).toHaveBeenCalledWith("test-g-1", expect.objectContaining({
-      type: "stream.stopped",
-      groupId: "test-g-1",
-    }));
+    expect(connManager.sendOrQueueStreamLifecycle).toHaveBeenCalledWith(
+      "test-g-1",
+      "ls-1",
+      "stream.stopped",
+      expect.objectContaining({ type: "stream.stopped", groupId: "test-g-1" }),
+    );
     expect(registry.handleStopped).toHaveBeenCalledWith({
       groupId: "test-g-1",
       hostDeviceId: "dev-1",
@@ -714,10 +720,12 @@ describe("StreamSessionManager (Stage 4)", () => {
     expect(newVdoConfig!.streamId).toBeTruthy();
     expect(newVdoConfig!.password).toBeTruthy();
 
-    // Verify broadcast was sent
+    // Verify restart was sent or queued
     const connManager = runtime.getConnectionManager();
-    expect(connManager.broadcast).toHaveBeenCalledWith(
+    expect(connManager.sendOrQueueStreamLifecycle).toHaveBeenCalledWith(
       "test-restart-g-1",
+      originalLogicalStreamId,
+      "stream.restarted",
       expect.objectContaining({ type: "stream.restarted" }),
     );
 

@@ -34,6 +34,7 @@ vi.mock("@screenlink/vdo-adapter", () => {
       room: null,
     };
     public announceId: string | null = null;
+    public _stopFn = vi.fn();
 
     on(event: string, listener: (...args: unknown[]) => void) {
       if (event === "dataReceived") this.dataHandler = listener as (d: unknown, p: string) => void;
@@ -70,6 +71,13 @@ vi.mock("@screenlink/vdo-adapter", () => {
     async announce(options: { streamID?: string }) {
       this.announceId = options.streamID ?? "announce";
       return this.announceId;
+    }
+    async autoConnect(options: { room: string; streamID?: string; password?: string }) {
+      this.state.connected = true;
+      this.state.roomJoined = true;
+      this.state.room = options.room;
+      this.announceId = options.streamID ?? "announce";
+      return { stop: this._stopFn, streamID: this.announceId! };
     }
     async sendData(data: unknown, options: { uuid?: string }) {
       this.sent.push({ to: options.uuid ?? "*", payload: data as Record<string, unknown> });

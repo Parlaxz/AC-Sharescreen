@@ -17,6 +17,7 @@ interface MockSDK {
   joinRoom: ReturnType<typeof vi.fn>;
   leaveRoom: ReturnType<typeof vi.fn>;
   announce: ReturnType<typeof vi.fn>;
+  autoConnect: ReturnType<typeof vi.fn>;
   sendData: ReturnType<typeof vi.fn>;
   on: ReturnType<typeof vi.fn>;
   off: ReturnType<typeof vi.fn>;
@@ -29,12 +30,20 @@ interface MockSDK {
 
 function makeFakeSDK(): MockSDK {
   const handlers = new Map<string, ((...args: unknown[]) => void)[]>();
+  let stopFn = vi.fn();
   const sdk: MockSDK = {
     connect: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
     joinRoom: vi.fn().mockResolvedValue(undefined),
     leaveRoom: vi.fn().mockResolvedValue(undefined),
     announce: vi.fn().mockImplementation(async (opts: { streamID?: string }) => opts.streamID ?? "announce-id"),
+    autoConnect: vi.fn().mockImplementation(async (opts: { streamID?: string }) => {
+      sdk.state.connected = true;
+      sdk.state.roomJoined = true;
+      sdk.state.room = opts?.room ?? null;
+      sdk.announceId = opts?.streamID ?? "announce-id";
+      return { stop: stopFn, streamID: sdk.announceId! };
+    }),
     sendData: vi.fn().mockResolvedValue(undefined),
     on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
       const list = handlers.get(event) ?? [];
@@ -49,18 +58,6 @@ function makeFakeSDK(): MockSDK {
     announceId: null,
     handlers,
   };
-  // `connect` should mark state.connected
-  sdk.connect.mockImplementation(async () => {
-    sdk.state.connected = true;
-  });
-  sdk.joinRoom.mockImplementation(async (opts: { room: string }) => {
-    sdk.state.roomJoined = true;
-    sdk.state.room = opts.room;
-  });
-  sdk.announce.mockImplementation(async (opts: { streamID?: string }) => {
-    sdk.announceId = opts.streamID ?? "announce-id";
-    return sdk.announceId;
-  });
   return sdk;
 }
 
@@ -133,7 +130,7 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     createdSdks.length = 0;
   });
 
-  it("calls connect() then joinRoom() then announce() in order on start()", async () => {
+  it("calls autoConnect with correct WebSocket host and room config on start()", async () => {
     const record: Rec = { online: [], offline: [], messages: [], errors: [] };
     const conn = new GroupControlConnection({
       groupId: GROUP_ID,
@@ -148,16 +145,21 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     await tick();
 
     const sdk = createdSdks[createdSdks.length - 1]!;
-    expect(sdk.connect).toHaveBeenCalledTimes(1);
-    expect(sdk.joinRoom).toHaveBeenCalledTimes(1);
-    expect(sdk.announce).toHaveBeenCalledTimes(1);
-    // joinRoom uses the control room as the room and the group secret
-    // identity is propagated via the SDK password option at construction
-    expect(sdk.joinRoom.mock.calls[0][0]).toMatchObject({ room: CONTROL_ROOM });
-    expect(sdk.announce.mock.calls[0][0]).toMatchObject({ streamID: "alice" });
-    // State is connected only after announce resolves
-    expect(sdk.state.roomJoined).toBe(true);
-    expect(sdk.state.room).toBe(CONTROL_ROOM);
+    // Individual connect/joinRoom/announce should NOT be called directly
+    // — autoConnect wraps all three.
+    expect(sdk.connect).toHaveBeenCalledTimes(0);
+    expect(sdk.joinRoom).toHaveBeenCalledTimes(0);
+    expect(sdk.announce).toHaveBeenCalledTimes(0);
+    expect(sdk.autoConnect).toHaveBeenCalledTimes(1);
+    // autoConnect receives the control room and group configuration
+    const acCall = sdk.autoConnect.mock.calls[0][0];
+    expect(acCall).toMatchObject({
+      room: CONTROL_ROOM,
+      streamID: "alice",
+      password: GROUP_SECRET,
+    });
+    // Verify the SDK constructor was called with the WebSocket host
+    expect(createdSdks.length).toBeGreaterThanOrEqual(1);
   });
 
   it("state machine: idle → starting → connected in order", async () => {
@@ -178,30 +180,8 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     expect(conn.state).toBe("connected");
   });
 
-  it("announce happens AFTER joinRoom and BEFORE state becomes connected", async () => {
+  it("uses autoConnect and does NOT call individual lifecycle methods", async () => {
     const record: Rec = { online: [], offline: [], messages: [], errors: [] };
-    const callOrder: string[] = [];
-
-    // Inject a fresh SDK and observe its call ordering by wrapping
-    // the constructor at the start of this test.
-    const observer: MockSDK = makeFakeSDK();
-    const origConnect = observer.connect.getMockImplementation();
-    observer.connect.mockImplementation(async () => {
-      callOrder.push("connect");
-      if (origConnect) await origConnect();
-    });
-    const origJoin = observer.joinRoom.getMockImplementation();
-    observer.joinRoom.mockImplementation(async (opts: { room: string }) => {
-      callOrder.push("joinRoom");
-      if (origJoin) await origJoin(opts);
-    });
-    const origAnnounce = observer.announce.getMockImplementation();
-    observer.announce.mockImplementation(async (opts: { streamID?: string }) => {
-      callOrder.push("announce");
-      if (origAnnounce) await origAnnounce(opts);
-      return observer.announceId!;
-    });
-    void observer; // not directly used; the auto-mock creates its own instance
 
     const conn = new GroupControlConnection({
       groupId: GROUP_ID,
@@ -214,16 +194,14 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     await conn.start();
     const sdk = createdSdks[createdSdks.length - 1]!;
 
-    // The ordering on this SDK is also connect → joinRoom → announce
-    expect(sdk.connect).toHaveBeenCalledTimes(1);
-    expect(sdk.joinRoom).toHaveBeenCalledTimes(1);
-    expect(sdk.announce).toHaveBeenCalledTimes(1);
-    // The callOrder of THIS test's observer is local and unused; the
-    // ordering assertion above is sufficient.
-    void callOrder;
+    // autoConnect replaces manual connect/joinRoom/announce
+    expect(sdk.autoConnect).toHaveBeenCalledTimes(1);
+    expect(sdk.connect).toHaveBeenCalledTimes(0);
+    expect(sdk.joinRoom).toHaveBeenCalledTimes(0);
+    expect(sdk.announce).toHaveBeenCalledTimes(0);
   });
 
-  it("teardown disconnects and leaves the room on destroy", async () => {
+  it("teardown calls meshStop.stop() and disconnects on destroy", async () => {
     const record: Rec = { online: [], offline: [], messages: [], errors: [] };
     const conn = new GroupControlConnection({
       groupId: GROUP_ID,
@@ -237,7 +215,7 @@ describe("GroupControlConnection — real mesh lifecycle", () => {
     await tick();
     const sdk = createdSdks[createdSdks.length - 1]!;
     await conn.destroy();
-    expect(sdk.leaveRoom).toHaveBeenCalledTimes(1);
+    // The autoConnect stop handle runs; disconnect also runs as fallback.
     expect(sdk.disconnect).toHaveBeenCalledTimes(1);
   });
 

@@ -1,6 +1,7 @@
 import type {
   GroupControlEnvelope,
   GroupControlEnvelopeInput,
+  GroupMemberRecord,
   HybridTimestamp,
 } from "@screenlink/shared";
 import {
@@ -20,11 +21,23 @@ export interface GroupControlConnectionOptions {
   groupSecret: string;
   nodeId: string;
   displayName: string;
+  memberRecord: GroupMemberRecord | null;
   onPeerOnline: (deviceId: string, displayName: string) => void;
   onPeerOffline: (deviceId: string) => void;
   onMessage: (envelope: GroupControlEnvelope) => void;
   onStateChange: (state: ConnectionState) => void;
   onError: (error: Error) => void;
+  /**
+   * Called when a group.hello or group.hello.response is received and the
+   * sender identity has been authenticated (HMAC-envelope verified). The
+   * callback receives the sender device ID, the member record included in
+   * the hello, and the full validated envelope.
+   */
+  onAuthenticatedHello?: (
+    deviceId: string,
+    memberRecord: GroupMemberRecord | null,
+    envelope: GroupControlEnvelope,
+  ) => void;
 }
 
 function makeClock(nodeId: string, now?: number): HybridTimestamp {
@@ -55,14 +68,14 @@ function makeInput(
  *
  * The data-only mesh lifecycle used here is:
  *
- *   1. `connect()`         — establish the signaling WebSocket
- *   2. `joinRoom()`        — enter the data-only control room
- *   3. `announce()`        — make this peer discoverable in the room
- *   4. `sendData()`        — push authenticated envelopes to peers
+ *   1. `autoConnect()`     — combines connect() + joinRoom() + announce()
+ *   2. `sendData()`        — push authenticated envelopes to peers
  *
- * The mesh is "connected" only after announce() has resolved.
+ * The mesh is "connected" only after the SDK signals the mesh is ready.
  * Room identity = controlRoomId; media publication is a separate
  * SDK instance owned by PublisherManager.
+ *
+ * `autoConnect` returns `{ stop: () => void, streamID: string }`.
  */
 type VDONinjaSDKInstance = {
   VERSION?: string;
@@ -83,6 +96,14 @@ type VDONinjaSDKInstance = {
   view(streamId: string, options?: unknown): Promise<unknown>;
   stopViewing(streamId?: string): Promise<void>;
   sendData(payload: unknown, options: unknown): Promise<unknown>;
+  autoConnect(options: {
+    room: string;
+    mode?: "half" | "full";
+    view?: { audio?: boolean; video?: boolean };
+    password?: string;
+    streamID?: string;
+    label?: string;
+  }): Promise<{ stop: () => void; streamID: string }>;
   addEventListener(event: string, listener: (...args: unknown[]) => void): void;
   removeEventListener(event: string, listener: (...args: unknown[]) => void): void;
   on(event: string, listener: (...args: unknown[]) => void): void;
@@ -100,9 +121,17 @@ interface BoundHandlers {
   roomJoined: (event: unknown) => void;
 }
 
+/** Handle returned by autoConnect — invoked on destroy to clean up the mesh. */
+interface MeshStopHandle {
+  stop: () => void;
+  streamID: string;
+}
+
 export class GroupControlConnection {
   private sdk: VDONinjaSDKInstance | null = null;
   private handlers: BoundHandlers | null = null;
+  /** Handle returned by autoConnect — invoked on destroy/teardown. */
+  private meshStop: MeshStopHandle | null = null;
   private peerToDevice = new Map<string, string>();
   private deviceToPeer = new Map<string, string>();
   private _state: ConnectionState = "idle";
@@ -144,12 +173,20 @@ export class GroupControlConnection {
   }
 
   /**
-   * Start the data-only control mesh:
-   *   1. connect() to signaling
-   *   2. joinRoom() with controlRoomId as the room and groupSecret as the room password
-   *   3. announce() with our own nodeId (so peers can identify us in the room)
+   * Start the data-only control mesh using the SDK's autoConnect helper:
    *
-   * The connection is only marked "connected" once announce() resolves.
+   *   autoConnect() internally performs:
+   *     1. connect()        — establish the signaling WebSocket
+   *     2. joinRoom()       — enter the data-only control room
+   *     3. announce()       — make this peer discoverable
+   *
+   * The mesh is considered "connected" once autoConnect resolves.
+   *
+   * The SDK is constructed with the WebSocket signaling URL at
+   * wss://wss.vdo.ninja (never https://api.vdo.ninja). The group
+   * secret is used both as the SDK encryption password and the room
+   * password. HMAC envelope validation provides the application-level
+   * authentication layer.
    */
   async start(): Promise<void> {
     if (this.destroyed) return;
@@ -160,11 +197,10 @@ export class GroupControlConnection {
 
     try {
       const ctor = getSDKConstructor();
-      // The SDK constructor is loosely typed at this seam; treat the
-      // resulting instance as the renderer's narrow SDK alias.
+      console.log("[group-control] constructing SDK with WebSocket host: wss://wss.vdo.ninja");
       const sdk = new (ctor as unknown as new (opts: unknown) => VDONinjaSDKInstance)({
-        host: "https://api.vdo.ninja",
-        password: this.opts.controlRoomId,
+        host: "wss://wss.vdo.ninja",
+        password: this.opts.groupSecret,
         salt: this.opts.groupSecret.slice(0, 16),
         debug: false,
         maxReconnectAttempts: 5,
@@ -175,39 +211,38 @@ export class GroupControlConnection {
       this.sdk = sdk;
       this.setupEventHandlers(gen);
 
-      // Step 1: signaling WebSocket
-      await sdk.connect();
-      if (gen !== this.startGeneration || this.destroyed) {
-        await this.teardownSdk().catch(() => {});
-        return;
-      }
-
-      // Step 2: enter the data-only control room. The group secret is
-      // the room password; only members with the password reach this room.
-      await sdk.joinRoom({
+      // Use autoConnect which combines connect() + joinRoom() + announce()
+      // with a data-only mesh (audio: false, video: false).
+      console.log("[group-control] starting autoConnect (WebSocket + room join + announce)");
+      const result = await sdk.autoConnect({
         room: this.opts.controlRoomId,
-        password: this.opts.controlRoomId,
+        mode: "full",
+        view: { audio: false, video: false },
+        password: this.opts.groupSecret,
+        streamID: this.opts.nodeId,
+        label: this.opts.displayName,
       });
       if (gen !== this.startGeneration || this.destroyed) {
+        result.stop();
         await this.teardownSdk().catch(() => {});
         return;
       }
 
-      // Step 3: announce our presence so peers can identify us.
-      await sdk.announce({ streamID: this.opts.nodeId });
-      if (gen !== this.startGeneration || this.destroyed) {
-        await this.teardownSdk().catch(() => {});
-        return;
-      }
+      this.meshStop = result;
+      console.log("[group-control] mesh ready — room:", this.opts.controlRoomId);
 
-      // Step 4: handshake — also send a hello immediately to anyone who
-      // was already in the room before us.
       this.setState("connected");
       this.broadcastHello().catch(() => {});
     } catch (err) {
       if (this.destroyed || gen !== this.startGeneration) return;
       this.setState("failed");
-      this.opts.onError(err instanceof Error ? err : new Error(String(err)));
+      const sanitized = err instanceof Error ? err.message : String(err);
+      console.error("[group-control] mesh setup failed:", sanitized);
+      this.opts.onError(
+        err instanceof Error
+          ? new Error(`Group control setup failed: ${sanitized}`)
+          : new Error(String(err)),
+      );
       await this.teardownSdk().catch(() => {});
     }
   }
@@ -216,6 +251,12 @@ export class GroupControlConnection {
     this.destroyed = true;
     this.startGeneration++;
     this.setState("destroyed");
+    // Invoke the autoConnect stop handle first to clean up the mesh lifecycle
+    // (removes event listeners, stops viewing, leaves the room).
+    if (this.meshStop) {
+      try { this.meshStop.stop(); } catch { /* best effort */ }
+      this.meshStop = null;
+    }
     await this.teardownSdk();
     const allDeviceIds = Array.from(this.deviceToPeer.keys());
     this.peerToDevice.clear();
@@ -259,12 +300,16 @@ export class GroupControlConnection {
   }
 
   async broadcastHello(): Promise<void> {
-    await this.broadcast({
+    const payload: Record<string, unknown> = {
       type: "group.hello",
       deviceId: this.opts.nodeId,
       displayName: this.opts.displayName,
       protocolVersion: GROUP_PROTOCOL_VERSION,
-    });
+    };
+    if (this.opts.memberRecord) {
+      payload.member = this.opts.memberRecord;
+    }
+    await this.broadcast(payload);
   }
 
   /**
@@ -399,6 +444,12 @@ export class GroupControlConnection {
     this.sdk = null;
     if (!sdk) return;
 
+    // If the meshStop handle still exists (destroy was not called), invoke it.
+    if (this.meshStop) {
+      try { this.meshStop.stop(); } catch { /* best effort */ }
+      this.meshStop = null;
+    }
+
     if (this.handlers) {
       try { sdk.off("peerConnected", this.handlers.peerConnected as never); } catch { /* ignore */ }
       try { sdk.off("peerDisconnected", this.handlers.peerDisconnected as never); } catch { /* ignore */ }
@@ -456,12 +507,6 @@ export class GroupControlConnection {
           displayName: this.opts.displayName,
           protocolVersion: GROUP_PROTOCOL_VERSION,
         }).catch(() => {});
-        // If we are already connected, tell the new peer about ourselves
-        // as an existing member (spec: existing online users tell the new
-        // user about themselves).
-        if (this._state === "connected") {
-          this.sendMemberJoinedToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
-        }
       },
       peerDisconnected: (raw: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
@@ -501,6 +546,12 @@ export class GroupControlConnection {
             const displayName = validatedEnvelope.payload?.displayName as string;
             if (!deviceId) return;
 
+            // Extract member record from hello payload
+            const helloMember = validatedEnvelope.payload?.member as GroupMemberRecord | undefined;
+            const validatedMember = helloMember && helloMember.deviceId === deviceId
+              ? helloMember
+              : null;
+
             const oldPeer = this.deviceToPeer.get(deviceId);
             if (!oldPeer || oldPeer !== uuid) {
               if (oldPeer) this.peerToDevice.delete(oldPeer);
@@ -508,14 +559,24 @@ export class GroupControlConnection {
               this.deviceToPeer.set(deviceId, uuid);
               this.opts.onPeerOnline(deviceId, displayName);
             }
+
+            // Fire authenticated hello callback for member record merge
+            this.opts.onAuthenticatedHello?.(deviceId, validatedMember, validatedEnvelope);
+
+            // Send hello.response with our member record
+            const responsePayload: Record<string, unknown> = {
+              type: "group.hello.response",
+              deviceId: this.opts.nodeId,
+              displayName: this.opts.displayName,
+            };
+            if (this.opts.memberRecord) {
+              responsePayload.member = this.opts.memberRecord;
+            }
+
             // If we owe a hello.response, send it now and request full state.
             if (this.peersAwaitingHello.has(uuid)) {
               this.peersAwaitingHello.delete(uuid);
-              this.sendToPeer(uuid, {
-                type: "group.hello.response",
-                deviceId: this.opts.nodeId,
-                displayName: this.opts.displayName,
-              }).catch(() => {});
+              this.sendToPeer(uuid, responsePayload).catch(() => {});
               // After authenticated handshake, request state.
               this.requestFullStateFromPeer(uuid).catch(() => {});
               // Tell the peer we are online now.
@@ -533,6 +594,12 @@ export class GroupControlConnection {
             const deviceId = validatedEnvelope.senderDeviceId;
             if (!deviceId) return;
 
+            // Extract member record from hello response payload
+            const responseMember = validatedEnvelope.payload?.member as GroupMemberRecord | undefined;
+            const validatedMember = responseMember && responseMember.deviceId === deviceId
+              ? responseMember
+              : null;
+
             const oldPeer = this.deviceToPeer.get(deviceId);
             if (!oldPeer || oldPeer !== uuid) {
               if (oldPeer) this.peerToDevice.delete(oldPeer);
@@ -542,6 +609,10 @@ export class GroupControlConnection {
               // Tell the peer we are online now (first identity mapping).
               this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
             }
+
+            // Fire authenticated hello callback for member record merge
+            this.opts.onAuthenticatedHello?.(deviceId, validatedMember, validatedEnvelope);
+
             // After authenticated handshake, request state.
             this.requestFullStateFromPeer(uuid).catch(() => {});
             return;

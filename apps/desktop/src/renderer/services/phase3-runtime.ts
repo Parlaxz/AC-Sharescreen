@@ -8,7 +8,7 @@ import { RestartCoordinator } from "./restart-coordinator.js";
 import { QualityCoordinator } from "./quality-coordinator.js";
 import { MediaStatsPoller } from "./media-stats-service.js";
 import { showNotification } from "./notifications.js";
-import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
+import type { GroupSharedState, GroupMemberRecord, HybridTimestamp } from "@screenlink/shared";
 
 /**
  * Phase3Runtime owns all Phase 3 services:
@@ -41,6 +41,19 @@ export class Phase3Runtime {
   private destroyPromise: Promise<void> | null = null;
   private _deviceId: string | null = null;
   private _displayName: string | null = null;
+
+  /**
+   * Tracks which member device IDs have already produced a "joined"
+   * notification per group. Prevents duplicate joined notifications
+   * on state sync replay.
+   */
+  private notifiedJoinedMembers = new Map<string, Set<string>>();
+
+  /**
+   * Tracks which device IDs are currently considered "online" for the
+   * purpose of online-transition notifications per group.
+   */
+  private previouslyOnlineMembers = new Map<string, Set<string>>();
 
   /** Human-readable identity for diagnostics. Not available until addGroup(). */
   get deviceId(): string | null { return this._deviceId; }
@@ -88,10 +101,24 @@ export class Phase3Runtime {
       const s = store.getState();
       const byGroup = { ...s.onlineDeviceIdsByGroup };
       if (!byGroup[groupId]) byGroup[groupId] = [];
-      if (!byGroup[groupId].includes(deviceId)) {
+      const wasOnline = byGroup[groupId].includes(deviceId);
+      if (!wasOnline) {
         byGroup[groupId] = [...byGroup[groupId], deviceId];
       }
       s.setOnlineDevices(byGroup);
+
+      // Online transition notification: fire only on genuine offline→online
+      if (!wasOnline && deviceId !== this._deviceId) {
+        const prevOnline = this.previouslyOnlineMembers.get(groupId);
+        if (prevOnline && !prevOnline.has(deviceId)) {
+          prevOnline.add(deviceId);
+          const groupName = s.groupsById[groupId]?.name ?? groupId;
+          showNotification({
+            title: "ScreenLink",
+            body: `${displayName} is online in ${groupName}`,
+          });
+        }
+      }
 
       // After peer connects, send stream.state.request to discover their streams (C2.3)
       const conn = this.connManager.getConnection(groupId);
@@ -114,6 +141,12 @@ export class Phase3Runtime {
       }
       s.setOnlineDevices(byGroup);
 
+      // Remove from online notification tracking so reconnect fires a new notification
+      const prevOnline = this.previouslyOnlineMembers.get(groupId);
+      if (prevOnline) {
+        prevOnline.delete(deviceId);
+      }
+
       // Remove viewer binding when peer goes offline
       this.viewerMediaBinding.removeViewer(deviceId);
     });
@@ -129,7 +162,7 @@ export class Phase3Runtime {
       s.setActiveStreams(byGroup);
     });
 
-    // Wire sync service updates to store
+    // Wire sync service updates to store + joined notification detection
     this.syncService.setOnStateUpdated((groupId, state) => {
       if (gen !== this.initGen || this.destroyed) return;
       const s = store.getState();
@@ -144,6 +177,28 @@ export class Phase3Runtime {
       };
       if (!order.includes(groupId)) order.push(groupId);
       s.setGroups(groupsById, order);
+
+      // Joined notification: fire when a previously unknown member appears in state
+      const joinedSet = this.notifiedJoinedMembers.get(groupId);
+      if (joinedSet) {
+        for (const [deviceId, member] of Object.entries(state.members)) {
+          if (deviceId !== this._deviceId && !joinedSet.has(deviceId)) {
+            joinedSet.add(deviceId);
+            showNotification({
+              title: "ScreenLink",
+              body: `${member.displayName} joined ${state.name.value}`,
+            });
+          }
+        }
+      }
+    });
+
+    // Wire authenticated hello callback for remote member record merge
+    this.connManager.setOnAuthenticatedHello((groupId, senderDeviceId, member) => {
+      if (gen !== this.initGen || this.destroyed) return;
+      if (member) {
+        void this.syncService.mergeRemoteMember(groupId, member, senderDeviceId);
+      }
     });
 
     // ── Create Phase 3 services (C2, C7) ──────────────────────────────
@@ -208,21 +263,38 @@ export class Phase3Runtime {
       this.streamSessionManager.setDeviceIdentity(config.nodeId, config.displayName);
     }
 
+    // Pre-populate joined notification tracking with known members from the
+    // initial persisted state. This suppresses "joined" notifications for
+    // members that are already known at startup.
+    const knownMemberIds = new Set(Object.keys(state.members ?? {}));
+    this.notifiedJoinedMembers.set(config.groupId, knownMemberIds);
+
     // Step 2: Initialize sync state FIRST so messages arriving after connection
     // start have a valid sync state to work with.  Await sync init (including
     // any persistence of a freshly inserted local member) before connecting.
-    await this.syncService.initializeGroup(config.groupId, state, clock, config.nodeId, config.displayName);
+    const result = await this.syncService.initializeGroup(
+      config.groupId, state, clock, config.nodeId, config.displayName,
+    );
 
-    // Step 5: Start the connection
-    await this.connManager.addGroup(config);
+    // If a new local member was inserted, mark it as already notified so the
+    // local user never receives a "joined" notification about themselves.
+    knownMemberIds.add(config.nodeId);
+
+    // Step 5: Start the connection, passing the durable self member record
+    // so hellos can carry it for peer introduction.
+    await this.connManager.addGroup({
+      ...config,
+      memberRecord: result.localMember,
+    });
 
     const conn = this.connManager.getConnection(config.groupId);
 
-    // Step 6: Broadcast member presence notifications.
-    // The local user "joined" the group and is now "online".
+    // Step 6: Broadcast member joined ONLY when this device genuinely joined
+    // for the first time. Do NOT broadcast on restart or reconnect.
     if (conn && conn.state === "connected") {
-      void conn.broadcastMemberJoined(config.nodeId, config.displayName).catch(() => {});
-      void conn.broadcastMemberOnline(config.nodeId, config.displayName).catch(() => {});
+      if (result.localMemberWasInserted) {
+        void conn.broadcastMemberJoined(config.nodeId, config.displayName).catch(() => {});
+      }
     }
 
     // Step 7: Broadcast full state snapshot immediately so peers get our state
@@ -235,18 +307,12 @@ export class Phase3Runtime {
       }).catch(() => {});
     }
 
-    // Step 8: Replay any queued member events that arrived during startup
-    // (e.g. "member.joined" notifications from peers we connected to).
-    const groupName = syncState?.state.name.value ?? config.groupId;
-    const recentEvents = this.messageRouter.drainRecentMemberEvents(config.groupId);
-    for (const evt of recentEvents) {
-      showNotification({
-        title: "ScreenLink",
-        body: evt.type === "joined"
-          ? `${evt.memberDisplayName} joined ${groupName}`
-          : `${evt.memberDisplayName} is online in ${groupName}`,
-      });
-    }
+    // Initial hydration: populate online notification tracking with devices
+    // that are already connected. This suppresses "online" notifications for
+    // the batch of initial peer connections.
+    const onlineState = (await import("../stores/main-store.js")).useStore.getState().onlineDeviceIdsByGroup[config.groupId] ?? [];
+    const onlineSet = new Set(onlineState);
+    this.previouslyOnlineMembers.set(config.groupId, onlineSet);
   }
 
   async removeGroup(groupId: string): Promise<void> {
@@ -266,6 +332,8 @@ export class Phase3Runtime {
       this.restartCoordinator.destroy();
       this.syncService.destroy();
       await this.connManager.destroyAll();
+      this.notifiedJoinedMembers.clear();
+      this.previouslyOnlineMembers.clear();
     })();
     await this.destroyPromise;
   }

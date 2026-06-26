@@ -131,7 +131,7 @@ export interface MergeResult {
  * Compare only the logical time portion of two HybridTimestamps, ignoring
  * nodeId. Returns -1, 0, or 1.
  */
-function compareLogicalTime(
+export function compareLogicalTime(
   a: HybridTimestamp,
   b: HybridTimestamp,
 ): number {

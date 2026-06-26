@@ -75,6 +75,30 @@ export async function startShare(input: StartShareInput): Promise<void> {
     }
   }
 
+  // Preflight: ensure the group control connection is ready before
+  // opening the capture picker or starting audio. This prevents
+  // starting an undiscoverable stream when the control mesh is
+  // unavailable. The specific "not connected" error helps the user
+  // understand the issue without exposing raw SDK errors.
+  const runtime = getRuntime();
+  if (!runtime) {
+    store.setLocalShareState("error");
+    throw new Error("Phase3 runtime not available");
+  }
+  if (typeof runtime.getConnectionManager === "function") {
+    const connManager = runtime.getConnectionManager();
+    if (typeof connManager.isConnected === "function" && !connManager.isConnected(input.groupId)) {
+      try {
+        await connManager.ensureConnected(input.groupId);
+      } catch {
+        store.setLocalShareState("error");
+        throw new Error(
+          "The selected group is not connected. Reconnect to the group and try again.",
+        );
+      }
+    }
+  }
+
   // Optimistically set source info in store before starting.
   store.setSource({
     id: input.source.id,
@@ -96,15 +120,6 @@ export async function startShare(input: StartShareInput): Promise<void> {
         `Source approval failed: ${approvalErr instanceof Error ? approvalErr.message : String(approvalErr)}`,
       );
     }
-  }
-
-  const runtime = getRuntime();
-  if (!runtime) {
-    if (api) {
-      api.setSource(null).catch(() => {});
-    }
-    store.setLocalShareState("error");
-    throw new Error("Phase3 runtime not available");
   }
 
   try {
