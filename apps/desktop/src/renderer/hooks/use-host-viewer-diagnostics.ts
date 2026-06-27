@@ -18,7 +18,7 @@ interface ViewerStatusEvent {
   sampledAt: number;
 }
 
-interface HostObservedViewerStats {
+type HostObservedViewerStats = {
   sentBitrateKbps: number | null;
   packetLossPercent: number | null;
   rttMs: number | null;
@@ -26,7 +26,7 @@ interface HostObservedViewerStats {
   sentHeight: number | null;
   sentFps: number | null;
   codec: string | null;
-}
+};
 
 export interface ViewerRow {
   viewerDeviceId: string;
@@ -65,13 +65,22 @@ export interface ViewerRow {
 
 const STALE_STATUS_MS = 10_000;
 const POLL_INTERVAL_MS = 2_000;
-const EMPTY_RECEIVED = { bitrateKbps: null, width: null, height: null, fps: null } as const;
-const EMPTY_SENT = { bitrateKbps: null, width: null, height: null, fps: null, packetLossPercent: null, rttMs: null, codec: null } as const;
-const EMPTY_REQUESTED = { bitrateKbps: null, width: null, height: null, fps: null, presetName: null } as const;
+const EMPTY_RECEIVED: ViewerRow["received"] = { bitrateKbps: null, width: null, height: null, fps: null };
+const EMPTY_SENT: ViewerRow["sent"] = { bitrateKbps: null, width: null, height: null, fps: null, packetLossPercent: null, rttMs: null, codec: null };
+const EMPTY_REQUESTED: ViewerRow["requested"] = { bitrateKbps: null, width: null, height: null, fps: null, presetName: null };
+
+function isViewerStatusEvent(value: unknown): value is ViewerStatusEvent {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).viewerDeviceId === "string" &&
+    typeof (value as Record<string, unknown>).state === "string"
+  );
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function computeHostStats(snapshot: StatsSnapshot): HostObservedViewerStats {
+function computeHostStats(snapshot: StatsSnapshot): Omit<HostObservedViewerStats, "sentBitrateKbps"> {
   const outbound = snapshot.outbound as Record<string, unknown> | undefined;
   const remoteInbound = snapshot.remoteInbound as Record<string, unknown> | undefined;
   const candidatePair = snapshot.candidatePair as Record<string, unknown> | undefined;
@@ -100,7 +109,6 @@ function computeHostStats(snapshot: StatsSnapshot): HostObservedViewerStats {
   const codecMimeType = typeof codec?.mimeType === "string" ? codec.mimeType : null;
 
   return {
-    sentBitrateKbps: null,
     packetLossPercent,
     rttMs,
     sentWidth,
@@ -122,12 +130,15 @@ export function useHostViewerDiagnostics(
   const [rows, setRows] = useState<ViewerRow[]>([]);
   const statusMapRef = useRef<Map<string, ViewerStatusEvent>>(new Map());
   const bytesRef = useRef<Map<string, { lastBytes: number; lastTime: number }>>(new Map());
+  /** Stable ref mirror of `viewers` to avoid resetting the poll interval on every store update. */
+  const viewersRef = useRef(viewers);
+  viewersRef.current = viewers;
 
   // Listen for viewer.status events
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as ViewerStatusEvent;
-      if (detail && detail.viewerDeviceId) {
+      const detail = (e as CustomEvent).detail;
+      if (isViewerStatusEvent(detail)) {
         statusMapRef.current.set(detail.viewerDeviceId, detail);
       }
     };
@@ -148,8 +159,9 @@ export function useHostViewerDiagnostics(
 
       try {
         const snapshot = await pollStats(pc);
-        const stats = computeHostStats(snapshot);
+        const base = computeHostStats(snapshot);
 
+        let sentBitrateKbps: number | null = null;
         const outbound = snapshot.outbound as Record<string, unknown> | undefined;
         const bytesSent = typeof outbound?.bytesSent === "number" ? outbound.bytesSent : 0;
         const prev = bytesRef.current.get(uuid);
@@ -157,11 +169,12 @@ export function useHostViewerDiagnostics(
           const elapsed = (Date.now() - prev.lastTime) / 1000;
           const delta = bytesSent - prev.lastBytes;
           if (elapsed > 0 && delta >= 0) {
-            stats.sentBitrateKbps = Math.round((delta * 8) / elapsed / 1000);
+            sentBitrateKbps = Math.round((delta * 8) / elapsed / 1000);
           }
         }
         newBytes.set(uuid, { lastBytes: bytesSent, lastTime: Date.now() });
-        newStats.set(uuid, stats);
+
+        newStats.set(uuid, { ...base, sentBitrateKbps });
       } catch {
         // Best effort
       }
@@ -173,33 +186,31 @@ export function useHostViewerDiagnostics(
 
   // Merge all data sources every poll cycle
   useEffect(() => {
-    if (viewers.length === 0) {
-      setRows([]);
-      return;
-    }
-
     let cancelled = false;
 
     const buildRows = async () => {
+      const currentViewers = viewersRef.current;
+      if (currentViewers.length === 0) {
+        if (!cancelled) setRows([]);
+        return;
+      }
+
       const hostStats = await pollHostStats();
       if (cancelled) return;
 
       const now = Date.now();
       const newRows: ViewerRow[] = [];
 
-      for (const viewer of viewers) {
+      for (const viewer of currentViewers) {
         const status = statusMapRef.current.get(viewer.viewerDeviceId);
         const isStale = !status || (now - status.sampledAt) > STALE_STATUS_MS;
 
-        let state: ViewerRow["state"] = "unknown";
-        if (status) {
-          state = status.state;
-          if (isStale) state = "unknown";
-        }
+        const state: ViewerRow["state"] =
+          status && !isStale ? status.state : "unknown";
 
         const hostStat = hostStats?.get(viewer.peerUuid) ?? null;
 
-        let requested: ViewerRow["requested"] = { ...EMPTY_REQUESTED };
+        let requested: ViewerRow["requested"] = EMPTY_REQUESTED;
         if (qualityCoordinator) {
           const req: ViewerQualityRequest | null = qualityCoordinator.getViewerRequest(
             groupId,
@@ -212,7 +223,7 @@ export function useHostViewerDiagnostics(
               width: req.maxWidth,
               height: req.maxHeight,
               fps: req.maxFps,
-              presetName: null,
+              presetName: req.degradationPreference,
             };
           }
         }
@@ -229,18 +240,8 @@ export function useHostViewerDiagnostics(
                 height: status.receivedHeight,
                 fps: status.displayedFps,
               }
-            : { ...EMPTY_RECEIVED },
-          sent: hostStat
-            ? {
-                bitrateKbps: hostStat.sentBitrateKbps,
-                width: hostStat.sentWidth,
-                height: hostStat.sentHeight,
-                fps: hostStat.sentFps,
-                packetLossPercent: hostStat.packetLossPercent,
-                rttMs: hostStat.rttMs,
-                codec: hostStat.codec,
-              }
-            : { ...EMPTY_SENT },
+            : EMPTY_RECEIVED,
+          sent: hostStat ?? EMPTY_SENT,
           requested,
           lastStatusAt: status?.sampledAt ?? null,
         });
@@ -256,7 +257,7 @@ export function useHostViewerDiagnostics(
       cancelled = true;
       clearInterval(interval);
     };
-  }, [viewers, sdk, qualityCoordinator, groupId, logicalStreamId, pollHostStats]);
+  }, [sdk, qualityCoordinator, groupId, logicalStreamId, pollHostStats]);
 
   return rows;
 }
