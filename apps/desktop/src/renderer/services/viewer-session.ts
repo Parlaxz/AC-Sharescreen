@@ -190,6 +190,9 @@ export class ViewerSession {
   /** Readiness timeout handle for cleanup. */
   private _readinessTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** 2-second interval for sending viewer.status reports to the host */
+  private _statusInterval: ReturnType<typeof setInterval> | null = null;
+
   /** Track IDs already in the received stream (deduplication). */
   private _trackIdsInStream = new Set<string>();
 
@@ -321,7 +324,8 @@ export class ViewerSession {
       if (!this.isPauseGenerationCurrent()) return;
 
       // Notify host that we paused
-      this.sendPauseState(true);
+      this.clearStatusInterval();
+      void this.buildAndSendViewerStatus("paused");
       this.setPauseState("paused");
     } catch (err) {
       // Pause failed — return to playing (reversible)
@@ -355,6 +359,7 @@ export class ViewerSession {
     this._pauseGeneration = ViewerSession.nextPauseGeneration;
 
     this.setPauseState("resuming");
+    void this.buildAndSendViewerStatus("reconnecting");
 
     try {
       const vc = this.viewerClient;
@@ -396,9 +401,9 @@ export class ViewerSession {
       if (!this.isPauseGenerationCurrent()) return;
 
       // ── 5) Notify host that we resumed ─────────────────────────────
-      this.sendPauseState(false);
       this.clearPosterFrame();
       this.setPauseState("playing");
+      this.startStatusInterval();
     } catch (err) {
       // Resume failed — stay paused so the user can retry
       console.error("[ViewerSession] resume failed, remaining paused:", err);
@@ -668,6 +673,7 @@ export class ViewerSession {
 
         // 2) Cancel waiters and timers so any pending operation bails.
         this.cancelReadinessTimer();
+        this.clearStatusInterval();
         this.cancelPendingJoin();
         this.cancelRemoteTrackEndedTimer();
 
@@ -1063,6 +1069,7 @@ export class ViewerSession {
         if (isVideo) {
           this.cancelReadinessTimer();
           this.setState("watching");
+          this.startStatusInterval();
 
           // If we were resuming from pause, the poster frame is now stale —
           // clear it so the live video shows through.
@@ -1230,6 +1237,7 @@ export class ViewerSession {
     }
 
     this.setState("watching");
+    this.startStatusInterval();
 
     // Watch for the capture track ending (user stops sharing).
     const track = captureStream.getVideoTracks()[0];
@@ -1254,6 +1262,7 @@ export class ViewerSession {
 
   private setError(error: string): void {
     if (this._destructed) return;
+    this.clearStatusInterval();
     this.cancelReadinessTimer();
     this._state = "error";
     this.onStateChange?.("error");
@@ -1264,11 +1273,12 @@ export class ViewerSession {
   }
 
   /**
-   * Send a viewer.paused state notification over the group-control channel.
-   * Informs the host that this viewer has paused or resumed media playback.
-   * Fire-and-forget — the host uses this for diagnostics and viewer status display.
+   * Build and send a viewer.status report over the group-control channel.
+   * Reports current viewer state, received media stats, and the sampled timestamp.
+   * When stateOverride is provided, skips diagnostics polling (used for pause/resume).
+   * Fire-and-forget — the host uses this for the viewer diagnostics list.
    */
-  private sendPauseState(paused: boolean): void {
+  private async buildAndSendViewerStatus(stateOverride?: string): Promise<void> {
     const runtime = getRuntime();
     if (!runtime || runtime.isDestroyed()) return;
     if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
@@ -1279,13 +1289,62 @@ export class ViewerSession {
     const peerUuid = conn.peerForDevice(this.hostDeviceId);
     if (!peerUuid) return;
 
+    const state = stateOverride ?? ((): "playing" | "paused" | "reconnecting" => {
+      if (this._pauseState === "paused" || this._pauseState === "pausing") return "paused";
+      if (this._pauseState === "resuming") return "reconnecting";
+      return "playing";
+    })();
+
+    let receivedBitrateKbps: number | null = null;
+    let receivedWidth: number | null = null;
+    let receivedHeight: number | null = null;
+    let displayedFps: number | null = null;
+
+    if (state !== "paused" && this.viewerClient) {
+      try {
+        const diag = await this.getDiagnostics();
+        if (diag) {
+          receivedBitrateKbps = diag.inboundVideo.bitrateBps > 0
+            ? Math.round(diag.inboundVideo.bitrateBps / 1000)
+            : null;
+          receivedWidth = diag.inboundVideo.frameWidth;
+          receivedHeight = diag.inboundVideo.frameHeight;
+          displayedFps = diag.inboundVideo.framesPerSecond;
+        }
+      } catch { /* best effort */ }
+    }
+
     void conn.sendToPeer(peerUuid, {
-      type: "viewer.paused",
-      logicalStreamId: this.logicalStreamId,
+      type: "viewer.status",
       viewerDeviceId: runtime.deviceId ?? "viewer",
-      viewerSessionId: this._viewerSessionId ?? undefined,
-      paused,
-    }).catch(() => {});
+      streamId: this.logicalStreamId,
+      state,
+      receivedBitrateKbps,
+      receivedWidth,
+      receivedHeight,
+      displayedFps,
+      sampledAt: Date.now(),
+    } as Record<string, unknown>).catch(() => {});
+  }
+
+  private startStatusInterval(): void {
+    this.clearStatusInterval();
+    this._statusInterval = setInterval(() => {
+      if (!this.isCurrent()) {
+        this.clearStatusInterval();
+        return;
+      }
+      void this.buildAndSendViewerStatus();
+    }, 2000);
+    // Send an immediate first report
+    void this.buildAndSendViewerStatus();
+  }
+
+  private clearStatusInterval(): void {
+    if (this._statusInterval) {
+      clearInterval(this._statusInterval);
+      this._statusInterval = null;
+    }
   }
 
   /**
