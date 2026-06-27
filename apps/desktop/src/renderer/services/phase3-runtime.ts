@@ -442,6 +442,37 @@ export class Phase3Runtime {
 let _runtime: Phase3Runtime | null = null;
 let _initPromise: Promise<Phase3Runtime> | null = null;
 let _destroyPromise: Promise<void> | null = null;
+let _scheduledRelease: {
+  timer: ReturnType<typeof setTimeout>;
+  promise: Promise<void>;
+  resolve: () => void;
+} | null = null;
+
+const STRICT_MODE_RELEASE_GRACE_MS = 0;
+
+function cancelScheduledRelease(): void {
+  const scheduled = _scheduledRelease;
+  if (!scheduled) return;
+  clearTimeout(scheduled.timer);
+  _scheduledRelease = null;
+  scheduled.resolve();
+}
+
+async function destroyRuntimeNow(): Promise<void> {
+  if (_initPromise) {
+    const runtime = await _initPromise;
+    _initPromise = null;
+    _runtime = null;
+    await runtime.destroy();
+    return;
+  }
+
+  const runtime = _runtime;
+  if (!runtime || runtime.isDestroyed()) return;
+
+  _runtime = null;
+  await runtime.destroy();
+}
 
 /**
  * Acquire the Phase3Runtime singleton.
@@ -455,6 +486,8 @@ let _destroyPromise: Promise<void> | null = null;
  * - Generation safety preserved via Phase3Runtime.initGen
  */
 export async function acquirePhase3Runtime(persistence?: SyncPersistenceAdapter): Promise<Phase3Runtime> {
+  cancelScheduledRelease();
+
   // Wait for any pending destroy to complete before creating a new runtime
   if (_destroyPromise) {
     await _destroyPromise;
@@ -503,28 +536,40 @@ export async function releasePhase3Runtime(): Promise<void> {
     return;
   }
 
-  // If startup is still in progress, wait for it then destroy.
-  // This handles the case where cleanup fires before acquirePhase3Runtime
-  // finishes initializing (e.g. StrictMode unmount during pending acquire).
-  if (_initPromise) {
-    const runtime = await _initPromise;
-    _initPromise = null; // prevent further reuse of this promise
-    _runtime = null;
-    await runtime.destroy();
+  if (_scheduledRelease) {
+    await _scheduledRelease.promise;
     return;
   }
 
-  const runtime = _runtime;
-  if (!runtime || runtime.isDestroyed()) return;
+  let resolveScheduled!: () => void;
+  const scheduledPromise = new Promise<void>((resolve) => {
+    resolveScheduled = resolve;
+  });
 
-  // Start destruction, tracking the promise
-  _destroyPromise = (async () => {
-    _runtime = null;
-    await runtime.destroy();
-  })();
+  const timer = setTimeout(() => {
+    const scheduled = _scheduledRelease;
+    _scheduledRelease = null;
 
-  await _destroyPromise;
-  _destroyPromise = null;
+    const destroyPromise = (async () => {
+      await destroyRuntimeNow();
+    })();
+
+    _destroyPromise = destroyPromise;
+    void destroyPromise.finally(() => {
+      if (_destroyPromise === destroyPromise) {
+        _destroyPromise = null;
+      }
+      scheduled?.resolve();
+    });
+  }, STRICT_MODE_RELEASE_GRACE_MS);
+
+  _scheduledRelease = {
+    timer,
+    promise: scheduledPromise,
+    resolve: resolveScheduled,
+  };
+
+  await scheduledPromise;
 }
 
 /**

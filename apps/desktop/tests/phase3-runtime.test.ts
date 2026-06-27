@@ -125,6 +125,18 @@ describe("Phase3Runtime singleton lifecycle", () => {
     expect(getRuntime()).toBe(r2);
   });
 
+  it("StrictMode cleanup does not tear down the runtime before the immediate remount reacquires it", async () => {
+    const r1 = await acquirePhase3Runtime();
+    const releasePromise = releasePhase3Runtime();
+    const r2 = await acquirePhase3Runtime();
+
+    await releasePromise;
+
+    expect(r2).toBe(r1);
+    expect(getRuntime()).toBe(r1);
+    expect(r1.isDestroyed()).toBe(false);
+  });
+
   it("release during pending acquire waits for init then destroys runtime", async () => {
     // Simulates unmount firing while acquirePhase3Runtime() is still initializing.
     // releasePhase3Runtime must handle _initPromise, not just _runtime.
@@ -186,36 +198,43 @@ describe("Phase3Runtime singleton lifecycle", () => {
   });
 
   it("acquire waits for pending destruction before creating new runtime", async () => {
-    // Override destroyAll to require explicit resolution so we can
-    // verify that acquire() waits for it
-    const origDestroyAll = GroupConnectionManager.prototype.destroyAll;
-    let destroyResolve: () => void;
-    const destroyGate = new Promise<void>((resolve) => { destroyResolve = resolve; });
-    let destroyStarted = false;
-    vi.spyOn(GroupConnectionManager.prototype, "destroyAll").mockImplementation(
-      async function (this: GroupConnectionManager) {
-        destroyStarted = true;
-        await destroyGate;
-      }
-    );
+    vi.useFakeTimers();
+    try {
+      // Override destroyAll to require explicit resolution so we can
+      // verify that acquire() waits for it
+      const origDestroyAll = GroupConnectionManager.prototype.destroyAll;
+      let destroyResolve: () => void;
+      const destroyGate = new Promise<void>((resolve) => { destroyResolve = resolve; });
+      let destroyStarted = false;
+      vi.spyOn(GroupConnectionManager.prototype, "destroyAll").mockImplementation(
+        async function (this: GroupConnectionManager) {
+          destroyStarted = true;
+          await destroyGate;
+        }
+      );
 
-    const r1 = await acquirePhase3Runtime();
-    const relPromise = releasePhase3Runtime();
+      const r1 = await acquirePhase3Runtime();
+      const relPromise = releasePhase3Runtime();
 
-    // destroyAll should have been called (started)
-    expect(destroyStarted).toBe(true);
+      await vi.runOnlyPendingTimersAsync();
 
-    // Acquire should not resolve until destroy completes
-    let acquired = false;
-    const acqPromise = acquirePhase3Runtime().then((r) => { acquired = true; return r; });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(acquired).toBe(false);
+      // destroyAll should have been called (started)
+      expect(destroyStarted).toBe(true);
 
-    // Now complete destroy
-    destroyResolve!();
-    const r2 = await acqPromise;
-    expect(r2).not.toBe(r1);
-    await relPromise;
+      // Acquire should not resolve until destroy completes
+      let acquired = false;
+      const acqPromise = acquirePhase3Runtime().then((r) => { acquired = true; return r; });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(acquired).toBe(false);
+
+      // Now complete destroy
+      destroyResolve!();
+      const r2 = await acqPromise;
+      expect(r2).not.toBe(r1);
+      await relPromise;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("generation safety: callbacks after destroy are rejected", async () => {
