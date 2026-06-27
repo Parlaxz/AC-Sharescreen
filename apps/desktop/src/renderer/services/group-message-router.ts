@@ -249,8 +249,13 @@ export class GroupMessageRouter {
         const leaveData = parseGroupMessagePayload("stream.leave", envelope.payload);
         if (!leaveData.ok) return;
         const viewerDeviceId = leaveData.data.viewerDeviceId;
+        // Optional per-attempt session ID. When present, removeViewer()
+        // will ignore the message if it does not match the active mapping
+        // — preventing a delayed leave from a prior Watch attempt from
+        // clobbering a newer rejoin mapping.
+        const viewerSessionId = leaveData.data.viewerSessionId;
         if (viewerDeviceId) {
-          this.viewerBinding.removeViewer(viewerDeviceId);
+          this.viewerBinding.removeViewer(viewerDeviceId, viewerSessionId);
         }
       }
       return;
@@ -285,8 +290,9 @@ export class GroupMessageRouter {
         if (!bindData.ok) return;
         const peerUuid = envelope.senderDeviceId;
         const token = bindData.data.token;
+        const viewerSessionId = bindData.data.viewerSessionId;
         if (peerUuid && token) {
-          void this.viewerBinding.handleMediaBind(peerUuid, token);
+          void this.viewerBinding.handleMediaBind(peerUuid, token, viewerSessionId);
         }
       }
       return;

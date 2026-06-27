@@ -33,8 +33,33 @@ export class ViewerClient {
   private _dataChannelWaiters = new Map<string, { promise: Promise<void>; resolve: () => void }>();
   private _dataChannelsOpened = new Set<string>();
 
+  /**
+   * The VDO stream ID currently being viewed. Stored so that shutdown()
+   * can call `stopViewing(activeStreamId)` — SDK 1.3.18 requires the
+   * stream ID to mark the disconnect as intentional and to cancel the
+   * per-stream retry timer.
+   */
+  private _activeStreamId: string | null = null;
+
+  /**
+   * Internal SDK event handlers that ViewerClient registers itself
+   * (peerConnected for codec preferences, dataChannelOpen for waiter
+   * resolution). Tracked separately from `registeredHandlers` so
+   * shutdown() can remove them — the public on()/off() path does not
+   * see them.
+   */
+  private _internalHandlers: Array<{ event: SDKEvent; handler: (...args: unknown[]) => void }> = [];
+
+  /**
+   * Set to true when shutdown() is in progress or has completed.
+   * Prevents new view() calls from racing the teardown.
+   */
+  private _shuttingDown = false;
+  private _shutdownPromise: Promise<void> | null = null;
+
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
+    if (this._shuttingDown) return;
     if (this.sdk) {
       this.sdk.on(event, handler);
       if (!this.registeredHandlers.has(event)) {
@@ -59,6 +84,9 @@ export class ViewerClient {
   }
 
   async createAndConnect(password: string, options?: Partial<VDONinjaSDKConstructorOptions> & { requestedCodec?: string }): Promise<void> {
+    if (this._shuttingDown || this._shutdownPromise) {
+      throw new CompatibilityError("ViewerClient is shutting down — cannot create a new connection");
+    }
     const Ctor = getSDKConstructor();
     this.sdk = new Ctor({
       host: options?.host ?? "wss://wss.vdo.ninja",
@@ -88,9 +116,11 @@ export class ViewerClient {
     // Stage 8: Register peerConnected handler to apply codec preferences
     // on new peer connections as they are established.
     this._requestedCodec = options?.requestedCodec ?? "auto";
-    this.sdk.on("peerConnected", () => {
+    const peerConnectedHandler = (): void => {
       this.applyCodecPreferencesOnExistingConnections();
-    });
+    };
+    this.sdk.on("peerConnected", peerConnectedHandler);
+    this._internalHandlers.push({ event: "peerConnected", handler: peerConnectedHandler });
 
     // Set up dataChannelOpen tracking.
     // In SDK 1.3.18, this fires as a CustomEvent with detail = { uuid }.
@@ -106,7 +136,7 @@ export class ViewerClient {
    */
   private setupDataChannelOpenHandler(): void {
     if (!this.sdk) return;
-    this.sdk.on("dataChannelOpen", (...args: unknown[]) => {
+    const handler = (...args: unknown[]): void => {
       const raw = args[0];
       let uuid: string | undefined;
 
@@ -130,38 +160,73 @@ export class ViewerClient {
           this._dataChannelWaiters.delete(uuid);
         }
       }
-    });
+    };
+    this.sdk.on("dataChannelOpen", handler);
+    this._internalHandlers.push({ event: "dataChannelOpen", handler });
   }
 
   /**
    * View a stream and apply codec preferences before the offer is generated.
    * Stage 8: Applies common video codec capabilities (VP9, H.264, VP8 auto-order)
    * on the viewer's transceivers before the SDK generates the offer.
+   *
+   * Stores the stream ID so that shutdown() can call `stopViewing(streamId)`
+   * — SDK 1.3.18 uses that argument to mark the disconnect as intentional
+   * and to cancel the per-stream retry timer.
    */
   async view(streamId: string, displayName?: string): Promise<void> {
+    if (this._shuttingDown || this._shutdownPromise) {
+      throw new CompatibilityError("ViewerClient is shutting down — cannot view a new stream");
+    }
     if (!this.sdk) throw new CompatibilityError("Not connected");
+
+    // Remember which stream we are viewing so shutdown() can pass it back
+    // to the SDK. Stored before the SDK call so that an error during view()
+    // still leaves a recoverable ID for cleanup.
+    this._activeStreamId = streamId;
 
     // Stage 8: Apply codec preferences to any pre-existing viewer transceivers.
     this.applyCodecPreferencesOnExistingConnections();
 
-    await withTimeout(
-      this.sdk.view(streamId, {
-        audio: true,
-        video: true,
-        label: displayName,
-      }),
-      30000,
-      "SDK view timed out — stream may not exist or credentials are wrong",
-    );
+    try {
+      await withTimeout(
+        this.sdk.view(streamId, {
+          audio: true,
+          video: true,
+          label: displayName,
+        }),
+        30000,
+        "SDK view timed out — stream may not exist or credentials are wrong",
+      );
+    } catch (err) {
+      // Don't leave a stale active-stream pointer if the view call failed
+      this._activeStreamId = null;
+      throw err;
+    }
 
     // Stage 8: Apply preferences again after view to catch transceivers
     // created during the view call.
     this.applyCodecPreferencesOnExistingConnections();
   }
 
+  /**
+   * Stop viewing the active stream. Backward-compatible wrapper — callers
+   * that don't have a stream ID can still invoke this with no argument.
+   * The SDK 1.3.18 type signature is `stopViewing(streamId?)` — passing
+   * the active stream ID marks the disconnect as intentional and cancels
+   * the per-stream retry timer, which is critical to preventing a leave
+   * from being followed by an automatic reconnect.
+   */
   async stopViewing(): Promise<void> {
     if (!this.sdk) return;
-    await this.sdk.stopViewing();
+    const streamId = this._activeStreamId;
+    try {
+      await this.sdk.stopViewing(streamId ?? undefined);
+    } finally {
+      // Clear the pointer whether or not the SDK call succeeded so a later
+      // shutdown() call won't re-target this stream.
+      this._activeStreamId = null;
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -170,8 +235,129 @@ export class ViewerClient {
     this.sdk = null;
   }
 
+  /**
+   * Idempotent asynchronous shutdown.
+   *
+   * Marks the shutdown as intentional (via the SDK's _intentionalDisconnect
+   * flag, set by stopViewing(streamId) and disconnect()), removes all
+   * application- and SDK-owned listeners, clears per-UUID data-channel
+   * waiters, and tears the SDK down in a strictly sequential order:
+   *
+   *   1. stopViewing(activeStreamId) — awaited
+   *   2. disconnect()                — awaited
+   *
+   * Concurrent execution of those two is unsafe: the SDK resets its
+   * `_intentionalDisconnect` flag at the end of `stopViewing()`, so a
+   * `disconnect()` fired in parallel can race a reconnect attempt.
+   *
+   * This method does NOT delete the ViewerClient instance; it just
+   * tears the underlying SDK state down. After shutdown() the client
+   * cannot be reused — create a new one for the next Watch attempt.
+   *
+   * Safe to call multiple times — repeated invocations await the same
+   * teardown promise and return without side effects.
+   */
+  async shutdown(): Promise<void> {
+    if (this._shutdownPromise) return this._shutdownPromise;
+    this._shuttingDown = true;
+
+    this._shutdownPromise = (async () => {
+      // Capture once: the SDK may be cleared mid-shutdown.
+      const sdk = this.sdk;
+      const activeStreamId = this._activeStreamId;
+
+      // 1) Stop viewing the active stream first. SDK 1.3.18 accepts the
+      //    streamID argument, which marks the disconnect as intentional
+      //    and cancels the per-stream retry timer so the SDK will NOT
+      //    automatically re-invite the viewer after we exit.
+      //    Awaited — the SDK resets _intentionalDisconnect at the end of
+      //    this call, so we must complete it before moving on.
+      if (sdk && activeStreamId) {
+        try {
+          await sdk.stopViewing(activeStreamId);
+        } catch {
+          // Best effort — proceed to disconnect regardless.
+        }
+      } else if (sdk) {
+        try {
+          await sdk.stopViewing();
+        } catch {
+          // Best effort
+        }
+      }
+      this._activeStreamId = null;
+
+      // 2) Disconnect from the signaling server. Sequential and awaited.
+      //    disconnect() also sets _intentionalDisconnect = true and tears
+      //    down the WebSocket, which is the final barrier against
+      //    auto-reconnect.
+      if (sdk) {
+        try {
+          await sdk.disconnect();
+        } catch {
+          // Best effort
+        }
+      }
+      this.sdk = null;
+
+      // 3) Remove all SDK listeners we registered. This includes both
+      //    application handlers (added via on()) and the internal
+      //    peerConnected / dataChannelOpen handlers we register in
+      //    createAndConnect() / setupDataChannelOpenHandler(). Without
+      //    this step, a stale SDK instance or a re-entrant event could
+      //    resurrect handler state after we null out the SDK.
+      if (sdk) {
+        for (const { event, handler } of this._internalHandlers) {
+          try {
+            sdk.off(event, handler);
+          } catch {
+            // ignore
+          }
+        }
+        for (const [event, handlers] of this.registeredHandlers) {
+          for (const handler of handlers) {
+            try {
+              sdk.off(event, handler);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+      this._internalHandlers = [];
+      this.registeredHandlers.clear();
+      this.pendingHandlers.clear();
+
+      // 4) Clear data-channel waiter state. Resolve any outstanding
+      //    waiters so any awaiter (e.g. sendMediaBind) wakes up and
+      //    observes the shutdown — the generation guard in the caller
+      //    prevents it from acting on the resolution.
+      for (const waiter of this._dataChannelWaiters.values()) {
+        try {
+          waiter.resolve();
+        } catch {
+          // ignore
+        }
+      }
+      this._dataChannelWaiters.clear();
+      this._dataChannelsOpened.clear();
+    })();
+
+    return this._shutdownPromise;
+  }
+
   getSDK(): VDONinjaSDK | null {
     return this.sdk;
+  }
+
+  /** True after shutdown() has been initiated. */
+  get isShuttingDown(): boolean {
+    return this._shuttingDown;
+  }
+
+  /** The currently active VDO stream ID, or null if not viewing. */
+  get activeStreamId(): string | null {
+    return this._activeStreamId;
   }
 
   /**
@@ -191,6 +377,9 @@ export class ViewerClient {
     targetUuid: string,
     timeout = 15_000,
   ): Promise<void> {
+    if (this._shuttingDown || this._shutdownPromise) {
+      throw new CompatibilityError("ViewerClient is shutting down");
+    }
     // Already open
     if (this._dataChannelsOpened.has(targetUuid)) return;
 
@@ -227,14 +416,21 @@ export class ViewerClient {
     targetUuid: string,
     token: string,
     mediaSessionId?: string,
+    viewerSessionId?: string,
   ): Promise<void> {
+    if (this._shuttingDown || this._shutdownPromise) {
+      throw new CompatibilityError("ViewerClient is shutting down");
+    }
     if (!this.sdk) throw new CompatibilityError("Not connected");
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       type: "media.bind",
       token,
       mediaSessionId: mediaSessionId ?? "",
     };
+    if (viewerSessionId) {
+      payload.viewerSessionId = viewerSessionId;
+    }
 
     // Wait for data channel to open before sending
     await this.waitForDataChannelOpen(targetUuid);

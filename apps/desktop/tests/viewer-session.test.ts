@@ -17,6 +17,7 @@ const mockViewerClientMethods = vi.hoisted(() => ({
   view: vi.fn(),
   stopViewing: vi.fn(),
   disconnect: vi.fn(),
+  shutdown: vi.fn().mockResolvedValue(undefined),
   getSDK: vi.fn(),
   sendMediaBind: vi.fn(),
   on: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock("@screenlink/vdo-adapter", () => ({
     view: mockViewerClientMethods.view,
     stopViewing: mockViewerClientMethods.stopViewing,
     disconnect: mockViewerClientMethods.disconnect,
+    shutdown: mockViewerClientMethods.shutdown,
     getSDK: mockViewerClientMethods.getSDK,
     sendMediaBind: mockViewerClientMethods.sendMediaBind,
     on: mockViewerClientMethods.on,
@@ -312,6 +314,131 @@ describe("ViewerSession — generation counter", () => {
     expect(mockViewerClientMethods.createAndConnect).toHaveBeenCalledTimes(1);
     const secondGen = (session as any)._generation;
     expect(secondGen).not.toBe(firstGen);
+  });
+});
+
+// ─── Leave/rejoin lifecycle ─────────────────────────────────────────────
+
+describe("ViewerSession — leave/rejoin lifecycle", () => {
+  let session: ViewerSession;
+  let runtime: ReturnType<typeof makeMockRuntime>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtime = makeMockRuntime();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    session = new ViewerSession();
+  });
+
+  afterEach(() => {
+    session.destroy();
+    vi.restoreAllMocks();
+  });
+
+  function mockJoinResponseOk() {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+  }
+
+  it("start() generates a viewerSessionId for the attempt", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    expect(session.viewerSessionId).toMatch(/^[0-9a-f-]{8,}/);
+  });
+
+  it("stream.join.request carries the viewerSessionId", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    const sentJoin = (runtime as any).__sendToPeer.mock.calls.find(
+      ([peer, payload]: [string, Record<string, unknown>]) => payload.type === "stream.join.request",
+    )?.[1];
+    expect(sentJoin).toBeDefined();
+    expect(sentJoin.viewerSessionId).toBe(session.viewerSessionId);
+  });
+
+  it("stream.leave carries the viewerSessionId", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    session.stop();
+    await Promise.resolve();
+    const sentLeave = (runtime as any).__sendToPeer.mock.calls.find(
+      ([peer, payload]: [string, Record<string, unknown>]) => payload.type === "stream.leave",
+    )?.[1];
+    expect(sentLeave).toBeDefined();
+    expect(sentLeave.viewerSessionId).toBe(session.viewerSessionId);
+  });
+
+  it("teardown calls shutdown() on the ViewerClient (not stopViewing + disconnect concurrently)", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    session.stop();
+    // Drain the microtask queue so the async teardown completes
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockViewerClientMethods.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("repeated stop() calls share a single teardown promise", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    session.stop();
+    session.stop();
+    session.stop();
+    await new Promise((resolve) => setImmediate(resolve));
+    // shutdown was awaited exactly once, even though stop() was called 3 times
+    expect(mockViewerClientMethods.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("new start() after stop() awaits the in-progress teardown", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // First leave: fire-and-forget stop
+    session.stop();
+    // Immediately start a new watch while teardown is in flight
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // New attempt has a new session ID
+    expect(session.viewerSessionId).toMatch(/^[0-9a-f-]{8,}/);
+    // And the new join request was sent
+    const sentJoin = (runtime as any).__sendToPeer.mock.calls
+      .map(([, p]: [string, Record<string, unknown>]) => p)
+      .filter((p) => p.type === "stream.join.request");
+    expect(sentJoin.length).toBe(2);
+    expect(sentJoin[0].viewerSessionId).not.toBe(sentJoin[1].viewerSessionId);
   });
 });
 

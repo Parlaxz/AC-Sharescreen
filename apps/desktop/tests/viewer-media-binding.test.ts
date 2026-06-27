@@ -282,12 +282,18 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     expect(binding.getViewerMediaPeer("viewer-1")).toBeNull();
   });
 
-  it("removeViewer closes the mapped peer connection", () => {
+  it("removeViewer does NOT close the SDK-owned peer connection but cleans up ScreenLink state", () => {
+    // The peer connection is owned by the VDO.Ninja SDK; the SDK closes it
+    // itself when the viewer tears down. Closing it from ScreenLink leaves
+    // the SDK's internal connection map in a broken state and is the root
+    // cause of repeated-rejoin failures — see the leave/rejoin lifecycle
+    // fix (commit "fix(viewer): make leave and rejoin lifecycle repeatable").
     const close = vi.fn();
     const statsService = runtime.getMediaStatsService() as any;
 
     (binding as any).viewerMap.set("viewer-1", {
       viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
       mediaPeerUuid: "peer-uuid-1",
       groupId: "g-1",
       logicalStreamId: "stream-1",
@@ -302,14 +308,76 @@ describe("ViewerMediaBinding (Stage 5)", () => {
 
     binding.removeViewer("viewer-1");
 
-    expect(close).toHaveBeenCalledTimes(1);
+    // Peer connection must NOT be closed by ScreenLink.
+    expect(close).not.toHaveBeenCalled();
+    // Per-viewer stats polling must be stopped.
     expect(statsService.disconnectViewer).toHaveBeenCalledWith(
       "g-1",
       "stream-1",
       "viewer-1",
       "peer-uuid-1",
     );
+    // Mapping is removed.
     expect(binding.getViewerMediaPeer("viewer-1")).toBeNull();
+  });
+
+  it("removeViewer ignores stale leaves whose viewerSessionId does not match", () => {
+    // A new Watch attempt has the same viewerDeviceId but a different
+    // session ID. A delayed leave from a prior attempt must not remove
+    // the new mapping.
+    const statsService = runtime.getMediaStatsService() as any;
+
+    (binding as any).viewerMap.set("viewer-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-NEW",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: null,
+      audioSender: null,
+    });
+
+    const removed = binding.removeViewer("viewer-1", "session-OLD");
+
+    // Stale leave was ignored.
+    expect(removed).toBe(false);
+    expect(statsService.disconnectViewer).not.toHaveBeenCalled();
+    // Active mapping still in place.
+    expect(binding.getViewerMediaPeer("viewer-1")).toBe("peer-uuid-1");
+
+    // Matching leave succeeds.
+    const removed2 = binding.removeViewer("viewer-1", "session-NEW");
+    expect(removed2).toBe(true);
+    expect(binding.getViewerMediaPeer("viewer-1")).toBeNull();
+  });
+
+  it("removeViewerByPeerUuid resolves the viewer device from the peer UUID", () => {
+    const close = vi.fn();
+    const statsService = runtime.getMediaStatsService() as any;
+
+    (binding as any).viewerMap.set("viewer-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close },
+      videoSender: null,
+      audioSender: null,
+    });
+
+    const removed = binding.removeViewerByPeerUuid("peer-uuid-1");
+    expect(removed).toBe(true);
+    expect(close).not.toHaveBeenCalled();
+    expect(statsService.disconnectViewer).toHaveBeenCalledWith(
+      "g-1",
+      "stream-1",
+      "viewer-1",
+      "peer-uuid-1",
+    );
   });
 
   // ─── consumeBinding (Stage 5) ────────────────────────────────────

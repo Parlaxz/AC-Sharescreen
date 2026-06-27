@@ -1,6 +1,7 @@
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import type { StreamAnnouncement } from "./active-stream-registry.js";
 import { PublisherManager } from "./publisher-manager.js";
+import { extractPeerUuid } from "./sdk-event-normalizer.js";
 import {
   generateVdoStreamId,
   generateVdoPassword,
@@ -380,11 +381,22 @@ export class StreamSessionManager {
       // Stage 5: Wire media.bind handler through the actual VDO data channel
       // Uses the real media peer UUID from the VDO SDK callback, not the
       // group control envelope senderDeviceId.
-      this.publisherManager.setOnMediaBind((peerUuid: string, token: string) => {
+      this.publisherManager.setOnMediaBind((peerUuid: string, token: string, viewerSessionId?: string) => {
         const viewerBinding = this.runtime.getViewerMediaBinding();
         if (viewerBinding) {
           // Pass the actual media peer UUID to the binding handler
-          viewerBinding.handleMediaBind(peerUuid, token).catch(() => {});
+          viewerBinding.handleMediaBind(peerUuid, token, viewerSessionId).catch(() => {});
+        }
+      });
+
+      // Stage 6: React to VDO peerDisconnected so abrupt disconnects
+      // (tab close, crash, network drop) still clean up ScreenLink-owned
+      // viewer state. The group-control stream.leave path covers the
+      // graceful-exit case; this covers the rest.
+      this.publisherManager.setOnPeerDisconnected((peerUuid: string) => {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        if (viewerBinding) {
+          viewerBinding.removeViewerByPeerUuid(peerUuid);
         }
       });
 
@@ -661,10 +673,18 @@ export class StreamSessionManager {
       });
 
       // Wire media.bind handler
-      this.publisherManager.setOnMediaBind((peerUuid: string, token: string) => {
+      this.publisherManager.setOnMediaBind((peerUuid: string, token: string, viewerSessionId?: string) => {
         const viewerBinding = this.runtime.getViewerMediaBinding();
         if (viewerBinding) {
-          viewerBinding.handleMediaBind(peerUuid, token).catch(() => {});
+          viewerBinding.handleMediaBind(peerUuid, token, viewerSessionId).catch(() => {});
+        }
+      });
+
+      // Wire peerDisconnected handler for abrupt viewer disconnects.
+      this.publisherManager.setOnPeerDisconnected((peerUuid: string) => {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        if (viewerBinding) {
+          viewerBinding.removeViewerByPeerUuid(peerUuid);
         }
       });
 

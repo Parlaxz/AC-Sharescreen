@@ -1,7 +1,7 @@
 import { HostPublisher } from "@screenlink/vdo-adapter";
 import type { MediaStatsSnapshot } from "./media-stats-service.js";
 import type { ProcessAudioController } from "../audio/ProcessAudioController.js";
-import { extractDataReceivedEvent } from "./sdk-event-normalizer.js";
+import { extractDataReceivedEvent, extractPeerUuid } from "./sdk-event-normalizer.js";
 
 export type AudioState = "disabled" | "active" | "error";
 
@@ -56,7 +56,14 @@ export class PublisherManager {
   private static nextId = 0;
   private readonly instanceId: number;
   private appliedAudioMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
-  private mediaBindHandler: ((peerUuid: string, token: string) => void) | null = null;
+  private mediaBindHandler: ((peerUuid: string, token: string, viewerSessionId?: string) => void) | null = null;
+  /**
+   * Handler for VDO SDK peerDisconnected events. Fires when the SDK
+   * reports that a media peer has gone away — used as a fallback
+   * cleanup path when the viewer crashes or closes its tab without
+   * sending a `stream.leave` message first.
+   */
+  private peerDisconnectedHandler: ((peerUuid: string) => void) | null = null;
 
   constructor(events: PublisherEvents) {
     PublisherManager.nextId++;
@@ -90,8 +97,42 @@ export class PublisherManager {
    * Stage 5: Uses the actual media peer UUID from the VDO SDK callback, not the
    * group control envelope senderDeviceId.
    */
-  setOnMediaBind(handler: (peerUuid: string, token: string) => void): void {
+  setOnMediaBind(handler: (peerUuid: string, token: string, viewerSessionId?: string) => void): void {
     this.mediaBindHandler = handler;
+  }
+
+  /**
+   * Register a handler for the VDO SDK's `peerDisconnected` event.
+   * The handler is called with the peer UUID of the viewer that
+   * disconnected. Used to clean up ScreenLink-owned viewer state
+   * (mapping entry, stats polling) when the viewer disconnects
+   * abruptly without sending a `stream.leave` first.
+   *
+   * The actual peer connection is owned by the SDK and is closed by
+   * the SDK itself; this handler must NOT close the PC directly.
+   */
+  setOnPeerDisconnected(handler: (peerUuid: string) => void): void {
+    this.peerDisconnectedHandler = handler;
+    // Subscribe lazily — the handler is registered after the publisher
+    // is created, so if it fires immediately due to in-flight state,
+    // the handler will be invoked.
+    if (this.publisher) {
+      const sdk = this.publisher.getSDK();
+      if (sdk && typeof (sdk as { on?: unknown }).on === "function") {
+        (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on(
+          "peerDisconnected",
+          (...args: unknown[]) => {
+            const { uuid } = extractPeerUuid(args[0]);
+            if (!uuid) return;
+            try {
+              this.peerDisconnectedHandler?.(uuid);
+            } catch {
+              // ignore handler errors
+            }
+          },
+        );
+      }
+    }
   }
 
   setAudioController(controller: ProcessAudioController, mode: 'system' | 'application' | 'monitor' | 'test-tone'): void {
@@ -245,10 +286,12 @@ export class PublisherManager {
           if (!normalized.valid || !normalized.data) return;
           const data = normalized.data as Record<string, unknown>;
           if (data.type === "media.bind" && data.token && typeof data.token === "string") {
-            this.mediaBindHandler!(normalized.uuid!, data.token);
+            const viewerSessionId = typeof data.viewerSessionId === "string" ? data.viewerSessionId : undefined;
+            this.mediaBindHandler!(normalized.uuid!, data.token, viewerSessionId);
             console.log('[PublisherManager] media.bind consumed', {
               peerUuid: normalized.uuid?.slice(0, 8) + '…',
               bindType: 'media.bind',
+              viewerSessionId: viewerSessionId?.slice(0, 8) + '…',
             });
           }
         });

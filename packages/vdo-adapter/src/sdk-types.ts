@@ -66,7 +66,14 @@ export interface VDONinjaSDK {
   publish(stream: MediaStream, options?: PublishOptions): Promise<void>;
   stopPublishing(): Promise<void>;
   view(streamId: string, options?: ViewOptions): Promise<void>;
-  stopViewing(): Promise<void>;
+  /**
+   * Stop viewing a stream. SDK 1.3.18 accepts an optional `streamID`
+   * argument — passing it marks the disconnect as intentional, cancels the
+   * per-stream retry timer, and prevents the SDK from auto-reconnecting to
+   * the same stream after the viewer has intentionally exited.
+   * If omitted, the SDK stops viewing all streams.
+   */
+  stopViewing(streamId?: string): Promise<void>;
   sendData(payload: unknown, options: SendDataOptions): Promise<void>;
   getStats(): Promise<RTCStatsReport | undefined>;
   on(event: string, handler: (...args: unknown[]) => void): void;
