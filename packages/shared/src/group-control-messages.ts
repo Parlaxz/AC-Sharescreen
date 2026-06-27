@@ -553,7 +553,7 @@ export const ViewerStatusPayloadSchema = z.object({
   receivedHeight: z.number().nullable(),
   displayedFps: z.number().nullable(),
   sampledAt: z.number(),
-}).strict();
+});
 
 // ─── Media bind payload schema ─────────────────────────────────────────────
 
