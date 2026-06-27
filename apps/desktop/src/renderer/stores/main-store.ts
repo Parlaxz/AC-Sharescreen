@@ -100,6 +100,9 @@ export interface AppState {
   viewStatus: string;
   focusMode: boolean;
 
+  /** Explicit watched target — replaces first-entry heuristics */
+  watchingTarget: WatchingTarget | null;
+
   // Group state
   selectedGroupId: string | null;
   groupsById: Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>;
@@ -134,6 +137,7 @@ export interface AppState {
   /** Convenience: navigate to home without clearing selectedGroupId. */
   homeNavigate: () => void;
   toggleFocusMode: () => void;
+  setFocusMode: (focusMode: boolean) => void;
   setIsSharing: (sharing: boolean) => void;
   setSharingGroupId: (groupId: string | null) => void;
   setIsDegraded: (degraded: boolean) => void;
@@ -153,12 +157,30 @@ export interface AppState {
   setLocalShareState: (state: LocalShareState) => void;
   setLocalStreamSession: (s: { sessionId: string; streamId: string; password: string } | null) => void;
   setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }> | ((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>)) => void;
+  /** Set explicit watching target (replaces first-entry heuristics) */
+  setWatchingTarget: (target: WatchingTarget | null) => void;
 
   // Group state actions
   setGroups: (groups: Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>, order: string[]) => void;
   setGroupConnectionState: (stateById: Record<string, GroupConnectionState>) => void;
   setOnlineDevices: (byGroup: Record<string, string[]>) => void;
   setActiveStreams: (byGroup: Record<string, StreamAnnouncement[]>) => void;
+}
+
+/**
+ * Explicit watched target — set when starting a watch/self-preview.
+ * ViewerWorkspace uses this instead of first-entry / streams[0] heuristics.
+ * Multi-stream safe: each watch sets its own target.
+ */
+export interface WatchingTarget {
+  groupId: string;
+  logicalStreamId: string;
+  mediaSessionId: string;
+  hostDeviceId: string;
+  hostName: string;
+  startedAt: number;
+  sourceName?: string;
+  sourceKind?: string;
 }
 
 export type LocalShareState =
@@ -192,6 +214,7 @@ const initialState = {
   isViewing: false,
   viewStatus: "",
   focusMode: false,
+  watchingTarget: null as WatchingTarget | null,
   selectedGroupId: null as string | null,
   groupsById: {} as Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>,
   groupOrder: [] as string[],
@@ -262,6 +285,7 @@ export const useStore = create<AppState>((set, get) => ({
   setTotalBytesSent: (bytes) => set({ totalBytesSent: bytes }),
   setIsViewing: (isViewing) => set({ isViewing: isViewing, focusMode: false }),
   toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
+  setFocusMode: (focusMode) => set({ focusMode }),
   setViewStatus: (status) => set({ viewStatus: status }),
   setSelectedGroupId: (id) => set({ selectedGroupId: id }),
   setQualityPresets: (presets) => set({ qualityPresets: presets }),
@@ -271,6 +295,7 @@ export const useStore = create<AppState>((set, get) => ({
   setLocalShareState: (state) => set({ localShareState: state }),
   setLocalStreamSession: (s) => set({ localStreamSession: s }),
   setWatchedStreams: (s) => set({ watchedStreamsBySessionId: typeof s === "function" ? s(get().watchedStreamsBySessionId) : s }),
+  setWatchingTarget: (target) => set({ watchingTarget: target }),
 
   setGroups: (groupsById, groupOrder) => set({ groupsById, groupOrder }),
   setGroupConnectionState: (groupConnectionStateById) => set({ groupConnectionStateById }),

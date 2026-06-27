@@ -463,6 +463,106 @@ describe("Stage 6: QualityCoordinator — quality.viewer.clear handling", () => 
   });
 });
 
+describe("Stage 6: QualityCoordinator — 300 kbps viewer request path (bounded lane B)", () => {
+  let coordinator: QualityCoordinator;
+
+  beforeEach(() => {
+    coordinator = new QualityCoordinator();
+  });
+
+  it("calculateEffectiveQuality with 300 kbps viewer request returns 300 kbps effective", () => {
+    const groupSettings = makeGroupSettings();
+    const hostLimits = makeHostLimits({ allowViewerQualityRequests: true });
+    const viewerRequest = makeViewerRequest({ videoBitrateKbps: 300 });
+
+    const result = coordinator.calculateEffectiveQuality(
+      groupSettings,
+      hostLimits,
+      viewerRequest,
+      { width: 1920, height: 1080 },
+    );
+
+    // The effective bitrate must be 300, not the group default (650)
+    expect(result.effective.videoBitrateKbps).toBe(300);
+    expect(result.effective.videoBitrateKbps).not.toBe(groupSettings.video.videoBitrateKbps);
+    // Viewer request must be reflected in the requested field
+    expect(result.requested).not.toBeNull();
+    expect(result.requested!.videoBitrateKbps).toBe(300);
+  });
+
+  it("calculateEffectiveQuality 300 kbps request survives range clamping", () => {
+    const groupSettings = makeGroupSettings();
+    const hostLimits = makeHostLimits({ allowViewerQualityRequests: true });
+    // 300 is well within RANGES.videoBitrateKbps (100–20000)
+    const viewerRequest = makeViewerRequest({ videoBitrateKbps: 300 });
+
+    const result = coordinator.calculateEffectiveQuality(
+      groupSettings,
+      hostLimits,
+      viewerRequest,
+      { width: 1920, height: 1080 },
+    );
+
+    expect(result.effective.videoBitrateKbps).toBe(300);
+    // No clamp reason for bitrate since 300 is in range and under host limit
+    const bitrateClampReasons = result.clampReasons.filter(r => r.toLowerCase().includes("bitrate"));
+    expect(bitrateClampReasons).toHaveLength(0);
+  });
+
+  it("calculateEffectiveQuality ignores 300 kbps viewer request when allowViewerQualityRequests is false", () => {
+    // When viewer requests are disabled, fall back to group defaults (650)
+    // This is the INTENDED fallback, not a bug
+    const groupSettings = makeGroupSettings({ videoBitrateKbps: 650 });
+    const hostLimits = makeHostLimits({ allowViewerQualityRequests: false });
+    const viewerRequest = makeViewerRequest({ videoBitrateKbps: 300 });
+
+    const result = coordinator.calculateEffectiveQuality(
+      groupSettings,
+      hostLimits,
+      viewerRequest,
+      { width: 1920, height: 1080 },
+    );
+
+    expect(result.requested).toBeNull();
+    expect(result.effective.videoBitrateKbps).toBe(650);
+  });
+
+  it("applyToSender sets correct enc.maxBitrate for 300 kbps effective", async () => {
+    const sender = createMockSender();
+
+    const effective = {
+      videoBitrateKbps: 300,
+      maxWidth: 640,
+      maxHeight: 360,
+      maxFps: 15,
+      degradationPreference: "maintain-resolution" as const,
+    };
+
+    await coordinator.applyToSender(sender, effective);
+    const params = sender.getParameters();
+    // 300 kbps → 300,000 bps
+    expect(params.encodings?.[0]?.maxBitrate).toBe(300_000);
+  });
+
+  it("applyToSender with 300 kbps reads back correctly as 300 kbps", async () => {
+    const sender = createMockSender();
+
+    const effective = {
+      videoBitrateKbps: 300,
+      maxWidth: 640,
+      maxHeight: 360,
+      maxFps: 15,
+      degradationPreference: "maintain-resolution" as const,
+    };
+
+    const configured = await coordinator.applyToSender(sender, effective);
+    // configured.maxBitrate is in bps — should be 300,000 for 300 kbps
+    expect(configured!.maxBitrate).toBe(300_000);
+    // Converting back: 300,000 / 1000 = 300 kbps
+    expect(Math.round(configured!.maxBitrate / 1000)).toBe(300);
+  });
+});
+
 describe("Stage 6: QualityCoordinator — exact viewer application", () => {
   let coordinator: QualityCoordinator;
 

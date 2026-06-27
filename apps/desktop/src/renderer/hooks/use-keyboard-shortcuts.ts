@@ -12,24 +12,31 @@ import { useStore } from "@/stores/main-store";
  * | Ctrl+Shift+F    | Toggle viewer focus mode         |
  * | Ctrl+Shift+S    | Start or stop sharing            |
  * | Alt+1…9         | Select group by position         |
- * | Esc             | Close overlay or exit fullscreen |
+ * | Esc             | Leave fullscreen → close overlays |
  *
- * Returns command palette state that the App component uses to render
- * the CommandPalette component.
+ * Viewer-specific (on viewer page only, ignored while typing in inputs):
+ * | F              | Toggle fullscreen (Electron)    |
+ * | M              | Toggle mute                     |
+ * | I              | Toggle diagnostics panel        |
+ * | S              | Toggle viewer settings panel    |
+ * | Esc            | Leave fullscreen → close overlays |
+ *
+ * All shortcuts are ignored while the user is typing in an input, textarea,
+ * select, or contenteditable element.
  */
 export function useKeyboardShortcuts() {
   const navigate = useStore((s) => s.navigate);
   const toggleContextPanel = useStore((s) => s.toggleContextPanel);
-  const toggleFocusMode = useStore((s) => s.toggleFocusMode);
   const isSharing = useStore((s) => s.isSharing);
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
 
   const handler = useCallback((event: KeyboardEvent) => {
-    // Ignore if user is typing in an input/textarea/contenteditable
+    // Ignore if user is typing in an input/textarea/select/contenteditable
     const target = event.target as HTMLElement;
     if (
       target.tagName === "INPUT" ||
       target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT" ||
       target.isContentEditable
     ) {
       return;
@@ -41,7 +48,6 @@ export function useKeyboardShortcuts() {
     // Ctrl+K — Command palette
     if (ctrl && event.key === "k") {
       event.preventDefault();
-      // Dispatch a custom event so App.tsx can manage the state
       window.dispatchEvent(new CustomEvent("screenlink:toggle-command-palette"));
       return;
     }
@@ -63,7 +69,7 @@ export function useKeyboardShortcuts() {
     // Ctrl+Shift+F — Toggle viewer focus mode (Section 14)
     if (ctrl && event.shiftKey && event.key === "F") {
       event.preventDefault();
-      toggleFocusMode();
+      useStore.getState().toggleFocusMode();
       return;
     }
 
@@ -96,7 +102,7 @@ export function useKeyboardShortcuts() {
     // ── Viewer-specific shortcuts (only when on viewer page) ──────────
     const page = useStore.getState().currentPage;
     if (page === "viewer") {
-      // F — Toggle fullscreen
+      // F — Toggle fullscreen (Electron fullscreen state, not document.fullscreenElement)
       if (event.key === "f" || event.key === "F") {
         if (!ctrl && !alt && !event.shiftKey) {
           event.preventDefault();
@@ -108,7 +114,6 @@ export function useKeyboardShortcuts() {
           } else {
             void document.documentElement.requestFullscreen();
           }
-          useStore.getState().toggleFocusMode();
           return;
         }
       }
@@ -120,40 +125,50 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // I — Toggle info panel
+      // I — Toggle diagnostics panel
       if ((event.key === "i" || event.key === "I") && !ctrl && !alt && !event.shiftKey) {
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-info"));
         return;
       }
 
-      // S — Toggle settings panel
-      if ((event.key === "s" || event.key === "S") && !ctrl && !alt && !event.shiftKey) {
+      // S — Toggle viewer settings panel (lowercase s only, not Shift+S)
+      if (event.key === "s" && !ctrl && !alt && !event.shiftKey) {
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"));
         return;
       }
+
+      // Esc — Leave fullscreen first, then close overlays if not fullscreen
+      if (event.key === "Escape") {
+        const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean>; isFullscreen?: () => boolean } }).screenlink;
+        // If fullscreen, exit fullscreen first (Escape)
+        if (document.fullscreenElement) {
+          if (api) {
+            void api.toggleFullscreen();
+          } else {
+            void document.exitFullscreen();
+          }
+          return;
+        }
+        // Close any open overlays by dispatching escape event
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-escape"));
+        return;
+      }
     }
 
-    // Esc — Close overlay, exit fullscreen, or exit viewer
-    if (event.key === "Escape") {
+    // Global Esc — handle fullscreen exit from any page
+    if (event.key === "Escape" && document.fullscreenElement) {
+      event.preventDefault();
       const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
-      const currentPage = useStore.getState().currentPage;
-      if (document.fullscreenElement) {
-        if (api) {
-          void api.toggleFullscreen();
-        } else {
-          void document.exitFullscreen();
-        }
-      } else if (currentPage === "viewer") {
-        // Exit viewer on Esc when not fullscreen
-        useStore.getState().setIsViewing(false);
-        useStore.getState().setViewStatus("");
-        useStore.getState().navigate("overview");
+      if (api) {
+        void api.toggleFullscreen();
+      } else {
+        void document.exitFullscreen();
       }
       return;
     }
-  }, [navigate, toggleContextPanel, toggleFocusMode, isSharing, setOpenShareSetup]);
+  }, [navigate, toggleContextPanel, isSharing, setOpenShareSetup]);
 
   useEffect(() => {
     window.addEventListener("keydown", handler);

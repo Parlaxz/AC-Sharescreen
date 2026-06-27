@@ -392,6 +392,112 @@ describe("StreamSessionManager quality override plumbing", () => {
   });
 });
 
+// ─── 300 kbps override path (bounded lane B) ────────────────────────────
+
+describe("300 kbps override propagation", () => {
+  let ssm: StreamSessionManager;
+  let runtime: Phase3Runtime;
+
+  beforeEach(() => {
+    runtime = makeMockRuntime();
+    ssm = new StreamSessionManager(runtime);
+    vi.restoreAllMocks();
+  });
+
+  it("customPresetToOverride preserves 300 kbps bitrate", () => {
+    const ov = customPresetToOverride({ width: 854, height: 480, fps: 15, bitrate: 300 });
+    expect(ov.videoBitrateKbps).toBe(300);
+    expect(ov.captureWidth).toBe(854);
+    expect(ov.captureHeight).toBe(480);
+    expect(ov.sendFps).toBe(15);
+  });
+
+  it("validateSessionQualityOverride accepts 300 kbps", () => {
+    const ov = customPresetToOverride({ width: 854, height: 480, fps: 15, bitrate: 300 });
+    expect(validateSessionQualityOverride(ov)).toBeNull();
+  });
+
+  it("300 kbps override propagates to PublisherManager startPublishing", async () => {
+    const syncService = runtime.getSyncService() as unknown as { getSyncState: ReturnType<typeof vi.fn> };
+    syncService.getSyncState.mockReturnValue(null);
+    mockGetDisplayMediaResolve();
+    const startSpy = vi.spyOn(PublisherManager.prototype, "startPublishing").mockResolvedValue(undefined);
+    try {
+      await ssm.startStream({
+        groupId: "g-300",
+        source: { id: "s-300", name: "300k", kind: "screen", displayId: null, fingerprint: null },
+        qualityOverride: customPresetToOverride({ width: 640, height: 360, fps: 15, bitrate: 300 }),
+      });
+      expect(ssm.state).toBe("active");
+      const cfg = startSpy.mock.calls[0][1];
+      expect(cfg.videoBitrate).toBe(300);
+      // Also verify other fields are preserved from the override
+      expect(cfg.videoWidth).toBe(640);
+      expect(cfg.videoHeight).toBe(360);
+      expect(cfg.videoFps).toBe(15);
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("300 kbps override is NOT silently replaced by 650 kbps fallback", async () => {
+    // Even without sync state (null group defaults), the override must win
+    const syncService = runtime.getSyncService() as unknown as { getSyncState: ReturnType<typeof vi.fn> };
+    syncService.getSyncState.mockReturnValue(null); // no group defaults
+    mockGetDisplayMediaResolve();
+    const startSpy = vi.spyOn(PublisherManager.prototype, "startPublishing").mockResolvedValue(undefined);
+    try {
+      await ssm.startStream({
+        groupId: "g-300b",
+        source: { id: "s-300b", name: "300k B", kind: "screen", displayId: null, fingerprint: null },
+        qualityOverride: customPresetToOverride({ width: 640, height: 360, fps: 15, bitrate: 300 }),
+      });
+      const cfg = startSpy.mock.calls[0][1];
+      // The override MUST win over the 650 kbps DEFAULT_VIDEO_BITRATE_KBPS
+      expect(cfg.videoBitrate).toBe(300);
+      expect(cfg.videoBitrate).not.toBe(650);
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("300 kbps override survives restart", async () => {
+    mockGetDisplayMediaResolve();
+    const startSpy = vi.spyOn(PublisherManager.prototype, "startPublishing").mockResolvedValue(undefined);
+    try {
+      await ssm.startStream({
+        groupId: "g-300-r",
+        source: { id: "s-300-r", name: "300k R", kind: "screen", displayId: null, fingerprint: null },
+        qualityOverride: customPresetToOverride({ width: 640, height: 360, fps: 15, bitrate: 300 }),
+      });
+      startSpy.mockClear();
+      await ssm.restartStream();
+      const cfg = startSpy.mock.calls[0][1];
+      expect(cfg.videoBitrate).toBe(300);
+    } finally {
+      startSpy.mockRestore();
+    }
+  });
+
+  it("presetSettingsToOverride preserves 300 kbps when present in video settings", () => {
+    const ov = presetSettingsToOverride({
+      video: {
+        videoBitrateKbps: 300,
+        sendWidth: 640,
+        sendHeight: 360,
+        sendFps: 15,
+      },
+    });
+    expect(ov.videoBitrateKbps).toBe(300);
+  });
+
+  it("presetSettingsToOverride with undefined settings falls back to 650 kbps default", () => {
+    const ov = presetSettingsToOverride(undefined);
+    // This is the INTENDED fallback — no override at all → use default
+    expect(ov.videoBitrateKbps).toBe(650);
+  });
+});
+
 // ─── Share coordinator uses the same plumbing for both flows ─────────────
 
 describe("Share coordinator accepts explicit groupId + qualityOverride", () => {
@@ -407,6 +513,9 @@ describe("Share coordinator accepts explicit groupId + qualityOverride", () => {
         startStream,
         getActualCaptureDimensions: () => ({ width: 0, height: 0, fps: 0 }),
         isAudioDegraded: false,
+      }),
+      getSyncService: () => ({
+        getSyncState: vi.fn().mockReturnValue(null),
       }),
     });
     const { startShare } = await import("../src/renderer/services/share-coordinator.js");

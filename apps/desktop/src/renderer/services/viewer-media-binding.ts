@@ -83,7 +83,9 @@ export class ViewerMediaBinding {
    * Uses the real host device ID from the runtime (not hardcoded "local").
    * Stage 5: Duplicate requestId returns the same token (idempotent).
    *
-   * Returns null if no active stream is found for the group.
+   * Returns null if no active stream is found for the group (but sends
+   * an explicit rejection so the viewer does not time out). Returns
+   * null on other failures as well.
    */
   handleJoinRequest(envelope: GroupControlEnvelope): { mediaSessionId: string; token: string } | null {
     if (this.destroyed) return null;
@@ -94,7 +96,15 @@ export class ViewerMediaBinding {
     const logicalStreamId = payload?.logicalStreamId as string | undefined;
     const requestId = payload?.requestId as string | undefined;
 
-    if (!viewerDeviceId || !logicalStreamId) return null;
+    if (!viewerDeviceId || !logicalStreamId) {
+      // Send rejection for invalid request so the viewer doesn't time out
+      this.sendJoinRejection(
+        envelope,
+        requestId,
+        !viewerDeviceId ? "Invalid viewer identity" : "Missing stream identifier",
+      );
+      return null;
+    }
 
     // Stage 5: Check for duplicate request (same envelope messageId)
     if (envelope.messageId && this.processedRequests.has(envelope.messageId)) {
@@ -115,7 +125,15 @@ export class ViewerMediaBinding {
       hostDeviceId,
       logicalStreamId,
     });
-    if (!stream) return null;
+    if (!stream) {
+      // Send explicit rejection instead of forcing a timeout
+      this.sendJoinRejection(
+        envelope,
+        requestId,
+        "There is no active share for this stream",
+      );
+      return null;
+    }
 
     // Generate 32 random bytes → Base64URL token
     const rawBytes = new Uint8Array(32);
@@ -148,6 +166,35 @@ export class ViewerMediaBinding {
       mediaSessionId: stream.mediaSessionId,
       token,
     };
+  }
+
+  /**
+   * Send a stream.join.response with accepted=false and a user-facing reason.
+   * Prevents the viewer from timing out when the host cannot satisfy the request
+   * (e.g. no active stream, invalid parameters).
+   */
+  private async sendJoinRejection(
+    requestEnvelope: GroupControlEnvelope,
+    requestId: string | undefined,
+    reason: string,
+  ): Promise<void> {
+    const conn = this.runtime.getConnectionManager().getConnection(requestEnvelope.groupId);
+    if (!conn) return;
+    const peerUuid = conn.peerForDevice(requestEnvelope.senderDeviceId);
+    if (!peerUuid) return;
+
+    try {
+      await conn.sendToPeer(peerUuid, {
+        type: "stream.join.response",
+        logicalStreamId: (requestEnvelope.payload as Record<string, unknown> | undefined)?.logicalStreamId as string ?? "",
+        accepted: false,
+        viewerDeviceId: requestEnvelope.senderDeviceId,
+        reason,
+        requestId: requestId ?? "",
+      });
+    } catch {
+      // Best-effort rejection — if the connection is gone the viewer will time out
+    }
   }
 
   /**

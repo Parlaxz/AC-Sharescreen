@@ -388,7 +388,8 @@ export class QualityCoordinator {
   /**
    * Apply effective quality to an RTCRtpSender by setting encoding parameters.
    * Stage 6: Read back actual configured values from sender.getParameters();
-   * do not hardcode scale=1.
+   * do not hardcode scale=1. Preserves unrelated sender parameters (priority,
+   * codec preferences, header extensions, etc.) that were set externally.
    */
   async applyToSender(
     sender: RTCRtpSender,
@@ -400,6 +401,10 @@ export class QualityCoordinator {
     }
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const enc = params.encodings[0]!;
+
+    // Preserve existing priority — do not hardcode "medium"
+    const existingPriority = enc.priority;
+
     enc.maxBitrate = effective.videoBitrateKbps * 1000;
     enc.maxFramerate = effective.maxFps;
 
@@ -417,8 +422,8 @@ export class QualityCoordinator {
     }
 
     (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = effective.degradationPreference as RTCDegradationPreference;
-    // Set priority
-    enc.priority = "medium";
+    // Preserve existing priority rather than overwriting it
+    enc.priority = existingPriority ?? "medium";
 
     await sender.setParameters(params);
 
@@ -429,7 +434,7 @@ export class QualityCoordinator {
       maxFramerate: readback.encodings?.[0]?.maxFramerate ?? 0,
       scaleResolutionDownBy: readback.encodings?.[0]?.scaleResolutionDownBy ?? 1,
       degradationPreference: effective.degradationPreference,
-      priority: "medium",
+      priority: readback.encodings?.[0]?.priority ?? "medium",
     };
   }
 

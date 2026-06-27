@@ -8,7 +8,8 @@ import { RestartCoordinator } from "./restart-coordinator.js";
 import { QualityCoordinator } from "./quality-coordinator.js";
 import { MediaStatsPoller } from "./media-stats-service.js";
 import { showNotification } from "./notifications.js";
-import type { GroupSharedState, GroupMemberRecord, HybridTimestamp } from "@screenlink/shared";
+import type { GroupSharedState, GroupMemberRecord, HybridTimestamp, HostQualityLimits } from "@screenlink/shared";
+import { createDefaultHostQualityLimits } from "@screenlink/shared";
 
 /**
  * Phase3Runtime owns all Phase 3 services:
@@ -41,6 +42,9 @@ export class Phase3Runtime {
   private destroyPromise: Promise<void> | null = null;
   private _deviceId: string | null = null;
   private _displayName: string | null = null;
+
+  /** Host quality limits loaded from persisted settings. Default allows requests. */
+  private _hostQualityLimits: HostQualityLimits = createDefaultHostQualityLimits();
 
   /**
    * Tracks which member device IDs have already produced a "joined"
@@ -86,6 +90,19 @@ export class Phase3Runtime {
 
     // Wire group connection state updates to store
     const store = (await import("../stores/main-store.js")).useStore;
+
+    // Load host quality limits from persisted settings
+    try {
+      const api = (window as unknown as { screenlink?: { getSettings: () => Promise<{ hostQualityLimits?: HostQualityLimits }> } }).screenlink;
+      if (api) {
+        const settings = await api.getSettings();
+        if (settings?.hostQualityLimits) {
+          this._hostQualityLimits = settings.hostQualityLimits;
+        }
+      }
+    } catch {
+      // Best-effort; defaults are already loaded
+    }
 
     this.connManager.setOnStatesChanged((states) => {
       if (gen !== this.initGen || this.destroyed) return;
@@ -392,6 +409,31 @@ export class Phase3Runtime {
    */
   waitForJoinResponse(requestId: string, timeoutMs?: number): Promise<JoinResponseData> {
     return this.messageRouter.waitForJoinResponse(requestId, timeoutMs);
+  }
+
+  /**
+   * Cancel a pending join response waiter. Removes the timer and rejects
+   * the pending promise. Idempotent — safe to call after the response
+   * already arrived or the timeout fired.
+   */
+  cancelJoinResponse(requestId: string): void {
+    this.messageRouter.cancelJoinResponse(requestId);
+  }
+
+  /**
+   * Get the current host quality limits (bandwidth caps, resolution limits,
+   * and whether viewer quality requests are allowed).
+   */
+  getHostQualityLimits(): HostQualityLimits {
+    return this._hostQualityLimits;
+  }
+
+  /**
+   * Update the host quality limits from persisted settings.
+   * Called during initialization or when settings change.
+   */
+  setHostQualityLimits(limits: HostQualityLimits): void {
+    this._hostQualityLimits = limits;
   }
 }
 

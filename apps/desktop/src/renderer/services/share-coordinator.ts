@@ -5,7 +5,10 @@ import type {
   SessionQualityOverride,
   ShareSource,
 } from "./share-quality.js";
-import { validateSessionQualityOverride } from "./share-quality.js";
+import {
+  validateSessionQualityOverride,
+  DEFAULT_VIDEO_BITRATE_KBPS,
+} from "./share-quality.js";
 
 export type { AudioModeValue, ShareSource, SessionQualityOverride };
 
@@ -173,6 +176,18 @@ export async function startShare(input: StartShareInput): Promise<void> {
 
     const dims = ssm.getActualCaptureDimensions();
     store.setCaptureInfo(dims.width, dims.height, dims.fps);
+
+    // Resolve the effective video bitrate and persist it in the store so the
+    // host/dashboard UI displays the actual bitrate rather than the initial
+    // default (650 kbps). Precedence matches StreamSessionManager.startStream:
+    //   1) session quality override
+    //   2) group default from sync state
+    //   3) hardcoded fallback from shared constants
+    const ov = input.qualityOverride;
+    const syncState = runtime.getSyncService().getSyncState(input.groupId);
+    const quality = syncState?.state?.defaultQuality?.value ?? null;
+    const effectiveBitrate = ov?.videoBitrateKbps ?? quality?.video?.videoBitrateKbps ?? DEFAULT_VIDEO_BITRATE_KBPS;
+    store.setCaptureBitrate(effectiveBitrate);
 
     if (ssm.isAudioDegraded) {
       store.setIsDegraded(true);

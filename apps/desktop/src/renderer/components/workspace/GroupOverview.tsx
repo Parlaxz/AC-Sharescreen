@@ -1,10 +1,14 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   UserPlus,
   Monitor,
   Eye,
   RefreshCw,
   AlertTriangle,
+  Repeat,
+  Check,
+  X,
+  Loader2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -18,14 +22,31 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { getInitials } from "@/lib/utils";
 import {
   useStore,
   type StreamAnnouncement,
+  type Page,
 } from "@/stores/main-store";
+import { toast } from "sonner";
 import { MembersList } from "./MembersList.js";
 import { copyGroupInviteFromUi } from "@/services/invite-copy";
+import { startShare } from "@/services/share-coordinator";
+import {
+  customPresetToOverride,
+  presetSettingsToOverride,
+  type SessionQualityOverride,
+} from "@/services/share-quality";
+import { fetchQualityPresets } from "@/services/group-actions";
+import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 
 // ─── Duration formatting ─────────────────────────────────────────────────
 
@@ -83,7 +104,17 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
 
   const handleWatch = useCallback(() => {
     if (isViewing) return;
-    // Store the watch target info so ViewerWorkspace can pick it up
+    // Set explicit watching target — no first-entry heuristics
+    const target = {
+      groupId: share.groupId,
+      logicalStreamId: share.logicalStreamId,
+      mediaSessionId: share.mediaSessionId,
+      hostDeviceId: share.hostDeviceId,
+      hostName: share.hostDisplayName,
+      startedAt: share.startedAt,
+      sourceName: share.sourceName,
+      sourceKind: share.sourceKind,
+    };
     setWatchedStreams((prev) => ({
       ...prev,
       [share.mediaSessionId]: {
@@ -92,6 +123,7 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
         startedAt: share.startedAt,
       },
     }));
+    useStore.getState().setWatchingTarget(target);
     setIsViewing(true);
     setViewStatus("connecting");
     navigate("viewer");
@@ -213,10 +245,142 @@ export function GroupOverview({
 
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
 
+  // ── "Share again" / reuse-last-settings state ────────────────────────
+  const [showShareAgainConfirm, setShowShareAgainConfirm] = useState(false);
+  const [shareAgainPending, setShareAgainPending] = useState(false);
+  const [lastShareSettings, setLastShareSettings] = useState<{
+    groupId: string;
+    sourceKind: "screen" | "window";
+    sourceId: string;
+    sourceName: string;
+    audioMode: "none" | "monitor" | "application";
+    selectedPresetId: string | null;
+    customQuality: {
+      resolutionValue: string;
+      customWidth: number;
+      customHeight: number;
+      fps: number;
+      bitrate: number;
+      codec: string;
+      contentHint: string;
+      degradationPreference: string;
+    };
+  } | null>(null);
+
+  // Load last share settings on mount
+  useEffect(() => {
+    const api = (window as unknown as { screenlink?: { getSettings: () => Promise<Record<string, unknown>> } }).screenlink;
+    if (!api) return;
+    void api.getSettings().then((settings) => {
+      const last = settings.lastShareSettings as typeof lastShareSettings;
+      if (last?.sourceName) {
+        setLastShareSettings(last);
+      }
+    }).catch(() => {});
+  }, []);
+
   const handleStartSharing = useCallback(() => {
     setIsSharing(false);
     setOpenShareSetup(true);
   }, [setOpenShareSetup, setIsSharing]);
+
+  const handleShareAgain = useCallback(() => {
+    setShowShareAgainConfirm(true);
+  }, []);
+
+  // ── One-click "Share again": verify source, then start or fallback ──
+  const handleConfirmShareAgain = useCallback(async () => {
+    setShowShareAgainConfirm(false);
+    const settings = lastShareSettings;
+    if (!settings) return;
+
+    setShareAgainPending(true);
+
+    try {
+      // 1) Fetch current sources to check availability
+      const api = (window as unknown as { screenlink?: { getSources: () => Promise<CaptureSourceDTO[]> } }).screenlink;
+      let sourceAvailable = false;
+      let matchingSource: CaptureSourceDTO | null = null;
+
+      if (api) {
+        const sources = await api.getSources();
+        matchingSource = sources.find((s) => s.id === settings.sourceId) ?? null;
+        sourceAvailable = matchingSource !== null;
+      }
+
+      if (!sourceAvailable || !matchingSource) {
+        // Fall back to opening ShareSetup with restored settings + notify
+        toast.info("Last source unavailable — opening setup with restored settings");
+        setIsSharing(false);
+        setOpenShareSetup(true);
+        return;
+      }
+
+      // 2) Load personal quality presets to resolve preset->override
+      const presets = await fetchQualityPresets().catch(() => []);
+      const presetList = presets.map((p: any) => ({ id: p.id, name: p.name, settings: p.settings }));
+
+      // 3) Resolve quality override
+      const groupId = settings.groupId || useStore.getState().selectedGroupId;
+      if (!groupId) {
+        toast.error("No group selected for sharing");
+        return;
+      }
+
+      const qualityOverride = (() => {
+        if (settings.selectedPresetId) {
+          const preset = presetList.find((p: any) => p.id === settings.selectedPresetId);
+          if (preset) {
+            return presetSettingsToOverride(
+              (preset.settings as { video?: Record<string, unknown> } | undefined),
+            );
+          }
+        }
+        if (settings.customQuality) {
+          return customPresetToOverride({
+            width: settings.customQuality.customWidth,
+            height: settings.customQuality.customHeight,
+            fps: settings.customQuality.fps,
+            bitrate: settings.customQuality.bitrate,
+            codec: settings.customQuality.codec,
+            contentHint: settings.customQuality.contentHint,
+            degradationPreference: settings.customQuality.degradationPreference,
+          });
+        }
+        return null;
+      })();
+
+      // 4) Start sharing directly
+      await startShare({
+        groupId,
+        source: {
+          id: matchingSource.id,
+          name: matchingSource.name,
+          kind: matchingSource.kind,
+          displayId: matchingSource.displayId ?? null,
+          fingerprint: null,
+          audioMode: settings.audioMode === "none" ? "none" : settings.audioMode,
+        },
+        qualityOverride: qualityOverride ?? undefined,
+      });
+
+      toast.success("Sharing started with last settings");
+      setIsSharing(false);
+      navigate("host" as Page);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast.error(`Share again failed: ${msg}`);
+      // Fallback: open ShareSetup
+      setIsSharing(false);
+      setOpenShareSetup(true);
+    } finally {
+      setShareAgainPending(false);
+    }
+  }, [lastShareSettings, setOpenShareSetup, setIsSharing, navigate]);
+
+  const handleCancelShareAgain = useCallback(() => {
+    setShowShareAgainConfirm(false);
+  }, []);
 
   const handleInvite = useCallback(async () => {
     if (!groupId) return;
@@ -363,6 +527,25 @@ export function GroupOverview({
             </TooltipContent>
           </Tooltip>
 
+          {lastShareSettings && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleShareAgain}
+                  aria-label="Share again with last settings"
+                >
+                  <Repeat className="h-3.5 w-3.5" />
+                  Share again
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                Reuse last source ({lastShareSettings.sourceName})
+              </TooltipContent>
+            </Tooltip>
+          )}
+
           <Button
             variant="default"
             size="sm"
@@ -372,6 +555,44 @@ export function GroupOverview({
             Start sharing
           </Button>
         </div>
+
+        {/* ─── Share again confirmation dialog ─────────────────── */}
+        <Dialog open={showShareAgainConfirm} onOpenChange={setShowShareAgainConfirm}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Share again?</DialogTitle>
+              <DialogDescription>
+                {lastShareSettings ? (
+                  <>
+                    Reuse your last share settings:
+                    <br />
+                    <span className="font-medium">{lastShareSettings.sourceName}</span>
+                    {" · "}
+                    <span className="capitalize">{lastShareSettings.sourceKind}</span>
+                    {lastShareSettings.audioMode !== "none" && (
+                      <> · Audio: <span className="capitalize">{lastShareSettings.audioMode}</span></>
+                    )}
+                  </>
+                ) : (
+                  "Open share setup with last used settings."
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={handleCancelShareAgain} disabled={shareAgainPending}>
+                <X className="h-3.5 w-3.5 mr-1" />
+                Cancel
+              </Button>
+              <Button variant="default" size="sm" onClick={handleConfirmShareAgain} disabled={shareAgainPending}>
+                {shareAgainPending ? (
+                  <><Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />Starting...</>
+                ) : (
+                  <><Check className="h-3.5 w-3.5 mr-1" />Continue</>
+                )}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
 
       {/* ─── Active shares section (always rendered) ─────────── */}

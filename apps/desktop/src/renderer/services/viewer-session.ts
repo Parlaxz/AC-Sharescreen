@@ -3,6 +3,54 @@ import { getRuntime } from "./phase3-runtime.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import { extractTrackEvent } from "./sdk-event-normalizer.js";
 
+// ─── Diagnostics Types ──────────────────────────────────────────────────────
+
+/**
+ * Snapshot of viewer diagnostics for the UI to display.
+ * Populated from real RTCPeerConnection stats, ICE candidate pairs,
+ * and inbound-rtp reports.
+ */
+export interface ViewerDiagnosticsSnapshot {
+  connectionState: string;
+  selectedCandidatePair: {
+    local: string | null;
+    remote: string | null;
+    state: string | null;
+    nominated: boolean | null;
+  };
+  inboundVideo: {
+    bitrateBps: number;
+    packetsReceived: number;
+    packetsLost: number;
+    jitter: number;
+    codecId: string | null;
+    /** frameWidth from inbound-rtp stats (track resolution) */
+    frameWidth: number | null;
+    /** frameHeight from inbound-rtp stats */
+    frameHeight: number | null;
+    /** framesPerSecond from inbound-rtp stats */
+    framesPerSecond: number | null;
+    /** framesDropped from inbound-rtp stats */
+    framesDropped: number | null;
+    /** freezeCount from inbound-rtp stats */
+    freezeCount: number | null;
+  };
+  inboundAudio: {
+    bitrateBps: number;
+    packetsReceived: number;
+    packetsLost: number;
+    jitter: number;
+    codecId: string | null;
+  };
+  /** currentRoundTripTime from candidate-pair stats (ms) */
+  rttMs: number | null;
+  /** Real candidate type from ICE candidate stats */
+  localCandidateType: string | null;
+  /** Real candidate type from ICE candidate stats */
+  remoteCandidateType: string | null;
+  timestamp: number;
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /**
@@ -93,6 +141,12 @@ export class ViewerSession {
 
   /** Track IDs already in the received stream (deduplication). */
   private _trackIdsInStream = new Set<string>();
+
+  /** Current pending join request ID, for cancellation on stop/destroy/retry. */
+  private _pendingRequestId: string | null = null;
+
+  /** Remote-track-ended debounce timer — instance state for proper cleanup. */
+  private _remoteTrackEndedTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Self-viewing support — when the host is the local device,
   // we pipe the capture stream directly instead of VDO relay.
@@ -193,6 +247,7 @@ export class ViewerSession {
    */
   async retry(): Promise<void> {
     if (this._destructed) return;
+    this.cancelPendingJoin();
     this.cleanupClient();
     this._receivedStream = null;
     this._trackIdsInStream.clear();
@@ -205,11 +260,37 @@ export class ViewerSession {
   }
 
   /**
+   * Cancel any pending join response waiter so the abandoned promise is
+   * rejected cleanly rather than left dangling until timeout.
+   */
+  private cancelPendingJoin(): void {
+    if (this._pendingRequestId) {
+      const runtime = getRuntime();
+      if (runtime && !runtime.isDestroyed()) {
+        runtime.cancelJoinResponse(this._pendingRequestId);
+      }
+      this._pendingRequestId = null;
+    }
+  }
+
+  /**
+   * Cancel the remote-track-ended debounce timer.
+   */
+  private cancelRemoteTrackEndedTimer(): void {
+    if (this._remoteTrackEndedTimer) {
+      clearTimeout(this._remoteTrackEndedTimer);
+      this._remoteTrackEndedTimer = null;
+    }
+  }
+
+  /**
    * Stop watching and clean up. Idempotent.
    */
   stop(): void {
     if (this._state === "ended") return;
     this.cancelReadinessTimer();
+    this.cancelPendingJoin();
+    this.cancelRemoteTrackEndedTimer();
     this.cleanupClient();
     this._receivedStream = null;
     this._trackIdsInStream.clear();
@@ -224,6 +305,8 @@ export class ViewerSession {
     if (this._destructed) return;
     this._destructed = true;
     this.cancelReadinessTimer();
+    this.cancelPendingJoin();
+    this.cancelRemoteTrackEndedTimer();
     this.cleanupClient();
     this._receivedStream = null;
     this._trackIdsInStream.clear();
@@ -232,6 +315,167 @@ export class ViewerSession {
     this.onStateChange = null;
     this.onStreamReceived = null;
     this.onError = null;
+  }
+
+  // ── Diagnostics access ───────────────────────────────────────────
+
+  /**
+   * Expose the underlying ViewerClient for the UI/store task to access
+   * the real VDO connection. Returns null if no client is active.
+   */
+  getViewerClient(): ViewerClient | null {
+    return this.viewerClient;
+  }
+
+  /**
+   * Gather real diagnostics from the ViewerClient's RTCPeerConnection.
+   * Uses actual WebRTC stats (candidate-pair, inbound-rtp) rather than
+   * fake/placeholder data. Returns null if no active viewer connection
+   * exists.
+   */
+  async getDiagnostics(): Promise<ViewerDiagnosticsSnapshot | null> {
+    if (!this.viewerClient || this._destructed) return null;
+    const sdk = this.viewerClient.getSDK();
+    if (!sdk) return null;
+
+    const entries = Array.from(sdk.connections.entries());
+    if (entries.length === 0) return null;
+
+    const [, group] = entries[0];
+    const pc = group.viewer?.pc ?? group.publisher?.pc;
+    if (!pc) return null;
+
+    const timestamp = Date.now();
+    let connectionState = pc.connectionState;
+
+    const snapshot: ViewerDiagnosticsSnapshot = {
+      connectionState,
+      selectedCandidatePair: {
+        local: null,
+        remote: null,
+        state: null,
+        nominated: null,
+      },
+      inboundVideo: {
+        bitrateBps: 0,
+        packetsReceived: 0,
+        packetsLost: 0,
+        jitter: 0,
+        codecId: null,
+        frameWidth: null,
+        frameHeight: null,
+        framesPerSecond: null,
+        framesDropped: null,
+        freezeCount: null,
+      },
+      inboundAudio: {
+        bitrateBps: 0,
+        packetsReceived: 0,
+        packetsLost: 0,
+        jitter: 0,
+        codecId: null,
+      },
+      rttMs: null,
+      localCandidateType: null,
+      remoteCandidateType: null,
+      timestamp,
+    };
+
+    try {
+      const stats = await pc.getStats();
+      let prevVideoTimestamp = 0;
+      let prevVideoBytes = 0;
+      let prevAudioTimestamp = 0;
+      let prevAudioBytes = 0;
+
+      const localCandidates = new Map<string, any>();
+      const remoteCandidates = new Map<string, any>();
+
+      for (const report of stats.values()) {
+        // Collect local and remote ICE candidates for type resolution
+        if (report.type === "local-candidate") {
+          localCandidates.set(report.id, report);
+        }
+        if (report.type === "remote-candidate") {
+          remoteCandidates.set(report.id, report);
+        }
+
+        if (report.type === "candidate-pair" && (report as any).selected) {
+          snapshot.selectedCandidatePair.state = (report as any).state ?? null;
+          snapshot.selectedCandidatePair.nominated = (report as any).nominated ?? null;
+          // Read currentRoundTripTime
+          const rtt = (report as any).currentRoundTripTime;
+          if (rtt !== undefined && rtt !== null) {
+            snapshot.rttMs = rtt * 1000; // convert seconds to ms
+          }
+          // Resolve local/remote candidate descriptions and types
+          if ((report as any).localCandidateId) {
+            const local = localCandidates.get((report as any).localCandidateId);
+            if (local) {
+              snapshot.selectedCandidatePair.local =
+                `${(local as any).address ?? "?"}:${(local as any).port ?? "?"}`;
+              snapshot.localCandidateType = (local as any).candidateType ?? null;
+            }
+          }
+          if ((report as any).remoteCandidateId) {
+            const remote = remoteCandidates.get((report as any).remoteCandidateId);
+            if (remote) {
+              snapshot.selectedCandidatePair.remote =
+                `${(remote as any).address ?? "?"}:${(remote as any).port ?? "?"}`;
+              snapshot.remoteCandidateType = (remote as any).candidateType ?? null;
+            }
+          }
+        }
+
+        if (report.type === "inbound-rtp") {
+          const kind = (report as any).kind;
+          const bytes = (report as any).bytesReceived ?? 0;
+          const ts = (report as any).timestamp ?? 0;
+          const packets = (report as any).packetsReceived ?? 0;
+          const lost = (report as any).packetsLost ?? 0;
+          const jitter = (report as any).jitter ?? 0;
+          const codecId = (report as any).codecId ?? null;
+
+          if (kind === "video") {
+            if (prevVideoTimestamp > 0) {
+              const elapsed = (ts - prevVideoTimestamp) / 1000;
+              snapshot.inboundVideo.bitrateBps = elapsed > 0
+                ? Math.round(((bytes - prevVideoBytes) * 8) / elapsed)
+                : 0;
+            }
+            snapshot.inboundVideo.packetsReceived = packets;
+            snapshot.inboundVideo.packetsLost = lost;
+            snapshot.inboundVideo.jitter = jitter;
+            snapshot.inboundVideo.codecId = codecId;
+            // Real video frame dimensions and stats
+            snapshot.inboundVideo.frameWidth = (report as any).frameWidth ?? null;
+            snapshot.inboundVideo.frameHeight = (report as any).frameHeight ?? null;
+            snapshot.inboundVideo.framesPerSecond = (report as any).framesPerSecond ?? null;
+            snapshot.inboundVideo.framesDropped = (report as any).framesDropped ?? null;
+            snapshot.inboundVideo.freezeCount = (report as any).freezeCount ?? null;
+            prevVideoTimestamp = ts;
+            prevVideoBytes = bytes;
+          } else if (kind === "audio") {
+            if (prevAudioTimestamp > 0) {
+              const elapsed = (ts - prevAudioTimestamp) / 1000;
+              snapshot.inboundAudio.bitrateBps = elapsed > 0
+                ? Math.round(((bytes - prevAudioBytes) * 8) / elapsed)
+                : 0;
+            }
+            snapshot.inboundAudio.packetsReceived = packets;
+            snapshot.inboundAudio.packetsLost = lost;
+            snapshot.inboundAudio.jitter = jitter;
+            snapshot.inboundAudio.codecId = codecId;
+            prevAudioTimestamp = ts;
+            prevAudioBytes = bytes;
+          }
+        }
+      }
+    } catch {
+      // Stats collection is best-effort; return partial snapshot
+    }
+
+    return snapshot;
   }
 
   // ── Join flow ───────────────────────────────────────────────────────
@@ -272,9 +516,14 @@ export class ViewerSession {
         return;
       }
 
-      // 2) Send stream.join.request
+      // 2) Register response waiter BEFORE sending the request to avoid a
+      //    race where the response arrives before the waiter is registered.
       this.setState("requesting-join");
       const requestId = crypto.randomUUID();
+      this._pendingRequestId = requestId;
+      const joinResponsePromise = runtime.waitForJoinResponse(requestId, 30_000);
+
+      // 3) Send stream.join.request
       await conn.sendToPeer(peerUuid, {
         type: "stream.join.request",
         logicalStreamId: this.logicalStreamId,
@@ -286,9 +535,12 @@ export class ViewerSession {
       // GENERATION CHECK
       if (!this.isCurrent()) return;
 
-      // 3) Wait for stream.join.response
+      // 4) Wait for stream.join.response
       this.setState("waiting-for-host");
-      const response = await runtime.waitForJoinResponse(requestId, 30_000);
+      const response = await joinResponsePromise;
+
+      // Clear pending request id since the waiter resolved
+      this._pendingRequestId = null;
 
       // GENERATION CHECK
       if (!this.isCurrent()) return;
@@ -401,12 +653,12 @@ export class ViewerSession {
 
       // Monitor remote track ended events (host stopped sharing)
       // Use 2s debounce to avoid mistaking brief interruptions for intentional stops
-      let remoteTrackEndedTimer: ReturnType<typeof setTimeout> | null = null;
+      // Uses instance field _remoteTrackEndedTimer for proper cleanup.
       const handleRemoteTrackEnded = (): void => {
         if (!this.isCurrent()) return;
-        if (remoteTrackEndedTimer) clearTimeout(remoteTrackEndedTimer);
-        remoteTrackEndedTimer = setTimeout(() => {
-          remoteTrackEndedTimer = null;
+        if (this._remoteTrackEndedTimer) clearTimeout(this._remoteTrackEndedTimer);
+        this._remoteTrackEndedTimer = setTimeout(() => {
+          this._remoteTrackEndedTimer = null;
           if (!this.isCurrent()) return;
           // If still in watching state after debounce, the stream likely ended
           if (this._state === "watching") {
@@ -467,6 +719,8 @@ export class ViewerSession {
         this.startReadinessTimeout();
       }
     } catch (err) {
+      // Clear pending request id on any error so the promise is not leaked
+      this._pendingRequestId = null;
       const message = err instanceof Error ? err.message : String(err);
       this.setError(message);
     }

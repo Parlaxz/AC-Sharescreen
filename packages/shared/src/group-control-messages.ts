@@ -530,11 +530,19 @@ export const QualityViewerClearPayloadSchema = z.object({
 export const QualityEffectivePayloadSchema = z.object({
   streamSessionId: z.string(),
   videoBitrateKbps: z.number().optional(),
+  maxWidth: z.number().optional(),
+  maxHeight: z.number().optional(),
+  maxFps: z.number().optional(),
+  degradationPreference: z.string().optional(),
+  clampReasons: z.array(z.string()).optional(),
 });
 
 export const QualityConfiguredPayloadSchema = z.object({
   streamSessionId: z.string(),
   videoBitrateKbps: z.number().optional(),
+  maxFramerate: z.number().optional(),
+  scaleResolutionDownBy: z.number().optional(),
+  degradationPreference: z.string().optional(),
 });
 
 export const QualityObservedPayloadSchema = z.object({

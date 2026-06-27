@@ -290,7 +290,10 @@ export interface PersistedSettings {
   localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
   lastShareSettings: {
+    groupId: string;
     sourceKind: "screen" | "window";
+    sourceId: string;
+    sourceName: string;
     audioMode: "none" | "monitor" | "application";
     selectedPresetId: string | null;
     customQuality: {

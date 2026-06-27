@@ -84,7 +84,10 @@ export interface PersistedSettings {
   lastQuickSharePresetId: string | null;
   /** Last successful share settings for "Use last settings" restoration */
   lastShareSettings: {
+    groupId: string;
     sourceKind: "screen" | "window";
+    sourceId: string;
+    sourceName: string;
     audioMode: "none" | "monitor" | "application";
     selectedPresetId: string | null;
     customQuality: {

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useStore } from "../src/renderer/stores/main-store.js";
+import { customPresetToOverride } from "../src/renderer/services/share-quality.js";
 
 const mockGetRuntime = vi.fn();
 
@@ -22,6 +23,9 @@ describe("share coordinator", () => {
         startStream,
         getActualCaptureDimensions: () => ({ width: 1920, height: 1080, fps: 30 }),
         isAudioDegraded: true,
+      }),
+      getSyncService: () => ({
+        getSyncState: vi.fn().mockReturnValue(null),
       }),
     });
 
@@ -56,6 +60,43 @@ describe("share coordinator", () => {
     expect(state.captureHeight).toBe(1080);
     expect(state.captureFps).toBe(30);
     expect(state.isDegraded).toBe(true);
+  });
+
+  it("updates store captureBitrate from 300 kbps quality override", async () => {
+    const startStream = vi.fn().mockResolvedValue(undefined);
+    mockGetRuntime.mockReturnValue({
+      getStreamSessionManager: () => ({
+        startStream,
+        getActualCaptureDimensions: () => ({ width: 640, height: 360, fps: 15 }),
+        isAudioDegraded: false,
+      }),
+      getSyncService: () => ({
+        getSyncState: vi.fn().mockReturnValue(null),
+      }),
+    });
+
+    const { startShare } = await import("../src/renderer/services/share-coordinator.js");
+    const override = customPresetToOverride({ width: 640, height: 360, fps: 15, bitrate: 300 });
+
+    // Reset captureBitrate to ensure we're not reading a stale value
+    useStore.getState().setCaptureBitrate(9999);
+    expect(useStore.getState().captureBitrate).toBe(9999);
+
+    await startShare({
+      groupId: "group-1",
+      source: {
+        id: "screen:1",
+        name: "Display 1",
+        kind: "screen",
+        displayId: "display-1",
+        fingerprint: null,
+      },
+      qualityOverride: override,
+    });
+
+    const state = useStore.getState();
+    expect(state.captureBitrate).toBe(300);
+    expect(state.captureBitrate).not.toBe(650); // must NOT be the default fallback
   });
 
   it("rejects starting when no group is provided", async () => {

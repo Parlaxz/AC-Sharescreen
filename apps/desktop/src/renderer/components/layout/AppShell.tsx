@@ -63,6 +63,7 @@ export function AppShell({ children, className }: AppShellProps) {
   const focusMode = useStore((s) => s.focusMode);
   const isContextPanelOpen = useStore((s) => s.showContextPanel);
 
+  const showTitleBar = !focusMode;
   const showRail = !focusMode;
   const showDashboard = !isViewing && !focusMode;
   const isContextPanelEligible = !isViewing && !focusMode && isSharing;
@@ -75,8 +76,21 @@ export function AppShell({ children, className }: AppShellProps) {
         className,
       )}
     >
-      {/* ─── Title Bar (Section 4.2) ──────────────────────── */}
-      <TitleBar />
+      {/* ─── Title Bar (Section 4.2) — hidden in focus/fullscreen mode ── */}
+      <AnimatePresence>
+        {showTitleBar ? (
+          <motion.div
+            key="title-bar"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 32, opacity: 1 }}
+            exit={{ height: 0, opacity: 0, overflow: "hidden" }}
+            transition={focusMode ? reducedCollapse : columnCollapse}
+            className="flex-shrink-0"
+          >
+            <TitleBar />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
       {/* ─── Main area — full-height content row ─────────────── */}
       <div className="flex flex-1 min-h-0 overflow-hidden">

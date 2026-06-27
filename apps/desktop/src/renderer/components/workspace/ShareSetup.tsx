@@ -237,9 +237,12 @@ export function ShareSetup() {
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [loadingSources, setLoadingSources] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
-  const [audioMode, setAudioMode] = useState<AudioModeValue>(() =>
-    resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode),
-  );
+  const [audioMode, setAudioMode] = useState<AudioModeValue>(() => {
+    // Default audio to enabled: screen => monitor, window => application
+    // Respect saved No Audio, but default to enabled when no prior preference
+    const saved = resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode);
+    return saved === "none" ? "none" : activeTab === "screen" ? "monitor" : "application";
+  });
   const [customQuality, setCustomQuality] = useState<QualityEditorFieldsValue>({
     resolutionValue: "1280x720",
     customWidth: 1280,
@@ -258,6 +261,17 @@ export function ShareSetup() {
   const [selectedPersonalPresetId, setSelectedPersonalPresetId] = useState<
     string | null
   >(null);
+  // Last successful share settings — for "Use last settings" button
+  const [lastShareSettings, setLastShareSettings] = useState<{
+    groupId: string;
+    sourceKind: "screen" | "window";
+    sourceId: string;
+    sourceName: string;
+    audioMode: "none" | "monitor" | "application";
+    selectedPresetId: string | null;
+    customQuality: QualityEditorFieldsValue;
+    timestamp: number;
+  } | null>(null);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -275,6 +289,23 @@ export function ShareSetup() {
       resolveAudioMode(activeTab, prev, lastScreenAudioMode, lastWindowAudioMode),
     );
   }, [activeTab, lastScreenAudioMode, lastWindowAudioMode]);
+
+  // Load last successful share settings from persisted preload settings
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const api = getApi();
+        if (!api) return;
+        const settings = await api.getSettings();
+        if (settings?.lastShareSettings?.sourceKind) {
+          setLastShareSettings(settings.lastShareSettings as any);
+        }
+      } catch { /* best-effort */ }
+    };
+    if (openShareSetup) {
+      load();
+    }
+  }, [openShareSetup]);
 
   // ── Fetch sources ─────────────────────────────────────────────────────
   const fetchSources = useCallback(async () => {
@@ -357,6 +388,23 @@ export function ShareSetup() {
     return () => { cancelled = true; };
   }, [openShareSetup, lastScreenAudioMode, lastWindowAudioMode]);
 
+  // Auto-select last source when it becomes available in the loaded sources list.
+  // This avoids the reset-to-null race where sources load asynchronously after
+  // the initial selectedSourceId=null set in the source-fetching effect.
+  useEffect(() => {
+    if (!openShareSetup) return;
+    if (loadingSources) return;          // wait for sources to finish loading
+    if (!lastShareSettings) return;      // no last settings to restore from
+    if (selectedSourceId !== null) return; // already selected
+    if (sources.length === 0) return;    // no sources loaded yet
+
+    // Try to find the last source in the current list
+    const match = sources.find((s) => s.id === lastShareSettings.sourceId);
+    if (match) {
+      setSelectedSourceId(lastShareSettings.sourceId);
+    }
+  }, [openShareSetup, loadingSources, lastShareSettings, sources, selectedSourceId]);
+
   // Load personal presets while the dialog is open.
   useEffect(() => {
     if (!openShareSetup) return;
@@ -425,14 +473,17 @@ export function ShareSetup() {
         qualityOverride: qualityOverride ?? undefined,
       });
 
-      // Persist source selection and full share settings
+      // Persist source selection and full share settings (to preload settings API)
       const api = getApi();
       if (api) {
         await api.updateSettings({
           lastSourceId: source.id,
           lastSourceName: source.name,
           lastShareSettings: {
+            groupId,
             sourceKind: source.kind,
+            sourceId: source.id,
+            sourceName: source.name,
             audioMode: audioMode === "none" ? "none" : audioMode,
             selectedPresetId: selectedPersonalPresetId,
             customQuality,
@@ -754,6 +805,38 @@ export function ShareSetup() {
                 </CardContent>
               </Card>
             </section>
+
+            {/* ─── "Use last settings" button ───────────────────── */}
+            {lastShareSettings && (
+              <div className="flex items-center justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    // Set source tab
+                    setActiveTab(lastShareSettings.sourceKind);
+                    // Try to find and select the source by ID
+                    const match = sources.find(s => s.id === lastShareSettings.sourceId);
+                    if (match) {
+                      setSelectedSourceId(lastShareSettings.sourceId);
+                    }
+                    // Set audio mode
+                    setAudioMode(lastShareSettings.audioMode);
+                    // Set quality / preset
+                    if (lastShareSettings.selectedPresetId) {
+                      setSelectedPersonalPresetId(lastShareSettings.selectedPresetId);
+                    } else {
+                      setSelectedPersonalPresetId(null);
+                    }
+                    setCustomQuality(lastShareSettings.customQuality);
+                  }}
+                  className="gap-2"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Use last settings
+                </Button>
+              </div>
+            )}
 
             {/* ─── Section 5: Confirmation ───────────────────────────── */}
             <Separator className="my-2" />

@@ -66,14 +66,14 @@ export function GroupRail() {
   }, []);
 
   return (
-    <div className="flex flex-col items-center w-16 h-full min-h-0 flex-shrink-0 bg-rail border-r border-border-subtle py-2 gap-1">
+    <div className="flex flex-col items-center w-16 h-full min-h-0 flex-shrink-0 bg-rail border-r border-border-subtle py-2 gap-1 overflow-x-hidden">
       {/* ─── Home/Product button ──────────────────────────── */}
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
             size="icon"
-            className="h-10 w-10 rounded-lg text-text-secondary hover:text-text-primary"
+            className="h-10 w-10 rounded-lg text-text-secondary hover:text-text-primary flex-shrink-0"
             aria-label="Home"
             onClick={() => navigate("home")}
           >
@@ -84,7 +84,7 @@ export function GroupRail() {
       </Tooltip>
 
       {/* ─── Groups list ──────────────────────────────────── */}
-      <div className="flex-1 min-h-0 flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1 w-full px-2">
+      <div className="flex-1 min-h-0 flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1 w-full px-2 min-w-0">
         <AnimatePresence mode="popLayout">
           {groupOrder.map((groupId) => {
             const group = groupsById[groupId];

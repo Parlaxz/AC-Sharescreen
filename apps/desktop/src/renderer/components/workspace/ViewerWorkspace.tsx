@@ -12,8 +12,10 @@ import {
   RefreshCw,
   AlertTriangle,
   WifiOff,
+  Settings2,
+  Info,
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -29,13 +31,12 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import {
-  useStore,
-  type StreamAnnouncement,
-} from "@/stores/main-store";
+import { useStore } from "@/stores/main-store";
+import type { StreamAnnouncement } from "@/stores/main-store";
 import { VideoControls } from "./viewer/VideoControls.js";
-import type { QualityLevel } from "./viewer/QualityPopover.js";
+import type { ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
 import { ViewerSession, type ViewerSessionState } from "@/services/viewer-session.js";
+import { getRuntime } from "@/services/phase3-runtime.js";
 
 // ─── Reduced motion hook ──────────────────────────────────────────────────
 
@@ -173,10 +174,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
-  const watchedSessionId = useMemo(
-    () => Object.keys(watchedStreamsBySessionId)[0] ?? null,
-    [watchedStreamsBySessionId],
-  );
+  const watchingTarget = useStore((s) => s.watchingTarget);
+  // Use explicit watching target — no first-entry heuristics
+  const currentTarget = watchingTarget;
+  const watchedSessionId = currentTarget?.mediaSessionId ?? null;
 
   // ── Local state ──────────────────────────────────────────────────
   const [isPaused, setIsPaused] = useState(false);
@@ -191,10 +192,31 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       return localStorage.getItem("screenlink:viewer-muted") === "true";
     } catch { return false; }
   });
-  const [quality, setQuality] = useState<QualityLevel>("custom");
+  // Viewer quality request state (null = no request = host defaults)
+  const [viewerRequest, setViewerRequest] = useState<ViewerRequestState | null>(() => {
+    try {
+      const raw = localStorage.getItem("screenlink:viewer-request");
+      if (raw) return JSON.parse(raw) as ViewerRequestState;
+    } catch { /* ignore */ }
+    return null; // default: no request = host defaults
+  });
+  // "Last requested" = what we last sent (for diagnostics)
+  const [lastRequestedQuality, setLastRequestedQuality] = useState<ViewerRequestState | null>(null);
+  // "Effective" = what the host replied (from quality.effective)
+  const [effectiveBitrateKbps, setEffectiveBitrateKbps] = useState<number | null>(null);
+  const [configuredBitrateBps, setConfiguredBitrateBps] = useState<number | null>(null);
+  const [displayMode, setDisplayMode] = useState<"fit" | "fill" | "actual">(() => {
+    try { return (localStorage.getItem("screenlink:viewer-display-mode") as "fit" | "fill" | "actual") ?? "fit"; }
+    catch { return "fit"; }
+  });
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<ViewerSessionState>("idle");
+  const [qualityRequestPending, setQualityRequestPending] = useState(false);
+  const [qualityFeedback, setQualityFeedback] = useState<string | null>(null);
+  const [lastQualityAccepted, setLastQualityAccepted] = useState<boolean | undefined>(undefined);
+  /** Track whether any popover panel is open to keep controls visible */
+  const [panelsOpen, setPanelsOpen] = useState(false);
 
   // Video element ref — shared with ViewerSession
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -202,23 +224,29 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ViewerSession instance ref — stable across renders
   const sessionRef = useRef<ViewerSession | null>(null);
 
-  // Auto-hide controls
+  // Auto-hide controls — stay visible while any popover panel is open
+  // Track panel open state as a synthetic "always show" signal
   const { visible: controlsVisible, show: showControls, keepVisible, hide: hideControls } =
-    useControlsAutoHide(3000);
+    useControlsAutoHide(panelsOpen ? 999999 : 3000);
 
-  // Fullscreen change listener — use Electron IPC when available
+  // Fullscreen change listener — use Electron IPC when available.
+  // Syncs focusMode with fullscreen state so AppShell hides chrome
+  // (TitleBar, GroupRail, GroupDashboard) when in fullscreen.
   useEffect(() => {
+    const syncFullscreenFocus = (isFs: boolean) => {
+      setIsFullscreen(isFs);
+      useStore.getState().setFocusMode(isFs);
+    };
+
     const api = (window as unknown as { screenlink?: { onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void } }).screenlink;
     if (api) {
       // Use Electron native fullscreen events
-      const unsubscribe = api.onFullscreenChanged((isFs) => {
-        setIsFullscreen(isFs);
-      });
+      const unsubscribe = api.onFullscreenChanged(syncFullscreenFocus);
       return unsubscribe;
     }
     // Fallback for non-Electron environments
     const handler = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      syncFullscreenFocus(!!document.fullscreenElement);
     };
     document.addEventListener("fullscreenchange", handler);
     return () => document.removeEventListener("fullscreenchange", handler);
@@ -242,6 +270,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [volume]);
 
+  // Sync muted via ref — the JSX muted attribute can get out of sync during
+  // re-renders when the video element is reused across state transitions.
+  // This explicit DOM sync ensures the video element's muted property
+  // always matches the isMuted state.
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.muted = isMuted;
+    }
+  }, [isMuted]);
+
   // Persist volume to localStorage
   useEffect(() => {
     try { localStorage.setItem("screenlink:viewer-volume", String(volume)); } catch {}
@@ -252,18 +290,43 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     try { localStorage.setItem("screenlink:viewer-muted", String(isMuted)); } catch {}
   }, [isMuted]);
 
-  // ── Derive current stream info ───────────────────────────────────
+  // Map display mode to CSS object-fit and object-position values
+  // "fill" uses cover (not stretch) to avoid distortion
+  const videoObjectFit = displayMode === "fit" ? "contain"
+    : displayMode === "fill" ? "cover"
+    : "none"; // actual size — no scaling
+  const videoObjectPosition = displayMode === "actual" ? "0 0" : "center";
+
+  // Persist viewer request preferences to localStorage (reuse on later streams)
+  useEffect(() => {
+    try {
+      if (viewerRequest) {
+        localStorage.setItem("screenlink:viewer-request", JSON.stringify(viewerRequest));
+      } else {
+        localStorage.removeItem("screenlink:viewer-request");
+      }
+    } catch { /* ignore */ }
+  }, [viewerRequest]);
+
+  // Persist display mode to localStorage
+  useEffect(() => {
+    try { localStorage.setItem("screenlink:viewer-display-mode", displayMode); } catch {}
+  }, [displayMode]);
+
+  // ── Derive current stream info from explicit watching target ─────
   const currentStream = useMemo(() => {
-    if (!selectedGroupId) return null;
-    const streams = activeStreamsByGroup[selectedGroupId] ?? [];
-    if (currentStreamId) {
-      return streams.find((s) => s.logicalStreamId === currentStreamId) ?? streams[0] ?? null;
-    }
-    if (watchedSessionId) {
-      return streams.find((s) => s.mediaSessionId === watchedSessionId) ?? streams[0] ?? null;
-    }
-    return streams[0] ?? null;
-  }, [selectedGroupId, activeStreamsByGroup, currentStreamId, watchedSessionId]);
+    if (!watchingTarget) return null;
+    // First try to find the exact stream in active streams
+    const streams = selectedGroupId ? (activeStreamsByGroup[selectedGroupId] ?? []) : [];
+    const exact = streams.find(
+      (s) => s.logicalStreamId === watchingTarget.logicalStreamId && s.mediaSessionId === watchingTarget.mediaSessionId
+    );
+    if (exact) return exact;
+    // If stream is gone (host stopped), still return the target info for display
+    // This keeps the "ended" state working even after the stream disappears
+    if (!currentStreamId) return null;
+    return streams.find((s) => s.logicalStreamId === currentStreamId) ?? null;
+  }, [selectedGroupId, activeStreamsByGroup, currentStreamId, watchingTarget]);
 
   // Set initial stream ID
   useEffect(() => {
@@ -272,23 +335,162 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [currentStream, currentStreamId]);
 
-  // Watched stream info (set by Watch button or join flow)
+  // Watched stream info from explicit target
   const watchedInfo = useMemo(() => {
-    const watchedId = currentStream?.mediaSessionId ?? Object.keys(watchedStreamsBySessionId)[0] ?? null;
-    if (watchedId && watchedStreamsBySessionId[watchedId]) {
-      return { sessionId: watchedId, ...watchedStreamsBySessionId[watchedId] };
-    }
-    return null;
-  }, [currentStream, watchedStreamsBySessionId]);
+    if (!watchingTarget) return null;
+    return {
+      sessionId: watchingTarget.mediaSessionId,
+      hostDeviceId: watchingTarget.hostDeviceId,
+      hostName: watchingTarget.hostName,
+      startedAt: watchingTarget.startedAt,
+    };
+  }, [watchingTarget]);
 
-  const sharerName = currentStream?.hostDisplayName ?? watchedInfo?.hostName ?? "Unknown";
-  const sourceName =
-    currentStream?.sourceName ?? currentStream?.sourceKind ?? "Screen share";
+  const sharerName = watchedInfo?.hostName ?? watchingTarget?.hostName ?? currentStream?.hostDisplayName ?? "Unknown";
+  const sourceName = watchingTarget?.sourceName
+    ?? currentStream?.sourceName
+    ?? watchingTarget?.sourceKind
+    ?? currentStream?.sourceKind
+    ?? "Screen share";
   const liveDuration = currentStream
     ? formatLiveDuration(currentStream.startedAt)
     : watchedInfo
     ? formatLiveDuration(watchedInfo.startedAt)
     : "";
+
+  // ── Send real quality request when user sets quality ──────────
+  const handleQualityRequestChange = useCallback(async (newRequest: ViewerRequestState | null) => {
+    const prevRequest = viewerRequest;
+    setViewerRequest(newRequest);
+    setQualityRequestPending(true);
+    setQualityFeedback(null);
+
+    try {
+      const runtime = getRuntime();
+      if (!runtime || !watchingTarget) return;
+
+      const groupId = watchingTarget.groupId;
+      const logicalStreamId = watchingTarget.logicalStreamId;
+
+      // Get connection manager and connection
+      const connManager = runtime.getConnectionManager();
+      const conn = connManager.getConnection(groupId);
+      if (!conn) {
+        setQualityFeedback("Not connected to group");
+        setLastQualityAccepted(false);
+        setQualityRequestPending(false);
+        return;
+      }
+      const hostPeerUuid = conn.peerForDevice(watchingTarget.hostDeviceId);
+
+      // If setting request state to null, send quality.viewer.clear
+      if (newRequest === null) {
+        setLastRequestedQuality(null);
+        if (hostPeerUuid) {
+          await conn.sendToPeer(hostPeerUuid, {
+            type: "quality.viewer.clear",
+            streamSessionId: logicalStreamId,
+          });
+        } else {
+          await conn.broadcast({
+            type: "quality.viewer.clear",
+            streamSessionId: logicalStreamId,
+          });
+        }
+        setQualityFeedback("Quality request cleared — using host defaults");
+        setLastQualityAccepted(true);
+        setQualityRequestPending(false);
+        return;
+      }
+
+      // Record the last requested values for diagnostics
+      setLastRequestedQuality(newRequest);
+
+      // Send through the authenticated group control channel with explicit fields
+      const requestId = crypto.randomUUID();
+      const payload = {
+        type: "quality.viewer.request" as const,
+        streamSessionId: logicalStreamId,
+        requestId,
+        revision: Date.now(),
+        videoBitrateKbps: newRequest.videoBitrateKbps,
+        maxWidth: newRequest.maxWidth,
+        maxHeight: newRequest.maxHeight,
+        maxFps: newRequest.maxFps,
+        degradationPreference: "balanced",
+      };
+
+      if (hostPeerUuid) {
+        await conn.sendToPeer(hostPeerUuid, payload);
+      } else {
+        await conn.broadcast(payload);
+      }
+
+      // Accept optimistically — real feedback comes via quality.effective messages
+      setQualityFeedback(`Requested ${newRequest.videoBitrateKbps} kbps, ${newRequest.maxWidth}×${newRequest.maxHeight} @ ${newRequest.maxFps}fps — awaiting host response`);
+      setLastQualityAccepted(undefined);
+    } catch (err) {
+      setViewerRequest(prevRequest);
+      setQualityFeedback(`Failed to send quality request: ${err instanceof Error ? err.message : String(err)}`);
+      setLastQualityAccepted(false);
+    } finally {
+      setQualityRequestPending(false);
+    }
+  }, [viewerRequest, watchingTarget]);
+
+  // ── Listen for incoming quality feedback (after currentStream is declared) ──
+  useEffect(() => {
+    const handleQualityEffective = (event: CustomEvent) => {
+      const detail = event.detail ?? {};
+      const streamSessionId = detail.streamSessionId;
+      const cs = currentStream;
+      const watchedLogicalStreamId = cs?.logicalStreamId;
+      if (!streamSessionId || !watchedLogicalStreamId) return;
+      if (streamSessionId !== watchedLogicalStreamId) return;
+
+      const kbps = detail.videoBitrateKbps;
+      const clampReasons: string[] = detail.clampReasons ?? [];
+
+      if (kbps) setEffectiveBitrateKbps(kbps);
+
+      if (clampReasons.length > 0) {
+        setQualityFeedback(`Accepted, capped: ${clampReasons.join("; ")}`);
+        setLastQualityAccepted(true);
+      } else {
+        setQualityFeedback(`Accepted at ${kbps} kbps`);
+        setLastQualityAccepted(true);
+      }
+    };
+
+    const handleQualityConfigured = (event: CustomEvent) => {
+      const detail = event.detail ?? {};
+      const streamSessionId = detail.streamSessionId;
+      const cs = currentStream;
+      const watchedLogicalStreamId = cs?.logicalStreamId;
+      if (!streamSessionId || !watchedLogicalStreamId) return;
+      if (streamSessionId !== watchedLogicalStreamId) return;
+
+      const kbps = detail.videoBitrateKbps;
+      const fps = detail.maxFramerate;
+      const scale = detail.scaleResolutionDownBy;
+
+      if (kbps) setConfiguredBitrateBps(kbps * 1000);
+
+      const parts: string[] = [];
+      if (kbps) parts.push(`${kbps} kbps`);
+      if (fps) parts.push(`${fps} fps`);
+      if (scale) parts.push(`scale ${scale}x`);
+      setQualityFeedback(parts.length > 0 ? `Applied: ${parts.join(", ")}` : "Applied to sender");
+      setLastQualityAccepted(true);
+    };
+
+    window.addEventListener("screenlink:quality-effective", handleQualityEffective as EventListener);
+    window.addEventListener("screenlink:quality-configured", handleQualityConfigured as EventListener);
+    return () => {
+      window.removeEventListener("screenlink:quality-effective", handleQualityEffective as EventListener);
+      window.removeEventListener("screenlink:quality-configured", handleQualityConfigured as EventListener);
+    };
+  }, [watchingTarget?.logicalStreamId]);
 
   // ── ViewerSession lifecycle ─────────────────────────────────────
   //
@@ -370,40 +572,68 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     };
   }, [isViewing]);
 
-  // ── Detect stream stop via store changes ──────────────────────────
+  // ── Detect exact watched stream stop using explicit target — do NOT eject on other streams ──
   useEffect(() => {
-    if (!isViewing) return;
+    if (!isViewing || !watchingTarget || !sessionRef.current) return;
+
+    const exactLogicalStreamId = watchingTarget.logicalStreamId;
+    const exactMediaSessionId = watchingTarget.mediaSessionId;
+    if (!exactLogicalStreamId) return;
+
+    let endTimer: ReturnType<typeof setTimeout> | null = null;
 
     const unsubscribe = useStore.subscribe((state, prevState) => {
-      // Check if our watched stream was removed from activeStreamsByGroup
-      if (!selectedGroupId) return;
-      const prevStreams = prevState.activeStreamsByGroup[selectedGroupId] ?? [];
-      const currStreams = state.activeStreamsByGroup[selectedGroupId] ?? [];
+      if (!sessionRef.current) return;
 
-      // If we had streams before and now none, the host stopped
-      if (prevStreams.length > 0 && currStreams.length === 0 && sessionRef.current) {
-        sessionRef.current.stop();
-        sessionRef.current.destroy();
-        sessionRef.current = null;
-        setViewStatus("ended");
+      // 1) Check if our exact logical stream disappeared from active streams
+      if (selectedGroupId) {
+        const currStreams = state.activeStreamsByGroup[selectedGroupId] ?? [];
+        const stillExists = currStreams.some(
+          (s) => s.logicalStreamId === exactLogicalStreamId && s.mediaSessionId === exactMediaSessionId
+        );
+        if (!stillExists) {
+          // Our stream is gone — destroy session and show ended
+          sessionRef.current.stop();
+          sessionRef.current.destroy();
+          sessionRef.current = null;
+          setViewStatus("ended");
+
+          // Auto-navigate to overview after short delay
+          if (endTimer) clearTimeout(endTimer);
+          endTimer = setTimeout(() => {
+            const s = useStore.getState();
+            s.setIsViewing(false);
+            s.navigate("overview");
+          }, 4000);
+          return;
+        }
       }
 
-      // Also check if our specific watched session was removed
+      // 2) Check if watched session removed from watchedStreamsBySessionId
       const prevWatched = prevState.watchedStreamsBySessionId;
       const currWatched = state.watchedStreamsBySessionId;
-      const watchedId = Object.keys(prevWatched)[0];
-      if (watchedId && prevWatched[watchedId] && !currWatched[watchedId]) {
+      if (exactMediaSessionId && prevWatched[exactMediaSessionId] && !currWatched[exactMediaSessionId]) {
         if (sessionRef.current) {
           sessionRef.current.stop();
           sessionRef.current.destroy();
           sessionRef.current = null;
         }
         setViewStatus("ended");
+
+        if (endTimer) clearTimeout(endTimer);
+        endTimer = setTimeout(() => {
+          const s = useStore.getState();
+          s.setIsViewing(false);
+          s.navigate("overview");
+        }, 4000);
       }
     });
 
-    return unsubscribe;
-  }, [isViewing, selectedGroupId, setViewStatus]);
+    return () => {
+      unsubscribe();
+      if (endTimer) clearTimeout(endTimer);
+    };
+  }, [isViewing, selectedGroupId, setViewStatus, watchingTarget?.logicalStreamId, watchingTarget?.mediaSessionId]);
 
   // Bind video element to session whenever ref is available
   useEffect(() => {
@@ -421,6 +651,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       sessionRef.current.destroy();
       sessionRef.current = null;
     }
+    // Clear watching target to avoid stale state
+    useStore.getState().setWatchingTarget(null);
     setIsViewing(false);
     setViewStatus("");
     // Exit fullscreen if active
@@ -437,17 +669,20 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const handleToggleFullscreen = useCallback(async () => {
     const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean>; onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void } }).screenlink;
     if (api) {
-      await api.toggleFullscreen();
+      const newFs = await api.toggleFullscreen();
+      // Sync focusMode with fullscreen so AppShell hides chrome
+      useStore.getState().setFocusMode(newFs);
     } else {
       // Fallback for non-Electron environments
       if (document.fullscreenElement) {
         void document.exitFullscreen();
+        useStore.getState().setFocusMode(false);
       } else {
         void document.documentElement.requestFullscreen();
+        useStore.getState().setFocusMode(true);
       }
     }
-    toggleFocusMode();
-  }, [toggleFocusMode]);
+  }, []);
 
   const handleStreamSwitch = useCallback(
     (stream: StreamAnnouncement) => {
@@ -560,8 +795,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isMuted={isMuted}
             onVolumeChange={setVolume}
             onToggleMute={() => setIsMuted((m) => !m)}
-            quality={quality}
-            onQualitySelect={setQuality}
+            viewerRequest={viewerRequest}
+            onQualityRequestChange={handleQualityRequestChange}
+            qualityRequestPending={qualityRequestPending}
+            qualityFeedback={qualityFeedback}
+            lastQualityAccepted={lastQualityAccepted}
+            effectiveBitrateKbps={effectiveBitrateKbps}
+            configuredBitrateBps={configuredBitrateBps}
+            displayMode={displayMode}
+            onDisplayModeChange={setDisplayMode}
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState="reconnecting"
@@ -571,6 +813,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             controlsVisible={controlsVisible}
             showControls={showControls}
             isLive
+            onPanelsOpenChange={setPanelsOpen}
           />
         </motion.div>
       </ViewerShell>
@@ -621,8 +864,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isMuted={isMuted}
             onVolumeChange={setVolume}
             onToggleMute={() => setIsMuted((m) => !m)}
-            quality={quality}
-            onQualitySelect={setQuality}
+            viewerRequest={viewerRequest}
+            onQualityRequestChange={handleQualityRequestChange}
+            qualityRequestPending={qualityRequestPending}
+            qualityFeedback={qualityFeedback}
+            lastQualityAccepted={lastQualityAccepted}
+            effectiveBitrateKbps={effectiveBitrateKbps}
+            configuredBitrateBps={configuredBitrateBps}
+            displayMode={displayMode}
+            onDisplayModeChange={setDisplayMode}
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState="degraded"
@@ -632,58 +882,57 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             controlsVisible={controlsVisible}
             showControls={showControls}
             isLive
+            onPanelsOpenChange={setPanelsOpen}
           />
         </motion.div>
       </ViewerShell>
     );
   }
 
-  // Stream ended state — Animated exit
+  // Stream ended state — Animated exit with auto-navigate
   if (displayStatus === "ended") {
     return (
-      <ViewerShell className={className} onExit={handleExit}>
+      <motion.div
+        key="ended"
+        initial={{ opacity: 1 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={reduced ? fadeInstant : { duration: 0.4 }}
+        className="flex flex-col items-center justify-center h-full bg-canvas"
+      >
+        {/* Fading video element */}
         <motion.div
-          key="ended"
           initial={{ opacity: 1 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={reduced ? fadeInstant : { duration: 0.4 }}
-          className="flex flex-col items-center justify-center h-full"
-        >
-          {/* Fading video element */}
-          <motion.div
-            initial={{ opacity: 1 }}
-            animate={{ opacity: 0 }}
-            transition={reduced ? { duration: 0.1 } : { duration: 0.6 }}
-            className="absolute inset-0 bg-canvas"
-          />
+          animate={{ opacity: 0 }}
+          transition={reduced ? { duration: 0.1 } : { duration: 0.6 }}
+          className="absolute inset-0 bg-canvas"
+        />
 
-          {/* Ended message */}
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={reduced ? fadeInstant : { delay: 0.3, duration: 0.4 }}
-            className="relative z-10 flex flex-col items-center gap-4 text-center"
-          >
-            <div className="h-12 w-12 rounded-full bg-surface-3 flex items-center justify-center">
-              <Monitor className="h-6 w-6 text-text-muted" />
-            </div>
-            <div>
-              <h2 className="text-base font-semibold text-text-primary">
-                {sharerName}'s stream ended
-              </h2>
-              <p className="text-sm text-text-secondary mt-1">
-                The stream is no longer available.
-                {liveDuration && ` It was live for ${liveDuration}.`}
-              </p>
-            </div>
-            <Button variant="default" onClick={handleExit}>
-              <ArrowLeft className="h-4 w-4" />
-              Return to overview
-            </Button>
-          </motion.div>
+        {/* Ended message */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={reduced ? fadeInstant : { delay: 0.3, duration: 0.4 }}
+          className="relative z-10 flex flex-col items-center gap-4 text-center"
+        >
+          <div className="h-12 w-12 rounded-full bg-surface-3 flex items-center justify-center">
+            <Monitor className="h-6 w-6 text-text-muted" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-text-primary">
+              The streamer ended the share
+            </h2>
+            <p className="text-sm text-text-secondary mt-1">
+              {sharerName}'s stream is no longer available.
+              {liveDuration && ` It was live for ${liveDuration}.`}
+            </p>
+          </div>
+          <Button variant="default" onClick={handleExit}>
+            <ArrowLeft className="h-4 w-4" />
+            Return to overview
+          </Button>
         </motion.div>
-      </ViewerShell>
+      </motion.div>
     );
   }
 
@@ -749,7 +998,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         <div className="relative flex-1 flex items-center justify-center bg-black">
           <video
             ref={videoRef}
-            className="w-full h-full object-contain"
+            className="w-full h-full"
+            style={{
+              objectFit: videoObjectFit,
+              objectPosition: videoObjectPosition,
+            }}
             muted={isMuted}
             playsInline
             autoPlay
@@ -764,8 +1017,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isMuted={isMuted}
             onVolumeChange={setVolume}
             onToggleMute={() => setIsMuted((m) => !m)}
-            quality={quality}
-            onQualitySelect={setQuality}
+            viewerRequest={viewerRequest}
+            onQualityRequestChange={handleQualityRequestChange}
+            qualityRequestPending={qualityRequestPending}
+            qualityFeedback={qualityFeedback}
+            lastQualityAccepted={lastQualityAccepted}
+            effectiveBitrateKbps={effectiveBitrateKbps}
+            configuredBitrateBps={configuredBitrateBps}
+            displayMode={displayMode}
+            onDisplayModeChange={setDisplayMode}
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState={
@@ -781,6 +1041,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             controlsVisible={controlsVisible}
             showControls={showControls}
             isLive
+            session={sessionRef.current}
+            onPanelsOpenChange={setPanelsOpen}
           />
         </div>
       </motion.div>
@@ -827,54 +1089,45 @@ function ViewerShell({
   const sourceName =
     currentStream?.sourceName ?? currentStream?.sourceKind ?? "Screen share";
 
-  // Connection status dot
+  // Connection status dot — authoritative, no hardcoded green badge
+  // Only show "Watching" when viewStatus is exactly "watching" and NO
+  // error is present. Never show Watching + error simultaneously.
+  const isErrorState = viewStatus.startsWith("error:") || viewStatus === "error";
+  const isEndedState = viewStatus === "ended";
+  const isConnectedState = viewStatus === "watching" && !isErrorState;
+
   const connectionDot = useMemo(() => {
-    switch (viewStatus) {
-      case "reconnecting":
-        return "bg-warning";
-      case "degraded":
-        return "bg-warning";
-      case "ended":
-        return "bg-text-muted";
-      case "error":
-        return "bg-danger";
-      case "watching":
-        return "bg-success";
-      default:
-        return "bg-warning";
-    }
-  }, [viewStatus]);
+    if (isErrorState) return "bg-danger";
+    if (isEndedState) return "bg-text-muted";
+    if (isConnectedState) return "bg-success";
+    if (viewStatus === "reconnecting" || viewStatus === "degraded") return "bg-warning";
+    return "bg-warning";
+  }, [viewStatus, isErrorState, isEndedState, isConnectedState]);
 
   const connectionLabel = useMemo(() => {
-    switch (viewStatus) {
-      case "reconnecting":
-        return "Reconnecting";
-      case "degraded":
-        return "Degraded";
-      case "ended":
-        return "Ended";
-      case "error":
-        return "Error";
-      case "watching":
-        return "Watching";
-      default:
-        return viewStatus || "Connecting";
-    }
-  }, [viewStatus]);
+    if (isErrorState) return "Error";
+    if (isEndedState) return "Ended";
+    if (isConnectedState) return "Watching";
+    if (viewStatus === "degraded") return "Degraded";
+    if (viewStatus === "reconnecting") return "Reconnecting";
+    return viewStatus || "Connecting";
+  }, [viewStatus, isErrorState, isEndedState, isConnectedState]);
 
   const handleFullscreen = useCallback(async () => {
     const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
     if (api) {
-      await api.toggleFullscreen();
+      const newFs = await api.toggleFullscreen();
+      useStore.getState().setFocusMode(newFs);
     } else {
       if (document.fullscreenElement) {
         void document.exitFullscreen();
+        useStore.getState().setFocusMode(false);
       } else {
         void document.documentElement.requestFullscreen();
+        useStore.getState().setFocusMode(true);
       }
     }
-    toggleFocusMode();
-  }, [toggleFocusMode]);
+  }, []);
 
   return (
     <div className={cn("flex flex-col h-full bg-canvas", className)}>
@@ -887,12 +1140,22 @@ function ViewerShell({
             <span className="text-sm font-medium text-text-primary truncate">
               {sharerName}
             </span>
-            <Badge
-              variant="success"
-              className="text-[10px] px-1.5 py-0 leading-none"
-            >
-              Watching
-            </Badge>
+            {isConnectedState && (
+              <Badge
+                variant="success"
+                className="text-[10px] px-1.5 py-0 leading-none"
+              >
+                Watching
+              </Badge>
+            )}
+            {!isConnectedState && !isErrorState && !isEndedState && (
+              <Badge
+                variant="secondary"
+                className="text-[10px] px-1.5 py-0 leading-none"
+              >
+                {connectionLabel}
+              </Badge>
+            )}
           </div>
           <span className="text-xs text-text-muted hidden sm:inline truncate">
             {sourceName}
@@ -916,8 +1179,9 @@ function ViewerShell({
           </Tooltip>
         </div>
 
-        {/* Right: actions */}
-        <div className="flex items-center gap-2">
+        {/* Right: actions — order: Fullscreen, Settings, Diagnostics, Exit */}
+        <div className="flex items-center gap-1">
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -925,13 +1189,47 @@ function ViewerShell({
                 size="icon"
                 className="h-8 w-8"
                 onClick={handleFullscreen}
-                aria-label="Enter focus mode"
+                aria-label="Toggle fullscreen"
               >
                 <Maximize className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom">
-              Focus mode (Ctrl+Shift+F)
+              Fullscreen (F)
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"))}
+                aria-label="Viewer settings"
+              >
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              Settings (S)
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-info"))}
+                aria-label="Diagnostics"
+              >
+                <Info className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              Diagnostics (I)
             </TooltipContent>
           </Tooltip>
 
@@ -964,7 +1262,9 @@ function ViewerShell({
 
 /**
  * VideoControlsOverlay — Wraps VideoControls with auto-hide behavior.
- * Renders controls at the bottom of the video stage using AnimatePresence.
+ * Always renders controls (never unmounts) to keep keyboard event
+ * listeners and popover state alive. Visibility is controlled via the
+ * `visible` prop and framer-motion opacity/y animation.
  */
 function VideoControlsOverlay({
   isPaused,
@@ -973,8 +1273,15 @@ function VideoControlsOverlay({
   isMuted,
   onVolumeChange,
   onToggleMute,
-  quality,
-  onQualitySelect,
+  viewerRequest,
+  onQualityRequestChange,
+  qualityRequestPending,
+  qualityFeedback,
+  lastQualityAccepted,
+  effectiveBitrateKbps,
+  configuredBitrateBps,
+  displayMode,
+  onDisplayModeChange,
   currentStreamId,
   onStreamSwitch,
   connectionState,
@@ -984,6 +1291,8 @@ function VideoControlsOverlay({
   controlsVisible,
   showControls,
   isLive,
+  session,
+  onPanelsOpenChange,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
@@ -991,8 +1300,15 @@ function VideoControlsOverlay({
   isMuted: boolean;
   onVolumeChange: (v: number) => void;
   onToggleMute: () => void;
-  quality: QualityLevel;
-  onQualitySelect: (level: QualityLevel) => void;
+  viewerRequest: ViewerRequestState | null;
+  onQualityRequestChange: (state: ViewerRequestState | null) => void;
+  qualityRequestPending: boolean;
+  qualityFeedback: string | null;
+  lastQualityAccepted: boolean | undefined;
+  effectiveBitrateKbps: number | null;
+  configuredBitrateBps: number | null;
+  displayMode: "fit" | "fill" | "actual";
+  onDisplayModeChange: (mode: "fit" | "fill" | "actual") => void;
   currentStreamId: string;
   onStreamSwitch: (stream: StreamAnnouncement) => void;
   connectionState: "connecting" | "connected" | "degraded" | "reconnecting" | "ended" | "error";
@@ -1002,29 +1318,36 @@ function VideoControlsOverlay({
   controlsVisible: boolean;
   showControls: () => void;
   isLive: boolean;
+  session?: ViewerSession | null;
+  onPanelsOpenChange?: (open: boolean) => void;
 }) {
   return (
-    <AnimatePresence>
-      {controlsVisible && (
-        <VideoControls
-          isPaused={isPaused}
-          onTogglePlay={onTogglePlay}
-          volume={volume}
-          isMuted={isMuted}
-          onVolumeChange={onVolumeChange}
-          onToggleMute={onToggleMute}
-          quality={quality}
-          onQualitySelect={onQualitySelect}
-          currentStreamId={currentStreamId}
-          onStreamSwitch={onStreamSwitch}
-          connectionState={connectionState}
-          isFullscreen={isFullscreen}
-          onToggleFullscreen={onToggleFullscreen}
-          onExit={onExit}
-          visible={controlsVisible}
-          isLive={isLive}
-        />
-      )}
-    </AnimatePresence>
+    <VideoControls
+      isPaused={isPaused}
+      onTogglePlay={onTogglePlay}
+      volume={volume}
+      isMuted={isMuted}
+      onVolumeChange={onVolumeChange}
+      onToggleMute={onToggleMute}
+      viewerRequest={viewerRequest}
+      onQualityRequestChange={onQualityRequestChange}
+      qualityRequestPending={qualityRequestPending}
+      qualityFeedback={qualityFeedback}
+      lastQualityAccepted={lastQualityAccepted}
+      effectiveBitrateKbps={effectiveBitrateKbps}
+      configuredBitrateBps={configuredBitrateBps}
+      displayMode={displayMode}
+      onDisplayModeChange={onDisplayModeChange}
+      currentStreamId={currentStreamId}
+      onStreamSwitch={onStreamSwitch}
+      connectionState={connectionState}
+      isFullscreen={isFullscreen}
+      onToggleFullscreen={onToggleFullscreen}
+      onExit={onExit}
+      visible={controlsVisible}
+      isLive={isLive}
+      session={session}
+      onPanelsOpenChange={onPanelsOpenChange}
+    />
   );
 }

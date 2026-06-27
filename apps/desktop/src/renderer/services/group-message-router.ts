@@ -1,10 +1,10 @@
-import type { GroupControlEnvelope, GroupControlMessageType } from "@screenlink/shared";
-import { parseGroupMessagePayload, createDefaultGroupQualitySettings, createDefaultHostQualityLimits } from "@screenlink/shared";
+import type { GroupControlEnvelope, GroupControlMessageType, HostQualityLimits } from "@screenlink/shared";
+import { parseGroupMessagePayload, createDefaultGroupQualitySettings } from "@screenlink/shared";
 import type { GroupSyncService } from "./group-sync-service.js";
 import type { ActiveStreamRegistry } from "./active-stream-registry.js";
 import type { ViewerMediaBinding } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
-import type { QualityCoordinator } from "./quality-coordinator.js";
+import type { QualityCoordinator, EffectiveQuality } from "./quality-coordinator.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import { showNotification } from "./notifications.js";
 
@@ -116,6 +116,20 @@ export class GroupMessageRouter {
       }, timeoutMs);
       this.joinResponseResolvers.set(requestId, { resolve, reject, timer });
     });
+  }
+
+  /**
+   * Cancel a pending join response waiter. Removes the timer and rejects
+   * the pending promise. Idempotent — safe to call after the response
+   * already arrived or the timeout fired.
+   */
+  cancelJoinResponse(requestId: string): void {
+    const resolver = this.joinResponseResolvers.get(requestId);
+    if (resolver) {
+      clearTimeout(resolver.timer);
+      this.joinResponseResolvers.delete(requestId);
+      resolver.reject(new Error("Join response cancelled"));
+    }
   }
 
   /**
@@ -285,7 +299,7 @@ export class GroupMessageRouter {
       type === "quality.configured" ||
       type === "quality.observed"
     ) {
-      this.handleQualityMessage(groupId, type, envelope);
+      void this.handleQualityMessage(groupId, type, envelope);
       return;
     }
 
@@ -347,13 +361,56 @@ export class GroupMessageRouter {
     return undefined;
   }
 
+  // ── Quality feedback ──────────────────────────────────────────────
+
+  /**
+   * Send quality feedback (effective + configured values + clamp reasons)
+   * back to the requesting viewer via quality.effective and quality.configured
+   * messages. The viewer-side UI uses these to show accepted/capped/rejected
+   * feedback for the exact watched stream.
+   */
+  private async sendQualityFeedback(
+    groupId: string,
+    viewerDeviceId: string,
+    logicalStreamId: string,
+    effective: EffectiveQuality,
+    configured: EffectiveQuality["configured"],
+  ): Promise<void> {
+    const conn = this.connManager.getConnection(groupId);
+    if (!conn) return;
+    const peerUuid = conn.peerForDevice(viewerDeviceId);
+    if (!peerUuid) return;
+
+    // Send quality.effective with the effective values (including clamp reasons)
+    await conn.sendToPeer(peerUuid, {
+      type: "quality.effective",
+      streamSessionId: logicalStreamId,
+      videoBitrateKbps: effective.effective.videoBitrateKbps,
+      maxWidth: effective.effective.maxWidth,
+      maxHeight: effective.effective.maxHeight,
+      maxFps: effective.effective.maxFps,
+      degradationPreference: effective.effective.degradationPreference,
+      clampReasons: effective.clampReasons,
+    });
+
+    // Send quality.configured with the actual sender-applied values
+    await conn.sendToPeer(peerUuid, {
+      type: "quality.configured",
+      streamSessionId: logicalStreamId,
+      videoBitrateKbps: configured?.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+      maxFramerate: configured?.maxFramerate ?? undefined,
+      scaleResolutionDownBy: configured?.scaleResolutionDownBy ?? undefined,
+      degradationPreference: configured?.degradationPreference ?? undefined,
+    });
+  }
+
   // ── Quality message handling (Stage 6) ───────────────────────
 
-  private handleQualityMessage(
+  private async handleQualityMessage(
     groupId: string,
     type: string,
     envelope: GroupControlEnvelope,
-  ): void {
+  ): Promise<void> {
     if (!this.qualityCoordinator) {
       return; // No coordinator configured yet, silently ignore
     }
@@ -393,9 +450,28 @@ export class GroupMessageRouter {
             envelope.senderDeviceId,
           );
           if (request) {
-            const groupSettings = createDefaultGroupQualitySettings();
-            const hostLimits = createDefaultHostQualityLimits();
-            const sourceDimensions = { width: 1920, height: 1080 };
+            // Use real group quality defaults from sync service
+            const syncState = this.runtime.getSyncService().getSyncState(groupId);
+            const quality = syncState?.state?.defaultQuality?.value;
+            const groupSettings = quality ?? createDefaultGroupQualitySettings();
+
+            // Use real source dimensions from StreamSessionManager
+            const ssm = this.runtime.getStreamSessionManager();
+            const actualDims = ssm.getActualCaptureDimensions();
+            const sourceDimensions = {
+              width: actualDims.width || groupSettings.video.sendWidth || 1920,
+              height: actualDims.height || groupSettings.video.sendHeight || 1080,
+            };
+
+            // Use real host quality limits from runtime (loaded from persisted settings)
+            const runtimeLimits = this.runtime.getHostQualityLimits();
+            const hostLimits: HostQualityLimits = {
+              maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+              maxWidth: runtimeLimits.maxWidth,
+              maxHeight: runtimeLimits.maxHeight,
+              maxFps: runtimeLimits.maxFps,
+              allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+            };
 
             const effective = this.qualityCoordinator.calculateEffectiveQuality(
               groupSettings,
@@ -404,12 +480,23 @@ export class GroupMessageRouter {
               sourceDimensions,
             );
 
-            this.qualityCoordinator.applyToExactViewer(
+            const configured = await this.qualityCoordinator.applyToExactViewer(
               envelope.senderDeviceId,
               envelope.senderDeviceId,
               sender,
               effective.effective,
-            ).catch(() => {});
+            ).catch(() => null);
+
+            // Send quality feedback back to the viewer (quality.effective with clamping info)
+            if (configured) {
+              await this.sendQualityFeedback(
+                groupId,
+                envelope.senderDeviceId,
+                logicalStreamId,
+                effective,
+                configured,
+              ).catch(() => {});
+            }
           }
         }
       }
@@ -432,9 +519,28 @@ export class GroupMessageRouter {
         const viewerBinding = this.runtime.getViewerMediaBinding();
         const sender = viewerBinding.getViewerVideoSender(envelope.senderDeviceId);
         if (sender && this.qualityCoordinator) {
-          const groupSettings = createDefaultGroupQualitySettings();
-          const hostLimits = createDefaultHostQualityLimits();
-          const sourceDimensions = { width: 1920, height: 1080 };
+          // Use real group quality defaults from sync service
+          const syncState = this.runtime.getSyncService().getSyncState(groupId);
+          const quality = syncState?.state?.defaultQuality?.value;
+          const groupSettings = quality ?? createDefaultGroupQualitySettings();
+
+          // Use real source dimensions from StreamSessionManager
+          const ssm = this.runtime.getStreamSessionManager();
+          const actualDims = ssm.getActualCaptureDimensions();
+          const sourceDimensions = {
+            width: actualDims.width || groupSettings.video.sendWidth || 1920,
+            height: actualDims.height || groupSettings.video.sendHeight || 1080,
+          };
+
+          // Use real host quality limits from runtime (loaded from persisted settings)
+          const runtimeLimits = this.runtime.getHostQualityLimits();
+          const hostLimits: HostQualityLimits = {
+            maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+            maxWidth: runtimeLimits.maxWidth,
+            maxHeight: runtimeLimits.maxHeight,
+            maxFps: runtimeLimits.maxFps,
+            allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+          };
 
           const effective = this.qualityCoordinator.calculateEffectiveQuality(
             groupSettings,
@@ -443,19 +549,58 @@ export class GroupMessageRouter {
             sourceDimensions,
           );
 
-          this.qualityCoordinator.applyToExactViewer(
+          const configured = await this.qualityCoordinator.applyToExactViewer(
             envelope.senderDeviceId,
             envelope.senderDeviceId,
             sender,
             effective.effective,
-          ).catch(() => {});
+          ).catch(() => null);
+
+          // Send quality feedback for the clear (reset to group defaults)
+          if (configured) {
+            await this.sendQualityFeedback(
+              groupId,
+              envelope.senderDeviceId,
+              logicalStreamId,
+              effective,
+              configured,
+            ).catch(() => {});
+          }
         }
       }
       return;
     }
 
-    // quality.effective, quality.configured, quality.observed are
-    // informational broadcasts — the coordinator may track them in future.
+    // quality.effective — forward to viewer UI via window events
+    if (type === "quality.effective") {
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        const parsed = parseGroupMessagePayload("quality.effective", envelope.payload);
+        if (parsed.ok) {
+          window.dispatchEvent(new CustomEvent("screenlink:quality-effective", {
+            detail: parsed.data,
+          }));
+        }
+      }
+      return;
+    }
+
+    // quality.configured — forward to viewer UI via window events
+    if (type === "quality.configured") {
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        const parsed = parseGroupMessagePayload("quality.configured", envelope.payload);
+        if (parsed.ok) {
+          window.dispatchEvent(new CustomEvent("screenlink:quality-configured", {
+            detail: parsed.data,
+          }));
+        }
+      }
+      return;
+    }
+
+    // quality.observed is informational — no UI feedback needed yet
+    if (type === "quality.observed") {
+      return;
+    }
   }
 
   // ── Private ──────────────────────────────────────────────────

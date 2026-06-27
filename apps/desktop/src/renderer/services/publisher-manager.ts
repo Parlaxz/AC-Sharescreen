@@ -357,8 +357,8 @@ export class PublisherManager {
     // Log sender presence immediately after publish
     this.logSenderDiagnostics('after-publish');
 
-    // Post-publish bitrate readback: verify the sender encoding
-    // actually has the requested maxBitrate (in bps).
+    // Post-publish bitrate enforcement: verify the sender encoding
+    // actually has the requested maxBitrate (in bps). If not, correct it.
     try {
       const sdk = publisher.getSDK();
       if (sdk) {
@@ -368,18 +368,40 @@ export class PublisherManager {
           const sender = pc.getSenders().find(s => s.track?.kind === "video");
           if (!sender) continue;
           const params = sender.getParameters();
-          const appliedBitrate = params.encodings?.[0]?.maxBitrate ?? 0;
+          if (!params.encodings || params.encodings.length === 0) continue;
+          const enc = params.encodings[0];
+          if (!enc) continue;
+          const appliedBitrate = enc.maxBitrate ?? 0;
           const requestedBps = config.videoBitrate * 1000;
+
+          // Log readback
+          const match = appliedBitrate === requestedBps;
           console.log('[PublisherManager] post-publish bitrate readback', {
             requestedKbps: config.videoBitrate,
             requestedBps,
             appliedBps: appliedBitrate,
-            match: appliedBitrate === requestedBps,
+            match,
           });
+
+          // If mismatch, correct it — preserve other encoding params
+          if (!match && requestedBps > 0) {
+            enc.maxBitrate = requestedBps;
+            await sender.setParameters(params).catch((setErr) => {
+              console.warn('[PublisherManager] bitrate correction setParameters failed:', setErr);
+            });
+            // Read back after correction
+            const correctedParams = sender.getParameters();
+            const correctedBps = correctedParams.encodings?.[0]?.maxBitrate ?? 0;
+            console.log('[PublisherManager] bitrate correction result', {
+              requestedBps,
+              correctedBps,
+              corrected: correctedBps === requestedBps,
+            });
+          }
         }
       }
     } catch (err) {
-      console.warn('[PublisherManager] Post-publish bitrate readback failed:', err);
+      console.warn('[PublisherManager] Post-publish bitrate enforcement failed:', err);
     }
   }
 
