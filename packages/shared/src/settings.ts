@@ -53,4 +53,7 @@ export interface PersistedSettings {
 
   /** Last selected audio mode (persisted across sessions) */
   lastAudioMode?: AudioMode;
+
+  /** Maximum volume percentage for the viewer slider (default 100; can exceed 100 for boost) */
+  viewerMaxVolumePercent: number;
 }

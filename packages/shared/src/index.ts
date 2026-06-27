@@ -113,6 +113,7 @@ export {
   StreamBindAckPayloadSchema,
   StreamLeavePayloadSchema,
   MediaBindPayloadSchema,
+  ViewerPausedPayloadSchema,
   QualityViewerRequestPayloadSchema,
   QualityViewerClearPayloadSchema,
   QualityEffectivePayloadSchema,

@@ -52,6 +52,7 @@ interface SettingsForm {
   discordMuteShortcut: string;
   discordDeafenShortcut: string;
   discordDeafenScreenLink: boolean;
+  viewerMaxVolumePercent: number;
 }
 
 const DEFAULT_FORM: SettingsForm = {
@@ -71,6 +72,7 @@ const DEFAULT_FORM: SettingsForm = {
   discordMuteShortcut: "Alt+M",
   discordDeafenShortcut: "Alt+D",
   discordDeafenScreenLink: true,
+  viewerMaxVolumePercent: 200,
 };
 
 const DEFAULT_AUDIO_SETTINGS = {
@@ -134,6 +136,7 @@ function buildForm(
     discordMuteShortcut: formatShortcutBinding(settings.discordMuteShortcut) || DEFAULT_FORM.discordMuteShortcut,
     discordDeafenShortcut: formatShortcutBinding(settings.discordDeafenShortcut) || DEFAULT_FORM.discordDeafenShortcut,
     discordDeafenScreenLink: settings.discordDeafenScreenLink ?? DEFAULT_FORM.discordDeafenScreenLink,
+    viewerMaxVolumePercent: settings.viewerMaxVolumePercent ?? DEFAULT_FORM.viewerMaxVolumePercent,
   };
 }
 
@@ -154,7 +157,8 @@ function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
     a.quickShareAccelerator === b.quickShareAccelerator &&
     a.discordMuteShortcut === b.discordMuteShortcut &&
     a.discordDeafenShortcut === b.discordDeafenShortcut &&
-    a.discordDeafenScreenLink === b.discordDeafenScreenLink
+    a.discordDeafenScreenLink === b.discordDeafenScreenLink &&
+    a.viewerMaxVolumePercent === b.viewerMaxVolumePercent
   );
 }
 
@@ -254,6 +258,9 @@ export function SettingsPage() {
     if (!isNonNegativeInteger(form.viewerBitrateSliderMaxKbps)) {
       return "Viewer bitrate slider max must be a nonnegative integer";
     }
+    if (!isNonNegativeInteger(form.viewerMaxVolumePercent) || form.viewerMaxVolumePercent < 1 || form.viewerMaxVolumePercent > 500) {
+      return "Max volume must be an integer between 1 and 500";
+    }
     if (!form.quickShareAccelerator.trim()) {
       return "Quick Share accelerator is required";
     }
@@ -322,6 +329,7 @@ export function SettingsPage() {
         discordMuteShortcut: parseShortcutString(form.discordMuteShortcut),
         discordDeafenShortcut: parseShortcutString(form.discordDeafenShortcut),
         discordDeafenScreenLink: form.discordDeafenScreenLink,
+        viewerMaxVolumePercent: form.viewerMaxVolumePercent,
       };
 
       await saveSettings(mergedSettingsPartial);
@@ -530,6 +538,26 @@ export function SettingsPage() {
             max={100000}
             value={form.viewerBitrateSliderMaxKbps}
             onChange={(e) => updateField("viewerBitrateSliderMaxKbps", parseInt(e.target.value || "0", 10) || 0)}
+            disabled={saving}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Max viewer volume</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1.5">
+          <Label htmlFor="viewer-max-volume">
+            Maximum volume percentage shown on the viewer volume slider
+          </Label>
+          <Input
+            id="viewer-max-volume"
+            type="number"
+            min={1}
+            max={500}
+            value={form.viewerMaxVolumePercent}
+            onChange={(e) => updateField("viewerMaxVolumePercent", parseInt(e.target.value || "0", 10) || 0)}
             disabled={saving}
           />
         </CardContent>

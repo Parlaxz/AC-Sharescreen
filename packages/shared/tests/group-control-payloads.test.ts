@@ -20,6 +20,7 @@ import {
   StreamJoinResponsePayloadSchema,
   StreamLeavePayloadSchema,
   MediaBindPayloadSchema,
+  ViewerPausedPayloadSchema,
   QualityViewerRequestPayloadSchema,
   QualityViewerClearPayloadSchema,
   QualityEffectivePayloadSchema,
@@ -334,6 +335,54 @@ describe("StreamLeavePayloadSchema", () => {
   });
 });
 
+describe("ViewerPausedPayloadSchema", () => {
+  it("accepts valid paused notification", () => {
+    const r = ViewerPausedPayloadSchema.safeParse({
+      logicalStreamId: "stream-1",
+      viewerDeviceId: "dev-2",
+      viewerSessionId: "vsid-abc",
+      paused: true,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("accepts valid resume notification", () => {
+    const r = ViewerPausedPayloadSchema.safeParse({
+      logicalStreamId: "stream-1",
+      viewerDeviceId: "dev-2",
+      paused: false,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("rejects missing paused field", () => {
+    const r = ViewerPausedPayloadSchema.safeParse({
+      logicalStreamId: "stream-1",
+      viewerDeviceId: "dev-2",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects paused field with non-boolean", () => {
+    const r = ViewerPausedPayloadSchema.safeParse({
+      logicalStreamId: "stream-1",
+      viewerDeviceId: "dev-2",
+      paused: "yes",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects extra unknown fields (strict mode)", () => {
+    const r = ViewerPausedPayloadSchema.safeParse({
+      logicalStreamId: "stream-1",
+      viewerDeviceId: "dev-2",
+      paused: true,
+      extraField: "should-not-be-allowed",
+    });
+    expect(r.success).toBe(false);
+  });
+});
+
 describe("MediaBindPayloadSchema", () => {
   it("accepts valid media bind", () => {
     const r = MediaBindPayloadSchema.safeParse({
@@ -454,6 +503,19 @@ describe("parseGroupMessagePayload", () => {
   it("parses pong payload", () => {
     const r = parseGroupMessagePayload("pong", { seq: 1 });
     expect(r.ok).toBe(true);
+  });
+
+  it("parses viewer.paused payload", () => {
+    const r = parseGroupMessagePayload("viewer.paused", {
+      logicalStreamId: "stream-1",
+      viewerDeviceId: "dev-2",
+      paused: true,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.data.paused).toBe(true);
+      expect(r.data.logicalStreamId).toBe("stream-1");
+    }
   });
 
   it("rejects malformed payload for known type", () => {

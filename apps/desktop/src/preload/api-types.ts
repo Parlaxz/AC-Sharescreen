@@ -320,6 +320,9 @@ export interface PersistedSettings {
   discordMuteShortcut: ShortcutBinding;
   discordDeafenShortcut: ShortcutBinding;
   discordDeafenScreenLink: boolean;
+
+  /** Maximum volume percentage for the viewer slider (default 100; allows boost up to 200+) */
+  viewerMaxVolumePercent: number;
 }
 
 /** Protocol response envelope for helper IPC calls */

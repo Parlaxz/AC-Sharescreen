@@ -57,6 +57,20 @@ export class ViewerClient {
   private _shuttingDown = false;
   private _shutdownPromise: Promise<void> | null = null;
 
+  /**
+   * True while the user has intentionally paused media playback.
+   * The SDK signaling connection stays alive; only the media stream is stopped.
+   * Suppresses auto-reconnect and "stream ended" handling during pause.
+   */
+  private _userPaused = false;
+
+  /**
+   * Saved view parameters for resume after a user-initiated pause.
+   * Populated by pauseMedia(), consumed and cleared by resumeMedia().
+   */
+  private _pausedStreamId: string | null = null;
+  private _pausedDisplayName: string | null = null;
+
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
     if (this._shuttingDown) return;
@@ -184,6 +198,9 @@ export class ViewerClient {
     // to the SDK. Stored before the SDK call so that an error during view()
     // still leaves a recoverable ID for cleanup.
     this._activeStreamId = streamId;
+    // Also store the display name so pauseMedia() → resumeMedia() can
+    // restore the original label without the caller having to remember it.
+    this._pausedDisplayName = displayName ?? null;
 
     // Stage 8: Apply codec preferences to any pre-existing viewer transceivers.
     this.applyCodecPreferencesOnExistingConnections();
@@ -227,6 +244,102 @@ export class ViewerClient {
       // shutdown() call won't re-target this stream.
       this._activeStreamId = null;
     }
+  }
+
+  /**
+   * Pause media playback while keeping the SDK signaling connection alive.
+   *
+   * Saves the active stream parameters so resumeMedia() can re-establish the
+   * media connection without rejoining the group or re-authenticating with the
+   * VDO signaling server.
+   *
+   * Safe to call when already paused (no-op), when shutting down (no-op), or
+   * when no stream is active (no-op). If stopViewing() fails, the saved resume
+   * state is nevertheless retained so the caller can retry resume.
+   *
+   * State machine:
+   *   playing → pauseMedia() → stopViewing() → paused
+   *   paused  → pauseMedia() → (no-op, still paused)
+   */
+  async pauseMedia(): Promise<void> {
+    if (this._shuttingDown || this._shutdownPromise) return;
+    if (this._userPaused) return;     // already paused — idempotent
+    if (!this.sdk || !this._activeStreamId) return; // nothing to pause
+
+    // Save parameters for resume before touching the SDK
+    this._pausedStreamId = this._activeStreamId;
+
+    try {
+      await this.sdk.stopViewing(this._activeStreamId);
+    } catch {
+      // Saved resume state retained so caller can retry
+      throw new CompatibilityError("pauseMedia: stopViewing failed — media may still be active");
+    }
+
+    this._activeStreamId = null;
+    this._userPaused = true;
+  }
+
+  /**
+   * Resume a user-paused media stream.
+   *
+   * Re-invokes view() with the stream parameters saved during pauseMedia().
+   * The SDK signaling connection has stayed alive throughout the pause, so no
+   * rejoin handshake is needed — the host receives a fresh invite and
+   * re-establishes the WebRTC connection.
+   *
+   * If `streamIdOverride` is provided, it takes precedence over the saved
+   * stream ID. This allows resuming against a new VDO stream ID after the
+   * host restarted or replaced the share while the viewer was paused.
+   *
+   * State machine:
+   *   paused → resumeMedia() → view(…) → playing
+   *   paused → resumeMedia() → view(…) fails → paused (error thrown, retryable)
+   *
+   * @param displayName - Optional display name label for the view call.
+   * @param streamIdOverride - If provided, resume against this stream ID
+   *   instead of the one saved during pause. Use when the host has
+   *   restarted their share while the viewer was paused.
+   * @throws CompatibilityError if not paused, shutting down, or view() fails
+   */
+  async resumeMedia(displayName?: string, streamIdOverride?: string): Promise<void> {
+    if (this._shuttingDown || this._shutdownPromise) {
+      throw new CompatibilityError("ViewerClient is shutting down — cannot resume");
+    }
+    if (!this._userPaused) {
+      throw new CompatibilityError("resumeMedia called but viewer was not paused");
+    }
+    if (!this.sdk) {
+      throw new CompatibilityError("Not connected — SDK disconnected during pause");
+    }
+
+    const streamId = streamIdOverride ?? this._pausedStreamId;
+    const label = displayName ?? this._pausedDisplayName;
+    if (!streamId) {
+      this._userPaused = false;
+      throw new CompatibilityError("No saved stream ID — cannot resume");
+    }
+
+    // Optimistically clear pause state so a subsequent pauseMedia() call
+    // during the view() negotiation won't be silently ignored.
+    this._userPaused = false;
+    this._pausedStreamId = null;
+    this._pausedDisplayName = null;
+
+    try {
+      await this.view(streamId, label ?? undefined);
+    } catch (err) {
+      // view() failed — restore pause state so the caller can retry resume
+      this._pausedStreamId = streamIdOverride ?? streamId;
+      this._pausedDisplayName = label;
+      this._userPaused = true;
+      throw err;
+    }
+  }
+
+  /** True while the user has intentionally paused media. */
+  get isUserPaused(): boolean {
+    return this._userPaused;
   }
 
   async disconnect(): Promise<void> {
@@ -328,7 +441,13 @@ export class ViewerClient {
       this.registeredHandlers.clear();
       this.pendingHandlers.clear();
 
-      // 4) Clear data-channel waiter state. Resolve any outstanding
+      // 4) Clear pause/resume state so a full shutdown does not leave
+      //    stale resume parameters behind.
+      this._userPaused = false;
+      this._pausedStreamId = null;
+      this._pausedDisplayName = null;
+
+      // 5) Clear data-channel waiter state. Resolve any outstanding
       //    waiters so any awaiter (e.g. sendMediaBind) wakes up and
       //    observes the shutdown — the generation guard in the caller
       //    prevents it from acting on the resolution.

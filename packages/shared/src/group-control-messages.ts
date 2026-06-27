@@ -24,10 +24,13 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "stream.restart.request",
   "stream.restarted",
   "stream.restart.result",
+  "stream.sourceChanged",
   "stream.join.request",
   "stream.join.response",
   "stream.bind.ack",
   "stream.leave",
+  "viewer.paused",
+  "viewer.status",
   "media.bind",
   "quality.viewer.request",
   "quality.viewer.clear",
@@ -461,6 +464,13 @@ export const StreamRestartResultPayloadSchema = z.object({
   failureReason: z.string().optional(),
 });
 
+export const StreamSourceChangedPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  mediaSessionId: z.string(),
+  sourceKind: z.string(),
+  sourceName: z.string(),
+});
+
 export const StreamJoinRequestPayloadSchema = z.object({
   logicalStreamId: z.string(),
   viewerDeviceId: z.string(),
@@ -519,6 +529,30 @@ export const StreamLeavePayloadSchema = z.object({
    */
   viewerSessionId: z.string().optional(),
 });
+
+// ─── Viewer paused payload schema ───────────────────────────────────────────
+
+export const ViewerPausedPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  viewerDeviceId: z.string(),
+  /** Per-attempt session ID so the host can correlate with the join mapping. */
+  viewerSessionId: z.string().optional(),
+  /** True when paused, false when resumed. */
+  paused: z.boolean(),
+}).strict();
+
+// ─── Viewer status payload schema ────────────────────────────────────────────
+
+export const ViewerStatusPayloadSchema = z.object({
+  viewerDeviceId: z.string(),
+  streamId: z.string(),
+  state: z.enum(["playing", "paused", "reconnecting"]),
+  receivedBitrateKbps: z.number().nullable(),
+  receivedWidth: z.number().nullable(),
+  receivedHeight: z.number().nullable(),
+  displayedFps: z.number().nullable(),
+  sampledAt: z.number(),
+}).strict();
 
 // ─── Media bind payload schema ─────────────────────────────────────────────
 
@@ -610,11 +644,14 @@ export type GroupControlPayloadMap = {
   "stream.restart.request": z.infer<typeof StreamRestartRequestPayloadSchema>;
   "stream.restarted": z.infer<typeof StreamRestartedPayloadSchema>;
   "stream.restart.result": z.infer<typeof StreamRestartResultPayloadSchema>;
+  "stream.sourceChanged": z.infer<typeof StreamSourceChangedPayloadSchema>;
   "stream.join.request": z.infer<typeof StreamJoinRequestPayloadSchema>;
   "stream.join.response": z.infer<typeof StreamJoinResponsePayloadSchema>;
   "stream.bind.ack": z.infer<typeof StreamBindAckPayloadSchema>;
   "stream.leave": z.infer<typeof StreamLeavePayloadSchema>;
   "media.bind": z.infer<typeof MediaBindPayloadSchema>;
+  "viewer.paused": z.infer<typeof ViewerPausedPayloadSchema>;
+  "viewer.status": z.infer<typeof ViewerStatusPayloadSchema>;
   "quality.viewer.request": z.infer<typeof QualityViewerRequestPayloadSchema>;
   "quality.viewer.clear": z.infer<typeof QualityViewerClearPayloadSchema>;
   "quality.effective": z.infer<typeof QualityEffectivePayloadSchema>;
@@ -642,11 +679,14 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "stream.restart.request": StreamRestartRequestPayloadSchema,
   "stream.restarted": StreamRestartedPayloadSchema,
   "stream.restart.result": StreamRestartResultPayloadSchema,
+  "stream.sourceChanged": StreamSourceChangedPayloadSchema,
   "stream.join.request": StreamJoinRequestPayloadSchema,
   "stream.join.response": StreamJoinResponsePayloadSchema,
   "stream.bind.ack": StreamBindAckPayloadSchema,
   "stream.leave": StreamLeavePayloadSchema,
   "media.bind": MediaBindPayloadSchema,
+  "viewer.paused": ViewerPausedPayloadSchema,
+  "viewer.status": ViewerStatusPayloadSchema,
   "quality.viewer.request": QualityViewerRequestPayloadSchema,
   "quality.viewer.clear": QualityViewerClearPayloadSchema,
   "quality.effective": QualityEffectivePayloadSchema,

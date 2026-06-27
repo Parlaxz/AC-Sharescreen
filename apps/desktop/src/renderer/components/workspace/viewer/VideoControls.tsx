@@ -15,6 +15,7 @@ import {
   HeadphoneOff,
   Lock,
   Unlock,
+  VideoOff,
 } from "lucide-react";
 import { motion } from "motion/react";
 import { Button } from "@/components/ui/button";
@@ -63,6 +64,19 @@ interface VideoControlsProps {
   isPaused: boolean;
   /** Toggle play/pause */
   onTogglePlay: () => void;
+  /**
+   * Whether the live stream is user-paused (media stopped, signaling alive).
+   * Only meaningful for live streams — replaces the "Live" badge with a
+   * pause/resume button.
+   */
+  isStreamPaused?: boolean;
+  /**
+   * True while a pause/resume async operation is in flight.
+   * Disables the button to prevent overlapping calls.
+   */
+  isStreamPauseTransitioning?: boolean;
+  /** Toggle live-stream pause/resume. Called by button click and Space key. */
+  onToggleStreamPause?: () => void;
   /** Current volume 0–1 */
   volume: number;
   /** Whether audio is muted */
@@ -105,6 +119,9 @@ interface VideoControlsProps {
   session?: ViewerSession | null;
   /** Called when any popover panel opens or closes (keeps controls visible) */
   onPanelsOpenChange?: (open: boolean) => void;
+  /** Maximum volume percentage for the slider (default 100; >100 enables audio boost) */
+  maxVolumePercent?: number;
+
   /** Whether ScreenLink audio is locally deafened (for Discord deafen feature) */
   isScreenLinkDeafened?: boolean;
   /** Toggle local ScreenLink audio deafen */
@@ -139,6 +156,9 @@ interface VideoControlsProps {
 export function VideoControls({
   isPaused,
   onTogglePlay,
+  isStreamPaused = false,
+  isStreamPauseTransitioning = false,
+  onToggleStreamPause,
   volume,
   isMuted,
   onVolumeChange,
@@ -162,6 +182,7 @@ export function VideoControls({
   onPanelsOpenChange,
   isScreenLinkDeafened = false,
   onToggleScreenLinkDeafen,
+  maxVolumePercent = 200,
   currentBandwidthBps = 0,
   totalBytesReceived = 0,
   discordMuteBinding = { modifiers: ["alt"], key: "M" },
@@ -172,6 +193,10 @@ export function VideoControls({
     (value: number[]) => onVolumeChange(value[0]),
     [onVolumeChange],
   );
+
+  // ── Volume percentage for display ──
+  const volumePercent = isMuted ? 0 : Math.round(volume * 100);
+  const volumeTooltip = `${volumePercent}%`;
 
   // ── Bar lock state (right-click to lock, double-click to unlock) ──
   const [barLocked, setBarLocked] = useState(false);
@@ -285,21 +310,28 @@ export function VideoControls({
             barLocked ? "border-accent/50 ring-1 ring-accent/30" : "border-white/10",
           )}
         >
-          {/* ── Left group: Play/Pause or Live badge ─────────────── */}
+          {/* ── Left group: Play/Pause or Live pause/resume ────── */}
           <div className="flex items-center gap-1">
             {isLive ? (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Badge
-                    variant="success"
-                    className="text-[10px] px-2 py-0.5 leading-none cursor-default select-none"
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-white hover:bg-white/10"
+                    onClick={onToggleStreamPause}
+                    disabled={isStreamPauseTransitioning}
+                    aria-label={isStreamPaused ? "Resume stream" : "Pause stream"}
                   >
-                    <Radio className="h-2.5 w-2.5 mr-1 inline" />
-                    Live
-                  </Badge>
+                    {isStreamPaused ? (
+                      <Play className="h-3.5 w-3.5" />
+                    ) : (
+                      <Pause className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
                 </TooltipTrigger>
                 <TooltipContent side="top">
-                  This stream is live — playback controls are not available
+                  {isStreamPaused ? "Resume (Space)" : "Pause (Space)"}
                 </TooltipContent>
               </Tooltip>
             ) : (
@@ -351,12 +383,13 @@ export function VideoControls({
 
             <div className="hidden sm:block w-20">
               <Slider
-                value={[isMuted ? 0 : volume * 100]}
+                value={[isMuted ? 0 : Math.min(volume * 100, maxVolumePercent)]}
                 onValueChange={(v) => handleVolumeSlider([v[0] / 100])}
-                max={100}
+                max={maxVolumePercent}
                 step={1}
                 aria-label="Volume"
                 className="[&>div]:h-1"
+                thumbTooltip={volumeTooltip}
               />
             </div>
           </div>

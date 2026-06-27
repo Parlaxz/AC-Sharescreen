@@ -81,10 +81,13 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const connectionClass = getConnectionClass(connectionLabel);
   const liveDuration = useMemo(() => formatLiveDuration(sessionDuration), [sessionDuration]);
 
+  const navigate = useStore((s) => s.navigate);
+
   const handleStopSharing = useCallback(async () => {
     setStopConfirmOpen(false);
     await stopShare();
-  }, []);
+    navigate("overview");
+  }, [navigate]);
 
   const handlePreview = useCallback(() => {
     const s = useStore.getState();

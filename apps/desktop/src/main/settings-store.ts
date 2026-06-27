@@ -108,6 +108,9 @@ export interface PersistedSettings {
   discordDeafenShortcut: ShortcutBinding;
   /** Whether deafening Discord also deafens ScreenLink audio */
   discordDeafenScreenLink: boolean;
+
+  /** Maximum volume percentage for the viewer slider (default 100; allows boost up to 200+) */
+  viewerMaxVolumePercent: number;
 }
 
 export type ShortcutBinding = {
@@ -191,6 +194,7 @@ function getDefaults(): PersistedSettings {
     discordMuteShortcut: { modifiers: ["alt"], key: "M" },
     discordDeafenShortcut: { modifiers: ["alt"], key: "D" },
     discordDeafenScreenLink: true,
+    viewerMaxVolumePercent: 200,
   };
 }
 
@@ -233,6 +237,11 @@ function applyMigrations(raw: unknown): PersistedSettings {
   }
   if (s.discordDeafenScreenLink === undefined) {
     s.discordDeafenScreenLink = true;
+  }
+
+  // Add viewerMaxVolumePercent if missing
+  if (s.viewerMaxVolumePercent === undefined) {
+    s.viewerMaxVolumePercent = 200;
   }
 
   // Normalize audio mode for current version
@@ -349,10 +358,13 @@ export class SettingsStore {
       }
       return migrated;
     }
-    // Already current — normalize audio mode
+    // Already current — ensure all additive fields are present
     const s = obj as unknown as PersistedSettings;
     if (s.lastAudioMode !== undefined) {
       s.lastAudioMode = normalizeAudioMode(s.lastAudioMode);
+    }
+    if (s.viewerMaxVolumePercent === undefined) {
+      s.viewerMaxVolumePercent = 200;
     }
     return s;
   }

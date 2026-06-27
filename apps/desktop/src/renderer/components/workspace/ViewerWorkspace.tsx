@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   WifiOff,
   Info,
+  Play,
 } from "lucide-react";
 import { motion } from "motion/react";
 import { Button } from "@/components/ui/button";
@@ -43,7 +44,7 @@ import {
   getViewerQualityDispatchError,
   resolveViewerQualityFeedbackStreamId,
 } from "./viewer/viewer-quality-helpers.js";
-import { ViewerSession, type ViewerSessionState } from "@/services/viewer-session.js";
+import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
 
 // ─── Reduced motion hook ──────────────────────────────────────────────────
@@ -179,6 +180,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const setIsViewing = useStore((s) => s.setIsViewing);
   const setViewStatus = useStore((s) => s.setViewStatus);
   const toggleFocusMode = useStore((s) => s.toggleFocusMode);
+  const navigate = useStore((s) => s.navigate);
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
@@ -223,10 +225,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   /** Track whether any popover panel is open to keep controls visible */
   const [panelsOpen, setPanelsOpen] = useState(false);
 
+  // ── Pause state ─────────────────────────────────────────────────────
+  const [streamPauseState, setStreamPauseState] = useState<ViewerPauseState>("playing");
+  const [streamPausePoster, setStreamPausePoster] = useState<string | null>(null);
+  const streamPauseTransitioning = streamPauseState === "pausing" || streamPauseState === "resuming";
+
   // ── Discord shortcut bindings (loaded from settings) ──
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
   const [discordDeafenBinding, setDiscordDeafenBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "D" });
   const [syncScreenLinkDeafen, setSyncScreenLinkDeafen] = useState(true);
+  const [maxVolumePercent, setMaxVolumePercent] = useState(200);
 
   useEffect(() => {
     void loadSettings().then((settings) => {
@@ -237,10 +245,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         setDiscordDeafenBinding(settings.discordDeafenShortcut);
       }
       setSyncScreenLinkDeafen(settings.discordDeafenScreenLink ?? true);
+      setMaxVolumePercent(settings.viewerMaxVolumePercent ?? 200);
     }).catch(() => {
       // keep defaults
     });
   }, []);
+
+  // Clamp current volume when maxVolumePercent changes
+  useEffect(() => {
+    const maxVol = maxVolumePercent / 100;
+    setVolume((prev) => Math.min(prev, maxVol));
+  }, [maxVolumePercent]);
 
   // ── ScreenLink deafen state (for Discord deafen feature) ──
   const [isScreenLinkDeafened, setIsScreenLinkDeafened] = useState(false);
@@ -369,7 +384,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         void document.exitFullscreen();
       }
     }
-  }, [setIsViewing, setViewStatus, isFullscreen]);
+    // Navigate back to the group overview
+    navigate("overview");
+  }, [setIsViewing, setViewStatus, isFullscreen, navigate]);
 
   const handleToggleFullscreen = useCallback(async () => {
     const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean>; onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void } }).screenlink;
@@ -406,10 +423,48 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [setViewStatus]);
 
+  // ── Pause/resume callbacks (single owner of toggle) ──────────────
+  const handlePauseStream = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!session || session.pauseState !== "playing") return;
+    try {
+      await session.pause();
+    } catch (err) {
+      console.error("[ViewerWorkspace] pause failed:", err);
+    }
+  }, []);
+
+  const handleResumeStream = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!session || session.pauseState !== "paused") return;
+    try {
+      await session.resume();
+    } catch (err) {
+      console.error("[ViewerWorkspace] resume failed:", err);
+    }
+  }, []);
+
+  const handleToggleStreamPause = useCallback(() => {
+    if (streamPauseState === "paused") {
+      void handleResumeStream();
+    } else if (streamPauseState === "playing") {
+      void handlePauseStream();
+    }
+  }, [streamPauseState, handlePauseStream, handleResumeStream]);
+
   // Listen for viewer keyboard shortcut events
   useEffect(() => {
     const handleToggleMute = () => {
       setIsMuted((m) => !m);
+    };
+    const handleTogglePause = () => {
+      // Guard: only toggle when in a toggleable state
+      if (streamPauseState === "paused") {
+        void handleResumeStream();
+      } else if (streamPauseState === "playing") {
+        void handlePauseStream();
+      }
+      // ignore pausing/resuming — operation already in flight
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isFullscreen) {
@@ -417,12 +472,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
     };
     window.addEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
+    window.addEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
+      window.removeEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleToggleFullscreen, isFullscreen]);
+  }, [handleToggleFullscreen, isFullscreen, streamPauseState]);
 
   // Sync volume via ref (volume is a DOM property, not a JSX attribute)
   useEffect(() => {
@@ -705,6 +762,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setViewStatus(status);
     };
 
+    // Wire pause state events for reactive UI updates
+    session.onPauseStateChange = (pauseState: ViewerPauseState) => {
+      setStreamPauseState(pauseState);
+    };
+    session.onPosterFrameChange = (poster: string | null) => {
+      setStreamPausePoster(poster);
+    };
+
     // Handle errors
     session.onError = (error: string) => {
       setViewStatus(`error: ${error}`);
@@ -744,13 +809,18 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     const unsubscribe = useStore.subscribe((state, prevState) => {
       if (!sessionRef.current) return;
 
-      // Don't treat stream as "gone" during the initial connection flow.
+      // Don't treat stream as "gone" during the initial connection flow
+      // or while the user has intentionally paused.
       // The join flow starts before the stream is announced in activeStreamsByGroup,
       // so the stream won't exist there until the host accepts the join and the
       // stream.started message arrives.  Without this guard, any unrelated store
       // update during the join window incorrectly destroys the session and cancels
       // the pending join response.
+      // While paused, the media connection is intentionally stopped; the stream
+      // may be removed from activeStreamsByGroup by a stream.restarted event
+      // that we want to handle at resume time, not by destroying the session.
       if (sessionRef.current.state !== "watching") return;
+      if (sessionRef.current.pauseState === "paused") return;
 
       // 1) Check if our exact logical stream disappeared from active streams
       if (selectedGroupId) {
@@ -899,6 +969,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           <VideoControlsOverlay
             isPaused={isPaused}
             onTogglePlay={() => setIsPaused((p) => !p)}
+            isStreamPaused={streamPauseState === "paused"}
+            isStreamPauseTransitioning={streamPauseTransitioning}
+            onToggleStreamPause={handleToggleStreamPause}
             volume={volume}
             isMuted={isMuted}
             onVolumeChange={setVolume}
@@ -927,6 +1000,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
+            maxVolumePercent={maxVolumePercent}
           />
         </motion.div>
       </ViewerShell>
@@ -973,6 +1047,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           <VideoControlsOverlay
             isPaused={isPaused}
             onTogglePlay={() => setIsPaused((p) => !p)}
+            isStreamPaused={streamPauseState === "paused"}
+            isStreamPauseTransitioning={streamPauseTransitioning}
+            onToggleStreamPause={handleToggleStreamPause}
             volume={volume}
             isMuted={isMuted}
             onVolumeChange={setVolume}
@@ -1001,6 +1078,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
+            maxVolumePercent={maxVolumePercent}
           />
         </motion.div>
       </ViewerShell>
@@ -1116,7 +1194,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         <div className="relative flex-1 flex items-center justify-center bg-black">
           <video
             ref={videoRef}
-            className="h-full object-contain"
+            className={cn(
+              "h-full object-contain",
+              streamPauseState === "paused" && "opacity-30",
+            )}
             muted={isMuted}
             playsInline
             autoPlay
@@ -1126,6 +1207,46 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               handleToggleFullscreen();
             }}
           />
+
+          {/* ── Paused overlay (frozen frame poster + play icon + label) ── */}
+          {(streamPauseState === "paused" || streamPauseState === "resuming") && (
+            <div
+              className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/40"
+              aria-label={streamPauseState === "paused" ? "Stream paused" : "Resuming stream"}
+              role="status"
+            >
+              {/* Poster frame as background image */}
+              {streamPausePoster && (
+                <div
+                  className="absolute inset-0 bg-cover bg-center opacity-60"
+                  style={{ backgroundImage: `url(${streamPausePoster})` }}
+                />
+              )}
+
+              {/* Centered icon + label */}
+              <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
+                {streamPauseState === "paused" ? (
+                  <>
+                    <div className="h-16 w-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
+                      <Play className="h-8 w-8 text-white" />
+                    </div>
+                    <p className="text-sm text-white/80 font-medium">
+                      Paused — Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-xs font-mono">Space</kbd> to resume
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="h-12 w-12 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
+                      <RefreshCw className="h-6 w-6 text-white animate-spin" />
+                    </div>
+                    <p className="text-sm text-white/80 font-medium">
+                      Resuming stream...
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Top-left exit button — fades in/out with controls */}
           <motion.div
@@ -1151,6 +1272,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           <VideoControlsOverlay
             isPaused={isPaused}
             onTogglePlay={() => setIsPaused((p) => !p)}
+            isStreamPaused={streamPauseState === "paused"}
+            isStreamPauseTransitioning={streamPauseTransitioning}
+            onToggleStreamPause={handleToggleStreamPause}
             volume={volume}
             isMuted={isMuted}
             onVolumeChange={setVolume}
@@ -1186,6 +1310,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
+            maxVolumePercent={maxVolumePercent}
           />
         </div>
       </motion.div>
@@ -1225,6 +1350,9 @@ function ViewerShell({
 function VideoControlsOverlay({
   isPaused,
   onTogglePlay,
+  isStreamPaused,
+  isStreamPauseTransitioning,
+  onToggleStreamPause,
   volume,
   isMuted,
   onVolumeChange,
@@ -1254,9 +1382,13 @@ function VideoControlsOverlay({
   discordMuteBinding,
   discordDeafenBinding,
   syncScreenLinkDeafen,
+  maxVolumePercent,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
+  isStreamPaused?: boolean;
+  isStreamPauseTransitioning?: boolean;
+  onToggleStreamPause?: () => void;
   volume: number;
   isMuted: boolean;
   onVolumeChange: (v: number) => void;
@@ -1286,11 +1418,15 @@ function VideoControlsOverlay({
   discordMuteBinding?: ShortcutBinding;
   discordDeafenBinding?: ShortcutBinding;
   syncScreenLinkDeafen?: boolean;
+  maxVolumePercent?: number;
 }) {
   return (
     <VideoControls
       isPaused={isPaused}
       onTogglePlay={onTogglePlay}
+      isStreamPaused={isStreamPaused}
+      isStreamPauseTransitioning={isStreamPauseTransitioning}
+      onToggleStreamPause={onToggleStreamPause}
       volume={volume}
       isMuted={isMuted}
       onVolumeChange={onVolumeChange}
@@ -1319,6 +1455,7 @@ function VideoControlsOverlay({
       discordMuteBinding={discordMuteBinding}
       discordDeafenBinding={discordDeafenBinding}
       syncScreenLinkDeafen={syncScreenLinkDeafen}
+      maxVolumePercent={maxVolumePercent}
     />
   );
 }

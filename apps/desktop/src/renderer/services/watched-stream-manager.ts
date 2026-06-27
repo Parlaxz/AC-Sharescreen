@@ -295,7 +295,7 @@ export class WatchedStreamManager {
 
   setVolume(input: WatchedStreamKey, volume: number): void {
     const entry = this.entries.get(keyOf(input));
-    if (entry) entry.volume = Math.max(0, Math.min(1, volume));
+    if (entry) entry.volume = Math.max(0, volume);
   }
 
   get(input: WatchedStreamKey): WatchedStreamEntry | null {

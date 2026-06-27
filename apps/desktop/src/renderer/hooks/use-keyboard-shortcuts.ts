@@ -15,6 +15,7 @@ import { useStore } from "@/stores/main-store";
  * | Esc             | Leave fullscreen → close overlays |
  *
  * Viewer-specific (on viewer page only, ignored while typing in inputs):
+ * | Space          | Toggle pause/resume             |
  * | F              | Toggle fullscreen (Electron)    |
  * | M              | Toggle mute                     |
  * | I              | Toggle diagnostics panel        |
@@ -136,6 +137,14 @@ export function useKeyboardShortcuts() {
       if (event.key === "s" && !ctrl && !alt && !event.shiftKey) {
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"));
+        return;
+      }
+
+      // Space — Toggle pause/resume (only when not typing in inputs)
+      // Guard: no modifiers, no repeat, prevent page scroll
+      if (event.key === " " && !ctrl && !alt && !event.shiftKey && !event.repeat) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-pause"));
         return;
       }
 
