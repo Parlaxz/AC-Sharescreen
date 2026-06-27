@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { ViewerInfo } from "@/stores/main-store";
 import type { QualityCoordinator } from "@/services/quality-coordinator";
 import type { ViewerQualityRequest } from "@screenlink/shared";
 import { pollStats } from "@screenlink/vdo-adapter";
@@ -11,6 +10,7 @@ interface ViewerStatusEvent {
   viewerDeviceId: string;
   streamId: string;
   state: "playing" | "paused" | "reconnecting";
+  viewerDisplayName?: string;
   receivedBitrateKbps: number | null;
   receivedWidth: number | null;
   receivedHeight: number | null;
@@ -61,6 +61,15 @@ export interface ViewerRow {
   };
 
   lastStatusAt: number | null;
+}
+
+/**
+ * Minimal viewer binding info: maps a viewerDeviceId to its media peer UUID
+ * so the hook can correlate host-side WebRTC stats with status events.
+ */
+export interface ViewerBinding {
+  viewerDeviceId: string;
+  mediaPeerUuid: string;
 }
 
 const STALE_STATUS_MS = 10_000;
@@ -122,7 +131,8 @@ function computeHostStats(snapshot: StatsSnapshot): Omit<HostObservedViewerStats
 
 export function useHostViewerDiagnostics(
   sdk: VDONinjaSDK | null,
-  viewers: ViewerInfo[],
+  /** Viewer bindings from ViewerMediaBinding — bridges viewerDeviceId ↔ mediaPeerUuid for host stats. */
+  viewerBindings: ViewerBinding[],
   qualityCoordinator: QualityCoordinator | null,
   groupId: string,
   logicalStreamId: string,
@@ -130,9 +140,8 @@ export function useHostViewerDiagnostics(
   const [rows, setRows] = useState<ViewerRow[]>([]);
   const statusMapRef = useRef<Map<string, ViewerStatusEvent>>(new Map());
   const bytesRef = useRef<Map<string, { lastBytes: number; lastTime: number }>>(new Map());
-  /** Stable ref mirror of `viewers` to avoid resetting the poll interval on every store update. */
-  const viewersRef = useRef(viewers);
-  viewersRef.current = viewers;
+  const bindingRef = useRef(viewerBindings);
+  bindingRef.current = viewerBindings;
 
   // Listen for viewer.status events
   useEffect(() => {
@@ -146,7 +155,7 @@ export function useHostViewerDiagnostics(
     return () => window.removeEventListener("screenlink:viewer-status", handler);
   }, []);
 
-  // Poll host-side SDK stats
+  // Poll host-side SDK stats per peer UUID
   const pollHostStats = useCallback(async () => {
     if (!sdk) return null;
 
@@ -173,7 +182,6 @@ export function useHostViewerDiagnostics(
           }
         }
         newBytes.set(uuid, { lastBytes: bytesSent, lastTime: Date.now() });
-
         newStats.set(uuid, { ...base, sentBitrateKbps });
       } catch {
         // Best effort
@@ -189,51 +197,52 @@ export function useHostViewerDiagnostics(
     let cancelled = false;
 
     const buildRows = async () => {
-      const currentViewers = viewersRef.current;
-      if (currentViewers.length === 0) {
-        if (!cancelled) setRows([]);
-        return;
-      }
-
       const hostStats = await pollHostStats();
       if (cancelled) return;
 
       const now = Date.now();
       const newRows: ViewerRow[] = [];
+      const seen = new Set<string>();
 
-      for (const viewer of currentViewers) {
-        const status = statusMapRef.current.get(viewer.viewerDeviceId);
-        const isStale = !status || (now - status.sampledAt) > STALE_STATUS_MS;
+      // Build a peerUuid → viewerDeviceId map from bindings
+      const peerToViewer = new Map<string, string>();
+      for (const b of bindingRef.current) {
+        peerToViewer.set(b.mediaPeerUuid, b.viewerDeviceId);
+      }
 
-        const state: ViewerRow["state"] =
-          status && !isStale ? status.state : "unknown";
+      // 1) Emit rows for viewers from status events (primary source)
+      for (const [viewerDeviceId, status] of statusMapRef.current) {
+        if (seen.has(viewerDeviceId)) continue;
+        seen.add(viewerDeviceId);
 
-        const hostStat = hostStats?.get(viewer.peerUuid) ?? null;
+        const isStale = (now - status.sampledAt) > STALE_STATUS_MS;
+        const state: ViewerRow["state"] = isStale ? "unknown" : status.state;
+        const displayName = status.viewerDisplayName ?? viewerDeviceId.slice(0, 8);
+
+        // Look up host stats for this viewer by finding their media peer UUID
+        const peerUuid = peerToViewer.get(viewerDeviceId) ?? null;
+        const hostStat = peerUuid ? (hostStats?.get(peerUuid) ?? null) : null;
 
         let requested: ViewerRow["requested"] = EMPTY_REQUESTED;
         if (qualityCoordinator) {
           const req: ViewerQualityRequest | null = qualityCoordinator.getViewerRequest(
-            groupId,
-            logicalStreamId,
-            viewer.viewerDeviceId,
+            groupId, logicalStreamId, viewerDeviceId,
           );
           if (req) {
             requested = {
-              bitrateKbps: req.videoBitrateKbps,
-              width: req.maxWidth,
-              height: req.maxHeight,
-              fps: req.maxFps,
+              bitrateKbps: req.videoBitrateKbps, width: req.maxWidth,
+              height: req.maxHeight, fps: req.maxFps,
               presetName: req.degradationPreference,
             };
           }
         }
 
         newRows.push({
-          viewerDeviceId: viewer.viewerDeviceId,
-          displayName: viewer.displayName,
-          connectedAt: viewer.connectedAt,
+          viewerDeviceId,
+          displayName,
+          connectedAt: status.sampledAt,
           state,
-          received: status && !isStale && state !== "paused"
+          received: !isStale && state !== "paused"
             ? {
                 bitrateKbps: status.receivedBitrateKbps,
                 width: status.receivedWidth,
@@ -243,8 +252,32 @@ export function useHostViewerDiagnostics(
             : EMPTY_RECEIVED,
           sent: hostStat ?? EMPTY_SENT,
           requested,
-          lastStatusAt: status?.sampledAt ?? null,
+          lastStatusAt: status.sampledAt,
         });
+      }
+
+      // 2) Emit rows for viewers with host stats but no status yet
+      if (hostStats) {
+        for (const [peerUuid] of hostStats) {
+          const viewerDeviceId = peerToViewer.get(peerUuid) ?? `sdk:${peerUuid.slice(0, 8)}`;
+          if (seen.has(viewerDeviceId)) {
+            // Already emitted above — augment with host stats
+            const existing = newRows.find((r) => r.viewerDeviceId === viewerDeviceId);
+            if (existing) existing.sent = hostStats.get(peerUuid) ?? EMPTY_SENT;
+            continue;
+          }
+          seen.add(viewerDeviceId);
+          newRows.push({
+            viewerDeviceId,
+            displayName: viewerDeviceId.slice(0, 8),
+            connectedAt: now,
+            state: "unknown",
+            received: EMPTY_RECEIVED,
+            sent: hostStats.get(peerUuid) ?? EMPTY_SENT,
+            requested: EMPTY_REQUESTED,
+            lastStatusAt: null,
+          });
+        }
       }
 
       if (!cancelled) setRows(newRows);

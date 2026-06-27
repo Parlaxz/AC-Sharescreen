@@ -547,6 +547,7 @@ export const ViewerStatusPayloadSchema = z.object({
   viewerDeviceId: z.string(),
   streamId: z.string(),
   state: z.enum(["playing", "paused", "reconnecting"]),
+  viewerDisplayName: z.string().optional(),
   receivedBitrateKbps: z.number().nullable(),
   receivedWidth: z.number().nullable(),
   receivedHeight: z.number().nullable(),

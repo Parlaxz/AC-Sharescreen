@@ -1321,6 +1321,7 @@ export class ViewerSession {
       viewerDeviceId: runtime.deviceId ?? "viewer",
       streamId: this.logicalStreamId,
       state,
+      viewerDisplayName: runtime.displayName ?? undefined,
       receivedBitrateKbps,
       receivedWidth,
       receivedHeight,

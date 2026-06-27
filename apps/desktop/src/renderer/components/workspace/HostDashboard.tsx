@@ -30,8 +30,7 @@ import { useStore } from "@/stores/main-store";
 import { getRuntime } from "@/services/phase3-runtime";
 import { stopShare } from "@/services/share-coordinator";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
-import { useHostViewerDiagnostics } from "@/hooks/use-host-viewer-diagnostics";
-import type { ViewerRow } from "@/hooks/use-host-viewer-diagnostics";
+import { useHostViewerDiagnostics, type ViewerRow } from "@/hooks/use-host-viewer-diagnostics";
 import { Separator } from "@/components/ui/separator";
 
 function formatLiveDuration(seconds: number): string {
@@ -193,9 +192,6 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const [selectedSwitchSource, setSelectedSwitchSource] = useState<CaptureSourceDTO | null>(null);
   const [switchSourceError, setSwitchSourceError] = useState<string | null>(null);
 
-  const viewers = useStore((s) => s.viewers);
-  const streamingGroupId = useStore((s) => s.sharingGroupId);
-
   const runtime = getRuntime();
   const sdk = runtime
     ?.getStreamSessionManager()
@@ -205,11 +201,19 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
 
   const logicalStreamId = runtime?.getStreamSessionManager()?.currentLogicalStreamId ?? "";
 
+  const viewerBindings = useMemo(() => {
+    return runtime
+      ?.getViewerMediaBinding()
+      ?.getAllViewers()
+      ?.map((v) => ({ viewerDeviceId: v.viewerDeviceId, mediaPeerUuid: v.mediaPeerUuid }))
+      ?? [];
+  }, [runtime]);
+
   const viewerRows = useHostViewerDiagnostics(
     sdk,
-    viewers,
+    viewerBindings,
     runtime?.getQualityCoordinator() ?? null,
-    streamingGroupId ?? "",
+    selectedGroupId ?? "",
     logicalStreamId,
   );
 
@@ -453,23 +457,27 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
         </CardContent>
       </Card>
 
-      {viewers.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm font-medium text-text-primary">
-              Viewers ({viewers.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-0">
-            {viewerRows.map((row, i) => (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-medium text-text-primary">
+            Viewers ({viewerRows.length})
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-0">
+          {viewerRows.length === 0 ? (
+            <p className="text-[11px] text-text-muted py-1">
+              No viewers connected yet
+            </p>
+          ) : (
+            viewerRows.map((row, i) => (
               <div key={row.viewerDeviceId}>
                 {i > 0 && <Separator className="my-1.5" />}
                 <ViewerRowItem row={row} />
               </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+            ))
+          )}
+        </CardContent>
+      </Card>
 
       <Dialog open={stopConfirmOpen} onOpenChange={setStopConfirmOpen}>
         <DialogContent className="sm:max-w-sm">
