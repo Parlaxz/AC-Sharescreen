@@ -331,103 +331,102 @@ export function DiagnosticsPanel({
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-80 p-3 max-h-[80vh] overflow-y-auto">
-        <div className="space-y-3">
-          {/* Connection section */}
-          <div>
-            <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1.5">
-              Connection
-            </p>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-              <span className="text-text-muted">State</span>
-              <span className="text-text-primary text-right capitalize">{stats.connectionState}</span>
-              <span className="text-text-muted">ICE pair</span>
-              <span className="text-text-primary text-right truncate text-[10px]" title={`${stats.selectedCandidatePair.local ?? "?"} ↔ ${stats.selectedCandidatePair.remote ?? "?"}`}>
-                {stats.selectedCandidatePair.local ?? "?"} ↔ {stats.selectedCandidatePair.remote ?? "?"}
-              </span>
-              <span className="text-text-muted">Local type</span>
-              <span className="text-text-primary text-right text-[10px]">{candidateTypeLabel(stats.localCandidateType)}</span>
-              <span className="text-text-muted">Remote type</span>
-              <span className="text-text-primary text-right text-[10px]">{candidateTypeLabel(stats.remoteCandidateType)}</span>
-              <span className="text-text-muted">Relay</span>
-              <span className="text-text-primary text-right">{stats.isRelay === null ? "—" : stats.isRelay ? "Yes" : "No"}</span>
-              <span className="text-text-muted">RTT</span>
-              <span className="text-text-primary text-right">{fmtMs(stats.rttMs)}</span>
-            </div>
-          </div>
-
-          <Separator />
-
-          {/* Video section */}
-          <div>
-            <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1.5">
-              Video
-            </p>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-              <span className="text-text-muted">Codec</span>
-              <span className="text-text-primary text-right truncate">{stats.videoCodec ?? "—"}</span>
-              <span className="text-text-muted">Resolution</span>
-              <span className="text-text-primary text-right">
-                {stats.videoWidth && stats.videoHeight ? `${stats.videoWidth}×${stats.videoHeight}` : "—"}
-              </span>
-              <span className="text-text-muted">Frame rate</span>
-              <span className="text-text-primary text-right">{stats.videoFrameRate ?? "—"} fps</span>
-              <span className="text-text-muted">Bitrate</span>
-              <span className="text-text-primary text-right">{fmtBps(stats.videoBitrateBps)}</span>
-              <span className="text-text-muted">Packets</span>
-              <span className="text-text-primary text-right">{stats.videoPacketsReceived} recv / {stats.videoPacketsLost} lost</span>
-              <span className="text-text-muted">Packet loss</span>
-              <span className="text-text-primary text-right">{fmtPct(stats.videoPacketLossPercent)}</span>
-              <span className="text-text-muted">Jitter</span>
-              <span className="text-text-primary text-right">{fmtMs(stats.videoJitter)}</span>
-              <span className="text-text-muted">Frames dropped</span>
-              <span className="text-text-primary text-right">{stats.videoFramesDropped ?? "—"}</span>
-              <span className="text-text-muted">Freeze count</span>
-              <span className="text-text-primary text-right">{stats.videoFreezeCount ?? "—"}</span>
-            </div>
-          </div>
-
-          <Separator />
-
-          {/* Audio section */}
-          <div>
-            <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1.5">
-              Audio
-            </p>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-              <span className="text-text-muted">Codec</span>
-              <span className="text-text-primary text-right truncate">{stats.audioCodec ?? "—"}</span>
-              <span className="text-text-muted">Bitrate</span>
-              <span className="text-text-primary text-right">{fmtBps(stats.audioBitrateBps)}</span>
-              <span className="text-text-muted">Packets</span>
-              <span className="text-text-primary text-right">{stats.audioPacketsReceived} recv / {stats.audioPacketsLost} lost</span>
-              <span className="text-text-muted">Jitter</span>
-              <span className="text-text-primary text-right">{fmtMs(stats.audioJitter)}</span>
-            </div>
-          </div>
-
-          {/* Quality section */}
-          {(stats.requestedBitrateKbps !== null || stats.effectiveBitrateKbps !== null || stats.senderMaxBitrateBps !== null) && (
-            <>
-              <Separator />
-              <div>
-                <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1.5">
-                  Quality
-                </p>
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-                  {stats.requestedBitrateKbps !== null && (
-                    <><span className="text-text-muted">Requested</span><span className="text-text-primary text-right">{stats.requestedBitrateKbps} kbps</span></>
-                  )}
-                  {stats.effectiveBitrateKbps !== null && (
-                    <><span className="text-text-muted">Effective</span><span className="text-text-primary text-right">{stats.effectiveBitrateKbps} kbps</span></>
-                  )}
-                  {stats.senderMaxBitrateBps !== null && (
-                    <><span className="text-text-muted">Sender max</span><span className="text-text-primary text-right">{Math.round(stats.senderMaxBitrateBps / 1000)} kbps</span></>
-                  )}
-                </div>
+      <PopoverContent side="top" align="center" className="w-[500px] p-4 max-h-[80vh] overflow-y-auto">
+        <div className="space-y-4">
+          {/* Connection + Video columns */}
+          <div className="grid grid-cols-2 gap-4">
+            {/* Connection section */}
+            <div>
+              <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
+                Connection
+              </p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                <span className="text-text-muted">State</span>
+                <span className="text-text-primary text-right capitalize">{stats.connectionState}</span>
+                <span className="text-text-muted">ICE pair</span>
+                <span className="text-text-primary text-right truncate text-[10px]" title={`${stats.selectedCandidatePair.local ?? "?"} ↔ ${stats.selectedCandidatePair.remote ?? "?"}`}>
+                  {stats.selectedCandidatePair.local ?? "?"}↔{stats.selectedCandidatePair.remote ?? "?"}
+                </span>
+                <span className="text-text-muted">Local / Remote</span>
+                <span className="text-text-primary text-right text-[10px]">{candidateTypeLabel(stats.localCandidateType)} / {candidateTypeLabel(stats.remoteCandidateType)}</span>
+                <span className="text-text-muted">Relay</span>
+                <span className="text-text-primary text-right">{stats.isRelay === null ? "—" : stats.isRelay ? "Yes" : "No"}</span>
+                <span className="text-text-muted">RTT</span>
+                <span className="text-text-primary text-right">{fmtMs(stats.rttMs)}</span>
               </div>
-            </>
-          )}
+            </div>
+
+            {/* Video section */}
+            <div>
+              <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
+                Video
+              </p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                <span className="text-text-muted">Codec</span>
+                <span className="text-text-primary text-right truncate">{stats.videoCodec ?? "—"}</span>
+                <span className="text-text-muted">Resolution</span>
+                <span className="text-text-primary text-right">
+                  {stats.videoWidth && stats.videoHeight ? `${stats.videoWidth}×${stats.videoHeight}` : "—"}
+                </span>
+                <span className="text-text-muted">FPS</span>
+                <span className="text-text-primary text-right">{stats.videoFrameRate ?? "—"}</span>
+                <span className="text-text-muted">Bitrate</span>
+                <span className="text-text-primary text-right">{fmtBps(stats.videoBitrateBps)}</span>
+                <span className="text-text-muted">Packet loss</span>
+                <span className="text-text-primary text-right">{fmtPct(stats.videoPacketLossPercent)}</span>
+                <span className="text-text-muted">Jitter</span>
+                <span className="text-text-primary text-right">{fmtMs(stats.videoJitter)}</span>
+                <span className="text-text-muted">Dropped / Freeze</span>
+                <span className="text-text-primary text-right">{stats.videoFramesDropped ?? "—"} / {stats.videoFreezeCount ?? "—"}</span>
+              </div>
+            </div>
+          </div>
+
+          <Separator />
+
+          {/* Audio + Quality columns */}
+          <div className="grid grid-cols-2 gap-4">
+            {/* Audio section */}
+            <div>
+              <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
+                Audio
+              </p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                <span className="text-text-muted">Codec</span>
+                <span className="text-text-primary text-right truncate">{stats.audioCodec ?? "—"}</span>
+                <span className="text-text-muted">Bitrate</span>
+                <span className="text-text-primary text-right">{fmtBps(stats.audioBitrateBps)}</span>
+                <span className="text-text-muted">Packets</span>
+                <span className="text-text-primary text-right">{stats.audioPacketsReceived} recv / {stats.audioPacketsLost} lost</span>
+                <span className="text-text-muted">Jitter</span>
+                <span className="text-text-primary text-right">{fmtMs(stats.audioJitter)}</span>
+              </div>
+            </div>
+
+            {/* Quality section */}
+            <div>
+              <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
+                Quality
+              </p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                {stats.requestedBitrateKbps !== null ? (
+                  <><span className="text-text-muted">Requested</span><span className="text-text-primary text-right">{stats.requestedBitrateKbps} kbps</span></>
+                ) : (
+                  <><span className="text-text-muted">Requested</span><span className="text-text-primary text-right">—</span></>
+                )}
+                {stats.effectiveBitrateKbps !== null ? (
+                  <><span className="text-text-muted">Effective</span><span className="text-text-primary text-right">{stats.effectiveBitrateKbps} kbps</span></>
+                ) : (
+                  <><span className="text-text-muted">Effective</span><span className="text-text-primary text-right">—</span></>
+                )}
+                {stats.senderMaxBitrateBps !== null ? (
+                  <><span className="text-text-muted">Sender max</span><span className="text-text-primary text-right">{Math.round(stats.senderMaxBitrateBps / 1000)} kbps</span></>
+                ) : (
+                  <><span className="text-text-muted">Sender max</span><span className="text-text-primary text-right">—</span></>
+                )}
+              </div>
+            </div>
+          </div>
 
           <Separator />
 

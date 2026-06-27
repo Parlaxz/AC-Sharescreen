@@ -279,7 +279,6 @@ describe("Viewer overlay controls mounted (Issues 2+3)", () => {
       <ViewerSettingsPanel
         requestState={null}
         onRequestChange={vi.fn()}
-        displayMode="fit"
       >
         <button aria-label="Settings trigger">Settings</button>
       </ViewerSettingsPanel>

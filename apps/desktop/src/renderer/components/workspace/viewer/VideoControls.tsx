@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import {
   Play,
   Pause,
@@ -8,6 +8,13 @@ import {
   Minimize,
   MonitorUp,
   Radio,
+  Settings2,
+  Mic,
+  MicOff,
+  Headphones,
+  HeadphoneOff,
+  Lock,
+  Unlock,
 } from "lucide-react";
 import { motion } from "motion/react";
 import { Button } from "@/components/ui/button";
@@ -19,7 +26,8 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { DisplayMode, ViewerRequestState } from "./ViewerSettingsPanel.js";
+import { toast } from "sonner";
+import type { ViewerRequestState } from "./ViewerSettingsPanel.js";
 import { ViewerSettingsPanel } from "./ViewerSettingsPanel.js";
 import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { StreamSwitcher } from "./StreamSwitcher.js";
@@ -77,10 +85,6 @@ interface VideoControlsProps {
   effectiveBitrateKbps?: number | null;
   /** Configured sender max bitrate in bps (for diagnostics) */
   configuredBitrateBps?: number | null;
-  /** Display mode for video element (fit/fill/actual) */
-  displayMode?: DisplayMode;
-  /** Called when display mode changes */
-  onDisplayModeChange?: (mode: DisplayMode) => void;
   /** Currently selected stream ID */
   currentStreamId: string;
   /** Called when switching streams */
@@ -101,6 +105,20 @@ interface VideoControlsProps {
   session?: ViewerSession | null;
   /** Called when any popover panel opens or closes (keeps controls visible) */
   onPanelsOpenChange?: (open: boolean) => void;
+  /** Whether ScreenLink audio is locally deafened (for Discord deafen feature) */
+  isScreenLinkDeafened?: boolean;
+  /** Toggle local ScreenLink audio deafen */
+  onToggleScreenLinkDeafen?: () => void;
+  /** Current bandwidth in bits per second (for bandwidth display) */
+  currentBandwidthBps?: number;
+  /** Total bytes received in this session (for bandwidth display) */
+  totalBytesReceived?: number;
+  /** Discord mute shortcut binding */
+  discordMuteBinding?: ShortcutBinding;
+  /** Discord deafen shortcut binding */
+  discordDeafenBinding?: ShortcutBinding;
+  /** Whether Discord deafen should also mute ScreenLink playback */
+  syncScreenLinkDeafen?: boolean;
 }
 
 // ─── VideoControls ────────────────────────────────────────────────────────
@@ -132,8 +150,6 @@ export function VideoControls({
   lastQualityAccepted,
   effectiveBitrateKbps = null,
   configuredBitrateBps = null,
-  displayMode = "fit",
-  onDisplayModeChange,
   currentStreamId,
   onStreamSwitch,
   connectionState,
@@ -144,16 +160,108 @@ export function VideoControls({
   isLive,
   session = null,
   onPanelsOpenChange,
+  isScreenLinkDeafened = false,
+  onToggleScreenLinkDeafen,
+  currentBandwidthBps = 0,
+  totalBytesReceived = 0,
+  discordMuteBinding = { modifiers: ["alt"], key: "M" },
+  discordDeafenBinding = { modifiers: ["alt"], key: "D" },
+  syncScreenLinkDeafen = true,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),
     [onVolumeChange],
   );
 
+  // ── Bar lock state (right-click to lock, double-click to unlock) ──
+  const [barLocked, setBarLocked] = useState(false);
+
+  const handleBarContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      // Only lock on right-click of empty space (not on buttons/controls)
+      const target = e.target as HTMLElement;
+      if (target.closest("button, a, input, [role='slider'], [data-radix-portal]")) return;
+      e.preventDefault();
+      setBarLocked((prev) => !prev);
+    },
+    [],
+  );
+
+  const handleBarDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("button, a, input, [role='slider'], [data-radix-portal]")) return;
+      e.preventDefault();
+      setBarLocked(false);
+    },
+    [],
+  );
+
+  // ── Discord mute/deafen state ──
+  const [discordMuted, setDiscordMuted] = useState(false);
+  const [discordDeafened, setDiscordDeafened] = useState(false);
+
+  const formatBindingLabel = useCallback((binding: ShortcutBinding): string => {
+    const modifierLabel = binding.modifiers.map((modifier) => modifier[0].toUpperCase() + modifier.slice(1)).join("+");
+    return modifierLabel ? `${modifierLabel}+${binding.key}` : binding.key;
+  }, []);
+
+  const handleDiscordMute = useCallback(async () => {
+    const api = (window as unknown as { screenlink?: { sendShortcut: (binding: ShortcutBinding) => Promise<{ success: boolean; error?: string }> } }).screenlink;
+    if (!api?.sendShortcut) {
+      toast.error("Discord shortcut bridge is unavailable.");
+      return;
+    }
+
+    const result = await api.sendShortcut(discordMuteBinding);
+    if (!result.success) {
+      toast.error(result.error ?? `Failed to send ${formatBindingLabel(discordMuteBinding)}.`);
+      return;
+    }
+
+    setDiscordMuted((prev) => !prev);
+  }, [discordMuteBinding, formatBindingLabel]);
+
+  const handleDiscordDeafen = useCallback(async () => {
+    const api = (window as unknown as { screenlink?: { sendShortcut: (binding: ShortcutBinding) => Promise<{ success: boolean; error?: string }> } }).screenlink;
+    if (!api?.sendShortcut) {
+      toast.error("Discord shortcut bridge is unavailable.");
+      return;
+    }
+
+    const result = await api.sendShortcut(discordDeafenBinding);
+    if (!result.success) {
+      toast.error(result.error ?? `Failed to send ${formatBindingLabel(discordDeafenBinding)}.`);
+      return;
+    }
+
+    const newDeafened = !discordDeafened;
+    setDiscordDeafened(newDeafened);
+    if (syncScreenLinkDeafen && onToggleScreenLinkDeafen) {
+      onToggleScreenLinkDeafen();
+    }
+  }, [discordDeafened, onToggleScreenLinkDeafen, discordDeafenBinding, formatBindingLabel, syncScreenLinkDeafen]);
+
+  // ── Bandwidth formatting ──
+  const formatBandwidth = useCallback((Bps: number): string => {
+    if (Bps <= 0) return "0 KB/s";
+    const KBps = Bps / 1000;
+    if (KBps < 1000) return `${KBps.toFixed(0)} KB/s`;
+    return `${(KBps / 1000).toFixed(1)} MB/s`;
+  }, []);
+
+  const formatTotalBytes = useCallback((bytes: number): string => {
+    if (bytes <= 0) return "0 B";
+    if (bytes < 1024) return `${bytes.toFixed(0)} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }, []);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: visible ? 1 : 0, y: visible ? 0 : 20 }}
+      animate={{ opacity: barLocked || visible ? 1 : 0, y: barLocked || visible ? 0 : 20 }}
       exit={{ opacity: 0, y: 20 }}
       transition={{ duration: 0.2, ease: "easeInOut" }}
       className={cn(
@@ -162,9 +270,21 @@ export function VideoControls({
       )}
     >
       {/* Control bar */}
-      <div className="flex items-center justify-center gap-1 px-4 pb-3 pt-8">
+      <div
+        className={cn(
+          "flex items-center justify-center gap-1 px-4 pb-3 pt-8",
+          barLocked && "pb-4",
+        )}
+        onContextMenu={handleBarContextMenu}
+        onDoubleClick={handleBarDoubleClick}
+      >
         {/* Inner row */}
-        <div className="flex items-center gap-1 rounded-standard bg-black/60 backdrop-blur-sm px-2 py-1.5 border border-white/10 max-w-2xl w-full">
+        <div
+          className={cn(
+            "flex items-center gap-1 rounded-standard bg-black/60 backdrop-blur-sm px-2 py-1.5 border max-w-3xl w-full",
+            barLocked ? "border-accent/50 ring-1 ring-accent/30" : "border-white/10",
+          )}
+        >
           {/* ── Left group: Play/Pause or Live badge ─────────────── */}
           <div className="flex items-center gap-1">
             {isLive ? (
@@ -241,10 +361,76 @@ export function VideoControls({
             </div>
           </div>
 
+          {/* ── Discord controls ──────────────────────────────────── */}
+          <span className="w-px h-5 bg-white/10 mx-0.5" />
+          <div className="flex items-center gap-0.5">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-7 w-7 hover:bg-white/10",
+                    discordMuted ? "text-white" : "text-white/50",
+                  )}
+                  onClick={handleDiscordMute}
+                  aria-label="Toggle Discord mute"
+                >
+                  {discordMuted ? (
+                    <MicOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Mic className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Toggle Discord mute ({formatBindingLabel(discordMuteBinding)})
+              </TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-7 w-7 hover:bg-white/10",
+                    discordDeafened ? "text-white" : "text-white/50",
+                  )}
+                  onClick={handleDiscordDeafen}
+                  aria-label="Toggle Discord deafen"
+                >
+                  {discordDeafened ? (
+                    <HeadphoneOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Headphones className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Toggle Discord deafen ({formatBindingLabel(discordDeafenBinding)}){syncScreenLinkDeafen && isScreenLinkDeafened ? " (+ScreenLink)" : ""}
+              </TooltipContent>
+            </Tooltip>
+          </div>
+
           {/* ── Spacer ──────────────────────────────────────────── */}
           <div className="flex-1" />
 
-          {/* ── Right group: Stream switcher | Connection | Fullscreen ── */}
+          {/* ── Bandwidth display ────────────────────────────────── */}
+          {currentBandwidthBps > 0 && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="text-[10px] text-white/50 font-mono px-1.5 cursor-default select-none tabular-nums">
+                  {formatBandwidth(currentBandwidthBps)}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Total received: {formatTotalBytes(totalBytesReceived)}
+              </TooltipContent>
+            </Tooltip>
+          )}
+
+          {/* ── Right group: Stream switcher | Connection dot | Settings | Fullscreen ── */}
           <div className="flex items-center gap-1">
             {/* Stream switcher */}
             <StreamSwitcher
@@ -268,28 +454,48 @@ export function VideoControls({
               </Tooltip>
             </StreamSwitcher>
 
-            {/* Connection state */}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="flex items-center gap-1.5 px-1.5 cursor-default">
-                  <span
-                    className={cn(
-                      "h-2 w-2 rounded-full",
-                      STATE_DOT_CLASSES[connectionState],
-                    )}
-                  />
-                  <span className="text-[11px] text-white/60 hidden sm:inline">
-                    {STATE_LABELS[connectionState]}
-                  </span>
-                </span>
-              </TooltipTrigger>
-              <TooltipContent side="top">
-                Connection: {STATE_LABELS[connectionState]}
-              </TooltipContent>
-            </Tooltip>
+            {/* Connection state dot — click to open diagnostics */}
+            <DiagnosticsPanel
+              session={session}
+              onOpenChange={onPanelsOpenChange}
+              lastRequestedQuality={viewerRequest}
+              effectiveBitrateKbps={effectiveBitrateKbps}
+              configuredBitrateBps={configuredBitrateBps}
+            >
+              <button
+                className="flex items-center gap-1.5 px-1.5 cursor-pointer hover:opacity-80 transition-opacity"
+                aria-label={`Connection: ${STATE_LABELS[connectionState]} — click for diagnostics`}
+                title={`${STATE_LABELS[connectionState]} — click for diagnostics`}
+              >
+                <span
+                  className={cn(
+                    "h-2 w-2 rounded-full",
+                    STATE_DOT_CLASSES[connectionState],
+                  )}
+                />
+              </button>
+            </DiagnosticsPanel>
 
             {/* Separator */}
             <span className="w-px h-5 bg-white/10 mx-0.5" />
+
+            {/* Settings cog */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
+                  onClick={() => window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"))}
+                  aria-label="Viewer settings"
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Settings (S)
+              </TooltipContent>
+            </Tooltip>
 
             {/* Fullscreen */}
             <Tooltip>
@@ -312,10 +518,24 @@ export function VideoControls({
                 {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               </TooltipContent>
             </Tooltip>
+
+            {/* Bar lock indicator */}
+            {barLocked && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="flex items-center text-accent/70 ml-0.5">
+                    <Lock className="h-3 w-3" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  Controls locked — double-click empty space to unlock
+                </TooltipContent>
+              </Tooltip>
+            )}
           </div>
 
-          {/* Settings and Diagnostics popovers remain mounted (hidden)
-              so keyboard events (S, I) and header button dispatches work.
+          {/* Settings popover remains mounted (hidden)
+              so keyboard events (S) and header button dispatches work.
               PopoverContent portals to document.body so it's visible. */}
           <div className="absolute opacity-0 pointer-events-none overflow-hidden w-0 h-0" aria-hidden="true">
             <ViewerSettingsPanel
@@ -324,22 +544,10 @@ export function VideoControls({
               requestPending={qualityRequestPending}
               lastRequestAccepted={lastQualityAccepted}
               requestFeedback={qualityFeedback}
-              displayMode={displayMode}
-              onDisplayModeChange={onDisplayModeChange}
               onOpenChange={onPanelsOpenChange}
             >
               <span />
             </ViewerSettingsPanel>
-
-            <DiagnosticsPanel
-              session={session}
-              onOpenChange={onPanelsOpenChange}
-              lastRequestedQuality={viewerRequest}
-              effectiveBitrateKbps={effectiveBitrateKbps}
-              configuredBitrateBps={configuredBitrateBps}
-            >
-              <span />
-            </DiagnosticsPanel>
           </div>
         </div>
       </div>
@@ -348,4 +556,11 @@ export function VideoControls({
 }
 
 // ─── Re-export types ───────────────────────────────────────────────────────
-export type { ViewerRequestState, DisplayMode } from "./ViewerSettingsPanel.js";
+export type { ViewerRequestState } from "./ViewerSettingsPanel.js";
+
+// ─── Shortcut binding type ─────────────────────────────────────────────────
+
+export type ShortcutBinding = {
+  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
+  key: string;
+};

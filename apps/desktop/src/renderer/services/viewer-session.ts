@@ -525,10 +525,8 @@ export class ViewerSession {
 
     try {
       const stats = await pc.getStats();
-      let prevVideoTimestamp = 0;
-      let prevVideoBytes = 0;
-      let prevAudioTimestamp = 0;
-      let prevAudioBytes = 0;
+      let aggregatedVideoBytes = 0;
+      let aggregatedAudioBytes = 0;
 
       const localCandidates = new Map<string, any>();
       const remoteCandidates = new Map<string, any>();
@@ -572,20 +570,13 @@ export class ViewerSession {
         if (report.type === "inbound-rtp") {
           const kind = (report as any).kind;
           const bytes = (report as any).bytesReceived ?? 0;
-          const ts = (report as any).timestamp ?? 0;
           const packets = (report as any).packetsReceived ?? 0;
           const lost = (report as any).packetsLost ?? 0;
           const jitter = (report as any).jitter ?? 0;
           const codecId = (report as any).codecId ?? null;
 
           if (kind === "video") {
-            if (prevVideoTimestamp > 0) {
-              const elapsed = (ts - prevVideoTimestamp) / 1000;
-              snapshot.inboundVideo.bitrateBps = elapsed > 0
-                ? Math.round(((bytes - prevVideoBytes) * 8) / elapsed)
-                : 0;
-            }
-            snapshot.inboundVideo.bytesReceived = bytes;
+            aggregatedVideoBytes += bytes;
             snapshot.inboundVideo.packetsReceived = packets;
             snapshot.inboundVideo.packetsLost = lost;
             snapshot.inboundVideo.jitter = jitter;
@@ -596,25 +587,18 @@ export class ViewerSession {
             snapshot.inboundVideo.framesPerSecond = (report as any).framesPerSecond ?? null;
             snapshot.inboundVideo.framesDropped = (report as any).framesDropped ?? null;
             snapshot.inboundVideo.freezeCount = (report as any).freezeCount ?? null;
-            prevVideoTimestamp = ts;
-            prevVideoBytes = bytes;
           } else if (kind === "audio") {
-            if (prevAudioTimestamp > 0) {
-              const elapsed = (ts - prevAudioTimestamp) / 1000;
-              snapshot.inboundAudio.bitrateBps = elapsed > 0
-                ? Math.round(((bytes - prevAudioBytes) * 8) / elapsed)
-                : 0;
-            }
-            snapshot.inboundAudio.bytesReceived = bytes;
+            aggregatedAudioBytes += bytes;
             snapshot.inboundAudio.packetsReceived = packets;
             snapshot.inboundAudio.packetsLost = lost;
             snapshot.inboundAudio.jitter = jitter;
             snapshot.inboundAudio.codecId = codecId;
-            prevAudioTimestamp = ts;
-            prevAudioBytes = bytes;
           }
         }
       }
+
+      snapshot.inboundVideo.bytesReceived = aggregatedVideoBytes;
+      snapshot.inboundAudio.bytesReceived = aggregatedAudioBytes;
     } catch {
       // Stats collection is best-effort; return partial snapshot
     }

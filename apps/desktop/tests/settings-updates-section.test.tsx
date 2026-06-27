@@ -64,4 +64,11 @@ describe("User Settings — Updates section is real", () => {
     const source = fs.readFileSync(SECTION, "utf-8");
     expect(source).toContain("status.currentVersion");
   });
+
+  it("renders check-download-and-install button", () => {
+    const source = fs.readFileSync(SECTION, "utf-8");
+    expect(source).toContain("updates-full-update-button");
+    expect(source).toContain("checkDownloadAndInstall");
+    expect(source).toContain("Check, download, and install");
+  });
 });

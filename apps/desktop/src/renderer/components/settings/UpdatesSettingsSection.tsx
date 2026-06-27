@@ -47,6 +47,7 @@ export function UpdatesSettingsSection() {
     check,
     download,
     restartAndInstall,
+    checkDownloadAndInstall,
   } = useUpdateStatus();
 
   // Mounted guard to keep UI stable across React strict-mode double-render.
@@ -191,16 +192,29 @@ export function UpdatesSettingsSection() {
           {status.phase === "up-to-date" && (
             <p className="text-sm text-text-muted">ScreenLink is up to date.</p>
           )}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void check()}
-            disabled={actionInFlight === "check"}
-            data-testid="updates-check-button"
-          >
-            <RefreshCw className="h-3.5 w-3.5 mr-1" />
-            Check for updates
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void check()}
+              disabled={actionInFlight === "check"}
+              data-testid="updates-check-button"
+            >
+              <RefreshCw className="h-3.5 w-3.5 mr-1" />
+              Check for updates
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => void checkDownloadAndInstall()}
+              disabled={actionInFlight !== null}
+              data-testid="updates-full-update-button"
+            >
+              <Download className="h-3.5 w-3.5 mr-1" />
+              {actionInFlight === "fullUpdate"
+                ? "Checking…"
+                : "Check, download, and install"}
+            </Button>
+          </div>
         </div>
       )}
 

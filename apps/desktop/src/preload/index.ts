@@ -88,6 +88,7 @@ const api: ScreenLinkAPI = {
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),
   restartAndInstallUpdate: () => ipcRenderer.invoke("updates:install"),
+  checkDownloadAndInstall: () => ipcRenderer.invoke("updates:full-update"),
 
   // ── Quick Share ──────────────────────────────────────────────────
   getQuickShareConfig: () => ipcRenderer.invoke("get-quick-share-config"),
@@ -116,6 +117,9 @@ const api: ScreenLinkAPI = {
     ipcRenderer.on("open-diagnostics", handler);
     return () => { ipcRenderer.removeListener("open-diagnostics", handler); };
   },
+
+  // Discord shortcut simulation
+  sendShortcut: (binding) => ipcRenderer.invoke("send-shortcut", binding),
 
   onUpdateStatusChanged: (callback) => {
     const handler = (_event: Electron.IpcRendererEvent, status: any) => callback(status);

@@ -345,6 +345,39 @@ export class UpdateManager {
   }
 
   /**
+   * Check for updates, download if available, then install — all in one call.
+   *
+   * Chains `checkForUpdates` → `downloadUpdate` → `restartAndInstallUpdate`.
+   * If any step doesn't produce the expected phase the chain stops and the
+   * current status is returned. The renderer sees every intermediate state
+   * via the status broadcast.
+   */
+  async checkDownloadAndInstall(): Promise<UpdateStatus> {
+    if (this.isDestroyed) return this.getStatus();
+    if (!this.state.updaterSupported) return this.getStatus();
+
+    // Step 1 — check
+    const checkResult = await this.checkForUpdates();
+    if (checkResult.phase !== "update-available") return checkResult;
+
+    this.logger.log("info", "updater", "full_update_check_done", {
+      version: this.state.availableVersion,
+    });
+
+    // Step 2 — download
+    const downloadResult = await this.downloadUpdate();
+    if (downloadResult.phase !== "downloaded") return downloadResult;
+
+    this.logger.log("info", "updater", "full_update_download_done", {
+      version: this.state.downloadedVersion,
+    });
+
+    // Step 3 — restart & install
+    this.restartAndInstallUpdate();
+    return this.getStatus();
+  }
+
+  /**
    * Clean up timers and event listeners. Call on app shutdown.
    */
   destroy(): void {

@@ -237,6 +237,15 @@ const noopUnsub = () => () => {};
       isPortable: false,
       updaterSupported: false,
     }),
+  checkDownloadAndInstall: () =>
+    Promise.resolve({
+      phase: "unsupported",
+      currentVersion: "0.1.0",
+      userMessage: "Update checks are not available in audit mode",
+      isPackaged: false,
+      isPortable: false,
+      updaterSupported: false,
+    }),
   onUpdateStatusChanged: noopUnsub,
 };
 

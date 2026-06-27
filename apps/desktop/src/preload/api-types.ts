@@ -1,5 +1,10 @@
 import type { AudioMode, GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
+export type ShortcutBinding = {
+  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
+  key: string;
+};
+
 export interface ScreenLinkAPI {
   // Sources
   getSources: () => Promise<CaptureSourceDTO[]>;
@@ -110,11 +115,15 @@ export interface ScreenLinkAPI {
   onStopSharing: (callback: () => void) => () => void;
   onOpenDiagnostics: (callback: () => void) => () => void;
 
+  // Discord shortcut simulation
+  sendShortcut: (binding: ShortcutBinding) => Promise<{ success: boolean; error?: string }>;
+
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;
   checkForUpdates: () => Promise<UpdateStatusDTO>;
   downloadUpdate: () => Promise<UpdateStatusDTO>;
   restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
+  checkDownloadAndInstall: () => Promise<UpdateStatusDTO>;
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 
@@ -308,6 +317,9 @@ export interface PersistedSettings {
       degradationPreference: string;
     };
   } | null;
+  discordMuteShortcut: ShortcutBinding;
+  discordDeafenShortcut: ShortcutBinding;
+  discordDeafenScreenLink: boolean;
 }
 
 /** Protocol response envelope for helper IPC calls */

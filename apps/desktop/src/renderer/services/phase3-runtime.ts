@@ -435,6 +435,27 @@ export class Phase3Runtime {
   setHostQualityLimits(limits: HostQualityLimits): void {
     this._hostQualityLimits = limits;
   }
+
+  /**
+   * Manually request a full group sync for the given group.
+   * Triggers anti-entropy for group state (name, members, quality)
+   * and requests stream state from all connected peers.
+   * Useful when the UI appears stale and the user wants to refresh.
+   */
+  async requestGroupSync(groupId: string): Promise<void> {
+    if (this.destroyed) return;
+
+    // 1) Trigger group state anti-entropy (name/member/quality sync)
+    await this.syncService.requestSync(groupId);
+
+    // 2) Request stream state from all connected peers
+    const conn = this.connManager.getConnection(groupId);
+    if (conn && conn.state === "connected") {
+      for (const peerUuid of conn.connectedPeers) {
+        void conn.sendToPeer(peerUuid, { type: "stream.state.request" }).catch(() => {});
+      }
+    }
+  }
 }
 
 // ─── Singleton accessor (async acquire/release) ─────────────────────────────

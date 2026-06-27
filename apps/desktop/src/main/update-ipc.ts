@@ -14,6 +14,7 @@ const IPC_CHANNELS = {
   CHECK: "updates:check",
   DOWNLOAD: "updates:download",
   INSTALL: "updates:install",
+  FULL_UPDATE: "updates:full-update",
   STATUS_CHANGED: "updates:status-changed",
 } as const;
 
@@ -44,6 +45,11 @@ export function registerUpdateIpcHandlers(
   ipcMain.handle(IPC_CHANNELS.INSTALL, () => {
     updateManager.restartAndInstallUpdate();
     return updateManager.getStatus();
+  });
+
+  // ── Check, download, and install in one shot ────────────────────────
+  ipcMain.handle(IPC_CHANNELS.FULL_UPDATE, async () => {
+    return await updateManager.checkDownloadAndInstall();
   });
 
   // ── Broadcast status changes to the renderer ────────────────────────

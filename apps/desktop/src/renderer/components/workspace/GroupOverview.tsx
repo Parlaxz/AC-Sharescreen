@@ -46,6 +46,7 @@ import {
   type SessionQualityOverride,
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
+import { getRuntime } from "@/services/phase3-runtime";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 
 // ─── Duration formatting ─────────────────────────────────────────────────
@@ -382,6 +383,24 @@ export function GroupOverview({
     setShowShareAgainConfirm(false);
   }, []);
 
+  // ── Manual refresh ────────────────────────────────────────────
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = useCallback(async () => {
+    if (!groupId || refreshing) return;
+    setRefreshing(true);
+    try {
+      const runtime = getRuntime();
+      if (runtime) {
+        await runtime.requestGroupSync(groupId);
+      }
+    } catch {
+      // Silently ignore — refresh is best-effort
+    } finally {
+      setRefreshing(false);
+    }
+  }, [groupId, refreshing]);
+
   const handleInvite = useCallback(async () => {
     if (!groupId) return;
     await copyGroupInviteFromUi(groupId, "Invite link copied");
@@ -545,6 +564,25 @@ export function GroupOverview({
               </TooltipContent>
             </Tooltip>
           )}
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={refreshing}
+                aria-label="Refresh group state"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5${refreshing ? " animate-spin" : ""}`}
+                />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              Refresh group state
+            </TooltipContent>
+          </Tooltip>
 
           <Button
             variant="default"

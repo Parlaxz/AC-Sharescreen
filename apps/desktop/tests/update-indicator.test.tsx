@@ -31,6 +31,7 @@ interface MockUpdateApi {
   checkForUpdates: ReturnType<typeof vi.fn>;
   downloadUpdate: ReturnType<typeof vi.fn>;
   restartAndInstallUpdate: ReturnType<typeof vi.fn>;
+  checkDownloadAndInstall: ReturnType<typeof vi.fn>;
   onUpdateStatusChanged: ReturnType<typeof vi.fn>;
   subscribed: StatusHandler[];
 }
@@ -54,6 +55,7 @@ function installMockApi(initial: UpdateStatusDTO, overrides: Partial<MockUpdateA
     checkForUpdates: vi.fn().mockResolvedValue(initial),
     downloadUpdate: vi.fn().mockResolvedValue(initial),
     restartAndInstallUpdate: vi.fn().mockResolvedValue(initial),
+    checkDownloadAndInstall: vi.fn().mockResolvedValue(initial),
     onUpdateStatusChanged: vi.fn((cb: StatusHandler) => {
       subscribed.push(cb);
       return () => {

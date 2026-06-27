@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 2026-06-27
+
+### New
+- **Bottom bar redesigned:** Replaced the connected icon with a diagnostics panel, added real-time internet usage display (hover shows total), settings cog, and mute/deafen Discord buttons (deafen can optionally mute the share audio too), and a lock toggle to prevent the bar from auto-hiding.
+- **Stream quality controls reworked:** Renamed resolution presets (640x360 → 360p, 426x240 → 240p, 256x144 → 144p), added FPS and bitrate sliders to the quality menu, made presets appear as labeled options. Bitrate slider now caps at the user's custom max setting, and the bitrate field supports direct typing. The quality form no longer disappears on apply.
+- **Stream viewing page cleaned up:** Removed the top bar entirely — the fullscreen button now lives in the bottom bar. Video now always prioritizes full-height layout so the bottom bar remains visible.
+- **One-click update install:** Added a combined "Check, Download & Install" button beside the existing check-update button.
+- **Right-click fullscreen toggle:** Right-clicking during a share screen now toggles fullscreen on/off.
+- **Group refresh button:** Added a refresh button in group views that messages all members to check if someone is sharing their screen.
+- **Connected text removed:** The "Connected" label in the bottom bar has been removed for a cleaner look.
+
+### Fixed
+- **Apply button reliability:** The quality settings apply button now works consistently — settings are always applied when clicked.
+- **Layout prioritization:** Video always prioritizes full height so the bottom bar never gets pushed off-screen.
+
 ## 0.2.3 — 2026-06-26
 
 ### New

@@ -26,6 +26,7 @@ interface MockUpdateApi {
   checkForUpdates: ReturnType<typeof vi.fn>;
   downloadUpdate: ReturnType<typeof vi.fn>;
   restartAndInstallUpdate: ReturnType<typeof vi.fn>;
+  checkDownloadAndInstall: ReturnType<typeof vi.fn>;
   onUpdateStatusChanged: ReturnType<typeof vi.fn>;
   /** Capture all subscribed status-change handlers. */
   subscribed: StatusHandler[];
@@ -38,6 +39,7 @@ function installMockApi(overrides: Partial<MockUpdateApi> = {}): MockUpdateApi {
     checkForUpdates: vi.fn().mockResolvedValue(DEFAULT_STATUS),
     downloadUpdate: vi.fn().mockResolvedValue(DEFAULT_STATUS),
     restartAndInstallUpdate: vi.fn().mockResolvedValue(DEFAULT_STATUS),
+    checkDownloadAndInstall: vi.fn().mockResolvedValue(DEFAULT_STATUS),
     onUpdateStatusChanged: vi.fn((cb: StatusHandler) => {
       subscribed.push(cb);
       return () => {
@@ -154,6 +156,21 @@ describe("useUpdateStatus", () => {
       expect(result.current.error).toBe("IPC failed");
     });
     expect(result.current.loading).toBe(false);
+  });
+
+  it("exposes checkDownloadAndInstall action that calls the bridge", async () => {
+    const api = installMockApi();
+    const { result } = renderHook(() => useUpdateStatus());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      await result.current.checkDownloadAndInstall();
+    });
+
+    expect(api.checkDownloadAndInstall).toHaveBeenCalledTimes(1);
   });
 
   it("exposes typed actions: check, download, restartAndInstall", async () => {

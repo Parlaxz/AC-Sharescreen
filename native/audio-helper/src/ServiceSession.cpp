@@ -714,6 +714,9 @@ bool ServiceSession::DispatchCommand(const CommandContext& ctx,
     } else if (command == "getEndpointDiagnostics" || command == "getendpointdiagnostics") {
         HandleGetEndpointDiagnostics(ctx, payload, response);
         return true;
+    } else if (command == "sendShortcut" || command == "sendshortcut") {
+        HandleSendShortcut(ctx, payload, response);
+        return true;
     }
     return false;
 }
@@ -1352,6 +1355,117 @@ void ServiceSession::HandleShutdown(const CommandContext& ctx,
     resp.Set("state", "idle");
     resp.SetRaw("result", result);
     resp.Set("error", "null");
+    response = resp.Str();
+}
+
+// ========================================================================
+// HandleSendShortcut — simulate a keyboard shortcut via SendInput
+// ========================================================================
+
+void ServiceSession::HandleSendShortcut(const CommandContext& ctx,
+                                         const std::string& payload,
+                                         std::string& response) {
+    // Parse modifiers via substring search
+    bool hasAlt   = payload.find("\"alt\"")   != std::string::npos;
+    bool hasCtrl  = payload.find("\"ctrl\"")  != std::string::npos;
+    bool hasShift = payload.find("\"shift\"") != std::string::npos;
+    bool hasWin   = payload.find("\"win\"")   != std::string::npos;
+
+    // Parse key string
+    std::string key = SimpleJson::GetString(payload, "key");
+    if (key.empty()) {
+        response = MakeErrorResponse(ctx, "missing-key");
+        return;
+    }
+
+    // Map key string to virtual key code
+    WORD vk = 0;
+    if (key.size() == 1) {
+        char c = key[0];
+        if (c >= 'A' && c <= 'Z') vk = static_cast<WORD>(c);
+        else if (c >= 'a' && c <= 'z') vk = static_cast<WORD>(c - 'a' + 'A');
+        else if (c >= '0' && c <= '9') vk = static_cast<WORD>(c);
+        else if (c == ' ') vk = VK_SPACE;
+    } else if (key == "Enter") {
+        vk = VK_RETURN;
+    } else if (key == "Tab") {
+        vk = VK_TAB;
+    } else if (key == "Escape") {
+        vk = VK_ESCAPE;
+    } else if (key == "Space") {
+        vk = VK_SPACE;
+    } else if (key == "Backspace") {
+        vk = VK_BACK;
+    } else if (key == "Delete") {
+        vk = VK_DELETE;
+    } else if (key == "Insert") {
+        vk = VK_INSERT;
+    } else if (key == "Home") {
+        vk = VK_HOME;
+    } else if (key == "End") {
+        vk = VK_END;
+    } else if (key == "PageUp") {
+        vk = VK_PRIOR;
+    } else if (key == "PageDown") {
+        vk = VK_NEXT;
+    } else if (key == "ArrowUp") {
+        vk = VK_UP;
+    } else if (key == "ArrowDown") {
+        vk = VK_DOWN;
+    } else if (key == "ArrowLeft") {
+        vk = VK_LEFT;
+    } else if (key == "ArrowRight") {
+        vk = VK_RIGHT;
+    } else if (key == "CapsLock") {
+        vk = VK_CAPITAL;
+    } else if (key.size() >= 2 && key[0] == 'F') {
+        int fNum = std::atoi(key.c_str() + 1);
+        if (fNum >= 1 && fNum <= 24) {
+            vk = static_cast<WORD>(VK_F1 + (fNum - 1));
+        }
+    }
+
+    if (vk == 0) {
+        response = MakeErrorResponse(ctx, "unsupported-key");
+        return;
+    }
+
+    // Build INPUT array: modifier downs, key down, key up, modifier ups
+    // Reverse order on release for correct chord semantics
+    std::vector<INPUT> inputs;
+
+    // -- Press modifiers --
+    if (hasShift) { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_SHIFT;   inputs.push_back(i); }
+    if (hasCtrl)  { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_CONTROL; inputs.push_back(i); }
+    if (hasAlt)   { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_MENU;    inputs.push_back(i); }
+    if (hasWin)   { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_LWIN;    inputs.push_back(i); }
+
+    // -- Press and release main key --
+    { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = vk; inputs.push_back(i); }
+    { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = vk; i.ki.dwFlags = KEYEVENTF_KEYUP; inputs.push_back(i); }
+
+    // -- Release modifiers (reverse order) --
+    if (hasWin)   { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_LWIN;    i.ki.dwFlags = KEYEVENTF_KEYUP; inputs.push_back(i); }
+    if (hasAlt)   { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_MENU;    i.ki.dwFlags = KEYEVENTF_KEYUP; inputs.push_back(i); }
+    if (hasCtrl)  { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_CONTROL; i.ki.dwFlags = KEYEVENTF_KEYUP; inputs.push_back(i); }
+    if (hasShift) { INPUT i = {}; i.type = INPUT_KEYBOARD; i.ki.wVk = VK_SHIFT;   i.ki.dwFlags = KEYEVENTF_KEYUP; inputs.push_back(i); }
+
+    UINT sent = SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+
+    // Build result
+    std::string result = "{";
+    result += "\"sent\":" + std::to_string(sent) + ",";
+    result += "\"requested\":" + std::to_string(inputs.size());
+    result += "}";
+
+    SimpleJson resp;
+    resp.Set("protocolVersion", std::string(kServiceProtocolVersion));
+    resp.Set("requestId", ctx.requestId);
+    resp.Set("sessionId", config_.sessionId);
+    resp.Set("success", sent == inputs.size());
+    resp.Set("state", StateToStr(static_cast<int>(state_.load())));
+    resp.SetRaw("result", result);
+    resp.Set("error", sent == inputs.size() ? "null" : "sendinput-failed");
     response = resp.Str();
 }
 

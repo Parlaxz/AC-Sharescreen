@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { KeyRecorder } from "@/components/ui/key-recorder";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
@@ -32,7 +33,7 @@ import {
 import { useIdentityStore } from "@/stores/identity-store";
 import { getRuntime } from "@/services/phase3-runtime";
 import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSection";
-import type { PersistedSettings, QuickShareConfigDTO } from "../../../preload/api-types.js";
+import type { PersistedSettings, QuickShareConfigDTO, ShortcutBinding } from "../../../preload/api-types.js";
 
 interface SettingsForm {
   displayName: string;
@@ -48,6 +49,9 @@ interface SettingsForm {
   defaultCodec: "vp9" | "av1" | "h264" | "vp8";
   quickShareEnabled: boolean;
   quickShareAccelerator: string;
+  discordMuteShortcut: string;
+  discordDeafenShortcut: string;
+  discordDeafenScreenLink: boolean;
 }
 
 const DEFAULT_FORM: SettingsForm = {
@@ -64,6 +68,9 @@ const DEFAULT_FORM: SettingsForm = {
   defaultCodec: "vp9",
   quickShareEnabled: true,
   quickShareAccelerator: "Alt+Shift+S",
+  discordMuteShortcut: "Alt+M",
+  discordDeafenShortcut: "Alt+D",
+  discordDeafenScreenLink: true,
 };
 
 const DEFAULT_AUDIO_SETTINGS = {
@@ -82,6 +89,20 @@ const CODEC_OPTIONS: Array<{ value: SettingsForm["defaultCodec"]; label: string 
   { value: "h264", label: "H.264" },
   { value: "vp8", label: "VP8" },
 ];
+
+function formatShortcutBinding(binding: ShortcutBinding | undefined): string {
+  if (!binding) return "";
+  const prefix = binding.modifiers.map((m) => m[0].toUpperCase() + m.slice(1)).join("+");
+  return prefix ? `${prefix}+${binding.key}` : binding.key;
+}
+
+function parseShortcutString(str: string): ShortcutBinding {
+  const parts = str.trim().split("+");
+  if (parts.length === 0) return { modifiers: [], key: "" };
+  const key = parts[parts.length - 1]!;
+  const modifiers = parts.slice(0, -1).map((m) => m.trim().toLowerCase() as ShortcutBinding["modifiers"][number]);
+  return { modifiers: modifiers.filter((m) => ["alt", "ctrl", "shift", "win"].includes(m)), key };
+}
 
 function buildForm(
   settings: PersistedSettings,
@@ -110,6 +131,9 @@ function buildForm(
         : DEFAULT_FORM.defaultCodec),
     quickShareEnabled: quickShare.shortcutEnabled,
     quickShareAccelerator: quickShare.shortcutAccelerator,
+    discordMuteShortcut: formatShortcutBinding(settings.discordMuteShortcut) || DEFAULT_FORM.discordMuteShortcut,
+    discordDeafenShortcut: formatShortcutBinding(settings.discordDeafenShortcut) || DEFAULT_FORM.discordDeafenShortcut,
+    discordDeafenScreenLink: settings.discordDeafenScreenLink ?? DEFAULT_FORM.discordDeafenScreenLink,
   };
 }
 
@@ -127,7 +151,10 @@ function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
     a.viewerBitrateSliderMaxKbps === b.viewerBitrateSliderMaxKbps &&
     a.defaultCodec === b.defaultCodec &&
     a.quickShareEnabled === b.quickShareEnabled &&
-    a.quickShareAccelerator === b.quickShareAccelerator
+    a.quickShareAccelerator === b.quickShareAccelerator &&
+    a.discordMuteShortcut === b.discordMuteShortcut &&
+    a.discordDeafenShortcut === b.discordDeafenShortcut &&
+    a.discordDeafenScreenLink === b.discordDeafenScreenLink
   );
 }
 
@@ -230,6 +257,12 @@ export function SettingsPage() {
     if (!form.quickShareAccelerator.trim()) {
       return "Quick Share accelerator is required";
     }
+    if (!parseShortcutString(form.discordMuteShortcut).key.trim()) {
+      return "Discord mute shortcut is required";
+    }
+    if (!parseShortcutString(form.discordDeafenShortcut).key.trim()) {
+      return "Discord deafen shortcut is required";
+    }
     return null;
   }, [form]);
 
@@ -286,6 +319,9 @@ export function SettingsPage() {
           },
           audio: settingsAfterNameSave.globalQualityDefaults?.audio ?? DEFAULT_AUDIO_SETTINGS,
         },
+        discordMuteShortcut: parseShortcutString(form.discordMuteShortcut),
+        discordDeafenShortcut: parseShortcutString(form.discordDeafenShortcut),
+        discordDeafenScreenLink: form.discordDeafenScreenLink,
       };
 
       await saveSettings(mergedSettingsPartial);
@@ -545,13 +581,49 @@ export function SettingsPage() {
           />
           <div className="space-y-1.5">
             <Label htmlFor="quick-share-accelerator">Accelerator</Label>
-            <Input
-              id="quick-share-accelerator"
+            <KeyRecorder
               value={form.quickShareAccelerator}
-              onChange={(e) => updateField("quickShareAccelerator", e.target.value)}
+              onChange={(v) => updateField("quickShareAccelerator", v)}
               disabled={saving}
             />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Discord Controls</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <p className="text-xs text-text-muted">
+            Configure shortcuts to simulate Discord global keybinds via Win32 SendInput.
+            Discord must have the matching keybind configured as a global shortcut.
+          </p>
+          <div className="space-y-1.5">
+            <Label htmlFor="discord-mute-shortcut">Mute shortcut</Label>
+            <KeyRecorder
+              value={form.discordMuteShortcut}
+              onChange={(v) => updateField("discordMuteShortcut", v)}
+              disabled={saving}
+              placeholder="Alt+M"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="discord-deafen-shortcut">Deafen shortcut</Label>
+            <KeyRecorder
+              value={form.discordDeafenShortcut}
+              onChange={(v) => updateField("discordDeafenShortcut", v)}
+              disabled={saving}
+              placeholder="Alt+D"
+            />
+          </div>
+          <Separator />
+          <SwitchRow
+            id="discord-deafen-screenlink"
+            label="Also deafen ScreenLink share audio"
+            checked={form.discordDeafenScreenLink}
+            onCheckedChange={(value) => updateField("discordDeafenScreenLink", value)}
+          />
         </CardContent>
       </Card>
     </div>

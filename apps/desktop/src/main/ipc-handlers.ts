@@ -15,6 +15,11 @@ import type { SecureStore } from "./secure-store.js";
 import type { TrayManager } from "./tray-manager.js";
 import type { GroupStore } from "./group-store.js";
 import type { QualityPresetStore } from "./quality-preset-store.js";
+import {
+  sendShortcutViaPowerShellSendInput,
+  sendShortcutWithFallback,
+  type ShortcutBinding,
+} from "./shortcut-sender.js";
 
 // In-memory VDO session credentials (set by host when sharing starts)
 let currentVdoStreamId = "";
@@ -586,6 +591,21 @@ export function registerIpcHandlers(
 
   ipcMain.on("tray-select-preset", (_event, presetId: string) => {
     window.webContents.send("select-preset", presetId);
+  });
+
+  // ── Shortcut simulation (Discord mute/deafen) ──────────────────────────────
+
+  ipcMain.handle("send-shortcut", async (_event, binding: ShortcutBinding) => {
+    try {
+      return await sendShortcutWithFallback(binding, {
+        currentHelper: currentAudioHelper,
+        ensureHelper: ensureAudioHelper,
+        directSend: sendShortcutViaPowerShellSendInput,
+      });
+    } catch (err) {
+      console.error("[IPC] send-shortcut failed:", err);
+      return { success: false, error: String(err) };
+    }
   });
 
   // ── Fullscreen (native Electron) ──────────────────────────────────────────

@@ -33,7 +33,7 @@ function getApi(): ScreenLinkUpdateApi | null {
   return w.screenlink ?? null;
 }
 
-export type UpdateAction = "check" | "download" | "restartAndInstall";
+export type UpdateAction = "check" | "download" | "restartAndInstall" | "fullUpdate";
 
 export interface UseUpdateStatusResult {
   status: UpdateStatusDTO | null;
@@ -45,12 +45,14 @@ export interface UseUpdateStatusResult {
   check: () => Promise<void>;
   download: () => Promise<void>;
   restartAndInstall: () => Promise<void>;
+  checkDownloadAndInstall: () => Promise<void>;
 }
 
 const ACTIONS: Record<UpdateAction, keyof ScreenLinkUpdateApi> = {
   check: "checkForUpdates",
   download: "downloadUpdate",
   restartAndInstall: "restartAndInstallUpdate",
+  fullUpdate: "checkDownloadAndInstall",
 };
 
 export function useUpdateStatus(): UseUpdateStatusResult {
@@ -168,6 +170,10 @@ export function useUpdateStatus(): UseUpdateStatusResult {
     () => runAction("restartAndInstall"),
     [runAction],
   );
+  const checkDownloadAndInstall = useCallback(
+    () => runAction("fullUpdate"),
+    [runAction],
+  );
 
   return {
     status,
@@ -178,5 +184,6 @@ export function useUpdateStatus(): UseUpdateStatusResult {
     check,
     download,
     restartAndInstall,
+    checkDownloadAndInstall,
   };
 }

@@ -1260,6 +1260,31 @@ export class AudioHelperManager {
     }
   }
 
+  // ── Discord shortcut simulation ──────────────────────────────────────────
+
+  /**
+   * Send a keyboard shortcut via the native helper's Win32 SendInput
+   * command. The helper is auto-started if not already running.
+   */
+  async sendShortcut(modifiers: Array<"alt" | "ctrl" | "shift" | "win">, key: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      // Ensure helper is running so we can talk to it
+      if (this.state === 'disconnected' || !this.control) {
+        await this.start();
+      }
+      if (!this.control) {
+        return { success: false, error: 'helper-not-available' };
+      }
+      const resp = await this.control.sendRequest('sendShortcut', { modifiers, key });
+      if (!resp.success) {
+        return { success: false, error: resp.error ?? 'send-shortcut-failed' };
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  }
+
   private generateId(): string {
     return crypto.randomBytes(16).toString('hex');
   }

@@ -68,6 +68,7 @@ private:
     void HandleGetDiagnostics(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandlePing(const CommandContext& ctx, const std::string& payload, std::string& response);
     void HandleShutdown(const CommandContext& ctx, const std::string& payload, std::string& response);
+    void HandleSendShortcut(const CommandContext& ctx, const std::string& payload, std::string& response);
 
     // Source resolution (shared with CLI --resolve-source)
     void HandleResolveSource(const CommandContext& ctx, const std::string& payload, std::string& response);

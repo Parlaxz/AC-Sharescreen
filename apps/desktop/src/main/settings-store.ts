@@ -103,7 +103,17 @@ export interface PersistedSettings {
       degradationPreference: string;
     };
   } | null;
+  /** Discord shortcut bindings */
+  discordMuteShortcut: ShortcutBinding;
+  discordDeafenShortcut: ShortcutBinding;
+  /** Whether deafening Discord also deafens ScreenLink audio */
+  discordDeafenScreenLink: boolean;
 }
+
+export type ShortcutBinding = {
+  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
+  key: string;
+};
 
 const CURRENT_VERSION = 3;
 
@@ -178,6 +188,9 @@ function getDefaults(): PersistedSettings {
     lastQuickShareSourceKind: null,
     lastQuickSharePresetId: null,
     lastShareSettings: null,
+    discordMuteShortcut: { modifiers: ["alt"], key: "M" },
+    discordDeafenShortcut: { modifiers: ["alt"], key: "D" },
+    discordDeafenScreenLink: true,
   };
 }
 
@@ -209,6 +222,17 @@ function applyMigrations(raw: unknown): PersistedSettings {
   // v3→current: add lastShareSettings if missing
   if (s.lastShareSettings === undefined) {
     s.lastShareSettings = null;
+  }
+
+  // Add Discord shortcut settings if missing
+  if (s.discordMuteShortcut === undefined) {
+    s.discordMuteShortcut = { modifiers: ["alt"], key: "M" };
+  }
+  if (s.discordDeafenShortcut === undefined) {
+    s.discordDeafenShortcut = { modifiers: ["alt"], key: "D" };
+  }
+  if (s.discordDeafenScreenLink === undefined) {
+    s.discordDeafenScreenLink = true;
   }
 
   // Normalize audio mode for current version

@@ -204,6 +204,16 @@ export class GroupSyncService {
     return { inserted: false, updated: false };
   }
 
+  /**
+   * Immediately trigger an anti-entropy sync for the given group.
+   * Broadcasts the local state summary so remote peers can compare
+   * and request a full sync if needed. Useful as a manual refresh
+   * when the UI appears stale.
+   */
+  async requestSync(groupId: string): Promise<void> {
+    await this.runAntiEntropy(groupId);
+  }
+
   removeGroup(groupId: string): void {
     this.syncStates.delete(groupId);
     this.stopAntiEntropy(groupId);

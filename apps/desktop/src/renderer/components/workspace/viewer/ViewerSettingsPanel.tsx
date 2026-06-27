@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   Popover,
   PopoverTrigger,
@@ -6,9 +6,10 @@ import {
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
-import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { loadSettings } from "@/services/settings-actions";
+import { useStore } from "@/stores/main-store";
 
 // ─── Viewer quality request state ─────────────────────────────────────────
 
@@ -29,35 +30,27 @@ export const VIEWER_REQUEST_PRESETS: Array<{
   value: ViewerRequestState;
 }> = [
   {
-    label: "Low (640×360)",
+    label: "Low (360p)",
     value: { videoBitrateKbps: 300, maxWidth: 640, maxHeight: 360, maxFps: 15 },
   },
   {
-    label: "Medium (1280×720)",
+    label: "Medium (720p)",
     value: { videoBitrateKbps: 1500, maxWidth: 1280, maxHeight: 720, maxFps: 24 },
   },
   {
-    label: "High (1920×1080)",
+    label: "High (1080p)",
     value: { videoBitrateKbps: 3000, maxWidth: 1920, maxHeight: 1080, maxFps: 30 },
   },
 ];
 
 export const RESOLUTION_CHOICES: Array<{ label: string; w: number; h: number }> = [
-  { label: "640×360", w: 640, h: 360 },
-  { label: "854×480", w: 854, h: 480 },
-  { label: "1280×720", w: 1280, h: 720 },
-  { label: "1920×1080", w: 1920, h: 1080 },
+  { label: "1080p", w: 1920, h: 1080 },
+  { label: "720p", w: 1280, h: 720 },
+  { label: "480p", w: 854, h: 480 },
+  { label: "360p", w: 640, h: 360 },
+  { label: "240p", w: 426, h: 240 },
+  { label: "144p", w: 256, h: 144 },
 ];
-
-// ─── Display mode ──────────────────────────────────────────────────────────
-
-export type DisplayMode = "fit" | "fill" | "actual";
-
-const DISPLAY_MODE_LABELS: Record<DisplayMode, string> = {
-  fit: "Fit to window",
-  fill: "Fill window",
-  actual: "Actual size",
-};
 
 // ─── Props ─────────────────────────────────────────────────────────────────
 
@@ -72,10 +65,6 @@ interface ViewerSettingsPanelProps {
   lastRequestAccepted?: boolean | undefined;
   /** Feedback message (e.g. "Capped at 2000 kbps") */
   requestFeedback?: string | null;
-  /** Current display mode */
-  displayMode?: DisplayMode;
-  /** Change display mode */
-  onDisplayModeChange?: (mode: DisplayMode) => void;
   /** Called when the popover opens or closes */
   onOpenChange?: (open: boolean) => void;
   /** Max value for the bitrate slider kbps (default 5000) */
@@ -85,14 +74,17 @@ interface ViewerSettingsPanelProps {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function resolveResolutionLabel(w: number, h: number): string {
-  const match = RESOLUTION_CHOICES.find((r) => r.w === w && r.h === h);
-  return match ? match.label : `${w}×${h}`;
-}
-
 /** Clamp a value between min and max */
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+// ─── Preset type from store ───────────────────────────────────────────────
+
+interface StorePreset {
+  id: string;
+  name: string;
+  settings: Record<string, unknown>;
 }
 
 // ─── ViewerSettingsPanel ──────────────────────────────────────────────────
@@ -100,8 +92,7 @@ function clamp(v: number, min: number, max: number): number {
 /**
  * ViewerSettingsPanel — Quality request controls with explicit resolution,
  * FPS, and bitrate inputs. Sends `quality.viewer.request` protocol messages
- * via the parent callback. No fake codec/content controls — the host decides
- * those. Persists preferences locally for reuse on later streams.
+ * via the parent callback.
  */
 export function ViewerSettingsPanel({
   requestState,
@@ -109,14 +100,23 @@ export function ViewerSettingsPanel({
   requestPending = false,
   lastRequestAccepted,
   requestFeedback = null,
-  displayMode = "fit",
-  onDisplayModeChange,
   onOpenChange,
   maxSliderBitrateKbps = 5000,
   children,
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
   const [effectiveMaxBitrate, setEffectiveMaxBitrate] = useState(maxSliderBitrateKbps);
+
+  // Load quality presets from store
+  const rawPresets = useStore((s) => s.qualityPresets as StorePreset[]);
+
+  const qualityPresets = useMemo(() => {
+    if (!Array.isArray(rawPresets)) return [];
+    return rawPresets.filter((p) => {
+      const video = p.settings?.video as Record<string, unknown> | undefined;
+      return video && typeof video.videoBitrateKbps === "number";
+    });
+  }, [rawPresets]);
 
   // Load persisted viewerBitrateSliderMaxKbps setting on mount
   useEffect(() => {
@@ -136,12 +136,27 @@ export function ViewerSettingsPanel({
     requestState ?? VIEWER_REQUEST_PRESETS[1].value,
   );
 
-  // Sync local state when requestState changes externally (e.g., from feedback clear)
+  // FPS / bitrate text input state
+  const [fpsText, setFpsText] = useState(String(localQuality.maxFps));
+  const [bitrateText, setBitrateText] = useState(String(localQuality.videoBitrateKbps));
+
+  // Sync local state when requestState changes externally
   useEffect(() => {
     if (requestState) {
       setLocalQuality(requestState);
+      setFpsText(String(requestState.maxFps));
+      setBitrateText(String(requestState.videoBitrateKbps));
     }
   }, [requestState]);
+
+  // Sync text inputs when sliders change
+  useEffect(() => {
+    setFpsText(String(localQuality.maxFps));
+  }, [localQuality.maxFps]);
+
+  useEffect(() => {
+    setBitrateText(String(localQuality.videoBitrateKbps));
+  }, [localQuality.videoBitrateKbps]);
 
   // Listen for keyboard shortcut S to toggle settings panel, and Escape to close
   useEffect(() => {
@@ -167,110 +182,115 @@ export function ViewerSettingsPanel({
   const handleSend = useCallback(() => {
     if (requestPending) return;
     onRequestChange(localQuality);
-    setOpen(false);
+    // Do NOT close on apply — user requested form stays open
   }, [localQuality, onRequestChange, requestPending]);
 
   const handleClear = useCallback(() => {
     if (requestPending) return;
     onRequestChange(null); // null = clear = host defaults
-    setOpen(false);
+    // Do NOT close on clear either
   }, [onRequestChange, requestPending]);
+
+  const handleFpsTextChange = useCallback((text: string) => {
+    setFpsText(text);
+    const v = parseInt(text, 10);
+    if (Number.isFinite(v) && v >= 1 && v <= 60) {
+      setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 1, 60) }));
+    }
+  }, []);
+
+  const handleFpsTextBlur = useCallback(() => {
+    const v = parseInt(fpsText, 10);
+    if (!Number.isFinite(v) || v < 1) {
+      const clamped = 1;
+      setFpsText(String(clamped));
+      setLocalQuality((prev) => ({ ...prev, maxFps: clamped }));
+    } else if (v > 60) {
+      setFpsText("60");
+      setLocalQuality((prev) => ({ ...prev, maxFps: 60 }));
+    } else {
+      setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 1, 60) }));
+    }
+  }, [fpsText]);
+
+  const handleBitrateTextChange = useCallback((text: string) => {
+    setBitrateText(text);
+    const v = parseInt(text, 10);
+    if (Number.isFinite(v) && v >= 100 && v <= effectiveMaxBitrate) {
+      setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }));
+    }
+  }, [effectiveMaxBitrate]);
+
+  const handleBitrateTextBlur = useCallback(() => {
+    const v = parseInt(bitrateText, 10);
+    if (!Number.isFinite(v) || v < 100) {
+      setBitrateText("100");
+      setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: 100 }));
+    } else if (v > effectiveMaxBitrate) {
+      setBitrateText(String(effectiveMaxBitrate));
+      setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: effectiveMaxBitrate }));
+    } else {
+      setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }));
+    }
+  }, [bitrateText, effectiveMaxBitrate]);
+
+  const applyPreset = useCallback((preset: ViewerRequestState) => {
+    setLocalQuality(preset);
+    setFpsText(String(preset.maxFps));
+    setBitrateText(String(preset.videoBitrateKbps));
+  }, []);
 
   const isCustom = requestState === null;
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-80 p-3">
+      <PopoverContent side="top" align="center" className="w-[500px] p-4">
         <div className="space-y-3">
-          {/* ── Quality request section ──────────────────────────── */}
-          <div>
-            <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1.5">
-              Request quality
-            </p>
-            <p className="text-xs text-text-muted mb-2">
-              Values are sent to the host. Actual quality depends on host limits.
-            </p>
-
-            {/* Resolution quick-select */}
-            <div className="mb-3">
-              <p className="text-[11px] text-text-muted mb-1.5">Resolution</p>
+          {/* ── Store presets ─────────────────────────────── */}
+          {qualityPresets.length > 0 && (
+            <div>
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
               <div className="flex flex-wrap gap-1">
-                {RESOLUTION_CHOICES.map((r) => (
-                  <button
-                    key={r.label}
-                    className={cn(
-                      "px-2 py-1 rounded-standard text-[11px] transition-colors border",
-                      localQuality.maxWidth === r.w && localQuality.maxHeight === r.h
-                        ? "bg-accent/10 border-accent/30 text-text-primary"
-                        : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
-                    )}
-                    onClick={() => setLocalQuality((prev) => ({ ...prev, maxWidth: r.w, maxHeight: r.h }))}
-                  >
-                    {r.label}
-                  </button>
-                ))}
+                {qualityPresets.map((preset) => {
+                  const video = preset.settings.video as Record<string, unknown>;
+                  const pw = video.sendWidth as number;
+                  const ph = video.sendHeight as number;
+                  const pf = video.sendFps as number;
+                  const pb = video.videoBitrateKbps as number;
+                  const isMatch = localQuality.maxWidth === pw &&
+                    localQuality.maxHeight === ph &&
+                    localQuality.maxFps === pf &&
+                    localQuality.videoBitrateKbps === pb;
+                  return (
+                    <button
+                      key={preset.id}
+                      className={cn(
+                        "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
+                        isMatch
+                          ? "bg-accent/10 border-accent/30 text-text-primary"
+                          : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
+                      )}
+                      onClick={() => applyPreset({
+                        videoBitrateKbps: pb,
+                        maxWidth: pw,
+                        maxHeight: ph,
+                        maxFps: pf,
+                      })}
+                      disabled={requestPending}
+                    >
+                      {preset.name}
+                    </button>
+                  );
+                })}
               </div>
             </div>
+          )}
 
-            {/* FPS slider */}
-            <div className="mb-3">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[11px] text-text-muted">FPS</span>
-                <span className="text-[11px] text-text-primary font-medium">{localQuality.maxFps} fps</span>
-              </div>
-              <Slider
-                value={[localQuality.maxFps]}
-                onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 5, 60) }))}
-                min={5}
-                max={60}
-                step={1}
-                aria-label="Requested FPS"
-                className="[&>div]:h-1"
-              />
-            </div>
-
-            {/* Bitrate slider */}
-            <div className="mb-3">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[11px] text-text-muted">Bitrate</span>
-                <span className="text-[11px] text-text-primary font-medium">{localQuality.videoBitrateKbps} kbps</span>
-              </div>
-              <Slider
-                value={[localQuality.videoBitrateKbps]}
-                onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
-                min={100}
-                max={effectiveMaxBitrate}
-                step={50}
-                aria-label="Requested bitrate"
-                className="[&>div]:h-1"
-              />
-            </div>
-
-            {/* Action buttons */}
-            <div className="flex items-center gap-2">
-              <Button
-                variant="default"
-                size="sm"
-                className="flex-1 text-xs"
-                onClick={handleSend}
-                disabled={requestPending}
-              >
-                {requestPending ? "Sending..." : "Apply"}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs"
-                onClick={handleClear}
-                disabled={requestPending}
-              >
-                {isCustom ? "Defaults" : "Clear"}
-              </Button>
-            </div>
-
-            {/* Quick preset chips (convenience) */}
-            <div className="flex flex-wrap gap-1 mt-2">
+          {/* ── Inline presets ────────────────────────────── */}
+          <div>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
+            <div className="flex flex-wrap gap-1">
               {VIEWER_REQUEST_PRESETS.map((preset) => {
                 const isMatch = requestState !== null &&
                   requestState.videoBitrateKbps === preset.value.videoBitrateKbps &&
@@ -280,16 +300,12 @@ export function ViewerSettingsPanel({
                   <button
                     key={preset.label}
                     className={cn(
-                      "px-2 py-1 rounded-standard text-[10px] transition-colors border",
+                      "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
                       isMatch
                         ? "bg-accent/10 border-accent/30 text-text-primary"
                         : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
                     )}
-                    onClick={() => {
-                      setLocalQuality(preset.value);
-                      onRequestChange(preset.value);
-                      setOpen(false);
-                    }}
+                    onClick={() => applyPreset(preset.value)}
                     disabled={requestPending}
                   >
                     {preset.label}
@@ -297,44 +313,124 @@ export function ViewerSettingsPanel({
                 );
               })}
             </div>
-
-            {/* Request feedback */}
-            {requestFeedback && (
-              <p className={cn(
-                "text-xs mt-2",
-                lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
-              )}>
-                {requestFeedback}
-              </p>
-            )}
           </div>
 
-          {/* ── Display mode section ─────────────────────────── */}
-          {onDisplayModeChange && (
-            <>
-              <div className="border-t border-border-subtle pt-2">
-                <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-1.5">
-                  Display
-                </p>
-                <div className="space-y-1">
-                  {(Object.keys(DISPLAY_MODE_LABELS) as DisplayMode[]).map((mode) => (
-                    <button
-                      key={mode}
-                      className={cn(
-                        "w-full text-left px-3 py-1.5 rounded-standard text-xs transition-colors",
-                        displayMode === mode
-                          ? "bg-accent/10 text-text-primary"
-                          : "text-text-muted hover:text-text-secondary hover:bg-surface-2",
-                      )}
-                      onClick={() => onDisplayModeChange(mode)}
-                    >
-                      {DISPLAY_MODE_LABELS[mode]}
-                    </button>
-                  ))}
-                </div>
+          {/* ── Resolution ───────────────────────────────── */}
+          <div>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
+            <div className="flex flex-wrap gap-1">
+              {RESOLUTION_CHOICES.map((r) => (
+                <button
+                  key={r.label}
+                  className={cn(
+                    "px-2.5 py-1 rounded-standard text-[11px] transition-colors border",
+                    localQuality.maxWidth === r.w && localQuality.maxHeight === r.h
+                      ? "bg-accent/10 border-accent/30 text-text-primary"
+                      : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
+                  )}
+                  onClick={() => setLocalQuality((prev) => ({ ...prev, maxWidth: r.w, maxHeight: r.h }))}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* ── FPS and Bitrate inline ───────────────────── */}
+          <div className="grid grid-cols-2 gap-4">
+            {/* FPS */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
               </div>
-            </>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Slider
+                    value={[localQuality.maxFps]}
+                    onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 5, 60) }))}
+                    min={5}
+                    max={60}
+                    step={1}
+                    aria-label="Requested FPS"
+                    className="[&>div]:h-1"
+                  />
+                </div>
+                <Input
+                  type="number"
+                  value={fpsText}
+                  onChange={(e) => handleFpsTextChange(e.target.value)}
+                  onBlur={handleFpsTextBlur}
+                  min={1}
+                  max={60}
+                  className="w-16 h-7 text-xs text-center font-mono"
+                  disabled={requestPending}
+                />
+              </div>
+            </div>
+
+            {/* Bitrate */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">Bitrate</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Slider
+                    value={[localQuality.videoBitrateKbps]}
+                    onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
+                    min={100}
+                    max={effectiveMaxBitrate}
+                    step={50}
+                    aria-label="Requested bitrate"
+                    className="[&>div]:h-1"
+                  />
+                </div>
+                <Input
+                  type="number"
+                  value={bitrateText}
+                  onChange={(e) => handleBitrateTextChange(e.target.value)}
+                  onBlur={handleBitrateTextBlur}
+                  min={100}
+                  max={effectiveMaxBitrate}
+                  className="w-20 h-7 text-xs text-center font-mono"
+                  disabled={requestPending}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* ── Action buttons ───────────────────────────── */}
+          <div className="flex items-center gap-2 pt-1">
+            <Button
+              variant="default"
+              size="sm"
+              className="flex-1 text-xs"
+              onClick={handleSend}
+              disabled={requestPending}
+            >
+              {requestPending ? "Sending..." : "Apply"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={handleClear}
+              disabled={requestPending}
+            >
+              {isCustom ? "Defaults" : "Clear"}
+            </Button>
+          </div>
+
+          {/* ── Request feedback ─────────────────────────── */}
+          {requestFeedback && (
+            <p className={cn(
+              "text-xs",
+              lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
+            )}>
+              {requestFeedback}
+            </p>
           )}
+
         </div>
       </PopoverContent>
     </Popover>
