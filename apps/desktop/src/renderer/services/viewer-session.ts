@@ -192,6 +192,8 @@ export class ViewerSession {
 
   /** 2-second interval for sending viewer.status reports to the host */
   private _statusInterval: ReturnType<typeof setInterval> | null = null;
+  /** Prevents concurrent getDiagnostics() calls when a prior tick is still in flight */
+  private _statusReportInFlight = false;
 
   /** Track IDs already in the received stream (deduplication). */
   private _trackIdsInStream = new Set<string>();
@@ -1278,7 +1280,7 @@ export class ViewerSession {
    * When stateOverride is provided, skips diagnostics polling (used for pause/resume).
    * Fire-and-forget — the host uses this for the viewer diagnostics list.
    */
-  private async buildAndSendViewerStatus(stateOverride?: string): Promise<void> {
+  private async buildAndSendViewerStatus(stateOverride?: "paused" | "reconnecting"): Promise<void> {
     const runtime = getRuntime();
     if (!runtime || runtime.isDestroyed()) return;
     if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
@@ -1289,11 +1291,11 @@ export class ViewerSession {
     const peerUuid = conn.peerForDevice(this.hostDeviceId);
     if (!peerUuid) return;
 
-    const state = stateOverride ?? ((): "playing" | "paused" | "reconnecting" => {
-      if (this._pauseState === "paused" || this._pauseState === "pausing") return "paused";
-      if (this._pauseState === "resuming") return "reconnecting";
-      return "playing";
-    })();
+    const state = stateOverride ?? (
+      this._pauseState === "paused" || this._pauseState === "pausing" ? "paused" :
+      this._pauseState === "resuming" ? "reconnecting" :
+      "playing"
+    );
 
     let receivedBitrateKbps: number | null = null;
     let receivedWidth: number | null = null;
@@ -1324,7 +1326,7 @@ export class ViewerSession {
       receivedHeight,
       displayedFps,
       sampledAt: Date.now(),
-    } as Record<string, unknown>).catch(() => {});
+    }).catch(() => {});
   }
 
   private startStatusInterval(): void {
@@ -1334,7 +1336,11 @@ export class ViewerSession {
         this.clearStatusInterval();
         return;
       }
-      void this.buildAndSendViewerStatus();
+      if (this._statusReportInFlight) return;
+      this._statusReportInFlight = true;
+      void this.buildAndSendViewerStatus().finally(() => {
+        this._statusReportInFlight = false;
+      });
     }, 2000);
     // Send an immediate first report
     void this.buildAndSendViewerStatus();
