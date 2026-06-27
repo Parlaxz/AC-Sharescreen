@@ -532,7 +532,75 @@ export function ShareSetup() {
           </DialogDescription>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[calc(85vh-120px)] px-6 pb-6">
+        {/* ─── Sticky confirmation bar ──────────────────────── */}
+        <div className="border-b border-border-subtle px-6 py-3 bg-surface-1">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              {selectedSourceId && (
+                <p className="text-xs text-text-secondary">
+                  Sharing{" "}
+                  <span className="font-medium text-text-primary">
+                    {sources.find((s) => s.id === selectedSourceId)
+                      ?.name ?? "selected source"}
+                  </span>
+                  {audioMode !== "none" &&
+                    ` with ${
+                      audioModeOptions.find((m) => m.value === audioMode)
+                        ?.label ?? "audio"
+                    }`}
+                </p>
+              )}
+            </div>
+
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span tabIndex={0}>
+                  <Button
+                    variant="default"
+                    disabled={!canStart || startingShare}
+                    onClick={handleStartSharing}
+                    className={cn(
+                      "min-w-[140px] transition-opacity",
+                      !canStart && "opacity-50",
+                    )}
+                  >
+                    {startingShare ? (
+                      <>
+                        <motion.div
+                          animate={{ rotate: 360 }}
+                          transition={{
+                            repeat: Infinity,
+                            duration: 1,
+                            ease: "linear",
+                          }}
+                        >
+                          <RefreshCw className="h-4 w-4" />
+                        </motion.div>
+                        Starting...
+                      </>
+                    ) : (
+                      <>
+                        <Monitor className="h-4 w-4" />
+                        Start sharing
+                      </>
+                    )}
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {!canStart && (
+                <TooltipContent side="top">
+                  {!sourceSelected
+                    ? "Select a source to share"
+                    : !usingPersonalPreset && !customValuesValid
+                      ? "Fix custom quality values"
+                      : ""}
+                </TooltipContent>
+              )}
+            </Tooltip>
+          </div>
+        </div>
+
+        <ScrollArea className="max-h-[calc(85vh-185px)] px-6 pb-6">
           <div className="space-y-6">
             {/* ─── Section 1: Source category (tabs) ─────────────────── */}
             <section>
@@ -838,73 +906,6 @@ export function ShareSetup() {
               </div>
             )}
 
-            {/* ─── Section 5: Confirmation ───────────────────────────── */}
-            <Separator className="my-2" />
-
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                {selectedSourceId && (
-                  <p className="text-xs text-text-secondary">
-                    Sharing{" "}
-                    <span className="font-medium text-text-primary">
-                      {sources.find((s) => s.id === selectedSourceId)
-                        ?.name ?? "selected source"}
-                    </span>
-                    {audioMode !== "none" &&
-                      ` with ${
-                        audioModeOptions.find((m) => m.value === audioMode)
-                          ?.label ?? "audio"
-                      }`}
-                  </p>
-                )}
-              </div>
-
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span tabIndex={0}>
-                    <Button
-                      variant="default"
-                      disabled={!canStart || startingShare}
-                      onClick={handleStartSharing}
-                      className={cn(
-                        "min-w-[140px] transition-opacity",
-                        !canStart && "opacity-50",
-                      )}
-                    >
-                      {startingShare ? (
-                        <>
-                          <motion.div
-                            animate={{ rotate: 360 }}
-                            transition={{
-                              repeat: Infinity,
-                              duration: 1,
-                              ease: "linear",
-                            }}
-                          >
-                            <RefreshCw className="h-4 w-4" />
-                          </motion.div>
-                          Starting...
-                        </>
-                      ) : (
-                        <>
-                          <Monitor className="h-4 w-4" />
-                          Start sharing
-                        </>
-                      )}
-                    </Button>
-                  </span>
-                </TooltipTrigger>
-                {!canStart && (
-                  <TooltipContent side="top">
-                    {!sourceSelected
-                      ? "Select a source to share"
-                      : !usingPersonalPreset && !customValuesValid
-                        ? "Fix custom quality values"
-                        : ""}
-                  </TooltipContent>
-                )}
-              </Tooltip>
-            </div>
           </div>
         </ScrollArea>
       </DialogContent>

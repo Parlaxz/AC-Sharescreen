@@ -65,6 +65,7 @@ export interface VDONinjaSDK {
   disconnect(): Promise<void>;
   publish(stream: MediaStream, options?: PublishOptions): Promise<void>;
   stopPublishing(): Promise<void>;
+  replaceTrack(oldTrack: MediaStreamTrack, newTrack: MediaStreamTrack): Promise<void>;
   view(streamId: string, options?: ViewOptions): Promise<void>;
   /**
    * Stop viewing a stream. SDK 1.3.18 accepts an optional `streamID`

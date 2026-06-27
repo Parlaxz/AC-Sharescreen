@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: MIT
+/**
+ * EnhancedVideoSurface — React component that owns the WebGL2 canvas and
+ * coordinates the GPU image enhancement pipeline.
+ *
+ * When the environment does not support WebGL2 or the pipeline encounters
+ * an unrecoverable error, the component renders nothing (null), allowing
+ * the parent to fall back to a native <video> element.
+ */
+
+import {
+  useRef,
+  useEffect,
+  useState,
+  useCallback,
+  type ReactElement,
+} from "react";
+import { cn } from "@/lib/utils";
+import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
+import type {
+  ProcessorState,
+  ProcessorStats,
+} from "@/services/viewer-image-processing/viewer-image-processor";
+import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-image-processor";
+import { getImageProcessingCapabilities } from "@/services/viewer-image-processing/viewer-image-capabilities";
+
+// ─── Props ───────────────────────────────────────────────────────────────────
+
+export interface EnhancedVideoSurfaceProps {
+  /** The source <video> element to capture frames from */
+  videoElement: HTMLVideoElement | null;
+  /** Master toggle — when false the pipeline is paused / hidden */
+  enabled: boolean;
+  /** Current enhancement settings (updated live via effect) */
+  settings: ViewerImageEnhancementSettings;
+  /** Optional CSS class names forwarded to the container */
+  className?: string;
+  /** Fired when the processor state changes */
+  onProcessorStateChange?: (state: ProcessorState) => void;
+  /** Fired on unrecoverable processing error */
+  onProcessingError?: (reason: string) => void;
+  /** Fired on the first successfully processed frame */
+  onFirstFrame?: () => void;
+  /** Fired periodically (~500 ms) with processing statistics */
+  onStatsUpdate?: (stats: ProcessorStats) => void;
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export function EnhancedVideoSurface({
+  videoElement,
+  enabled,
+  settings,
+  className,
+  onProcessorStateChange,
+  onProcessingError,
+  onFirstFrame,
+  onStatsUpdate,
+}: EnhancedVideoSurfaceProps): ReactElement | null {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const processorRef = useRef<ViewerImageProcessor | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const prevEnabledRef = useRef<boolean>(enabled);
+
+  const [processorState, setProcessorState] = useState<ProcessorState>("idle");
+  const [fallback, setFallback] = useState<boolean>(false);
+
+  // ─── Capabilities check on mount ──────────────────────────────────────
+
+  useEffect(() => {
+    try {
+      const caps = getImageProcessingCapabilities();
+      if (!caps.webgl2Available) {
+        setFallback(true);
+        onProcessingError?.("WebGL2 is not available in this browser");
+      }
+    } catch {
+      setFallback(true);
+      onProcessingError?.("Failed to detect image processing capabilities");
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── Processor initialisation ─────────────────────────────────────────
+
+  useEffect(() => {
+    if (!enabled || fallback || !videoElement || !canvasRef.current) return;
+
+    const processor = new ViewerImageProcessor(
+      canvasRef.current,
+      videoElement,
+    );
+
+    processor.setCallbacks({
+      onStateChange: (state: ProcessorState) => {
+        setProcessorState(state);
+        onProcessorStateChange?.(state);
+      },
+      onError: (reason: string) => {
+        setFallback(true);
+        onProcessingError?.(reason);
+      },
+      onFirstFrame: () => {
+        onFirstFrame?.();
+      },
+      onStatsUpdate: (stats: ProcessorStats) => {
+        onStatsUpdate?.(stats);
+      },
+    });
+
+    processor.start(settings);
+    processorRef.current = processor;
+
+    return () => {
+      processor.destroy();
+      processorRef.current = null;
+    };
+  }, [enabled, fallback, videoElement]); // intentionally limited deps
+
+  // ─── Live settings update ─────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!processorRef.current) return;
+    processorRef.current.updateSettings(settings);
+  }, [settings]);
+
+  // ─── Pause / resume on enabled toggle ─────────────────────────────────
+
+  useEffect(() => {
+    const proc = processorRef.current;
+    if (!proc) return;
+
+    if (enabled && !prevEnabledRef.current) {
+      // Transitioned from disabled to enabled
+      if (proc.getState() === "paused") {
+        proc.resume();
+      }
+    } else if (!enabled && prevEnabledRef.current) {
+      // Transitioned from enabled to disabled
+      if (proc.getState() === "running") {
+        proc.pause();
+      }
+    }
+
+    prevEnabledRef.current = enabled;
+  }, [enabled]);
+
+  // ─── ResizeObserver for container sizing ──────────────────────────────
+
+  const handleResize = useCallback(() => {
+    const proc = processorRef.current;
+    const container = containerRef.current;
+    if (!proc || !container) return;
+
+    const { width, height } = container.getBoundingClientRect();
+    if (width > 0 && height > 0) {
+      proc.resizeOutput(width, height);
+    }
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver(() => {
+      handleResize();
+    });
+
+    observer.observe(container);
+    resizeObserverRef.current = observer;
+
+    // Initial sizing
+    handleResize();
+
+    return () => {
+      observer.disconnect();
+      resizeObserverRef.current = null;
+    };
+  }, [handleResize]);
+
+  // ─── Render ───────────────────────────────────────────────────────────
+
+  // When in fallback mode, render nothing — parent should show native video
+  if (fallback) return null;
+
+  const canvasVisible =
+    enabled &&
+    (processorState === "running" || processorState === "paused");
+
+  return (
+    <div
+      ref={containerRef}
+      className={cn("absolute inset-0 overflow-hidden", className)}
+    >
+      <canvas
+        ref={canvasRef}
+        data-enhanced-canvas
+        className="h-full w-full object-contain"
+        style={{
+          display: canvasVisible ? "block" : "none",
+        }}
+      />
+    </div>
+  );
+}

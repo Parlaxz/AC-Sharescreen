@@ -30,6 +30,8 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import type { ViewerRequestState } from "./ViewerSettingsPanel.js";
 import { ViewerSettingsPanel } from "./ViewerSettingsPanel.js";
+import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
+import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "@/services/viewer-image-processing/viewer-image-defaults";
 import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { StreamSwitcher } from "./StreamSwitcher.js";
 import type { StreamAnnouncement } from "@/stores/main-store";
@@ -136,6 +138,22 @@ interface VideoControlsProps {
   discordDeafenBinding?: ShortcutBinding;
   /** Whether Discord deafen should also mute ScreenLink playback */
   syncScreenLinkDeafen?: boolean;
+  /** Current GPU image enhancement settings */
+  enhancementSettings?: ViewerImageEnhancementSettings;
+  /** Called live when any enhancement control changes */
+  onEnhancementChange?: (settings: ViewerImageEnhancementSettings) => void;
+  /** Called when the user clicks Reset to Defaults in the enhancements tab */
+  onEnhancementReset?: () => void;
+  /** Processing statistics for GPU enhancement display */
+  enhancementStats?: {
+    inputWidth: number;
+    inputHeight: number;
+    outputWidth: number;
+    outputHeight: number;
+    processingTimeMs: number | null;
+    enhancedScalingActive: boolean;
+    backend: string;
+  } | null;
 }
 
 // ─── VideoControls ────────────────────────────────────────────────────────
@@ -188,6 +206,10 @@ export function VideoControls({
   discordMuteBinding = { modifiers: ["alt"], key: "M" },
   discordDeafenBinding = { modifiers: ["alt"], key: "D" },
   syncScreenLinkDeafen = true,
+  enhancementSettings = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
+  onEnhancementChange,
+  onEnhancementReset,
+  enhancementStats = null,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),
@@ -578,6 +600,10 @@ export function VideoControls({
               lastRequestAccepted={lastQualityAccepted}
               requestFeedback={qualityFeedback}
               onOpenChange={onPanelsOpenChange}
+              enhancementSettings={enhancementSettings}
+              onEnhancementChange={onEnhancementChange ?? (() => {})}
+              onEnhancementReset={onEnhancementReset ?? (() => {})}
+              enhancementStats={enhancementStats}
             >
               <span />
             </ViewerSettingsPanel>

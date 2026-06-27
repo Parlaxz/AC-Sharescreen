@@ -126,6 +126,8 @@ export interface AppState {
   // Local streaming state
   localShareState: LocalShareState;
   localStreamSession: { sessionId: string; streamId: string; password: string } | null;
+  /** True while a source switch is in progress. Used by HostDashboard to disable the switch button. */
+  isSwitchingSource: boolean;
   qualityPresets: unknown[];
 
   // Actions
@@ -156,6 +158,7 @@ export interface AppState {
   setLastWindowAudioMode: (mode: "none" | "application") => void;
   setLocalShareState: (state: LocalShareState) => void;
   setLocalStreamSession: (s: { sessionId: string; streamId: string; password: string } | null) => void;
+  setSwitchingSource: (switching: boolean) => void;
   setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }> | ((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>)) => void;
   /** Set explicit watching target (replaces first-entry heuristics) */
   setWatchingTarget: (target: WatchingTarget | null) => void;
@@ -229,6 +232,7 @@ const initialState = {
   lastWindowAudioMode: "none" as "none" | "application",
   localShareState: "idle" as LocalShareState,
   localStreamSession: null as { sessionId: string; streamId: string; password: string } | null,
+  isSwitchingSource: false,
   qualityPresets: [] as unknown[],
 };
 
@@ -294,6 +298,7 @@ export const useStore = create<AppState>((set, get) => ({
   setLastWindowAudioMode: (mode) => set({ lastWindowAudioMode: mode }),
   setLocalShareState: (state) => set({ localShareState: state }),
   setLocalStreamSession: (s) => set({ localStreamSession: s }),
+  setSwitchingSource: (switching) => set({ isSwitchingSource: switching }),
   setWatchedStreams: (s) => set({ watchedStreamsBySessionId: typeof s === "function" ? s(get().watchedStreamsBySessionId) : s }),
   setWatchingTarget: (target) => set({ watchingTarget: target }),
 

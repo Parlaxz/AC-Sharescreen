@@ -46,6 +46,14 @@ import {
 } from "./viewer/viewer-quality-helpers.js";
 import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
+import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
+import type { ProcessorStats } from "@/components/workspace/viewer/EnhancedVideoSurface";
+import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
+import {
+  loadImageEnhancementSettings,
+  saveImageEnhancementSettings,
+  resetImageEnhancementSettings,
+} from "@/services/viewer-image-processing/viewer-image-settings";
 
 // ─── Reduced motion hook ──────────────────────────────────────────────────
 
@@ -230,6 +238,19 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [streamPausePoster, setStreamPausePoster] = useState<string | null>(null);
   const streamPauseTransitioning = streamPauseState === "pausing" || streamPauseState === "resuming";
 
+  // ── GPU image enhancement state ──────────────────────────────────────
+  const [enhancementSettings, setEnhancementSettings] = useState<ViewerImageEnhancementSettings>(() => {
+    return loadImageEnhancementSettings();
+  });
+  const [enhancementStats, setEnhancementStats] = useState<ProcessorStats | null>(null);
+  const [enhancementFallback, setEnhancementFallback] = useState(false);
+
+  // Refs for closure-safe access in callbacks
+  const enhancementSettingsRef = useRef(enhancementSettings);
+  enhancementSettingsRef.current = enhancementSettings;
+  const enhancementFallbackRef = useRef(enhancementFallback);
+  enhancementFallbackRef.current = enhancementFallback;
+
   // ── Discord shortcut bindings (loaded from settings) ──
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
   const [discordDeafenBinding, setDiscordDeafenBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "D" });
@@ -330,6 +351,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // Video element ref — shared with ViewerSession
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Audio boost via Web Audio API GainNode (allows volume > 1.0)
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
 
   // ViewerSession instance ref — stable across renders
   const sessionRef = useRef<ViewerSession | null>(null);
@@ -452,11 +477,137 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [streamPauseState, handlePauseStream, handleResumeStream]);
 
+  const handleEnhancementChange = useCallback((partial: Partial<ViewerImageEnhancementSettings>) => {
+    setEnhancementSettings((prev) => ({ ...prev, ...partial }));
+  }, []);
+
+  const handleEnhancementReset = useCallback(() => {
+    setEnhancementSettings(resetImageEnhancementSettings());
+  }, []);
+
+  // ── Audio boost pipeline (Web Audio API GainNode) ────────────────
+  // HTMLMediaElement.volume is spec-capped at [0, 1]. For boost >100% we use a
+  // GainNode. The pipeline is created ON DEMAND from user-gesture handlers so
+  // AudioContext starts in "running" state.
+  //
+  // IMPORTANT: NEVER initialise AudioContext from a useEffect — an AudioContext
+  // created outside a user gesture is suspended and produces no output. Once the
+  // gain-node ref is set, the native path is dead (video.volume = 0), so a
+  // suspended AudioContext = permanent silence.
+
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
+  const isMutedRef = useRef(isMuted);
+  isMutedRef.current = isMuted;
+
+  /**
+   * Initialise or resume the Web Audio boost pipeline.
+   * Must only be called from a user-gesture handler (pointer / keyboard event)
+   * so AudioContext starts in "running" state.
+   * Safe to call repeatedly — no-op once the gain node exists and context is running.
+   *
+   * @param targetVolume — optional initial gain to set (avoids stale-ref issue
+   *                       when called before the re-render that updates refs).
+   */
+  const ensureAudioBoost = useCallback(async (targetVolume?: number): Promise<boolean> => {
+    if (gainNodeRef.current) {
+      // Already initialised — resume if suspended
+      if ((audioCtxRef.current?.state as AudioContextState) !== "suspended") return true;
+      try { await audioCtxRef.current?.resume(); } catch {}
+      return (audioCtxRef.current?.state as AudioContextState) !== "suspended";
+    }
+
+    const video = videoRef.current;
+    if (!video) return false;
+
+    // Need a MediaStream to create a MediaStreamAudioSourceNode.
+    // The stream must already be attached (user is watching before they can
+    // adjust volume past 100%).
+    const stream = video.srcObject;
+    if (!stream || !(stream instanceof MediaStream)) return false;
+
+    try {
+      const ctx = new AudioContext();
+
+      // createMediaStreamSource reads audio directly from the WebRTC
+      // MediaStream, bypassing the video element's internal audio pipeline.
+      // This is the correct API for srcObject-based streams and works
+      // reliably in Chromium.
+      const source = ctx.createMediaStreamSource(stream);
+
+      const gain = ctx.createGain();
+      const vol = targetVolume ?? volumeRef.current;
+      gain.gain.value = isMutedRef.current ? 0 : vol;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+
+      audioCtxRef.current = ctx;
+      gainNodeRef.current = gain;
+
+      // Silence the native video element output.
+      // createMediaStreamSource reads the raw MediaStream, not the element's
+      // output, so the element's own audio path would produce double audio
+      // if left unmuted. Use both volume=0 and muted=true for certainty.
+      video.volume = 0;
+      video.muted = true;
+
+      // During a user gesture the context starts running synchronously.
+      if ((ctx.state as AudioContextState) !== "suspended") return true;
+
+      // Suspended — attempt resume (should succeed during user gesture).
+      try { await ctx.resume(); } catch {}
+
+      if ((ctx.state as AudioContextState) !== "suspended") return true;
+
+      // Still suspended — roll back to native path.
+      audioCtxRef.current = null;
+      gainNodeRef.current = null;
+      ctx.close().catch(() => {});
+      // Restore native mute state (will be re-applied by sync effect on next render)
+      video.muted = isMutedRef.current;
+      return false;
+    } catch {
+      // On failure, restore native path state
+      if (gainNodeRef.current) {
+        gainNodeRef.current = null;
+        audioCtxRef.current = null;
+      }
+      if (video) {
+        video.muted = isMutedRef.current;
+      }
+      return false;
+    }
+  }, []);
+
+  /**
+   * User-gesture-safe volume change handler.
+   * Wraps setVolume and initialises the boost pipeline when volume first exceeds 1.
+   * This runs inside a user gesture (slider drag / keyboard), so AudioContext
+   * starts in "running" state.
+   */
+  const handleVolumeChange = useCallback((newVolume: number) => {
+    setVolume(newVolume);
+    if (newVolume > 1 && !gainNodeRef.current) {
+      // Fire-and-forget: if init fails, native path clamps to 1 as fallback.
+      ensureAudioBoost(newVolume);
+    }
+  }, []);
+
+  /**
+   * User-gesture-safe mute toggle.
+   * Initialises boost pipeline when unmuting with volume > 1.
+   */
+  const handleToggleMute = useCallback(() => {
+    setIsMuted((m) => !m);
+    // If currently muted (will become unmuted) and volume > 1, init boost.
+    // Click/keyboard is a user gesture — AudioContext starts running.
+    if (isMutedRef.current && volumeRef.current > 1 && !gainNodeRef.current) {
+      ensureAudioBoost(volumeRef.current);
+    }
+  }, []);
+
   // Listen for viewer keyboard shortcut events
   useEffect(() => {
-    const handleToggleMute = () => {
-      setIsMuted((m) => !m);
-    };
     const handleTogglePause = () => {
       // Guard: only toggle when in a toggleable state
       if (streamPauseState === "paused") {
@@ -479,24 +630,42 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       window.removeEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleToggleFullscreen, isFullscreen, streamPauseState]);
+  }, [handleToggleFullscreen, handleToggleMute, isFullscreen, streamPauseState]);
 
-  // Sync volume via ref (volume is a DOM property, not a JSX attribute)
+  // Sync volume — routes to gain node when active, native path otherwise.
+  // NOTE: This effect NEVER creates AudioContext. Boost is created by
+  // ensureAudioBoost() called from user-gesture handlers only.
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.volume = volume;
-    }
-  }, [volume]);
+    const video = videoRef.current;
+    if (!video) return;
 
-  // Sync muted via ref — the JSX muted attribute can get out of sync during
-  // re-renders when the video element is reused across state transitions.
-  // This explicit DOM sync ensures the video element's muted property
-  // always matches the isMuted state.
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.muted = isMuted;
+    const actualVolume = isMuted ? 0 : volume;
+
+    if (gainNodeRef.current) {
+      // Boost mode: gain node controls volume, native path stays silenced.
+      // Defensively re-silence the native path — stream reconnection can
+      // reset the element's muted/volume state, causing double audio.
+      gainNodeRef.current.gain.value = actualVolume;
+      video.volume = 0;
+      video.muted = true;
+      return;
     }
-  }, [isMuted]);
+
+    // Normal mode: spec-safe [0, 1] range
+    video.volume = Math.min(1, actualVolume);
+    video.muted = isMuted;
+  }, [volume, isMuted]);
+
+  // Tear down boost on unmount
+  useEffect(() => {
+    return () => {
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+        gainNodeRef.current = null;
+      }
+    };
+  }, []);
 
   // Persist volume to localStorage
   useEffect(() => {
@@ -518,6 +687,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
     } catch { /* ignore */ }
   }, [viewerRequest]);
+
+  // Persist image enhancement settings to localStorage
+  useEffect(() => {
+    try {
+      saveImageEnhancementSettings(enhancementSettings);
+    } catch { /* ignore */ }
+  }, [enhancementSettings]);
 
   // ── Derive current stream info from explicit watching target ─────
   const currentStream = useMemo(() => {
@@ -767,6 +943,20 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setStreamPauseState(pauseState);
     };
     session.onPosterFrameChange = (poster: string | null) => {
+      // When GPU enhancements are active and running, capture poster from enhanced canvas
+      // instead of the (possibly hidden) native video element
+      if (enhancementSettingsRef.current?.enabled && !enhancementFallbackRef.current) {
+        const canvas = document.querySelector('[data-enhanced-canvas]') as HTMLCanvasElement | null;
+        if (canvas && canvas.width > 0 && canvas.height > 0) {
+          try {
+            const enhancedPoster = canvas.toDataURL("image/jpeg", 0.85);
+            setStreamPausePoster(enhancedPoster);
+            return;
+          } catch {
+            // Fall through to use video element poster
+          }
+        }
+      }
       setStreamPausePoster(poster);
     };
 
@@ -944,7 +1134,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             <video
               ref={videoRef}
               className="h-full object-contain"
-              muted={isMuted}
               playsInline
             />
 
@@ -974,8 +1163,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onToggleStreamPause={handleToggleStreamPause}
             volume={volume}
             isMuted={isMuted}
-            onVolumeChange={setVolume}
-            onToggleMute={() => setIsMuted((m) => !m)}
+            onVolumeChange={handleVolumeChange}
+            onToggleMute={handleToggleMute}
             viewerRequest={viewerRequest}
             onQualityRequestChange={handleQualityRequestChange}
             qualityRequestPending={qualityRequestPending}
@@ -1023,7 +1212,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             <video
               ref={videoRef}
               className="h-full object-contain"
-              muted={isMuted}
               playsInline
             />
 
@@ -1052,8 +1240,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onToggleStreamPause={handleToggleStreamPause}
             volume={volume}
             isMuted={isMuted}
-            onVolumeChange={setVolume}
-            onToggleMute={() => setIsMuted((m) => !m)}
+            onVolumeChange={handleVolumeChange}
+            onToggleMute={handleToggleMute}
             viewerRequest={viewerRequest}
             onQualityRequestChange={handleQualityRequestChange}
             qualityRequestPending={qualityRequestPending}
@@ -1194,17 +1382,41 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         <div className="relative flex-1 flex items-center justify-center bg-black">
           <video
             ref={videoRef}
+            data-video-native
             className={cn(
               "h-full object-contain",
               streamPauseState === "paused" && "opacity-30",
+              // Hide native video when GPU canvas is actively rendering
+              !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
             )}
-            muted={isMuted}
             playsInline
             autoPlay
             aria-label={`${sharerName}'s stream - ${sourceName}`}
             onContextMenu={(e) => {
               e.preventDefault();
               handleToggleFullscreen();
+            }}
+          />
+
+          {/* ── GPU-enhanced display surface ────────────────────── */}
+          <EnhancedVideoSurface
+            videoElement={videoRef.current}
+            enabled={!enhancementFallback && enhancementSettings.enabled}
+            settings={enhancementSettings}
+            onProcessorStateChange={(state) => {
+              if (state === "error") {
+                setEnhancementFallback(true);
+              }
+            }}
+            onProcessingError={(reason) => {
+              console.warn("[ViewerWorkspace] GPU enhancement error:", reason);
+              setEnhancementFallback(true);
+            }}
+            onFirstFrame={() => {
+              // First enhanced frame successfully rendered
+            }}
+            onStatsUpdate={(stats) => {
+              setEnhancementStats(stats);
             }}
           />
 
@@ -1277,8 +1489,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onToggleStreamPause={handleToggleStreamPause}
             volume={volume}
             isMuted={isMuted}
-            onVolumeChange={setVolume}
-            onToggleMute={() => setIsMuted((m) => !m)}
+            onVolumeChange={handleVolumeChange}
+            onToggleMute={handleToggleMute}
             viewerRequest={viewerRequest}
             onQualityRequestChange={handleQualityRequestChange}
             qualityRequestPending={qualityRequestPending}
@@ -1311,6 +1523,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
             maxVolumePercent={maxVolumePercent}
+            enhancementSettings={enhancementSettings}
+            onEnhancementChange={handleEnhancementChange}
+            onEnhancementReset={handleEnhancementReset}
+            enhancementStats={enhancementStats}
           />
         </div>
       </motion.div>
@@ -1383,6 +1599,10 @@ function VideoControlsOverlay({
   discordDeafenBinding,
   syncScreenLinkDeafen,
   maxVolumePercent,
+  enhancementSettings,
+  onEnhancementChange,
+  onEnhancementReset,
+  enhancementStats,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
@@ -1419,6 +1639,18 @@ function VideoControlsOverlay({
   discordDeafenBinding?: ShortcutBinding;
   syncScreenLinkDeafen?: boolean;
   maxVolumePercent?: number;
+  enhancementSettings?: ViewerImageEnhancementSettings;
+  onEnhancementChange?: (partial: Partial<ViewerImageEnhancementSettings>) => void;
+  onEnhancementReset?: () => void;
+  enhancementStats?: {
+    inputWidth: number;
+    inputHeight: number;
+    outputWidth: number;
+    outputHeight: number;
+    processingTimeMs: number | null;
+    enhancedScalingActive: boolean;
+    backend: string;
+  } | null;
 }) {
   return (
     <VideoControls
@@ -1456,6 +1688,10 @@ function VideoControlsOverlay({
       discordDeafenBinding={discordDeafenBinding}
       syncScreenLinkDeafen={syncScreenLinkDeafen}
       maxVolumePercent={maxVolumePercent}
+      enhancementSettings={enhancementSettings}
+      onEnhancementChange={onEnhancementChange}
+      onEnhancementReset={onEnhancementReset}
+      enhancementStats={enhancementStats}
     />
   );
 }

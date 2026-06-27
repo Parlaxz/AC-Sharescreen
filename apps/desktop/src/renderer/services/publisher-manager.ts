@@ -39,7 +39,7 @@ export interface PublisherEvents {
   onStateChange: (state: PublisherState) => void;
   onStats: (stats: MediaStatsSnapshot) => void;
   onError: (error: Error) => void;
-  onTrackEnded: () => void;
+  onTrackEnded: (track: MediaStreamTrack) => void;
 }
 
 export class PublisherManager {
@@ -56,6 +56,8 @@ export class PublisherManager {
   private static nextId = 0;
   private readonly instanceId: number;
   private appliedAudioMode: 'none' | 'system' | 'application' | 'monitor' | 'test-tone' = 'none';
+  /** Track the currently published video track for replaceTrack and track-ended detection. */
+  private _publishedVideoTrack: MediaStreamTrack | null = null;
   private mediaBindHandler: ((peerUuid: string, token: string, viewerSessionId?: string) => void) | null = null;
   /**
    * Handler for VDO SDK peerDisconnected events. Fires when the SDK
@@ -395,6 +397,18 @@ export class PublisherManager {
 
     this.publisher = publisher;
     this.config = config;
+    this._publishedVideoTrack = stream.getVideoTracks()[0] ?? null;
+
+    // Wire track-ended handler so StreamSessionManager can react when the
+    // published video track ends (e.g. browser ends the source track).
+    // The handler receives the actual track reference so the caller can
+    // check whether it is still the current published track.
+    if (this._publishedVideoTrack) {
+      this._publishedVideoTrack.onended = () => {
+        this.events.onTrackEnded(this._publishedVideoTrack!);
+      };
+    }
+
     this.setState("sharing");
 
     // Log sender presence immediately after publish
@@ -481,6 +495,66 @@ export class PublisherManager {
     }
   }
 
+  /**
+   * Detach the track-ended handler from the currently published video track.
+   * Called _before_ the old capture track is ended (e.g. before a new
+   * getDisplayMedia call) so that the onended handler does not fire and
+   * trigger an unwanted stream-stop while switching sources.
+   *
+   * The onended handler is re-wired by replaceVideoTrack on the new track.
+   */
+  detachTrackEnded(): void {
+    if (this._publishedVideoTrack) {
+      this._publishedVideoTrack.onended = null;
+    }
+  }
+
+  /**
+   * Replace the video track on the publisher with a new one.
+   * Delegates to HostPublisher.replaceVideoTrack which calls the SDK's
+   * public replaceTrack. Updates the internal combined stream reference
+   * and publishes the new track together with existing audio.
+   *
+   * Throws if the replacement fails. The caller is responsible for
+   * cleaning up the new track on failure.
+   *
+   * @returns The old video track that was replaced.
+   */
+  async replaceVideoTrack(newTrack: MediaStreamTrack): Promise<MediaStreamTrack> {
+    if (!this.publisher) throw new Error("replaceVideoTrack: no publisher active");
+    const oldTrack = this._publishedVideoTrack;
+    if (!oldTrack) throw new Error("replaceVideoTrack: no current video track");
+
+    // Clear the onended handler on the old track so it does not trigger
+    // a stop when the browser ends it (which happens when the old
+    // capture stream is closed).
+    oldTrack.onended = null;
+
+    await this.publisher.replaceVideoTrack(oldTrack, newTrack);
+
+    // Update combined stream reference so self-view and track tracking
+    // reflect the new source.
+    if (this.combinedStream) {
+      this.combinedStream.removeTrack(oldTrack);
+      this.combinedStream.addTrack(newTrack);
+    }
+
+    this._publishedVideoTrack = newTrack;
+
+    // Wire the new track's ended event.
+    newTrack.onended = () => {
+      this.events.onTrackEnded(newTrack);
+    };
+
+    console.log('[PublisherManager] replaceVideoTrack succeeded', {
+      oldTrackId: oldTrack.id.slice(0, 8) + '…',
+      newTrackId: newTrack.id.slice(0, 8) + '…',
+      newLabel: newTrack.label,
+    });
+
+    return oldTrack;
+  }
+
   async stopCapture(): Promise<void> {
     // Return existing promise if already stopping (awaitable idempotency)
     if (this.stopping_) {
@@ -513,6 +587,12 @@ export class PublisherManager {
         if (this.combinedStream) {
           this.combinedStream.getAudioTracks().forEach(t => t.stop());
           this.combinedStream = null;
+        }
+
+        // 4. Clear published video track reference
+        if (this._publishedVideoTrack) {
+          this._publishedVideoTrack.onended = null;
+          this._publishedVideoTrack = null;
         }
 
         this.audioTrack = null;

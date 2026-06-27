@@ -115,6 +115,16 @@ export class HostPublisher {
     this.applyCodecPreferencesOnExistingConnections();
   }
 
+  /**
+   * Replace the video track being published.
+   * Delegates directly to the SDK's public replaceTrack API.
+   * Throws if not connected.
+   */
+  async replaceVideoTrack(oldTrack: MediaStreamTrack, newTrack: MediaStreamTrack): Promise<void> {
+    if (!this.sdk) throw new CompatibilityError("Not connected");
+    await this.sdk.replaceTrack(oldTrack, newTrack);
+  }
+
   async stopPublishing(): Promise<void> {
     if (!this.sdk) return;
     await this.sdk.stopPublishing();

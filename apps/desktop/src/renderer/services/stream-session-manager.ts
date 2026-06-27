@@ -98,6 +98,7 @@ export class StreamSessionManager {
   private actualCaptureHeight: number = 0;
   private actualCaptureFps: number = 0;
   private _sourceId: string | null = null;
+  private _sourceName: string = "";
   private _sourceKind: "screen" | "window" | null = null;
   private _developerMode = false;
   private _audioModeOverride: AudioMode | null = null;
@@ -108,6 +109,8 @@ export class StreamSessionManager {
    * Reused by restart so the same captured values are applied again.
    */
   private _sessionQualityOverride: SessionQualityOverride | null = null;
+  /** Guard against concurrent source switches. Set during switchSource. */
+  private isSwitchingSource = false;
 
   constructor(
     private runtime: Phase3Runtime,
@@ -283,7 +286,7 @@ export class StreamSessionManager {
       hostDeviceId: this._hostDeviceId,
       hostDisplayName: this._hostDisplayName,
         sourceKind: this._sourceKind ?? this.currentTrack?.kind ?? "screen",
-      sourceName: this.currentTrack?.label ?? "",
+      sourceName: this._sourceName || this.currentTrack?.label || "",
       startedAt: this.startedAt,
       appliedSettingsRevision: 0,
       heartbeatSequence: this.heartbeatSeq,
@@ -324,6 +327,7 @@ export class StreamSessionManager {
     this.streamRevision++;
     this.heartbeatSeq = 0;
     this._sourceId = input.source.id;
+    this._sourceName = input.source.name ?? "";
     this._sourceKind = input.source.kind;
     this._explicitAudioMode = input.audioMode ?? null;
     this._isAudioDegraded = false;
@@ -372,8 +376,12 @@ export class StreamSessionManager {
           // Stats flow through store in future
         },
         onError: (err) => console.error("[stream-session] Publisher error:", err),
-        onTrackEnded: () => {
-          // If display capture track ends, stop the stream
+        onTrackEnded: (endedTrack: MediaStreamTrack) => {
+          // Only stop the stream if the ended track is still the current
+          // published track. During source switching, currentTrack is
+          // updated before the old track's ended event fires, so this
+          // check naturally prevents stopping during a switch.
+          if (endedTrack !== this.currentTrack) return;
           this.stopStream().catch(() => {});
         },
       });
@@ -528,6 +536,161 @@ export class StreamSessionManager {
   }
 
   /**
+   * Switch the video source of the active stream without disrupting
+   * viewer connections or audio.
+   *
+   * Flow:
+   *   1. Guard against concurrent switches
+   *   2. Pre-approve the new capture source via IPC
+   *   3. Call getDisplayMedia to acquire the new source
+   *   4. Validate the new video track
+   *   5. Replace the published video track via PublisherManager
+   *   6. On failure: stop the new track, leave existing stream unchanged
+   *   7. On success: update internal state, stop old capture, broadcast
+   *
+   * Viewers see a smooth video transition. Audio is untouched.
+   */
+  async switchSource(source: {
+    id: string;
+    name: string;
+    kind: "screen" | "window";
+  }): Promise<void> {
+    if (this._state !== "active") return;
+    if (this.destroyed) return;
+    if (this.isSwitchingSource) {
+      console.log("[stream-session] switchSource: already switching, ignoring");
+      return;
+    }
+    if (!this.publisherManager) return;
+
+    this.isSwitchingSource = true;
+
+    let newCaptureStream: MediaStream | null = null;
+    let newTrack: MediaStreamTrack | null = null;
+
+    try {
+      // 1. Pre-approve the new source so getDisplayMedia skips the system picker
+      const api = typeof window !== "undefined"
+        ? (window as unknown as { screenlink?: { setSource: (id: string | null) => Promise<void> } }).screenlink
+        : null;
+      if (api?.setSource) {
+        await api.setSource(source.id);
+      }
+
+      // Check that the session is still active after the async pre-approval
+      if (this._state !== "active" || this.destroyed) {
+        if (api?.setSource) {
+          await api.setSource(null).catch(() => {});
+        }
+        return;
+      }
+
+      // 2. Detach the old track's ended handler BEFORE calling getDisplayMedia.
+      //    The browser ends the old capture track during getDisplayMedia, which
+      //    would fire onended and trigger an unwanted stopStream(). By clearing
+      //    the handler here, we prevent that race. replaceVideoTrack below will
+      //    re-wire the handler on the new track.
+      this.publisherManager.detachTrackEnded();
+
+      // 3. Acquire new source — the display-media-handler intercepts this
+      //    and returns the pre-approved source without showing a picker.
+      newCaptureStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+
+      const videoTracks = newCaptureStream.getVideoTracks();
+      if (videoTracks.length === 0) {
+        throw new Error("No video track in switched source");
+      }
+      newTrack = videoTracks[0];
+      if (newTrack.readyState !== "live") {
+        throw new Error(`Switched track is not live: ${newTrack.readyState}`);
+      }
+
+      // 3. Replace the published video track
+      await this.publisherManager.replaceVideoTrack(newTrack);
+
+      // 4. On success: commit the new state
+      const oldCaptureStream = this.captureStream;
+      const oldTrack = this.currentTrack;
+
+      this.captureStream = newCaptureStream;
+      this.currentTrack = newTrack;
+      newCaptureStream = null; // prevent cleanup in the catch block
+      newTrack = null;
+
+      this._sourceId = source.id;
+      this._sourceName = source.name;
+      this._sourceKind = source.kind;
+
+      // Apply capture constraints from current quality settings to the new track
+      const syncState = this.runtime.getSyncService().getSyncState(this.groupId!);
+      const quality = syncState?.state?.defaultQuality?.value ?? null;
+      const ov = this._sessionQualityOverride;
+      await this.applyCaptureConstraints(this.currentTrack!, {
+        captureWidth: ov?.captureWidth ?? quality?.video?.captureWidth ?? DEFAULT_SEND_WIDTH,
+        captureHeight: ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT,
+        captureFps: ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS,
+      }).catch(() => {
+        // Non-fatal — readback will report whatever the source produces
+      });
+
+      // Update local registry with new source metadata
+      const registry = this.runtime.getActiveStreamRegistry();
+      registry.registerLocalStream(this.buildAnnouncement());
+
+      // Broadcast metadata update to remote peers
+      const connManager = this.runtime.getConnectionManager();
+      void connManager.broadcast(this.groupId!, {
+        type: "stream.sourceChanged",
+        logicalStreamId: this.logicalStreamId,
+        mediaSessionId: this.mediaSessionId,
+        sourceKind: source.kind,
+        sourceName: source.name,
+      }).catch(() => {
+        // Non-fatal — the video switch is complete regardless
+      });
+
+      // 5. Stop old capture tracks (the old track is no longer published)
+      if (oldCaptureStream) {
+        oldCaptureStream.getTracks().forEach((t) => t.stop());
+      }
+
+      console.log("[stream-session] switchSource succeeded:", {
+        newSource: source.name,
+        newSourceKind: source.kind,
+        trackId: this.currentTrack?.id?.slice(0, 8),
+      });
+    } catch (err) {
+      // On failure: leave the existing stream untouched
+      console.error("[stream-session] switchSource failed:", err instanceof Error ? err.message : String(err));
+
+      // Clean up the new capture stream/track if acquired
+      if (newTrack) {
+        newTrack.stop();
+      }
+      if (newCaptureStream) {
+        newCaptureStream.getTracks().forEach((t) => t.stop());
+      }
+
+      // Clear the approved source if we set it
+      try {
+        const api = typeof window !== "undefined"
+          ? (window as unknown as { screenlink?: { setSource: (id: string | null) => Promise<void> } }).screenlink
+          : null;
+        if (api?.setSource) {
+          await api.setSource(null).catch(() => {});
+        }
+      } catch { /* best effort */ }
+
+      throw err;
+    } finally {
+      this.isSwitchingSource = false;
+    }
+  }
+
+  /**
    * Stop the current stream session.
    *
    * Full stop flow (Stage 4):
@@ -667,7 +830,8 @@ export class StreamSessionManager {
         onStateChange: () => {},
         onStats: () => {},
         onError: (err) => console.error("[stream-session] Publisher error:", err),
-        onTrackEnded: () => {
+        onTrackEnded: (endedTrack: MediaStreamTrack) => {
+          if (endedTrack !== this.currentTrack) return;
           this.stopStream().catch(() => {});
         },
       });
@@ -1142,6 +1306,7 @@ export class StreamSessionManager {
     this.captureStream = null;
     this.vdoConfig = null;
     this._sourceId = null;
+    this._sourceName = "";
     this._explicitAudioMode = null;
     this._sessionQualityOverride = null;
     this.actualCaptureWidth = 0;

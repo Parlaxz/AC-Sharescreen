@@ -7,9 +7,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { loadSettings } from "@/services/settings-actions";
 import { useStore } from "@/stores/main-store";
+import {
+  clampValue,
+  type ViewerImageEnhancementSettings,
+} from "@/services/viewer-image-processing/viewer-image-settings";
+import { IMAGE_ENHANCEMENT_CONTROL_RANGE } from "@/services/viewer-image-processing/viewer-image-defaults";
 
 // ─── Viewer quality request state ─────────────────────────────────────────
 
@@ -69,6 +76,22 @@ interface ViewerSettingsPanelProps {
   onOpenChange?: (open: boolean) => void;
   /** Max value for the bitrate slider kbps (default 5000) */
   maxSliderBitrateKbps?: number;
+  /** Current GPU image enhancement settings */
+  enhancementSettings: ViewerImageEnhancementSettings;
+  /** Called live when any enhancement control changes */
+  onEnhancementChange: (settings: ViewerImageEnhancementSettings) => void;
+  /** Called when the user clicks Reset to Defaults in the enhancements tab */
+  onEnhancementReset: () => void;
+  /** Processing statistics (shown when enhancements enabled) */
+  enhancementStats?: {
+    inputWidth: number;
+    inputHeight: number;
+    outputWidth: number;
+    outputHeight: number;
+    processingTimeMs: number | null;
+    enhancedScalingActive: boolean;
+    backend: string;
+  } | null;
   children: React.ReactNode;
 }
 
@@ -77,6 +100,87 @@ interface ViewerSettingsPanelProps {
 /** Clamp a value between min and max */
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+// ─── Enhancement slider sub-component ─────────────────────────────────────
+
+/**
+ * A single slider + number-input pair for GPU image enhancement controls.
+ * Manages its own text input state internally and fires live onChange.
+ */
+function EnhancementSliderControl({
+  label,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  disabled: boolean;
+  onChange: (v: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+
+  // Sync text when value changes externally (e.g. reset)
+  useEffect(() => {
+    setText(String(value));
+  }, [value]);
+
+  const handleTextChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const raw = e.target.value;
+      setText(raw);
+      const v = parseFloat(raw);
+      if (Number.isFinite(v) && v >= 0 && v <= 1) {
+        onChange(clampValue(v, 0, 1));
+      }
+    },
+    [onChange],
+  );
+
+  const handleBlur = useCallback(() => {
+    const v = parseFloat(text);
+    const clamped = Number.isFinite(v) ? clampValue(v, 0, 1) : value;
+    setText(String(clamped));
+    if (clamped !== value) onChange(clamped);
+  }, [text, value, onChange]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-[10px] text-text-muted uppercase tracking-wide">
+          {label}
+        </span>
+        <span className="text-[11px] font-mono text-text-secondary">
+          {value.toFixed(2)}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="flex-1">
+          <Slider
+            value={[value]}
+            onValueChange={([v]) => onChange(clampValue(v, 0, 1))}
+            min={IMAGE_ENHANCEMENT_CONTROL_RANGE.min}
+            max={IMAGE_ENHANCEMENT_CONTROL_RANGE.max}
+            step={IMAGE_ENHANCEMENT_CONTROL_RANGE.step}
+            aria-label={label}
+            disabled={disabled}
+          />
+        </div>
+        <Input
+          type="number"
+          value={text}
+          onChange={handleTextChange}
+          onBlur={handleBlur}
+          min={IMAGE_ENHANCEMENT_CONTROL_RANGE.min}
+          max={IMAGE_ENHANCEMENT_CONTROL_RANGE.max}
+          step={IMAGE_ENHANCEMENT_CONTROL_RANGE.step}
+          className="w-16 h-7 text-xs text-center font-mono"
+          disabled={disabled}
+        />
+      </div>
+    </div>
+  );
 }
 
 // ─── Preset type from store ───────────────────────────────────────────────
@@ -102,6 +206,10 @@ export function ViewerSettingsPanel({
   requestFeedback = null,
   onOpenChange,
   maxSliderBitrateKbps = 5000,
+  enhancementSettings,
+  onEnhancementChange,
+  onEnhancementReset,
+  enhancementStats = null,
   children,
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
@@ -246,192 +354,320 @@ export function ViewerSettingsPanel({
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
       <PopoverContent side="top" align="center" className="w-[500px] p-4">
-        <div className="space-y-3">
-          {/* ── Store presets ─────────────────────────────── */}
-          {qualityPresets.length > 0 && (
-            <div>
-              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
-              <div className="flex flex-wrap gap-1">
-                {qualityPresets.map((preset) => {
-                  const video = preset.settings.video as Record<string, unknown>;
-                  const pw = video.sendWidth as number;
-                  const ph = video.sendHeight as number;
-                  const pf = video.sendFps as number;
-                  const pb = video.videoBitrateKbps as number;
-                  const isMatch = localQuality.maxWidth === pw &&
-                    localQuality.maxHeight === ph &&
-                    localQuality.maxFps === pf &&
-                    localQuality.videoBitrateKbps === pb;
-                  return (
+        <Tabs defaultValue="general" className="w-full">
+          <TabsList className="w-full mb-2">
+            <TabsTrigger value="general" className="flex-1 text-xs">General</TabsTrigger>
+            <TabsTrigger value="enhancements" className="flex-1 text-xs">Image Enhancements</TabsTrigger>
+          </TabsList>
+
+          {/* ── General tab (existing quality controls) ──── */}
+          <TabsContent value="general" className="mt-0">
+            <div className="space-y-3">
+              {/* ── Store presets ─────────────────────────────── */}
+              {qualityPresets.length > 0 && (
+                <div>
+                  <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
+                  <div className="flex flex-wrap gap-1">
+                    {qualityPresets.map((preset) => {
+                      const video = preset.settings.video as Record<string, unknown>;
+                      const pw = video.sendWidth as number;
+                      const ph = video.sendHeight as number;
+                      const pf = video.sendFps as number;
+                      const pb = video.videoBitrateKbps as number;
+                      const isMatch = localQuality.maxWidth === pw &&
+                        localQuality.maxHeight === ph &&
+                        localQuality.maxFps === pf &&
+                        localQuality.videoBitrateKbps === pb;
+                      return (
+                        <button
+                          key={preset.id}
+                          className={cn(
+                            "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
+                            isMatch
+                              ? "bg-accent/10 border-accent/30 text-text-primary"
+                              : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
+                          )}
+                          onClick={() => applyPreset({
+                            videoBitrateKbps: pb,
+                            maxWidth: pw,
+                            maxHeight: ph,
+                            maxFps: pf,
+                          })}
+                          disabled={requestPending}
+                        >
+                          {preset.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ── Inline presets ────────────────────────────── */}
+              <div>
+                <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
+                <div className="flex flex-wrap gap-1">
+                  {VIEWER_REQUEST_PRESETS.map((preset) => {
+                    const isMatch = requestState !== null &&
+                      requestState.videoBitrateKbps === preset.value.videoBitrateKbps &&
+                      requestState.maxWidth === preset.value.maxWidth &&
+                      requestState.maxFps === preset.value.maxFps;
+                    return (
+                      <button
+                        key={preset.label}
+                        className={cn(
+                          "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
+                          isMatch
+                            ? "bg-accent/10 border-accent/30 text-text-primary"
+                            : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
+                        )}
+                        onClick={() => applyPreset(preset.value)}
+                        disabled={requestPending}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* ── Resolution ───────────────────────────────── */}
+              <div>
+                <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
+                <div className="flex flex-wrap gap-1">
+                  {RESOLUTION_CHOICES.map((r) => (
                     <button
-                      key={preset.id}
+                      key={r.label}
                       className={cn(
-                        "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
-                        isMatch
+                        "px-2.5 py-1 rounded-standard text-[11px] transition-colors border",
+                        localQuality.maxWidth === r.w && localQuality.maxHeight === r.h
                           ? "bg-accent/10 border-accent/30 text-text-primary"
                           : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
                       )}
-                      onClick={() => applyPreset({
-                        videoBitrateKbps: pb,
-                        maxWidth: pw,
-                        maxHeight: ph,
-                        maxFps: pf,
-                      })}
-                      disabled={requestPending}
+                      onClick={() => setLocalQuality((prev) => ({ ...prev, maxWidth: r.w, maxHeight: r.h }))}
                     >
-                      {preset.name}
+                      {r.label}
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
 
-          {/* ── Inline presets ────────────────────────────── */}
-          <div>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
-            <div className="flex flex-wrap gap-1">
-              {VIEWER_REQUEST_PRESETS.map((preset) => {
-                const isMatch = requestState !== null &&
-                  requestState.videoBitrateKbps === preset.value.videoBitrateKbps &&
-                  requestState.maxWidth === preset.value.maxWidth &&
-                  requestState.maxFps === preset.value.maxFps;
-                return (
-                  <button
-                    key={preset.label}
-                    className={cn(
-                      "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
-                      isMatch
-                        ? "bg-accent/10 border-accent/30 text-text-primary"
-                        : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
-                    )}
-                    onClick={() => applyPreset(preset.value)}
-                    disabled={requestPending}
-                  >
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+              {/* ── FPS and Bitrate inline ───────────────────── */}
+              <div className="grid grid-cols-2 gap-4">
+                {/* FPS */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <Slider
+                        value={[localQuality.maxFps]}
+                        onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 5, 60) }))}
+                        min={5}
+                        max={60}
+                        step={1}
+                        aria-label="Requested FPS"
+                        className="[&>div]:h-1"
+                      />
+                    </div>
+                    <Input
+                      type="number"
+                      value={fpsText}
+                      onChange={(e) => handleFpsTextChange(e.target.value)}
+                      onBlur={handleFpsTextBlur}
+                      min={1}
+                      max={60}
+                      className="w-16 h-7 text-xs text-center font-mono"
+                      disabled={requestPending}
+                    />
+                  </div>
+                </div>
 
-          {/* ── Resolution ───────────────────────────────── */}
-          <div>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
-            <div className="flex flex-wrap gap-1">
-              {RESOLUTION_CHOICES.map((r) => (
-                <button
-                  key={r.label}
-                  className={cn(
-                    "px-2.5 py-1 rounded-standard text-[11px] transition-colors border",
-                    localQuality.maxWidth === r.w && localQuality.maxHeight === r.h
-                      ? "bg-accent/10 border-accent/30 text-text-primary"
-                      : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
-                  )}
-                  onClick={() => setLocalQuality((prev) => ({ ...prev, maxWidth: r.w, maxHeight: r.h }))}
+                {/* Bitrate */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">Bitrate</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <Slider
+                        value={[localQuality.videoBitrateKbps]}
+                        onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
+                        min={100}
+                        max={effectiveMaxBitrate}
+                        step={50}
+                        aria-label="Requested bitrate"
+                        className="[&>div]:h-1"
+                      />
+                    </div>
+                    <Input
+                      type="number"
+                      value={bitrateText}
+                      onChange={(e) => handleBitrateTextChange(e.target.value)}
+                      onBlur={handleBitrateTextBlur}
+                      min={100}
+                      max={effectiveMaxBitrate}
+                      className="w-20 h-7 text-xs text-center font-mono"
+                      disabled={requestPending}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* ── Action buttons ───────────────────────────── */}
+              <div className="flex items-center gap-2 pt-1">
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="flex-1 text-xs"
+                  onClick={handleSend}
+                  disabled={requestPending}
                 >
-                  {r.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* ── FPS and Bitrate inline ───────────────────── */}
-          <div className="grid grid-cols-2 gap-4">
-            {/* FPS */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <Slider
-                    value={[localQuality.maxFps]}
-                    onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 5, 60) }))}
-                    min={5}
-                    max={60}
-                    step={1}
-                    aria-label="Requested FPS"
-                    className="[&>div]:h-1"
-                  />
-                </div>
-                <Input
-                  type="number"
-                  value={fpsText}
-                  onChange={(e) => handleFpsTextChange(e.target.value)}
-                  onBlur={handleFpsTextBlur}
-                  min={1}
-                  max={60}
-                  className="w-16 h-7 text-xs text-center font-mono"
+                  {requestPending ? "Sending..." : "Apply"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
+                  onClick={handleClear}
                   disabled={requestPending}
+                >
+                  {isCustom ? "Defaults" : "Clear"}
+                </Button>
+              </div>
+
+              {/* ── Request feedback ─────────────────────────── */}
+              {requestFeedback && (
+                <p className={cn(
+                  "text-xs",
+                  lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
+                )}>
+                  {requestFeedback}
+                </p>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* ── Image Enhancements tab ────────────────────── */}
+          <TabsContent value="enhancements" className="mt-0 max-h-[60vh] overflow-y-auto">
+            <div className="space-y-4">
+              {/* Master toggle */}
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">GPU Image Enhancements</span>
+                <Switch
+                  checked={enhancementSettings.enabled}
+                  onCheckedChange={(checked) =>
+                    onEnhancementChange({ ...enhancementSettings, enabled: checked })
+                  }
+                  aria-label="Toggle GPU Image Enhancements"
                 />
               </div>
-            </div>
 
-            {/* Bitrate */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] text-text-muted uppercase tracking-wide">Bitrate</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1">
-                  <Slider
-                    value={[localQuality.videoBitrateKbps]}
-                    onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
-                    min={100}
-                    max={effectiveMaxBitrate}
-                    step={50}
-                    aria-label="Requested bitrate"
-                    className="[&>div]:h-1"
-                  />
-                </div>
-                <Input
-                  type="number"
-                  value={bitrateText}
-                  onChange={(e) => handleBitrateTextChange(e.target.value)}
-                  onBlur={handleBitrateTextBlur}
-                  min={100}
-                  max={effectiveMaxBitrate}
-                  className="w-20 h-7 text-xs text-center font-mono"
-                  disabled={requestPending}
+              {/* Enhanced GPU Scaling */}
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">Enhanced GPU Scaling</span>
+                <Switch
+                  checked={enhancementSettings.enhancedScaling}
+                  onCheckedChange={(checked) =>
+                    onEnhancementChange({ ...enhancementSettings, enhancedScaling: checked })
+                  }
+                  disabled={!enhancementSettings.enabled}
+                  aria-label="Toggle Enhanced GPU Scaling"
                 />
               </div>
+
+              <hr className="border-border-subtle" />
+
+              {/* Numeric controls */}
+              <EnhancementSliderControl
+                label="Sharpening Strength"
+                value={enhancementSettings.sharpeningStrength}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
+              />
+              <EnhancementSliderControl
+                label="Chroma Contribution"
+                value={enhancementSettings.chromaContribution}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, chromaContribution: v })}
+              />
+              <EnhancementSliderControl
+                label="Artifact Clamp"
+                value={enhancementSettings.artifactClamp}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, artifactClamp: v })}
+              />
+              <EnhancementSliderControl
+                label="Texture/Noise Sharpening"
+                value={enhancementSettings.textureNoiseSharpening}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, textureNoiseSharpening: v })}
+              />
+              <EnhancementSliderControl
+                label="Anti-ringing"
+                value={enhancementSettings.antiRinging}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, antiRinging: v })}
+              />
+              <EnhancementSliderControl
+                label="Chroma Cleanup"
+                value={enhancementSettings.chromaCleanup}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, chromaCleanup: v })}
+              />
+              <EnhancementSliderControl
+                label="Deblocking"
+                value={enhancementSettings.deblocking}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, deblocking: v })}
+              />
+
+              {/* Reset button */}
+              <div className="pt-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full text-xs"
+                  onClick={onEnhancementReset}
+                >
+                  Reset to Defaults
+                </Button>
+              </div>
+
+              {/* ── Processing statistics ──────────────────────── */}
+              {enhancementSettings.enabled && enhancementStats && (
+                <div className="pt-2 border-t border-border-subtle">
+                  <p className="text-[10px] text-text-muted uppercase tracking-wide mb-2">Processing Stats</p>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                    <span className="text-text-muted">Input</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.inputWidth}x{enhancementStats.inputHeight}
+                    </span>
+                    <span className="text-text-muted">Output</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.outputWidth}x{enhancementStats.outputHeight}
+                    </span>
+                    <span className="text-text-muted">Backend</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.backend}
+                    </span>
+                    <span className="text-text-muted">GPU Time</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.processingTimeMs != null
+                        ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
+                        : "—"}
+                    </span>
+                    <span className="text-text-muted">Scaling</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.enhancedScalingActive ? "Enhanced" : "Standard"}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
-
-          {/* ── Action buttons ───────────────────────────── */}
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              variant="default"
-              size="sm"
-              className="flex-1 text-xs"
-              onClick={handleSend}
-              disabled={requestPending}
-            >
-              {requestPending ? "Sending..." : "Apply"}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              onClick={handleClear}
-              disabled={requestPending}
-            >
-              {isCustom ? "Defaults" : "Clear"}
-            </Button>
-          </div>
-
-          {/* ── Request feedback ─────────────────────────── */}
-          {requestFeedback && (
-            <p className={cn(
-              "text-xs",
-              lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
-            )}>
-              {requestFeedback}
-            </p>
-          )}
-
-        </div>
+          </TabsContent>
+        </Tabs>
       </PopoverContent>
     </Popover>
   );

@@ -108,6 +108,7 @@ export {
   StreamRestartRequestPayloadSchema,
   StreamRestartedPayloadSchema,
   StreamRestartResultPayloadSchema,
+  StreamSourceChangedPayloadSchema,
   StreamJoinRequestPayloadSchema,
   StreamJoinResponsePayloadSchema,
   StreamBindAckPayloadSchema,
