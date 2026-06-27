@@ -375,6 +375,13 @@ export class ViewerMediaBinding {
   removeViewer(viewerDeviceId: string): void {
     const mapping = this.viewerMap.get(viewerDeviceId);
     if (mapping) {
+      if (mapping.pc && typeof (mapping.pc as RTCPeerConnection & { close?: () => void }).close === "function") {
+        try {
+          mapping.pc.close();
+        } catch {
+        }
+      }
+
       // Stop per-viewer stats polling
       const statsService = this.runtime.getMediaStatsService();
       if (statsService) {

@@ -75,6 +75,8 @@ export interface PersistedSettings {
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
+  /** Cap for the viewer bitrate slider (kbps) */
+  viewerBitrateSliderMaxKbps: number;
   /** Quick Share global shortcut configuration */
   quickShareShortcutEnabled: boolean;
   quickShareShortcutAccelerator: string;
@@ -169,6 +171,7 @@ function getDefaults(): PersistedSettings {
     notificationsEnabled: true,
     localTransportPolicy: {},
     lastAudioMode: "none",
+    viewerBitrateSliderMaxKbps: 5000,
     quickShareShortcutEnabled: true,
     quickShareShortcutAccelerator: "Super+Alt+S",
     lastQuickShareGroupId: null,

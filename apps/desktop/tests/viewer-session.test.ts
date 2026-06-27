@@ -69,6 +69,8 @@ function makeMockRuntime() {
     deviceId: mockRuntimeMethods.deviceId,
     displayName: mockRuntimeMethods.displayName,
     isDestroyed: mockRuntimeMethods.isDestroyed,
+    __conn: conn,
+    __sendToPeer: sendToPeer,
   };
 }
 
@@ -174,6 +176,89 @@ describe("ViewerSession — generation counter", () => {
     // ViewerClient should NOT have been created.
     expect(mockViewerClientMethods.createAndConnect).not.toHaveBeenCalled();
     expect(mockViewerClientMethods.view).not.toHaveBeenCalled();
+  });
+
+  it("destroy during pending send does not surface an unhandled join-cancel rejection", async () => {
+    let rejectJoinResponse!: (reason?: unknown) => void;
+    let resolveSendToPeer!: () => void;
+
+    const joinResponsePromise = new Promise((_, reject) => {
+      rejectJoinResponse = reject;
+    });
+    mockRuntimeMethods.waitForJoinResponse.mockReturnValue(joinResponsePromise);
+    mockRuntimeMethods.cancelJoinResponse.mockImplementation(() => {
+      rejectJoinResponse(new Error("Join response cancelled"));
+    });
+
+    (runtime as any).__sendToPeer.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveSendToPeer = resolve;
+      }),
+    );
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const startPromise = session.start({
+        groupId: "g-1",
+        hostDeviceId: "host-1",
+        logicalStreamId: "ls-1",
+        mediaSessionId: "ms-1",
+        hostName: "Host",
+      });
+
+      session.destroy();
+      await new Promise((resolve) => setImmediate(resolve));
+      resolveSendToPeer();
+      await startPromise;
+
+      expect(unhandled).toEqual([]);
+      expect((session as any)._pendingRequestId).toBeNull();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("stop sends stream.leave to the host peer", async () => {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+
+    session.stop();
+    await Promise.resolve();
+
+    expect((runtime as any).__sendToPeer).toHaveBeenNthCalledWith(
+      2,
+      "peer-uuid-host",
+      expect.objectContaining({
+        type: "stream.leave",
+        logicalStreamId: "ls-1",
+        viewerDeviceId: "my-device",
+      }),
+    );
   });
 
   it("retry() bumps generation and creates a new ViewerClient", async () => {

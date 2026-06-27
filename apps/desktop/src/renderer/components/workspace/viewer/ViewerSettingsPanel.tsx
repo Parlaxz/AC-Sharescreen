@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { loadSettings } from "@/services/settings-actions";
 
 // ─── Viewer quality request state ─────────────────────────────────────────
 
@@ -77,6 +78,8 @@ interface ViewerSettingsPanelProps {
   onDisplayModeChange?: (mode: DisplayMode) => void;
   /** Called when the popover opens or closes */
   onOpenChange?: (open: boolean) => void;
+  /** Max value for the bitrate slider kbps (default 5000) */
+  maxSliderBitrateKbps?: number;
   children: React.ReactNode;
 }
 
@@ -109,9 +112,24 @@ export function ViewerSettingsPanel({
   displayMode = "fit",
   onDisplayModeChange,
   onOpenChange,
+  maxSliderBitrateKbps = 5000,
   children,
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
+  const [effectiveMaxBitrate, setEffectiveMaxBitrate] = useState(maxSliderBitrateKbps);
+
+  // Load persisted viewerBitrateSliderMaxKbps setting on mount
+  useEffect(() => {
+    loadSettings()
+      .then((s) => {
+        if (s.viewerBitrateSliderMaxKbps != null) {
+          setEffectiveMaxBitrate(s.viewerBitrateSliderMaxKbps);
+        }
+      })
+      .catch(() => {
+        // fall back to prop default
+      });
+  }, []);
 
   // Local editing state (only applies when user hits Send / Clear)
   const [localQuality, setLocalQuality] = useState<ViewerRequestState>(
@@ -220,9 +238,9 @@ export function ViewerSettingsPanel({
               </div>
               <Slider
                 value={[localQuality.videoBitrateKbps]}
-                onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, 20000) }))}
+                onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
                 min={100}
-                max={20000}
+                max={effectiveMaxBitrate}
                 step={50}
                 aria-label="Requested bitrate"
                 className="[&>div]:h-1"

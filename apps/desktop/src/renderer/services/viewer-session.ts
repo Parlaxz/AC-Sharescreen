@@ -158,6 +158,7 @@ export class ViewerSession {
   private logicalStreamId = "";
   private mediaSessionId = "";
   private hostName = "";
+  private leaveAnnounced = false;
 
   // Events
   public onStateChange: ((state: ViewerSessionState) => void) | null = null;
@@ -190,6 +191,7 @@ export class ViewerSession {
     this.logicalStreamId = options.logicalStreamId;
     this.mediaSessionId = options.mediaSessionId;
     this.hostName = options.hostName;
+    this.leaveAnnounced = false;
 
     if (options.videoElement) {
       this.videoElement = options.videoElement;
@@ -251,6 +253,7 @@ export class ViewerSession {
     this.cleanupClient();
     this._receivedStream = null;
     this._trackIdsInStream.clear();
+    this.leaveAnnounced = false;
 
     // Bump generation so in-flight flows from prior retry are abandoned
     ViewerSession.nextGeneration++;
@@ -288,6 +291,7 @@ export class ViewerSession {
    */
   stop(): void {
     if (this._state === "ended") return;
+    this.sendLeave();
     this.cancelReadinessTimer();
     this.cancelPendingJoin();
     this.cancelRemoteTrackEndedTimer();
@@ -303,6 +307,7 @@ export class ViewerSession {
    */
   destroy(): void {
     if (this._destructed) return;
+    this.sendLeave();
     this._destructed = true;
     this.cancelReadinessTimer();
     this.cancelPendingJoin();
@@ -521,7 +526,13 @@ export class ViewerSession {
       this.setState("requesting-join");
       const requestId = crypto.randomUUID();
       this._pendingRequestId = requestId;
-      const joinResponsePromise = runtime.waitForJoinResponse(requestId, 30_000);
+      const joinResponsePromise = runtime.waitForJoinResponse(requestId, 30_000).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === "Join response cancelled") {
+          return null;
+        }
+        throw error;
+      });
 
       // 3) Send stream.join.request
       await conn.sendToPeer(peerUuid, {
@@ -538,6 +549,7 @@ export class ViewerSession {
       // 4) Wait for stream.join.response
       this.setState("waiting-for-host");
       const response = await joinResponsePromise;
+      if (!response) return;
 
       // Clear pending request id since the waiter resolved
       this._pendingRequestId = null;
@@ -817,6 +829,26 @@ export class ViewerSession {
     this.onStateChange?.("error");
     this.onError?.(error);
     this.cleanupClient();
+  }
+
+  private sendLeave(): void {
+    if (this.leaveAnnounced) return;
+    const runtime = getRuntime();
+    if (!runtime || runtime.isDestroyed()) return;
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
+
+    const conn = runtime.getConnectionManager().getConnection(this.groupId);
+    if (!conn) return;
+
+    const peerUuid = conn.peerForDevice(this.hostDeviceId);
+    if (!peerUuid) return;
+
+    this.leaveAnnounced = true;
+    void conn.sendToPeer(peerUuid, {
+      type: "stream.leave",
+      logicalStreamId: this.logicalStreamId,
+      viewerDeviceId: runtime.deviceId ?? "viewer",
+    }).catch(() => {});
   }
 
   private cleanupClient(): void {

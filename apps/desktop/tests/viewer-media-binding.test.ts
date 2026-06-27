@@ -282,6 +282,36 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     expect(binding.getViewerMediaPeer("viewer-1")).toBeNull();
   });
 
+  it("removeViewer closes the mapped peer connection", () => {
+    const close = vi.fn();
+    const statsService = runtime.getMediaStatsService() as any;
+
+    (binding as any).viewerMap.set("viewer-1", {
+      viewerDeviceId: "viewer-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: {
+        connectionState: "connected",
+        close,
+      },
+      videoSender: null,
+      audioSender: null,
+    });
+
+    binding.removeViewer("viewer-1");
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(statsService.disconnectViewer).toHaveBeenCalledWith(
+      "g-1",
+      "stream-1",
+      "viewer-1",
+      "peer-uuid-1",
+    );
+    expect(binding.getViewerMediaPeer("viewer-1")).toBeNull();
+  });
+
   // ─── consumeBinding (Stage 5) ────────────────────────────────────
 
   it("consumeBinding validates token and returns false for unknown", async () => {

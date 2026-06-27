@@ -585,6 +585,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     const unsubscribe = useStore.subscribe((state, prevState) => {
       if (!sessionRef.current) return;
 
+      // Don't treat stream as "gone" during the initial connection flow.
+      // The join flow starts before the stream is announced in activeStreamsByGroup,
+      // so the stream won't exist there until the host accepts the join and the
+      // stream.started message arrives.  Without this guard, any unrelated store
+      // update during the join window incorrectly destroys the session and cancels
+      // the pending join response.
+      if (sessionRef.current.state !== "watching") return;
+
       // 1) Check if our exact logical stream disappeared from active streams
       if (selectedGroupId) {
         const currStreams = state.activeStreamsByGroup[selectedGroupId] ?? [];

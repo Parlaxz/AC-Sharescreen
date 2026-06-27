@@ -44,6 +44,7 @@ interface SettingsForm {
   maxHeight: number;
   maxFps: number;
   allowViewerQualityRequests: boolean;
+  viewerBitrateSliderMaxKbps: number;
   defaultCodec: "vp9" | "av1" | "h264" | "vp8";
   quickShareEnabled: boolean;
   quickShareAccelerator: string;
@@ -59,6 +60,7 @@ const DEFAULT_FORM: SettingsForm = {
   maxHeight: 1080,
   maxFps: 60,
   allowViewerQualityRequests: true,
+  viewerBitrateSliderMaxKbps: 5000,
   defaultCodec: "vp9",
   quickShareEnabled: true,
   quickShareAccelerator: "Alt+Shift+S",
@@ -97,6 +99,8 @@ function buildForm(
     maxFps: settings.hostQualityLimits?.maxFps ?? DEFAULT_FORM.maxFps,
     allowViewerQualityRequests:
       settings.hostQualityLimits?.allowViewerQualityRequests ?? DEFAULT_FORM.allowViewerQualityRequests,
+    viewerBitrateSliderMaxKbps:
+      settings.viewerBitrateSliderMaxKbps ?? DEFAULT_FORM.viewerBitrateSliderMaxKbps,
     defaultCodec:
       (settings.globalQualityDefaults?.video?.codec === "av1" ||
       settings.globalQualityDefaults?.video?.codec === "h264" ||
@@ -120,6 +124,7 @@ function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
     a.maxHeight === b.maxHeight &&
     a.maxFps === b.maxFps &&
     a.allowViewerQualityRequests === b.allowViewerQualityRequests &&
+    a.viewerBitrateSliderMaxKbps === b.viewerBitrateSliderMaxKbps &&
     a.defaultCodec === b.defaultCodec &&
     a.quickShareEnabled === b.quickShareEnabled &&
     a.quickShareAccelerator === b.quickShareAccelerator
@@ -219,6 +224,9 @@ export function SettingsPage() {
     if (!isNonNegativeInteger(form.maxFps)) {
       return "Maximum FPS must be a nonnegative integer";
     }
+    if (!isNonNegativeInteger(form.viewerBitrateSliderMaxKbps)) {
+      return "Viewer bitrate slider max must be a nonnegative integer";
+    }
     if (!form.quickShareAccelerator.trim()) {
       return "Quick Share accelerator is required";
     }
@@ -255,6 +263,7 @@ export function SettingsPage() {
         launchAtLogin: form.launchAtLogin,
         autoResumeLastMonitor: form.autoResumeLastMonitor,
         notificationsEnabled: form.notificationsEnabled,
+        viewerBitrateSliderMaxKbps: form.viewerBitrateSliderMaxKbps,
         hostQualityLimits: {
           ...(settingsAfterNameSave.hostQualityLimits ?? {
             maxVideoBitrateKbps: DEFAULT_FORM.maxVideoBitrateKbps,
@@ -466,6 +475,26 @@ export function SettingsPage() {
             label="Allow viewer quality requests"
             checked={form.allowViewerQualityRequests}
             onCheckedChange={(value) => updateField("allowViewerQualityRequests", value)}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Viewer bitrate slider cap</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1.5">
+          <Label htmlFor="viewer-bitrate-slider-max">
+            Maximum bitrate (kbps) shown on the viewer quality slider
+          </Label>
+          <Input
+            id="viewer-bitrate-slider-max"
+            type="number"
+            min={100}
+            max={100000}
+            value={form.viewerBitrateSliderMaxKbps}
+            onChange={(e) => updateField("viewerBitrateSliderMaxKbps", parseInt(e.target.value || "0", 10) || 0)}
+            disabled={saving}
           />
         </CardContent>
       </Card>

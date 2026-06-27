@@ -289,6 +289,7 @@ export interface PersistedSettings {
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
+  viewerBitrateSliderMaxKbps: number;
   lastShareSettings: {
     groupId: string;
     sourceKind: "screen" | "window";
