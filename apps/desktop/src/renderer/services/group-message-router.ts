@@ -298,6 +298,19 @@ export class GroupMessageRouter {
       return;
     }
 
+    // viewer.status → dispatch window event for HostDashboard hook
+    if (type === "viewer.status") {
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        const parsed = parseGroupMessagePayload("viewer.status", envelope.payload);
+        if (parsed.ok) {
+          window.dispatchEvent(new CustomEvent("screenlink:viewer-status", {
+            detail: parsed.data,
+          }));
+        }
+      }
+      return;
+    }
+
     // ── quality.* → QualityCoordinator (Stage 6) ──────────────────
     if (
       type.startsWith("quality.viewer.") ||
