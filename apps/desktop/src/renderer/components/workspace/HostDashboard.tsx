@@ -86,7 +86,7 @@ function ViewerRowItem({ row }: { row: ViewerRow }) {
     }
   })();
 
-  const fmtBps = (bps: number | null) => bps !== null ? `${(bps / 1000).toFixed(1)} Mbps` : null;
+  const fmtKBps = (kbps: number | null) => kbps !== null ? `${(kbps / 1000).toFixed(1)} Mbps` : null;
 
   return (
     <div className="py-1.5 space-y-0.5">
@@ -126,7 +126,7 @@ function ViewerRowItem({ row }: { row: ViewerRow }) {
 
           <div className="text-[11px] text-text-muted pl-4 flex flex-wrap gap-x-3 gap-y-0">
             {row.sent.bitrateKbps !== null && (
-              <span>{fmtBps(row.sent.bitrateKbps)}</span>
+              <span>{fmtKBps(row.sent.bitrateKbps)}</span>
             )}
             {row.sent.rttMs !== null && (
               <span>RTT {Math.round(row.sent.rttMs)} ms</span>
@@ -203,9 +203,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     ?.getPublisher()
     ?.getSDK() ?? null;
 
-  const logicalStreamId = useMemo(() => {
-    return runtime?.getStreamSessionManager()?.currentLogicalStreamId ?? "";
-  }, [runtime]);
+  const logicalStreamId = runtime?.getStreamSessionManager()?.currentLogicalStreamId ?? "";
 
   const viewerRows = useHostViewerDiagnostics(
     sdk,
