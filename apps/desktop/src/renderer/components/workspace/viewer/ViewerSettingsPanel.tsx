@@ -16,8 +16,11 @@ import {
   clampValue,
   type ViewerImageEnhancementSettings,
   type ScalingAlgorithm,
+  type FsrTargetScale,
   SCALING_ALGORITHMS,
   SCALING_ALGORITHM_LABELS,
+  FSR_TARGET_SCALES,
+  FSR_TARGET_SCALE_LABELS,
 } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   IMAGE_ENHANCEMENT_CONTROL_RANGE,
@@ -98,6 +101,9 @@ interface ViewerSettingsPanelProps {
     enhancedScalingActive: boolean;
     backend: string;
     scalingAlgorithm?: ScalingAlgorithm;
+    easuTargetWidth?: number;
+    easuTargetHeight?: number;
+    finalBicubicActive?: boolean;
   } | null;
   children: React.ReactNode;
 }
@@ -624,14 +630,31 @@ export function ViewerSettingsPanel({
                 onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
               />
 
-              {/* FSR/Bicubic Blend — only when FSR 1 EASU is selected */}
+              {/* FSR Target Scale — only when FSR 1 EASU is selected */}
               {isFsr && (
-                <EnhancementSliderControl
-                  label="FSR/Bicubic Blend"
-                  value={enhancementSettings.fsrBicubicBlend}
-                  disabled={!enhancementSettings.enabled}
-                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, fsrBicubicBlend: v })}
-                />
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Target Scale</span>
+                  </div>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                    value={enhancementSettings.fsrTargetScale}
+                    onChange={(e) =>
+                      onEnhancementChange({
+                        ...enhancementSettings,
+                        fsrTargetScale: e.target.value as FsrTargetScale,
+                      })
+                    }
+                    disabled={!enhancementSettings.enabled}
+                    aria-label="FSR Target Scale"
+                  >
+                    {FSR_TARGET_SCALES.map((s) => (
+                      <option key={s} value={s}>
+                        {FSR_TARGET_SCALE_LABELS[s]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
 
               {/* Reset button */}
@@ -647,7 +670,7 @@ export function ViewerSettingsPanel({
               </div>
 
               {/* ── Processing statistics ──────────────────────── */}
-              {enhancementSettings.enabled && enhancementStats && (
+                  {enhancementSettings.enabled && enhancementStats && (
                 <div className="pt-2 border-t border-border-subtle">
                   <p className="text-[10px] text-text-muted uppercase tracking-wide mb-2">Processing Stats</p>
                   <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
@@ -655,10 +678,26 @@ export function ViewerSettingsPanel({
                     <span className="text-text-secondary font-mono text-right">
                       {enhancementStats.inputWidth}x{enhancementStats.inputHeight}
                     </span>
-                    <span className="text-text-muted">Output</span>
+                    {enhancementStats.easuTargetWidth != null && enhancementStats.easuTargetWidth > 0 && (
+                      <>
+                        <span className="text-text-muted">EASU Target</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.easuTargetWidth}x{enhancementStats.easuTargetHeight}
+                        </span>
+                      </>
+                    )}
+                    <span className="text-text-muted">Display</span>
                     <span className="text-text-secondary font-mono text-right">
                       {enhancementStats.outputWidth}x{enhancementStats.outputHeight}
                     </span>
+                    {enhancementStats.finalBicubicActive != null && (
+                      <>
+                        <span className="text-text-muted">Final Scaling</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.finalBicubicActive ? "Bicubic" : enhancementStats.easuTargetWidth ? "EASU only" : "Native"}
+                        </span>
+                      </>
+                    )}
                     <span className="text-text-muted">Backend</span>
                     <span className="text-text-secondary font-mono text-right">
                       {enhancementStats.backend}

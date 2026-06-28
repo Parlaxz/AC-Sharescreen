@@ -25,6 +25,98 @@ export const OVERSHOOTING_ALGORITHMS: ReadonlySet<ScalingAlgorithm> = new Set([
   "fsr1-easu",
 ]);
 
+// ─── FSR Target Scale ───────────────────────────────────────────────────────
+
+export type FsrTargetScale = "auto" | 1.25 | 1.5 | 1.75 | 2 | "display";
+
+export const FSR_TARGET_SCALES: readonly FsrTargetScale[] = [
+  "auto",
+  1.25,
+  1.5,
+  1.75,
+  2,
+  "display",
+] as const;
+
+export const FSR_TARGET_SCALE_LABELS: Record<FsrTargetScale, string> = {
+  auto: "Auto",
+  "1.25": "1.25×",
+  "1.5": "1.5×",
+  "1.75": "1.75×",
+  "2": "2.00×",
+  display: "Display Resolution",
+};
+
+/**
+ * Result of computing the EASU intermediate target dimensions.
+ */
+export interface EasuTargetResult {
+  easuW: number;
+  easuH: number;
+  needsBicubic: boolean;
+  targetScale: FsrTargetScale;
+  scaleValue: number;
+}
+
+/**
+ * Compute the EASU intermediate target dimensions based on source and final
+ * display dimensions and the chosen target scale.
+ *
+ * Pure TypeScript (no GL), suitable for testing.
+ */
+export function computeEasuTarget(
+  sourceW: number,
+  sourceH: number,
+  finalW: number,
+  finalH: number,
+  scale: FsrTargetScale,
+): EasuTargetResult {
+  // Clamp source dimensions
+  const sw = Math.max(1, sourceW);
+  const sh = Math.max(1, sourceH);
+  const fw = Math.max(1, finalW);
+  const fh = Math.max(1, finalH);
+
+  if (scale === "display") {
+    // EASU targets the display dimensions directly; no bicubic final stretch needed.
+    return {
+      easuW: fw,
+      easuH: fh,
+      needsBicubic: false,
+      targetScale: "display",
+      scaleValue: Math.max(fw / sw, fh / sh),
+    };
+  }
+
+  let scaleValue: number;
+  if (scale === "auto") {
+    // Auto caps at 2.0× source
+    scaleValue = 2.0;
+  } else {
+    // Numeric scale (1.25, 1.5, 1.75, 2)
+    scaleValue = scale;
+  }
+
+  // Compute proposed dimensions
+  const proposedW = sw * scaleValue;
+  const proposedH = sh * scaleValue;
+
+  // Cap to final display dimensions
+  const easuW = Math.min(fw, Math.ceil(proposedW));
+  const easuH = Math.min(fh, Math.ceil(proposedH));
+
+  // If EASU target doesn't reach display dimensions, a final bicubic stretch is needed
+  const needsBicubic = easuW < fw || easuH < fh;
+
+  return {
+    easuW,
+    easuH,
+    needsBicubic,
+    targetScale: scale,
+    scaleValue,
+  };
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface ViewerImageEnhancementSettings {
@@ -32,6 +124,8 @@ export interface ViewerImageEnhancementSettings {
   enabled: boolean;
   /** GPU scaling algorithm: native | bicubic | fsr1-easu */
   scalingAlgorithm: ScalingAlgorithm;
+  /** FSR EASU target scale when scalingAlgorithm is fsr1-easu */
+  fsrTargetScale: FsrTargetScale;
   /** Sharpening filter strength (0–1). 0 = bypass */
   sharpeningStrength: number;
   /** Noise-aware sharpening mask (0–1). 0 = sharpen all detail, 1 = protect noise */
@@ -40,8 +134,8 @@ export interface ViewerImageEnhancementSettings {
   compressionCleanup: number;
   /** Spatial gradient debanding (0–1). 0 = bypass */
   debanding: number;
-  /** Blend between bicubic and FSR EASU when FSR selected (0–1). Only used when scalingAlgorithm === "fsr1-easu" */
-  fsrBicubicBlend: number;
+  /** Schema version for migration tracking (optional, set by validateSettings) */
+  _schemaVersion?: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -69,6 +163,7 @@ const OLD_NUMERIC_KEYS: ReadonlySet<string> = new Set([
   "antiRinging",
   "chromaCleanup",
   "compressionSmoothing",
+  "fsrBicubicBlend",
 ]);
 
 /**
@@ -77,7 +172,8 @@ const OLD_NUMERIC_KEYS: ReadonlySet<string> = new Set([
  *   - enhancedScaling boolean → scalingAlgorithm
  *   - textureNoiseSharpening → noiseProtection (inverted)
  *   - chromaCleanup + compressionSmoothing → compressionCleanup
- *   - Removes old fields (chromaContribution, artifactClamp, antiRinging)
+ *   - Removes old fields (chromaContribution, artifactClamp, antiRinging, fsrBicubicBlend)
+ *   - Schema version 1 → version 2: forces optional effects to zero
  */
 function migrateLegacySettings(
   obj: Record<string, unknown>,
@@ -109,6 +205,17 @@ function migrateLegacySettings(
     }
   }
 
+  // Schema version 2 migration: force optional effects to zero
+  const currentSchema = typeof migrated._schemaVersion === "number" ? migrated._schemaVersion : 1;
+  if (currentSchema < 2) {
+    // Preserve scalingAlgorithm and sharpeningStrength, but zero out all optional effects
+    migrated.noiseProtection = 0;
+    migrated.compressionCleanup = 0;
+    migrated.debanding = 0;
+    migrated.fsrTargetScale = "auto";
+    migrated._schemaVersion = 2;
+  }
+
   // Remove old fields that are no longer user-facing
   for (const key of OLD_NUMERIC_KEYS) {
     delete migrated[key];
@@ -126,7 +233,6 @@ const NUMERIC_KEYS: ReadonlySet<string> = new Set([
   "noiseProtection",
   "compressionCleanup",
   "debanding",
-  "fsrBicubicBlend",
 ]);
 
 const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
@@ -161,6 +267,11 @@ export function validateSettings(
     out.scalingAlgorithm = obj.scalingAlgorithm as ScalingAlgorithm;
   }
 
+  // Validate fsrTargetScale
+  if (FSR_TARGET_SCALES.includes(obj.fsrTargetScale as FsrTargetScale)) {
+    out.fsrTargetScale = obj.fsrTargetScale as FsrTargetScale;
+  }
+
   for (const key of NUMERIC_KEYS) {
     const v = obj[key];
     if (typeof v === "number") {
@@ -179,6 +290,9 @@ export function validateSettings(
       (out as unknown as Record<string, unknown>)[key] = v;
     }
   }
+
+  // Ensure _schemaVersion
+  out._schemaVersion = 2;
 
   return out;
 }

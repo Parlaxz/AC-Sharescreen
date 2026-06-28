@@ -82,6 +82,9 @@ class MockWebGL2Backend {
       contextLossCount: 0,
       backend: "webgl2",
       scalingAlgorithm: "native",
+      easuTargetWidth: 0,
+      easuTargetHeight: 0,
+      finalBicubicActive: false,
     };
   }
 
@@ -280,7 +283,7 @@ describe("ViewerImageProcessor — settings live update (uniform mapping)", () =
       "noiseProtection",
       "compressionCleanup",
       "debanding",
-      "fsrBicubicBlend",
+      "fsrTargetScale",
     ];
 
     for (const key of settingsKeys) {

@@ -5,7 +5,7 @@ precision highp float;
 // Contrast-adaptive sharpening with noise protection and internal
 // artifact clamping. Chroma contribution is internalised at 0.15
 // to prevent coloured halos without desaturating the sharpened result.
-// Artifact clamp is tied to sharpening strength at 0.50×.
+// Artifact clamp is tied to sharpening strength at 0.75×.
 // Anti-ringing is handled in the scaling pass, not here.
 
 in vec2 v_texCoord;
@@ -70,7 +70,9 @@ void main() {
     float effectiveStrength = u_sharpeningStrength * detailMask;
 
     // -- Luminance sharpening -----------------------------------------
-    vec3 lumaSharp = center + vec3(lumaDetail * effectiveStrength) * LUMA;
+    // Apply luma detail equally to all RGB channels (no per-channel LUMA weighting).
+    // The chroma restoration below adds back colour-aware detail separately.
+    vec3 lumaSharp = center + vec3(lumaDetail * effectiveStrength);
 
     // -- Chroma (color-only) detail (internalised) --------------------
     vec3 rgbDetail = center * 4.0 - up - down - left - right;
@@ -81,8 +83,8 @@ void main() {
 
     // -- Internal artifact clamp (tied to sharpening strength) --------
     // At low sharpening, overshoot is negligible so clamp is weak.
-    // At max sharpening, clamp caps at 0.50× preventing excessive halos.
-    float clampStrength = clamp(u_sharpeningStrength * 0.50, 0.0, 0.60);
+    // At max sharpening, clamp caps at 0.60× preventing excessive halos.
+    float clampStrength = clamp(u_sharpeningStrength * 0.75, 0.0, 0.60);
     if (clampStrength > 0.0) {
         vec3 nw = texture(u_sourceTexture, v_texCoord + vec2(-step.x, -step.y)).rgb;
         vec3 ne = texture(u_sourceTexture, v_texCoord + vec2( step.x, -step.y)).rgb;

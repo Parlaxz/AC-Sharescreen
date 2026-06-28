@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine,
   ResponsiveContainer, CartesianGrid, Label,
@@ -17,14 +17,13 @@ interface BandwidthGraphModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   mediaSessionId: string | null;
-  /** When true, show viewer download instead of host upload */
   viewerMode?: boolean;
 }
 
 function fmtKBps(bps: number): string {
-  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
-  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
-  return `${bps} bps`;
+  if (bps >= 1_000_000) return (bps / 1_000_000).toFixed(1) + " Mbps";
+  if (bps >= 1_000) return (bps / 1_000).toFixed(0) + " kbps";
+  return bps + " bps";
 }
 
 export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewerMode }: BandwidthGraphModalProps) {
@@ -32,7 +31,8 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
   const [markers, setMarkers] = useState<SettingMarker[]>([]);
   const [duration, setDuration] = useState(0);
   const [hostTotal, setHostTotal] = useState(0);
-  const [avgBps, setAvgBps] = useState(0);
+  const [avgBpsState, setAvgBpsState] = useState(0);
+  const [viewerSamples, setViewerSamples] = useState<Array<{ timestamp: number; bps: number }>>([]);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -41,15 +41,15 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
     const svc = StreamMetricsService.getInstance();
     const refresh = () => {
       if (viewerMode) {
-        // Viewer mode: show viewer download stats
-        setAvgBps(svc.getViewerBps());
+        setAvgBpsState(svc.getViewerBps());
         setHostTotal(svc.getViewerTotalBytes());
+        setViewerSamples(svc.getViewerSamples());
       } else if (mediaSessionId) {
         setSamples(svc.getLiveSamples(mediaSessionId));
         setMarkers(svc.getLiveMarkers(mediaSessionId));
         setDuration(svc.getLiveDuration(mediaSessionId));
         setHostTotal(svc.getLiveHostTotal(mediaSessionId));
-        setAvgBps(svc.getLiveCurrentBps(mediaSessionId));
+        setAvgBpsState(svc.getLiveCurrentBps(mediaSessionId));
       }
     };
     refresh();
@@ -60,36 +60,55 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
     };
   }, [open, mediaSessionId, viewerMode]);
 
-  const chartData = samples.map((s) => ({
-    time: new Date(s.timestamp).toLocaleTimeString(),
-    hostKbps: s.hostUploadBps / 1000,
-  }));
-
-  // In viewer mode, show simple stats instead of graph (no host data)
+  // Viewer mode: show download graph
   if (viewerMode) {
+    const chartData = viewerSamples.map(function(s) {
+      return { time: new Date(s.timestamp).toLocaleTimeString(), kbps: (s.bps || 0) / 1000 };
+    });
+    const avgBpsCalc = viewerSamples.length > 0
+      ? Math.round(viewerSamples.reduce(function(a, b) { return a + b.bps; }, 0) / viewerSamples.length)
+      : 0;
+
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Bandwidth</DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-4 text-sm">
+          <div className="grid grid-cols-3 gap-4 text-sm">
             <div>
               <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Current speed</div>
-              <div className="font-mono tabular-nums">{fmtKBps(avgBps)}</div>
+              <div className="font-mono tabular-nums">{fmtKBps(avgBpsState)}</div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Average</div>
+              <div className="font-mono tabular-nums">{fmtKBps(avgBpsCalc)}</div>
             </div>
             <div>
               <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Total received</div>
               <div className="font-mono tabular-nums">{formatBytes(hostTotal)}</div>
             </div>
           </div>
-          <p className="text-[11px] text-text-muted mt-2">
-            Viewer download stats. Host upload data is available on the host dashboard.
-          </p>
+          <div className="h-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" />
+                <YAxis tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" label={{ value: "KB/s", angle: -90, position: "insideLeft", style: { fontSize: 11 } }} />
+                <Tooltip contentStyle={{ fontSize: 12 }} />
+                <Area type="monotone" dataKey="kbps" name="Download" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} isAnimationActive={false} dot={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
         </DialogContent>
       </Dialog>
     );
   }
+
+  // Host mode: show upload graph
+  const hostChartData = samples.map(function(s) {
+    return { time: new Date(s.timestamp).toLocaleTimeString(), hostKbps: s.hostUploadBps / 1000 };
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -105,7 +124,7 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Average bitrate</div>
-            <div className="font-mono tabular-nums">{fmtKBps(avgBps)}</div>
+            <div className="font-mono tabular-nums">{fmtKBps(avgBpsState)}</div>
           </div>
           <div>
             <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Total uploaded</div>
@@ -115,11 +134,11 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
 
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={chartData} margin={{ top: 20, right: 20, left: 10, bottom: 5 }}>
+            <AreaChart data={hostChartData} margin={{ top: 20, right: 20, left: 10, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
               <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" />
               <YAxis tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" label={{ value: "kbps", angle: -90, position: "insideLeft", style: { fontSize: 11 } }} />
-              <Tooltip contentStyle={{ fontSize: 12 }} formatter={(value: number) => [`${value.toFixed(0)} kbps`]} />
+              <Tooltip contentStyle={{ fontSize: 12 }} formatter={(value: number) => [value.toFixed(0) + " kbps"]} />
               <Area type="monotone" dataKey="hostKbps" name="Host Upload" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.1} isAnimationActive={false} dot={false} />
               {markers.map((m, i) => (
                 <ReferenceLine key={i} x={new Date(m.timestamp).toLocaleTimeString()} stroke="var(--color-warning)" strokeDasharray="4 4" label={<Label value={m.label} position="top" style={{ fontSize: 10, fill: "var(--color-warning)" }} />} />

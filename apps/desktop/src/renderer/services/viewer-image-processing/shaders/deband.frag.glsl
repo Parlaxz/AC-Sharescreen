@@ -4,8 +4,9 @@ precision highp float;
 // SPDX-License-Identifier: MIT
 // Lightweight spatial debanding. Detects gradient quantization steps
 // in a 5x5 neighborhood and applies edge-aware smoothing to reduce
-// visible banding. Optionally adds subtle fixed dithering to prevent
-// bands from reappearing. Zero value is a true bypass.
+// visible banding. Dither is proportional to debandStrength × bandScore
+// so it scales naturally with the amount of debanding applied.
+// Zero value is a true bypass (no deband, no dither).
 // No temporal processing or frame history.
 
 in vec2 v_texCoord;
@@ -18,12 +19,12 @@ uniform vec2 u_texSize;
 // Rec. 709 luminance coefficients
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
-// Fixed dither amplitude (internal, 0.5 / 255 = 1 8-bit level rounded)
+// Fixed dither amplitude (internal, 1/255 = 0.5 LSB at 8-bit)
 const float DITHER_AMP = 0.00196;
 
-// Simple hash-based dither pattern (static per pixel, no temporal component)
+// Improved hash-based dither pattern (static per pixel, no temporal component)
 float ditherPattern(vec2 pos) {
-    return fract(sin(dot(pos, vec2(12.9898, 78.233))) * 43758.5453);
+    return fract(sin(dot(pos, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
 void main() {
@@ -103,10 +104,11 @@ void main() {
     float debandAmount = u_debandStrength * bandScore * (1.0 - edgeWeight);
     vec3 result = mix(center, blurred, clamp(debandAmount, 0.0, 1.0));
 
-    // -- Subtle fixed dither to prevent re-quantization ----------------
-    // The dither pattern is static per pixel (no temporal) which prevents
-    // bands from reappearing without causing flicker.
-    float dither = (ditherPattern(gl_FragCoord.xy) - 0.5) * DITHER_AMP;
+    // -- Dither proportional to deband strength × bandScore ------------
+    // Dither amplitude scales with debanding so that stronger debanding
+    // adds appropriate noise to prevent re-quantization. At deband=0,
+    // dither=0 (true bypass).
+    float dither = (ditherPattern(gl_FragCoord.xy) - 0.5) * DITHER_AMP * u_debandStrength * bandScore;
     result += vec3(dither);
 
     fragColor = vec4(clamp(result, 0.0, 1.0), 1.0);

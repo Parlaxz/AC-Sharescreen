@@ -83,11 +83,12 @@ function createReadyVideo(width = 100, height = 50): HTMLVideoElement {
 const allControls: ViewerImageEnhancementSettings = {
   enabled: true,
   scalingAlgorithm: "bicubic",
+  fsrTargetScale: "auto",
   sharpeningStrength: 0.77,
   noiseProtection: 0.66,
   compressionCleanup: 0.55,
   debanding: 0.44,
-  fsrBicubicBlend: 0.33,
+  _schemaVersion: 2,
 };
 
 describe("WebGL2ViewerImageBackend resource tracking", () => {
@@ -162,7 +163,7 @@ describe("WebGL2ViewerImageBackend output dimension tracking", () => {
     expect(backend.lastOutputHeight).toBe(300);
   });
 
-  it("releaseResources resets cleanup dimension trackers in GL branch", () => {
+  it("releaseResources resets dimension trackers in GL branch", () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -170,8 +171,12 @@ describe("WebGL2ViewerImageBackend output dimension tracking", () => {
     backend.lastCleanupHeight = 480;
     backend.lastScaleWidth = 1280;
     backend.lastScaleHeight = 720;
+    backend.lastEasuTargetWidth = 960;
+    backend.lastEasuTargetHeight = 540;
     backend.lastOutputWidth = 1920;
     backend.lastOutputHeight = 1080;
+    backend.lastDebandWidth = 1920;
+    backend.lastDebandHeight = 1080;
 
     (backend.releaseResources as () => void)();
 
@@ -179,8 +184,12 @@ describe("WebGL2ViewerImageBackend output dimension tracking", () => {
     expect(backend.lastCleanupHeight).toBe(0);
     expect(backend.lastScaleWidth).toBe(0);
     expect(backend.lastScaleHeight).toBe(0);
+    expect(backend.lastEasuTargetWidth).toBe(0);
+    expect(backend.lastEasuTargetHeight).toBe(0);
     expect(backend.lastOutputWidth).toBe(0);
     expect(backend.lastOutputHeight).toBe(0);
+    expect(backend.lastDebandWidth).toBe(0);
+    expect(backend.lastDebandHeight).toBe(0);
   });
 
   it("ensureOutputResources does not use getTexLevelParameter", () => {
@@ -215,7 +224,6 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     backend.cleanupProgram = "cleanup";
     backend.sharpenProgram = "sharpen";
     backend.debandProgram = "deband";
-    backend.blendProgram = "blend";
     // For scaling, set bicubic as the active program path
     backend.bicubicProgram = "bicubic";
     backend.cleanupUniforms = {
@@ -238,11 +246,6 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
       u_sourceTexture: "deband.source",
       u_debandStrength: "deband.debandStrength",
       u_texSize: "deband.texSize",
-    };
-    backend.blendUniforms = {
-      u_textureA: "blend.textureA",
-      u_textureB: "blend.textureB",
-      u_blendFactor: "blend.blendFactor",
     };
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings(allControls);
@@ -339,20 +342,8 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.outputWidth = 200;
     backend.outputHeight = 100;
     backend.fullscreenProgram = "fullscreen";
-    backend.bicubicProgram = "bicubicProg";
     backend.easuProgram = "easuProg";
-    // Bicubic uniforms - not used since blend=1, but kept for code path safety
-    backend.bicubicUniforms = {
-      u_sourceTexture: "scale.source",
-      u_sourceSize: "scale.sourceSize",
-      u_outputSize: "scale.outputSize",
-      u_antiRinging: "scale.antiRinging",
-    };
-    // Bicubic FBO/resources - not used since fsrBicubicBlend=1, but kept for safety
-    backend.lastBicubicWidth = 200;
-    backend.lastBicubicHeight = 100;
-    backend.bicubicTexture = "bicubicTex";
-    backend.bicubicFBO = "bicubicFbo";
+    // EASU uniforms
     backend.easuUniforms = {
       u_sourceTexture: "easu.source",
       u_sourceSize: "easu.sourceSize",
@@ -363,6 +354,11 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
       u_easuCon2: "easu.con2",
       u_easuCon3: "easu.con3",
     };
+    // Ensure EASU FBO exists (ensured via ensureEasuResources)
+    backend.lastEasuTargetWidth = 200;
+    backend.lastEasuTargetHeight = 100;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
@@ -370,7 +366,8 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
-      fsrBicubicBlend: 1.0,
+      fsrTargetScale: "display",
+      // With display scale, source(50,25) → easuTarget(200,100) directly
     });
 
     const result = backend.processFrame(createReadyVideo(50, 25));
@@ -444,6 +441,232 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(result.success).toBe(true);
     expect(gl.useProgram).not.toHaveBeenCalledWith("debandProg");
   });
+
+  // ─── New pipeline routing tests ─────────────────────────────────────
+
+  it("FSR 360p→1080p with auto: EASU to 1280×720, then bicubic to 1920×1080", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    // Pre-allocate easu and scale resources (the init would have done this)
+    backend.lastEasuTargetWidth = 1280;
+    backend.lastEasuTargetHeight = 720;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+    backend.lastScaleWidth = 1920;
+    backend.lastScaleHeight = 1080;
+    backend.scaleTexture = "scaleTex";
+    backend.scaleFBO = "scaleFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+      fsrTargetScale: "auto",
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+
+    // EASU should be called with the intermediate target viewport
+    const easuViewportCalls = gl.viewport.mock.calls.filter(
+      (call: number[]) => call[2] === 1280 && call[3] === 720
+    );
+    expect(easuViewportCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Bicubic should be called with the display viewport
+    const bicubicViewportCalls = gl.viewport.mock.calls.filter(
+      (call: number[]) => call[2] === 1920 && call[3] === 1080
+    );
+    expect(bicubicViewportCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("FSR 720p→1080p with auto: EASU to 1920×1080 directly, no bicubic", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    // Pre-allocate easu at display dims
+    backend.lastEasuTargetWidth = 1920;
+    backend.lastEasuTargetHeight = 1080;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+      fsrTargetScale: "auto",
+    });
+
+    const result = backend.processFrame(createReadyVideo(1280, 720));
+    expect(result.success).toBe(true);
+
+    // EASU should be called, bicubic should NOT (since needsBicubic=false)
+    expect(gl.useProgram).toHaveBeenCalledWith("easuProg");
+    const bicubicCalls = gl.useProgram.mock.calls.filter(
+      (call: string[]) => call[0] === "bicubicProg"
+    );
+    expect(bicubicCalls.length).toBe(0);
+  });
+
+  it("FSR 360p→1080p with display: EASU to full display, no bicubic", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    // Pre-allocate easu at display dims
+    backend.lastEasuTargetWidth = 1920;
+    backend.lastEasuTargetHeight = 1080;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+      fsrTargetScale: "display",
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+
+    // EASU should be called, bicubic should NOT
+    expect(gl.useProgram).toHaveBeenCalledWith("easuProg");
+    const bicubicCalls = gl.useProgram.mock.calls.filter(
+      (call: string[]) => call[0] === "bicubicProg"
+    );
+    expect(bicubicCalls.length).toBe(0);
+  });
+
+  it("Bicubic algorithm: bicubic source→display, no EASU", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "bicubic",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+
+    expect(gl.useProgram).toHaveBeenCalledWith("bicubicProg");
+    expect(gl.useProgram).not.toHaveBeenCalledWith("easuProg");
+  });
+
+  it("Native algorithm: no scaling pass, just direct draw", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 640;
+    backend.outputHeight = 360;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "native",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+    });
+
+    // Source same size as output → no scaling needed
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+
+    expect(gl.useProgram).not.toHaveBeenCalledWith("bicubicProg");
+    expect(gl.useProgram).not.toHaveBeenCalledWith("easuProg");
+  });
 });
 
 describe("WebGL2ViewerImageBackend getStats", () => {
@@ -458,6 +681,32 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     const stats = backend.getStats();
     expect(stats.scalingAlgorithm).toBe("bicubic");
     expect(stats.backend).toBe("webgl2");
+  });
+
+  it("includes easuTargetWidth/easuTargetHeight and finalBicubicActive", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+      fsrTargetScale: "auto",
+    });
+
+    // Process a 360p frame to populate render dimensions
+    backend.processFrame(createReadyVideo(640, 360));
+
+    const stats = backend.getStats();
+    expect(stats.easuTargetWidth).toBe(1280);
+    expect(stats.easuTargetHeight).toBe(720);
+    expect(stats.finalBicubicActive).toBe(true);
   });
 });
 

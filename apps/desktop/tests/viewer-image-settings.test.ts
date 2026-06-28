@@ -14,6 +14,9 @@ import {
   SCALING_ALGORITHMS,
   SCALING_ALGORITHM_LABELS,
   OVERSHOOTING_ALGORITHMS,
+  FSR_TARGET_SCALES,
+  FSR_TARGET_SCALE_LABELS,
+  computeEasuTarget,
   type ScalingAlgorithm,
 } from "@/services/viewer-image-processing/viewer-image-settings";
 
@@ -39,25 +42,53 @@ describe("scaling algorithm enums", () => {
   });
 });
 
+describe("FSR target scale enums", () => {
+  it("includes all expected scales", () => {
+    expect(FSR_TARGET_SCALES).toEqual([
+      "auto",
+      1.25,
+      1.5,
+      1.75,
+      2,
+      "display",
+    ]);
+  });
+
+  it("every scale has a label", () => {
+    expect(FSR_TARGET_SCALE_LABELS["auto"]).toBe("Auto");
+    expect(FSR_TARGET_SCALE_LABELS["1.25"]).toBe("1.25×");
+    expect(FSR_TARGET_SCALE_LABELS["1.5"]).toBe("1.5×");
+    expect(FSR_TARGET_SCALE_LABELS["1.75"]).toBe("1.75×");
+    expect(FSR_TARGET_SCALE_LABELS["2"]).toBe("2.00×");
+    expect(FSR_TARGET_SCALE_LABELS["display"]).toBe("Display Resolution");
+  });
+});
+
 describe("viewer-image-defaults", () => {
   it("all default values are within valid range", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
     expect(d.enabled).toBe(false);
     expect(d.scalingAlgorithm).toBe("native");
-    for (const key of ["sharpeningStrength", "noiseProtection", "compressionCleanup", "debanding", "fsrBicubicBlend"]) {
+    for (const key of ["sharpeningStrength", "noiseProtection", "compressionCleanup", "debanding"]) {
       const v = d[key as keyof ViewerImageEnhancementSettings] as number;
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1);
     }
   });
 
-  it("defaults match specification values", () => {
+  it("defaults match specification values (schema v2)", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
-    expect(d.sharpeningStrength).toBeCloseTo(0.14);
-    expect(d.noiseProtection).toBeCloseTo(0.85);
-    expect(d.compressionCleanup).toBeCloseTo(0.20);
-    expect(d.debanding).toBeCloseTo(0.10);
-    expect(d.fsrBicubicBlend).toBeCloseTo(0.70);
+    expect(d.sharpeningStrength).toBeCloseTo(0.25);
+    expect(d.noiseProtection).toBeCloseTo(0.00);
+    expect(d.compressionCleanup).toBeCloseTo(0.00);
+    expect(d.debanding).toBeCloseTo(0.00);
+    expect(d.fsrTargetScale).toBe("auto");
+    expect(d._schemaVersion).toBe(2);
+  });
+
+  it("does not include fsrBicubicBlend", () => {
+    const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as Record<string, unknown>;
+    expect(d.fsrBicubicBlend).toBeUndefined();
   });
 
   it("control range has correct bounds", () => {
@@ -158,15 +189,16 @@ describe("validateSettings", () => {
     expect(result.scalingAlgorithm).toBe("bicubic");
   });
 
-  it("accepts valid complete settings with new fields", () => {
+  it("accepts valid complete settings with new fields (no fsrBicubicBlend)", () => {
     const valid: ViewerImageEnhancementSettings = {
       enabled: true,
       scalingAlgorithm: "bicubic",
+      fsrTargetScale: "auto",
       sharpeningStrength: 0.5,
       noiseProtection: 0.3,
       compressionCleanup: 0.6,
       debanding: 0.1,
-      fsrBicubicBlend: 0.4,
+      _schemaVersion: 2,
     };
     expect(validateSettings(valid)).toEqual(valid);
   });
@@ -176,26 +208,115 @@ describe("validateSettings", () => {
     expect(result.compressionCleanup).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionCleanup);
   });
 
-  it("migrates old textureNoiseSharpening to noiseProtection with inversion", () => {
+  it("migrates old textureNoiseSharpening to noiseProtection with inversion (but v2 migration zeros optional effects)", () => {
     const result = validateSettings({ textureNoiseSharpening: 0.3 });
-    // 1 - 0.3 = 0.7
-    expect(result.noiseProtection).toBeCloseTo(0.7);
+    // 1 - 0.3 = 0.7, but then v2 migration forces optional effects to 0
+    expect(result.noiseProtection).toBeCloseTo(0.0);
+    expect(result._schemaVersion).toBe(2);
   });
 
-  it("migrates old chromaCleanup/compressionSmoothing to compressionCleanup", () => {
+  it("migrates old chromaCleanup/compressionSmoothing to compressionCleanup (but v2 migration zeros optional effects)", () => {
     const result = validateSettings({ chromaCleanup: 0.5, compressionSmoothing: 0.3 });
-    // Max of 0.5 and 0.3 = 0.5
-    expect(result.compressionCleanup).toBeCloseTo(0.5);
+    // Max of 0.5 and 0.3 = 0.5, but v2 migration forces to 0
+    expect(result.compressionCleanup).toBeCloseTo(0.0);
+    expect(result._schemaVersion).toBe(2);
   });
 
-  it("handles both old fields migrated together", () => {
+  it("handles both old fields migrated together (but v2 migration zeros optional effects)", () => {
     const result = validateSettings({
       textureNoiseSharpening: 0.2,
       chromaCleanup: 0.4,
       compressionSmoothing: 0.6,
     });
-    expect(result.noiseProtection).toBeCloseTo(0.8); // 1 - 0.2
-    expect(result.compressionCleanup).toBeCloseTo(0.6); // max(0.4, 0.6)
+    expect(result.noiseProtection).toBeCloseTo(0.0);
+    expect(result.compressionCleanup).toBeCloseTo(0.0);
+    expect(result._schemaVersion).toBe(2);
+  });
+
+  // ─── fsrTargetScale validation ─────────────────────────────────────────
+
+  it("accepts all valid fsrTargetScale values", () => {
+    for (const scale of FSR_TARGET_SCALES) {
+      // Use _schemaVersion: 2 to avoid v1 migration overwriting fsrTargetScale
+      const result = validateSettings({ fsrTargetScale: scale, _schemaVersion: 2 });
+      expect(result.fsrTargetScale).toBe(scale);
+    }
+  });
+
+  it("rejects invalid fsrTargetScale, defaults to auto", () => {
+    const result = validateSettings({ fsrTargetScale: "magic" });
+    expect(result.fsrTargetScale).toBe("auto");
+  });
+
+  // ─── Old schema migration (v1 → v2) ───────────────────────────────────
+
+  it("old schema (no _schemaVersion) forces optional effects to zero", () => {
+    const result = validateSettings({
+      sharpeningStrength: 0.20,
+      noiseProtection: 0.85,
+      compressionCleanup: 0.20,
+      debanding: 0.10,
+      scalingAlgorithm: "fsr1-easu",
+    });
+    expect(result.noiseProtection).toBeCloseTo(0.00);
+    expect(result.compressionCleanup).toBeCloseTo(0.00);
+    expect(result.debanding).toBeCloseTo(0.00);
+    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.sharpeningStrength).toBeCloseTo(0.20);
+    expect(result.fsrTargetScale).toBe("auto");
+    expect(result._schemaVersion).toBe(2);
+  });
+
+  it("_schemaVersion=1 forces optional effects to zero", () => {
+    const result = validateSettings({
+      _schemaVersion: 1,
+      sharpeningStrength: 0.20,
+      noiseProtection: 0.85,
+      compressionCleanup: 0.20,
+      debanding: 0.10,
+      scalingAlgorithm: "bicubic",
+    });
+    expect(result.noiseProtection).toBeCloseTo(0.00);
+    expect(result.compressionCleanup).toBeCloseTo(0.00);
+    expect(result.debanding).toBeCloseTo(0.00);
+    expect(result.scalingAlgorithm).toBe("bicubic");
+    expect(result.sharpeningStrength).toBeCloseTo(0.20);
+  });
+
+  it("new schema (v2) preserves user values even if they match old defaults", () => {
+    const result = validateSettings({
+      _schemaVersion: 2,
+      noiseProtection: 0.85,
+      compressionCleanup: 0.20,
+      debanding: 0.10,
+      sharpeningStrength: 0.20,
+      scalingAlgorithm: "fsr1-easu",
+      fsrTargetScale: "auto",
+    });
+    expect(result.noiseProtection).toBeCloseTo(0.85);
+    expect(result.compressionCleanup).toBeCloseTo(0.20);
+    expect(result.debanding).toBeCloseTo(0.10);
+    expect(result.sharpeningStrength).toBeCloseTo(0.20);
+    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.fsrTargetScale).toBe("auto");
+    expect(result._schemaVersion).toBe(2);
+  });
+
+  it("fsrBicubicBlend is deleted on input", () => {
+    const result = validateSettings({
+      fsrBicubicBlend: 0.70,
+      scalingAlgorithm: "fsr1-easu",
+    });
+    expect((result as Record<string, unknown>).fsrBicubicBlend).toBeUndefined();
+  });
+
+  it("fsrBicubicBlend is not in validated output for new schema", () => {
+    const result = validateSettings({
+      _schemaVersion: 2,
+      fsrBicubicBlend: 0.70,
+      scalingAlgorithm: "native",
+    });
+    expect((result as Record<string, unknown>).fsrBicubicBlend).toBeUndefined();
   });
 });
 
@@ -283,5 +404,126 @@ describe("localStorage persistence", () => {
     expect(result.scalingAlgorithm).toBe("fsr1-easu");
     expect(result.enabled).toBe(true);
     expect(result.sharpeningStrength).toBe(0.5);
+  });
+});
+
+describe("computeEasuTarget", () => {
+  // 720p (1280×720) → 1080p (1920×1080)
+  it("720p → 1080p with auto: fits in display, no bicubic needed", () => {
+    const result = computeEasuTarget(1280, 720, 1920, 1080, "auto");
+    // 1280*2=2560 > 1920 → cap to 1920; 720*2=1440 > 1080 → cap to 1080
+    // So EASU goes all the way to 1920x1080
+    expect(result.easuW).toBe(1920);
+    expect(result.easuH).toBe(1080);
+    expect(result.needsBicubic).toBe(false);
+    expect(result.targetScale).toBe("auto");
+    expect(result.scaleValue).toBe(2);
+  });
+
+  // 540p (960×540) → 1080p (1920×1080)
+  it("540p → 1080p with auto: 2× fits exactly on height", () => {
+    const result = computeEasuTarget(960, 540, 1920, 1080, "auto");
+    // 960*2=1920 <= 1920; 540*2=1080 <= 1080
+    expect(result.easuW).toBe(1920);
+    expect(result.easuH).toBe(1080);
+    expect(result.needsBicubic).toBe(false);
+  });
+
+  // 360p (640×360) → 1080p (1920×1080)
+  it("360p → 1080p with auto: 2× does not reach display, bicubic needed", () => {
+    const result = computeEasuTarget(640, 360, 1920, 1080, "auto");
+    // 640*2=1280, 360*2=720
+    expect(result.easuW).toBe(1280);
+    expect(result.easuH).toBe(720);
+    expect(result.needsBicubic).toBe(true);
+    expect(result.scaleValue).toBe(2);
+  });
+
+  // 240p (426×240) → 1080p (1920×1080)
+  it("240p → 1080p with auto: 2× still small, bicubic needed", () => {
+    const result = computeEasuTarget(426, 240, 1920, 1080, "auto");
+    // 426*2=852, 240*2=480
+    expect(result.easuW).toBe(852);
+    expect(result.easuH).toBe(480);
+    expect(result.needsBicubic).toBe(true);
+  });
+
+  // 1080p → 1080p (no upscale needed)
+  it("1080p → 1080p with auto: no upscale needed", () => {
+    const result = computeEasuTarget(1920, 1080, 1920, 1080, "auto");
+    // 1920*2=3840 > 1920 → cap; 1080*2=2160 > 1080 → cap
+    expect(result.easuW).toBe(1920);
+    expect(result.easuH).toBe(1080);
+    expect(result.needsBicubic).toBe(false);
+  });
+
+  // 360p → 1080p with 2.00×
+  it("360p → 1080p with 2.00×: same as auto max", () => {
+    const result = computeEasuTarget(640, 360, 1920, 1080, 2);
+    expect(result.easuW).toBe(1280);
+    expect(result.easuH).toBe(720);
+    expect(result.needsBicubic).toBe(true);
+    expect(result.targetScale).toBe(2);
+  });
+
+  // 360p → 1080p with 1.5×
+  it("360p → 1080p with 1.5×: smaller intermediate", () => {
+    const result = computeEasuTarget(640, 360, 1920, 1080, 1.5);
+    // 640*1.5=960, 360*1.5=540
+    expect(result.easuW).toBe(960);
+    expect(result.easuH).toBe(540);
+    expect(result.needsBicubic).toBe(true);
+    expect(result.targetScale).toBe(1.5);
+    expect(result.scaleValue).toBe(1.5);
+  });
+
+  // 360p → 1080p with "display": EASU goes to display dimensions
+  it("360p → 1080p with display: EASU targets display, no bicubic", () => {
+    const result = computeEasuTarget(640, 360, 1920, 1080, "display");
+    expect(result.easuW).toBe(1920);
+    expect(result.easuH).toBe(1080);
+    expect(result.needsBicubic).toBe(false);
+    expect(result.targetScale).toBe("display");
+    expect(result.scaleValue).toBeCloseTo(3);
+  });
+
+  // 480p (854×480) → 2160p (3840×2160) — auto caps at 2×
+  it("480p → 2160p with auto: caps at 2× source, bicubic needed", () => {
+    const result = computeEasuTarget(854, 480, 3840, 2160, "auto");
+    expect(result.easuW).toBe(1708);
+    expect(result.easuH).toBe(960);
+    expect(result.needsBicubic).toBe(true);
+    expect(result.scaleValue).toBe(2);
+  });
+
+  // 2.00× never exceeds 2× source
+  it("2.00× cap: never exceeds 2× source", () => {
+    const result = computeEasuTarget(640, 360, 3840, 2160, 2);
+    expect(result.easuW).toBe(1280);
+    expect(result.easuH).toBe(720);
+    expect(result.scaleValue).toBe(2);
+  });
+
+  // Aspect ratio preserved
+  it("aspect ratio is preserved (proportional scaling)", () => {
+    const result = computeEasuTarget(640, 360, 1920, 1080, "auto");
+    expect(result.easuW / result.easuH).toBeCloseTo(640 / 360, 5);
+  });
+
+  // Source larger than display: EASU targets display dims
+  it("source larger than display: EASU targets display dims", () => {
+    const result = computeEasuTarget(3840, 2160, 1920, 1080, "auto");
+    // sourceW > finalW, so proposedW would be capped at fw
+    expect(result.easuW).toBe(1920);
+    expect(result.easuH).toBe(1080);
+    expect(result.needsBicubic).toBe(false);
+  });
+
+  // Edge: source × 2 === display exactly
+  it("source × 2 equals display exactly", () => {
+    const result = computeEasuTarget(960, 540, 1920, 1080, "auto");
+    expect(result.easuW).toBe(1920);
+    expect(result.easuH).toBe(1080);
+    expect(result.needsBicubic).toBe(false);
   });
 });

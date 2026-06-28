@@ -33,6 +33,9 @@ export interface ProcessorStats {
   backend: string;
   framesProcessed: number;
   scalingAlgorithm: ScalingAlgorithm;
+  easuTargetWidth: number;
+  easuTargetHeight: number;
+  finalBicubicActive: boolean;
 }
 
 // ─── Processor ───────────────────────────────────────────────────────────────
@@ -178,6 +181,9 @@ export class ViewerImageProcessor {
       backend: backendStats?.backend ?? "unavailable",
       framesProcessed: this.framesProcessed,
       scalingAlgorithm: backendStats?.scalingAlgorithm ?? "native",
+      easuTargetWidth: backendStats?.easuTargetWidth ?? 0,
+      easuTargetHeight: backendStats?.easuTargetHeight ?? 0,
+      finalBicubicActive: backendStats?.finalBicubicActive ?? false,
     };
   }
 

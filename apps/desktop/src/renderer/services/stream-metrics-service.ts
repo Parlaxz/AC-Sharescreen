@@ -120,7 +120,7 @@ export class StreamMetricsService {
     state.lastQualityLabel = label;
   }
 
-  onStreamStop(mediaSessionId: string): void {
+  async onStreamStop(mediaSessionId: string): Promise<void> {
     const state = this.sessions.get(mediaSessionId);
     if (!state) return;
     const now = Date.now();
@@ -128,7 +128,7 @@ export class StreamMetricsService {
     this.takeSample(mediaSessionId);
     const record = this.buildRecord(state, now);
     if (record) {
-      this.persistRecord(record).catch(() => {});
+      await this.persistRecord(record);
     }
     this.sessions.delete(mediaSessionId);
   }
@@ -277,7 +277,7 @@ export class StreamMetricsService {
 
   private buildRecord(state: SessionState, now: number): StreamHistoryRecord | null {
     const durationMs = now - state.startedAt;
-    if (durationMs < 1000) return null;
+    // no minimum duration
     return {
       mediaSessionId: state.mediaSessionId,
       logicalStreamId: state.logicalStreamId,

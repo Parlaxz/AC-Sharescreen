@@ -34,7 +34,6 @@ import { cn } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 import type { StreamAnnouncement } from "@/stores/main-store";
 import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
-import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
 import type { ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
@@ -255,6 +254,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   enhancementSettingsRef.current = enhancementSettings;
   const enhancementFallbackRef = useRef(enhancementFallback);
   enhancementFallbackRef.current = enhancementFallback;
+  /** Tracks whether the stored viewerRequest has been auto-sent for this session */
+  const viewerRequestAutoSentRef = useRef(false);
 
   // ── Discord shortcut bindings (loaded from settings) ──
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
@@ -305,7 +306,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Bandwidth tracking ──
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
-  const [bandwidthModalOpen, setBandwidthModalOpen] = useState(false);
   const bandwidthTrackerRef = useRef(createBandwidthTracker());
   const bandwidthPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -338,7 +338,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           bandwidthTrackerRef.current = next;
           setTotalBytesReceived(next.totalBytesReceived);
           setCurrentBandwidthBps(next.currentBytesPerSecond);
-          StreamMetricsService.getInstance().feedViewerBandwidth(next.currentBytesPerSecond, next.totalBytesReceived);
         }
       } catch {
         // best-effort
@@ -908,6 +907,21 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [viewerRequest, watchingTarget]);
 
+  // ── Auto-send stored quality request when session starts watching ──
+  // When the user joins a new stream, the stored viewerRequest from a
+  // previous session is restored from localStorage but never dispatched
+  // to the new host. This effect sends it once when media connects.
+  useEffect(() => {
+    if (
+      sessionState === "watching" &&
+      viewerRequest &&
+      !viewerRequestAutoSentRef.current
+    ) {
+      viewerRequestAutoSentRef.current = true;
+      handleQualityRequestChange(viewerRequest);
+    }
+  }, [sessionState, viewerRequest, handleQualityRequestChange]);
+
   // ── Listen for incoming quality feedback (after currentStream is declared) ──
   useEffect(() => {
     const handleQualityEffective = (event: CustomEvent) => {
@@ -1263,7 +1277,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isScreenLinkDeafened={isScreenLinkDeafened}
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
-            onBandwidthClick={() => setBandwidthModalOpen(true)}
             totalBytesReceived={totalBytesReceived}
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
@@ -1704,7 +1717,6 @@ function VideoControlsOverlay({
   isScreenLinkDeafened?: boolean;
   onToggleScreenLinkDeafen?: () => void;
   currentBandwidthBps?: number;
-  onBandwidthClick?: () => void;
   totalBytesReceived?: number;
   discordMuteBinding?: ShortcutBinding;
   discordDeafenBinding?: ShortcutBinding;

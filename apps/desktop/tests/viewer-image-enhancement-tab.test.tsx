@@ -55,13 +55,14 @@ describe("ViewerSettingsPanel Image Enhancements tab", () => {
     expect(SCALING_ALGORITHM_LABELS["fsr1-easu"]).toBe("FSR 1 EASU");
   });
 
-  it("defaults have correct structure (no enhancedScaling, has scalingAlgorithm)", () => {
+  it("defaults have correct structure (no enhancedScaling, no fsrBicubicBlend)", () => {
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.scalingAlgorithm).toBe("native");
     expect((VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as Record<string, unknown>).enhancedScaling).toBeUndefined();
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.noiseProtection).toBeDefined();
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionCleanup).toBeDefined();
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.debanding).toBeDefined();
-    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.fsrBicubicBlend).toBeDefined();
+    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.fsrTargetScale).toBeDefined();
+    expect((VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as Record<string, unknown>).fsrBicubicBlend).toBeUndefined();
   });
 
   it("fires onEnhancementChange when settings prop changes via parent", () => {

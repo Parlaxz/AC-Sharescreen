@@ -270,27 +270,15 @@ export function useHostViewerDiagnostics(
         });
       }
 
-      // 2) Emit rows for viewers with host stats but no status yet
+            // 2) Augment existing rows with host stats (skip connections without viewer bindings)
       if (hostStats) {
         for (const [peerUuid] of hostStats) {
-          const viewerDeviceId = peerToViewer.get(peerUuid) ?? `sdk:${peerUuid.slice(0, 8)}`;
+          const viewerDeviceId = peerToViewer.get(peerUuid);
+          if (!viewerDeviceId) continue;
           if (seen.has(viewerDeviceId)) {
-            // Already emitted above â€” augment with host stats
-            const existing = newRows.find((r) => r.viewerDeviceId === viewerDeviceId);
+            const existing = newRows.find(function(r) { return r.viewerDeviceId === viewerDeviceId; });
             if (existing) existing.sent = toSentStats(hostStats.get(peerUuid) ?? null);
-            continue;
           }
-          seen.add(viewerDeviceId);
-          newRows.push({
-            viewerDeviceId,
-            displayName: viewerDeviceId.slice(0, 8),
-            connectedAt: now,
-            state: "unknown",
-            received: EMPTY_RECEIVED,
-            sent: toSentStats(hostStats.get(peerUuid) ?? null),
-            requested: EMPTY_REQUESTED,
-            lastStatusAt: null,
-          });
         }
       }
 

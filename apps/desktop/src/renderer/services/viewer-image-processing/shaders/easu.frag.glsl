@@ -200,6 +200,12 @@ void main() {
     fsrEasuTap(aC, aW, vec2( 0.0,  2.0) - pp, dir, len2, lob, clp, n);
 
     vec3 raw = aC * safeRcp(aW);
+    // Note: u_antiRinging neighborhood clamp is non-AMD-standard.
+    // The official AMD FSR 1 EASU does not include a neighborhood
+    // anti-ringing pass — it relies entirely on the adaptive
+    // EASU reconstruction filter to suppress ringing.
+    // This is a ScreenLink addition for safety on aggressively
+    // compressed streams where EASU can produce overshoot.
     vec3 deringed = clamp(raw, min4, max4);
     vec3 pix = mix(raw, deringed, clamp(u_antiRinging, 0.0, 1.0));
 
