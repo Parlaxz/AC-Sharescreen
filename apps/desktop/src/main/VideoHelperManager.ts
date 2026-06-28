@@ -451,7 +451,8 @@ export class VideoHelperManager {
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      socket.removeListener("data", this.controlDataHandler);
+      // Don't remove the shared control data handler — only remove this pending entry
+      this.pendingCommands.delete(pendingKey);
       this.commandInFlight = false;
       next.resolve(null);
       this.processQueue();

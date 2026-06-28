@@ -84,7 +84,7 @@ export async function probeNvidiaCapability(): Promise<NvidiaCapabilityState> {
     const result = await api.probeNvidiaVsrCapability();
     state = {
       available: result.available,
-      reason: (result.reason as CapabilityReason) || "helper-missing",
+      reason: (result.reason as CapabilityReason) || "helper-failed",
       adapterName: result.adapterName ?? null,
       driverVersion: result.driverVersion ?? null,
       supportedModes: result.supportedModes ? result.supportedModes.split(",").map(s => s.trim()) : [],
@@ -92,8 +92,14 @@ export async function probeNvidiaCapability(): Promise<NvidiaCapabilityState> {
       probing: false,
       probed: true,
     };
-  } catch {
-    state = { ...state, probing: false, probed: true };
+  } catch (err) {
+    state = {
+      ...state,
+      available: false,
+      reason: "helper-failed",
+      probing: false,
+      probed: true,
+    };
   }
 
   notify();

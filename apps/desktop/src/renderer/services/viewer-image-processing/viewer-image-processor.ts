@@ -383,6 +383,8 @@ export class ViewerImageProcessor {
     this.framesProcessed++;
 
     if (!result.success) {
+      // Don't count failures in the processed count
+      this.framesProcessed--;
       this.callbacks.onError?.("Frame processing failed");
       // Transition to error state so the parent can fall back to native video
       this.state = "error";

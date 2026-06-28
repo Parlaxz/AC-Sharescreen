@@ -3,7 +3,7 @@
  * Factory for creating the appropriate image processing backend based on
  * settings and runtime capabilities.
  *
- * WebGL2 is the only available backend.
+ * Currently only WebGL2 is available. NVIDIA VSR backend requires SDK build.
  */
 
 import type { ViewerImageEnhancementSettings } from "./viewer-image-settings";
@@ -13,6 +13,10 @@ import {
   getImageProcessingCapabilities,
   type ImageProcessingCapabilities,
 } from "./viewer-image-capabilities";
+import {
+  getNvidiaCapabilitySnapshot,
+  probeNvidiaCapability,
+} from "../nvidia-capability-store.js";
 
 export type BackendSelection = "auto" | "webgl2";
 
@@ -27,25 +31,25 @@ export interface BackendSelectionResult {
  * Create the appropriate image processing backend based on settings and
  * capabilities.
  *
- * @param settings - Current user settings (uses `processingBackend` field)
- * @param capabilities - Optional injected capabilities; auto-detected if omitted
+ * Falls back to WebGL2 when NVIDIA VSR is unavailable (sdk-not-built).
  */
 export function createImageProcessingBackend(
   settings: ViewerImageEnhancementSettings,
   capabilities?: ImageProcessingCapabilities,
 ): BackendSelectionResult {
   const caps = capabilities ?? getImageProcessingCapabilities();
-  const requested: BackendSelection =
-    (settings.processingBackend as BackendSelection) ?? "webgl2";
 
-  if (caps.webgl2Available) {
-    return {
-      backend: new WebGL2ViewerImageBackend(),
-      requested,
-      effective: "webgl2",
-    };
+  // Check NVIDIA capability store — force WebGL2 if unable
+  const nvidiaCaps = getNvidiaCapabilitySnapshot();
+  if (!nvidiaCaps.probed) {
+    // Trigger async probe — next factory call will see result
+    void probeNvidiaCapability();
   }
 
-  // No available backend
-  throw new Error("No image processing backend available");
+  return {
+    backend: new WebGL2ViewerImageBackend(),
+    requested: "webgl2",
+    effective: "webgl2",
+    fallbackReason: nvidiaCaps.probed ? nvidiaCaps.reason || "nvidia-unavailable" : undefined,
+  };
 }

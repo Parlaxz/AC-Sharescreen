@@ -4,7 +4,6 @@ import {
   PopoverAnchor,
   PopoverContent,
 } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ViewerSettingsPanel, type ViewerRequestState } from "./ViewerSettingsPanel.js";
 import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { BandwidthGraphModal } from "../BandwidthGraphModal.js";
@@ -111,7 +110,6 @@ export function ViewerPanelShell({
         collisionPadding={16}
         className={`${width} p-4`}
       >
-        <ScrollArea className="max-h-[calc(85vh-2rem)]">
           {activePanel === "settings" && (
             <ViewerSettingsPanel
               contentOnly
@@ -152,7 +150,6 @@ export function ViewerPanelShell({
               viewerHistoryId={viewerHistoryId}
             />
           )}
-        </ScrollArea>
       </PopoverContent>
     </Popover>
   );

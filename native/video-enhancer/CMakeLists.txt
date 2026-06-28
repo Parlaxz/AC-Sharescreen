@@ -36,16 +36,18 @@ set(SOURCES
 # NVIDIA VFX integration (disabled by default)
 option(SCREENLINK_ENABLE_NVIDIA_VFX "Enable NVIDIA Video Effects SDK" OFF)
 
+# Executable must be defined before target_compile_definitions can reference it
+add_executable(${PROJECT_NAME} ${SOURCES})
+
 if(SCREENLINK_ENABLE_NVIDIA_VFX)
   if(NOT DEFINED NVIDIA_VFX_SDK_ROOT)
     message(FATAL_ERROR "NVIDIA_VFX_SDK_ROOT must be set when SCREENLINK_ENABLE_NVIDIA_VFX=ON")
   endif()
   target_compile_definitions(${PROJECT_NAME} PRIVATE SCREENLINK_NVIDIA_VFX_ENABLED)
   # Future: add VFX headers, link libraries
+  # target_include_directories(${PROJECT_NAME} PRIVATE ${NVIDIA_VFX_SDK_ROOT}/include)
+  # target_link_libraries(${PROJECT_NAME} PRIVATE ${NVIDIA_VFX_SDK_ROOT}/lib/NvVFX.lib)
 endif()
-
-# Executable
-add_executable(${PROJECT_NAME} ${SOURCES})
 
 # Regenerate build provenance at every build (not just configure)
 # Uses VHC_SOURCE_DIR/VHC_BINARY_DIR to avoid CMAKE_SOURCE_DIR confusion in -P mode.

@@ -396,6 +396,9 @@ export class StreamMetricsService {
         }
         conn.state = "playing";
         this.addConnectionMarker(conn, "resume", null, "resumed", "Session resumed");
+      } else if (newState === "playing" && connOldState === "reconnecting") {
+        conn.state = "playing";
+        this.addConnectionMarker(conn, "reconnect", null, "connected", "Reconnect completed");
       } else if (newState === "reconnecting") {
         conn.state = "reconnecting";
         this.addConnectionMarker(conn, "reconnect", null, "reconnecting", "Session reconnecting");

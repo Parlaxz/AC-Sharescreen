@@ -538,6 +538,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   );
 
   const handleRetry = useCallback(() => {
+    if (viewerHistoryIdRef.current) {
+      StreamMetricsService.getInstance().addMarker(
+        viewerHistoryIdRef.current, "reconnect", "error", "reconnecting", "Retry initiated"
+      );
+    }
     if (sessionRef.current) {
       setViewStatus("connecting");
       void sessionRef.current.retry();
@@ -551,6 +556,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const handlePauseStream = useCallback(async () => {
     const session = sessionRef.current;
     if (!session || session.pauseState !== "playing") return;
+    if (viewerHistoryIdRef.current) {
+      StreamMetricsService.getInstance().addMarker(
+        viewerHistoryIdRef.current, "pause", "playing", "paused", "User paused stream"
+      );
+      StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "paused");
+    }
     try {
       await session.pause();
     } catch (err) {
@@ -561,6 +572,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const handleResumeStream = useCallback(async () => {
     const session = sessionRef.current;
     if (!session || session.pauseState !== "paused") return;
+    if (viewerHistoryIdRef.current) {
+      StreamMetricsService.getInstance().addMarker(
+        viewerHistoryIdRef.current, "resume", "paused", "playing", "User resumed stream"
+      );
+      StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "playing");
+    }
     try {
       await session.resume();
     } catch (err) {
@@ -593,6 +610,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   const handleEnhancementProcessingError = useCallback((reason: string) => {
     console.warn("[ViewerWorkspace] GPU enhancement error:", reason);
+    if (viewerHistoryIdRef.current) {
+      StreamMetricsService.getInstance().addMarker(
+        viewerHistoryIdRef.current, "enhancement", "webgl2", "webgl2", `Enhancement fallback: ${reason}`
+      );
+    }
     setEnhancementActive(false);
     setEnhancementFallback(true);
   }, []);
@@ -970,6 +992,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       // Accept optimistically — real feedback comes via quality.effective messages
       setQualityFeedback(`Requested ${newRequest.videoBitrateKbps} kbps, ${newRequest.maxWidth}×${newRequest.maxHeight} @ ${newRequest.maxFps}fps — awaiting host response`);
       setLastQualityAccepted(undefined);
+      if (viewerHistoryIdRef.current) {
+        StreamMetricsService.getInstance().addMarker(
+          viewerHistoryIdRef.current, "preset", null,
+          `${newRequest.videoBitrateKbps}kbps ${newRequest.maxWidth}×${newRequest.maxHeight}`,
+          `Quality request: ${newRequest.videoBitrateKbps}kbps`
+        );
+      }
     } catch (err) {
       setViewerRequest(prevRequest);
       setQualityFeedback(`Failed to send quality request: ${err instanceof Error ? err.message : String(err)}`);
