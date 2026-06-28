@@ -510,6 +510,20 @@ export class PublisherManager {
   }
 
   /**
+   * Re-attach the track-ended handler to the currently published video track.
+   * Called after a failed source switch to restore the handler that was
+   * removed by detachTrackEnded(). Without this, the old track ending
+   * naturally (user closes source app) would never trigger stopStream.
+   */
+  reattachTrackEnded(): void {
+    if (this._publishedVideoTrack) {
+      this._publishedVideoTrack.onended = () => {
+        this.events.onTrackEnded(this._publishedVideoTrack!);
+      };
+    }
+  }
+
+  /**
    * Replace the video track on the publisher with a new one.
    * Delegates to HostPublisher.replaceVideoTrack which calls the SDK's
    * public replaceTrack. Updates the internal combined stream reference
