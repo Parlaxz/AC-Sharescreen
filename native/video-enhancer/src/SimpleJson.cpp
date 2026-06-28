@@ -47,6 +47,10 @@ static std::string ParseString(std::string_view& input) {
 
 static JsonValue ParseValue(std::string_view& input);
 
+// ─── Serialize helper (forward decl) ───────────────────────────────────
+
+static std::string SerializeJsonValue(const JsonValue& value);
+
 static double ParseNumber(std::string_view& input) {
     size_t i = 0;
     bool negative = false;
@@ -84,12 +88,12 @@ static JsonValue ParseValue(std::string_view& input) {
     switch (input.front()) {
         case '"': return JsonValue(ParseString(input));
         case '{': {
+            auto obj = std::make_shared<JsonObject>();
             input.remove_prefix(1); // skip '{'
-            JsonObject obj;
             input = TrimWhitespace(input);
             if (!input.empty() && input.front() == '}') {
                 input.remove_prefix(1);
-                return JsonValue(obj);
+                return JsonValue(std::move(obj));
             }
             while (true) {
                 input = TrimWhitespace(input);
@@ -99,7 +103,7 @@ static JsonValue ParseValue(std::string_view& input) {
                 input = TrimWhitespace(input);
                 if (input.empty() || input.front() != ':') throw std::runtime_error("Expected ':'");
                 input.remove_prefix(1); // skip ':'
-                obj[key] = ParseValue(input);
+                (*obj)[key] = ParseValue(input);
                 input = TrimWhitespace(input);
                 if (input.empty()) throw std::runtime_error("Unexpected end of object");
                 if (input.front() == '}') {
@@ -143,53 +147,62 @@ JsonObject ParseJson(std::string_view json) {
     if (input.empty() || input.front() != '{')
         throw std::runtime_error("Expected JSON object starting with '{'");
     auto val = ParseValue(input);
-    return std::move(std::get<JsonObject>(val));
+    return std::move(*std::get<std::shared_ptr<JsonObject>>(val));
+}
+
+static std::string SerializeJsonValue(const JsonValue& value) {
+    if (std::holds_alternative<std::nullptr_t>(value)) {
+        return "null";
+    } else if (std::holds_alternative<bool>(value)) {
+        return std::get<bool>(value) ? "true" : "false";
+    } else if (std::holds_alternative<double>(value)) {
+        double d = std::get<double>(value);
+        if (d == static_cast<int64_t>(d)) {
+            return std::to_string(static_cast<int64_t>(d));
+        }
+        return std::to_string(d);
+    } else if (std::holds_alternative<std::string>(value)) {
+        const auto& s = std::get<std::string>(value);
+        std::string out = "\"";
+        for (char c : s) {
+            switch (c) {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                default: out += c;
+            }
+        }
+        out += "\"";
+        return out;
+    } else if (std::holds_alternative<std::shared_ptr<JsonObject>>(value)) {
+        return SerializeJson(*std::get<std::shared_ptr<JsonObject>>(value));
+    }
+    return "null";
 }
 
 std::string SerializeJson(const JsonObject& obj) {
-    std::ostringstream os;
-    os << "{";
+    std::string os = "{";
     bool first = true;
     for (const auto& [key, value] : obj) {
-        if (!first) os << ",";
+        if (!first) os += ",";
         first = false;
-        os << "\"" << key << "\":";
-        if (std::holds_alternative<std::nullptr_t>(value)) {
-            os << "null";
-        } else if (std::holds_alternative<bool>(value)) {
-            os << (std::get<bool>(value) ? "true" : "false");
-        } else if (std::holds_alternative<double>(value)) {
-            double d = std::get<double>(value);
-            if (d == static_cast<int64_t>(d)) {
-                os << static_cast<int64_t>(d);
-            } else {
-                os << d;
-            }
-        } else if (std::holds_alternative<std::string>(value)) {
-            const auto& s = std::get<std::string>(value);
-            os << "\"";
-            for (char c : s) {
-                switch (c) {
-                    case '"': os << "\\\""; break;
-                    case '\\': os << "\\\\"; break;
-                    case '\n': os << "\\n"; break;
-                    case '\r': os << "\\r"; break;
-                    case '\t': os << "\\t"; break;
-                    default: os << c;
-                }
-            }
-            os << "\"";
-        }
+        os += "\"" + key + "\":";
+        os += SerializeJsonValue(value);
     }
-    os << "}";
-    return os.str();
+    os += "}";
+    return os;
 }
 
-const std::string* GetString(const JsonObject& obj, const std::string& key) {
+std::optional<std::string> GetString(const JsonObject& obj, const std::string& key) {
     auto it = obj.find(key);
-    if (it != obj.end() && std::holds_alternative<std::string>(it->second))
-        return &std::get<std::string>(it->second);
-    return nullptr;
+    if (it == obj.end()) return std::nullopt;
+    if (std::holds_alternative<std::string>(it->second))
+        return std::get<std::string>(it->second);
+    if (std::holds_alternative<std::shared_ptr<JsonObject>>(it->second))
+        return SerializeJson(*std::get<std::shared_ptr<JsonObject>>(it->second));
+    return std::nullopt;
 }
 
 double GetNumber(const JsonObject& obj, const std::string& key, double fallback) {

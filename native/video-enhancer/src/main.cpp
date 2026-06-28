@@ -1,21 +1,125 @@
 #include "BuildInfo.h"
 #include "Protocol.h"
-#include "CapabilityProbe.h"
 #include "FrameTransport.h"
-#include "SharedFrameRing.h"
-#include "NvidiaVsrContext.h"
 #include "Diagnostics.h"
 #include "SimpleJson.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 
 namespace sv = screenlink::video;
+
+// ─── CPU-staging bilinear upscale context ─────────────────────────────
+
+/// Simple CPU-based bilinear upscaler (Phase 7 staging).
+/// Replace with GPU-accelerated processing in Phase 7+.
+class ProcessingContext {
+public:
+    ProcessingContext() = default;
+    ~ProcessingContext() = default;
+    ProcessingContext(const ProcessingContext&) = delete;
+    ProcessingContext& operator=(const ProcessingContext&) = delete;
+
+    bool Initialize(uint32_t inputW, uint32_t inputH,
+                    uint32_t outputW, uint32_t outputH) {
+        inputWidth_ = inputW;
+        inputHeight_ = inputH;
+        outputWidth_ = outputW;
+        outputHeight_ = outputH;
+        initialized_ = true;
+        printf("[ProcessingContext] Initialized (CPU staging): %ux%u -> %ux%u\n",
+               inputW, inputH, outputW, outputH);
+        return true;
+    }
+
+    void Shutdown() {
+        if (initialized_) {
+            printf("[ProcessingContext] Shutdown\n");
+        }
+        initialized_ = false;
+    }
+
+    bool ProcessFrame(const void* inputData, uint32_t inputSize,
+                      void* outputData, uint32_t outputSize) {
+        if (!initialized_) return false;
+
+        uint32_t expectedInput = inputWidth_ * inputHeight_ * 4;
+        uint32_t expectedOutput = outputWidth_ * outputHeight_ * 4;
+
+        if (inputSize < expectedInput || outputSize < expectedOutput) {
+            fprintf(stderr, "[ProcessingContext] Buffer size mismatch: "
+                    "input %u/%u, output %u/%u\n",
+                    inputSize, expectedInput, outputSize, expectedOutput);
+            return false;
+        }
+
+        BilinearUpscale(
+            static_cast<const uint8_t*>(inputData), inputWidth_, inputHeight_,
+            static_cast<uint8_t*>(outputData), outputWidth_, outputHeight_);
+        return true;
+    }
+
+    bool IsInitialized() const { return initialized_; }
+
+private:
+    static uint8_t Lerp(uint8_t a, uint8_t b, float t) {
+        return static_cast<uint8_t>(
+            static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * t);
+    }
+
+    static void BilinearUpscale(const uint8_t* src, uint32_t srcW, uint32_t srcH,
+                                uint8_t* dst, uint32_t dstW, uint32_t dstH) {
+        for (uint32_t dy = 0; dy < dstH; ++dy) {
+            float srcYf = (static_cast<float>(dy) + 0.5f) * static_cast<float>(srcH)
+                          / static_cast<float>(dstH) - 0.5f;
+            if (srcYf < 0.0f) srcYf = 0.0f;
+            if (srcYf > static_cast<float>(srcH) - 1.001f)
+                srcYf = static_cast<float>(srcH) - 1.001f;
+
+            uint32_t srcY0 = static_cast<uint32_t>(srcYf);
+            uint32_t srcY1 = std::min(srcY0 + 1, srcH - 1);
+            float ty = srcYf - static_cast<float>(srcY0);
+
+            for (uint32_t dx = 0; dx < dstW; ++dx) {
+                float srcXf = (static_cast<float>(dx) + 0.5f) * static_cast<float>(srcW)
+                              / static_cast<float>(dstW) - 0.5f;
+                if (srcXf < 0.0f) srcXf = 0.0f;
+                if (srcXf > static_cast<float>(srcW) - 1.001f)
+                    srcXf = static_cast<float>(srcW) - 1.001f;
+
+                uint32_t srcX0 = static_cast<uint32_t>(srcXf);
+                uint32_t srcX1 = std::min(srcX0 + 1, srcW - 1);
+                float tx = srcXf - static_cast<float>(srcX0);
+
+                const uint8_t* p00 = src + (srcY0 * srcW + srcX0) * 4;
+                const uint8_t* p10 = src + (srcY0 * srcW + srcX1) * 4;
+                const uint8_t* p01 = src + (srcY1 * srcW + srcX0) * 4;
+                const uint8_t* p11 = src + (srcY1 * srcW + srcX1) * 4;
+
+                uint8_t* out = dst + (dy * dstW + dx) * 4;
+
+                for (int c = 0; c < 4; ++c) {
+                    float top = static_cast<float>(Lerp(p00[c], p10[c], tx));
+                    float bot = static_cast<float>(Lerp(p01[c], p11[c], tx));
+                    out[c] = static_cast<uint8_t>(top + (bot - top) * ty);
+                }
+            }
+        }
+    }
+
+    bool initialized_ = false;
+    uint32_t inputWidth_ = 0;
+    uint32_t inputHeight_ = 0;
+    uint32_t outputWidth_ = 0;
+    uint32_t outputHeight_ = 0;
+};
 
 // ─── Global configuration (set by --serve commands) ───────────────────
 
@@ -31,7 +135,7 @@ static struct {
     bool configured = false;
 } g_config;
 
-static sv::NvidiaVsrContext g_vsr;
+static ProcessingContext g_processor;
 
 // ─── Helper: create JSON response ─────────────────────────────────────
 
@@ -47,9 +151,9 @@ static sv::JsonObject MakeResponse(bool success, const std::string& errorMsg = "
 // ─── Command handlers ─────────────────────────────────────────────────
 
 static bool HandleHello(const sv::JsonObject& payload) {
-    auto* proto = sv::GetString(payload, "protocolVersion");
-    auto* sid = sv::GetString(payload, "sessionId");
-    auto* token = sv::GetString(payload, "authToken");
+    auto proto = sv::GetString(payload, "protocolVersion");
+    auto sid = sv::GetString(payload, "sessionId");
+    auto token = sv::GetString(payload, "authToken");
 
     if (!proto || !sid || !token) {
         fprintf(stderr, "[Serve] hello: missing required fields\n");
@@ -79,9 +183,9 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
     g_config.qualityLevel = static_cast<uint32_t>(
         sv::GetNumber(payload, "qualityLevel", 2));
 
-    g_vsr.Shutdown();
-    bool ok = g_vsr.Initialize(g_config.inputWidth, g_config.inputHeight,
-                                g_config.outputWidth, g_config.outputHeight);
+    g_processor.Shutdown();
+    bool ok = g_processor.Initialize(g_config.inputWidth, g_config.inputHeight,
+                                     g_config.outputWidth, g_config.outputHeight);
     g_config.configured = ok;
 
     printf("[Serve] Configured: %ux%u -> %ux%u mode=%u quality=%u %s\n",
@@ -121,18 +225,18 @@ static bool HandleSubmitFrame(const sv::JsonObject& /*payload*/,
     // Process frame (CPU-staging bilinear upscale)
     auto start = std::chrono::steady_clock::now();
 
-    // If dimensions differ, reinitialize VSR context
+    // If dimensions differ, reinitialize processing context
     if (inW != g_config.inputWidth || inH != g_config.inputHeight ||
         outW != g_config.outputWidth || outH != g_config.outputHeight) {
-        g_vsr.Shutdown();
-        g_vsr.Initialize(inW, inH, outW, outH);
+        g_processor.Shutdown();
+        g_processor.Initialize(inW, inH, outW, outH);
         g_config.inputWidth = inW;
         g_config.inputHeight = inH;
         g_config.outputWidth = outW;
         g_config.outputHeight = outH;
     }
 
-    bool processOk = g_vsr.ProcessFrame(
+    bool processOk = g_processor.ProcessFrame(
         frameData.data(), static_cast<uint32_t>(frameData.size()),
         outputData.data(), outSize);
 
@@ -329,7 +433,7 @@ static int RunServe(const std::vector<std::string>& args) {
                         sv::SerializeJson(MakeResponse(true)));
                     transport.CloseControlPipe();
                     transport.CloseFramePipe();
-                    g_vsr.Shutdown();
+                    g_processor.Shutdown();
                     return 0;
 
                 default:

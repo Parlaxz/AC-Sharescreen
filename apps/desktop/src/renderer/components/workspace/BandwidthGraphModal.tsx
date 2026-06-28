@@ -1,4 +1,4 @@
-import { useSyncExternalStore, useMemo, useState, useCallback } from "react";
+import { Fragment, useSyncExternalStore, useMemo, useState, useCallback } from "react";
 import {
   Area,
   AreaChart,
@@ -43,7 +43,6 @@ import type {
 } from "@/services/bandwidth-telemetry-types";
 import {
   fmtBitRate,
-  fmtByteRate,
   fmtCumulativeBytes,
   fmtDuration,
   fmtHourlyUsage,
@@ -88,6 +87,7 @@ interface BandwidthGraphModalProps {
   mediaSessionId: string | null;
   viewerMode?: boolean;
   viewerHistoryId?: string | null;
+  contentOnly?: boolean;
 }
 
 // ─── Chart data types ───────────────────────────────────────────────────────
@@ -176,11 +176,11 @@ function getChartData(
       if (s.timestampMs < cutoff) continue;
       data.push({
         time: (s.timestampMs - baseTime) / 1000,
-        smoothed: i < ewmaSeries.length ? ewmaSeries[i] / 8 : undefined,
-        raw: showRaw ? s.mediaBitsPerSecond / 8 : undefined,
-        target: s.configuredVideoBitsPerSecond ? s.configuredVideoBitsPerSecond / 8 : undefined,
-        video: s.videoBitsPerSecond ? s.videoBitsPerSecond / 8 : null,
-        audio: s.audioBitsPerSecond ? s.audioBitsPerSecond / 8 : null,
+        smoothed: i < ewmaSeries.length ? ewmaSeries[i] : undefined,
+        raw: showRaw ? s.mediaBitsPerSecond : undefined,
+        target: s.configuredVideoBitsPerSecond ?? undefined,
+        video: s.videoBitsPerSecond ?? null,
+        audio: s.audioBitsPerSecond ?? null,
       });
     }
 
@@ -286,10 +286,10 @@ function formatTimeAxis(seconds: number): string {
   return `${s}s`;
 }
 
-function formatByteAxis(value: number): string {
-  if (value >= 1_048_576) return (value / 1_048_576).toFixed(1) + "M";
-  if (value >= 1024) return Math.round(value / 1024) + "K";
-  return String(Math.round(value));
+function formatBitRateAxis(bitsPerSecond: number): string {
+  if (bitsPerSecond >= 1_000_000) return (bitsPerSecond / 1_000_000).toFixed(1) + "M";
+  if (bitsPerSecond >= 1000) return Math.round(bitsPerSecond / 1000) + "K";
+  return String(Math.round(bitsPerSecond));
 }
 
 // ─── useBandwidthSnapshot hook ──────────────────────────────────────────────
@@ -338,7 +338,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Smoothed</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtByteRate(d.smoothed)}
+              {fmtBitRate(d.smoothed)}
             </span>
           </div>
         )}
@@ -346,7 +346,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Raw</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtByteRate(d.raw)}
+              {fmtBitRate(d.raw)}
             </span>
           </div>
         )}
@@ -354,7 +354,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Target</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtByteRate(d.target)}
+              {fmtBitRate(d.target)}
             </span>
           </div>
         )}
@@ -362,7 +362,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Video</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtByteRate(d.video)}
+              {fmtBitRate(d.video)}
             </span>
           </div>
         )}
@@ -370,7 +370,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Audio</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtByteRate(d.audio)}
+              {fmtBitRate(d.audio)}
             </span>
           </div>
         )}
@@ -476,6 +476,7 @@ export function BandwidthGraphModal({
   mediaSessionId,
   viewerMode = false,
   viewerHistoryId = null,
+  contentOnly = false,
 }: BandwidthGraphModalProps) {
   // Resolve history ID
   const resolved = useMemo(
@@ -556,6 +557,403 @@ export function BandwidthGraphModal({
     snapshot.mediumBuckets.length > 0 ||
     snapshot.longBuckets.length > 0;
 
+  const content = (
+    <Fragment>
+      <div className="text-lg font-semibold mb-4 text-text-primary">
+        Bandwidth
+      </div>
+
+      <ScrollArea className="max-h-[calc(85vh-8rem)] pr-2">
+        {/* ── Summary Row ── */}
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4 text-sm">
+          <SummaryItem
+            label="Current"
+            value={fmtBitRate(snapshot.currentBitsPerSecond)}
+          />
+          <SummaryItem label="30s Avg" value={fmtBitRate(avg30s)} />
+          <SummaryItem
+            label="Peak"
+            value={fmtBitRate(snapshot.peakBitsPerSecond)}
+          />
+          <SummaryItem
+            label="Total"
+            value={fmtCumulativeBytes(snapshot.totalBytes)}
+          />
+          <SummaryItem
+            label="Est/hr"
+            value={
+              hourlyEstimate > 0
+                ? fmtHourlyUsage(hourlyEstimate)
+                : "\u2014"
+            }
+          />
+          <SummaryItem label="Duration">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-mono tabular-nums">
+                {fmtDuration(snapshot.durationMs)}
+              </span>
+              {snapshot.state === "paused" && (
+                <Badge variant="warning" className="text-[10px] px-1.5 py-0">
+                  paused
+                </Badge>
+              )}
+              {snapshot.state === "reconnecting" && (
+                <Badge
+                  variant="destructive"
+                  className="text-[10px] px-1.5 py-0"
+                >
+                  reconnecting
+                </Badge>
+              )}
+            </div>
+          </SummaryItem>
+        </div>
+
+        {/* ── Time Range Selector ── */}
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex gap-0.5">
+            {TIME_RANGES.map((r) => (
+              <Button
+                key={r.label}
+                variant={timeRange === r.value ? "default" : "outline"}
+                size="sm"
+                onClick={() => setTimeRange(r.value)}
+                className="text-xs"
+              >
+                {r.label}
+              </Button>
+            ))}
+          </div>
+
+          {chartData.length > 0 &&
+            snapshot.rawSamples.length > 0 &&
+            timeRange <= 300_000 && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={showRaw ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setShowRaw(!showRaw)}
+                    className="text-xs"
+                  >
+                    Raw
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  Toggle raw bandwidth samples
+                </TooltipContent>
+              </Tooltip>
+            )}
+        </div>
+
+        {/* ── Per-Viewer Selector (Host Mode) ── */}
+        {role === "host" && viewerOptions.length > 1 && (
+          <div className="mb-3">
+            <Select
+              value={selectedViewer}
+              onValueChange={setSelectedViewer}
+            >
+              <SelectTrigger className="w-48 h-8 text-xs">
+                <SelectValue placeholder="All Viewers" />
+              </SelectTrigger>
+              <SelectContent>
+                {viewerOptions.map((opt) => (
+                  <SelectItem
+                    key={opt.value}
+                    value={opt.value}
+                    className="text-xs"
+                  >
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
+
+        {/* ── Empty State ── */}
+        {!hasData ? (
+          <div className="h-64 flex items-center justify-center text-sm text-text-muted">
+            Aucune donnée de bande passante disponible pour l&apos;instant.
+          </div>
+        ) : (
+          <Tabs defaultValue="throughput">
+            <TabsList className="mb-2">
+              <TabsTrigger value="throughput">Throughput</TabsTrigger>
+              <TabsTrigger value="health">
+                Connection Health
+              </TabsTrigger>
+            </TabsList>
+
+            {/* ── Throughput Tab ── */}
+            <TabsContent value="throughput">
+              {chartData.length === 0 ? (
+                <div className="h-48 flex items-center justify-center text-sm text-text-muted">
+                  Aucune donnée de bande passante disponible pour
+                  l&apos;instant.
+                </div>
+              ) : (
+                <div className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={chartData}
+                      margin={{
+                        top: 16,
+                        right: 16,
+                        left: 8,
+                        bottom: 8,
+                      }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="var(--color-border)"
+                      />
+                      <XAxis
+                        dataKey="time"
+                        tickFormatter={formatTimeAxis}
+                        tick={{ fontSize: 11 }}
+                        stroke="var(--color-text-muted)"
+                      />
+                      <YAxis
+                        tickFormatter={formatBitRateAxis}
+                        tick={{ fontSize: 11 }}
+                        stroke="var(--color-text-muted)"
+                        label={{
+                          value: "bps",
+                          angle: -90,
+                          position: "insideLeft",
+                          style: {
+                            fontSize: 11,
+                            fill: "var(--color-text-muted)",
+                          },
+                        }}
+                      />
+                      <RechartsTooltip
+                        content={<ThroughputTooltip />}
+                      />
+
+                      {/* Smoothed (EWMA) line */}
+                      <Area
+                        type="monotone"
+                        dataKey="smoothed"
+                        name="Smoothed"
+                        stroke="var(--color-accent)"
+                        fill="var(--color-accent)"
+                        fillOpacity={0.08}
+                        isAnimationActive={false}
+                        dot={false}
+                        strokeWidth={2}
+                      />
+
+                      {/* Raw samples area (optional toggle) */}
+                      {showRaw && (
+                        <Area
+                          type="monotone"
+                          dataKey="raw"
+                          name="Raw"
+                          stroke="var(--color-text-muted)"
+                          fill="var(--color-text-muted)"
+                          fillOpacity={0.04}
+                          isAnimationActive={false}
+                          dot={false}
+                          strokeWidth={1}
+                        />
+                      )}
+
+                      {/* Target reference line */}
+                      {snapshot.configuredBitsPerSecond != null &&
+                        snapshot.configuredBitsPerSecond > 0 && (
+                          <ReferenceLine
+                            y={snapshot.configuredBitsPerSecond}
+                            stroke="var(--color-warning)"
+                            strokeDasharray="6 3"
+                            label={
+                              <Label
+                                value={`Target: ${fmtBitRate(snapshot.configuredBitsPerSecond)}`}
+                                position="right"
+                                style={{
+                                  fontSize: 10,
+                                  fill: "var(--color-warning)",
+                                }}
+                              />
+                            }
+                          />
+                        )}
+
+                      {/* Marker reference lines */}
+                      {visibleMarkers.map((cluster) => {
+                        const first = cluster[0];
+                        const markerTime =
+                          (first.timestampMs - baseTime) / 1000;
+                        const label =
+                          cluster.length === 1
+                            ? first.label
+                            : `${first.label} +${cluster.length - 1}`;
+                        const color = getMarkerColor(first.type);
+
+                        return (
+                          <ReferenceLine
+                            key={first.id}
+                            x={markerTime}
+                            stroke={color}
+                            strokeDasharray="4 4"
+                            label={
+                              <Label
+                                value={label}
+                                position="top"
+                                style={{
+                                  fontSize: 10,
+                                  fill: color,
+                                }}
+                              />
+                            }
+                          />
+                        );
+                      })}
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </TabsContent>
+
+            {/* ── Connection Health Tab ── */}
+            <TabsContent value="health">
+              {healthData.length === 0 ? (
+                <div className="h-48 flex items-center justify-center text-sm text-text-muted">
+                  No connection health data available.
+                </div>
+              ) : (
+                <div className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={healthData}
+                      margin={{
+                        top: 16,
+                        right: 16,
+                        left: 8,
+                        bottom: 8,
+                      }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="var(--color-border)"
+                      />
+                      <XAxis
+                        dataKey="time"
+                        tickFormatter={formatTimeAxis}
+                        tick={{ fontSize: 11 }}
+                        stroke="var(--color-text-muted)"
+                      />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        stroke="var(--color-text-muted)"
+                        yAxisId="left"
+                        label={{
+                          value: "ms",
+                          angle: -90,
+                          position: "insideLeft",
+                          style: {
+                            fontSize: 11,
+                            fill: "var(--color-text-muted)",
+                          },
+                        }}
+                      />
+                      <YAxis
+                        tick={{ fontSize: 11 }}
+                        stroke="var(--color-text-muted)"
+                        orientation="right"
+                        yAxisId="right"
+                        domain={[0, 100]}
+                        label={{
+                          value: "%",
+                          angle: 90,
+                          position: "insideRight",
+                          style: {
+                            fontSize: 11,
+                            fill: "var(--color-text-muted)",
+                          },
+                        }}
+                      />
+                      <RechartsTooltip
+                        content={<HealthTooltip />}
+                      />
+
+                      <Area
+                        type="monotone"
+                        dataKey="rtt"
+                        name="RTT"
+                        yAxisId="left"
+                        stroke="var(--color-accent)"
+                        fill="var(--color-accent)"
+                        fillOpacity={0.06}
+                        isAnimationActive={false}
+                        dot={false}
+                        strokeWidth={1.5}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="jitter"
+                        name="Jitter"
+                        yAxisId="left"
+                        stroke="var(--color-warning)"
+                        fill="var(--color-warning)"
+                        fillOpacity={0.06}
+                        isAnimationActive={false}
+                        dot={false}
+                        strokeWidth={1.5}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="packetLoss"
+                        name="Packet Loss"
+                        yAxisId="right"
+                        stroke="var(--color-destructive)"
+                        fill="var(--color-destructive)"
+                        fillOpacity={0.06}
+                        isAnimationActive={false}
+                        dot={false}
+                        strokeWidth={1.5}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              {/* Connection status badge */}
+              <div className="flex items-center gap-2 mt-3">
+                <span className="text-xs text-text-muted">Status:</span>
+                <Badge
+                  variant={
+                    snapshot.state === "playing"
+                      ? "success"
+                      : snapshot.state === "paused"
+                        ? "warning"
+                        : "destructive"
+                  }
+                  className="text-xs"
+                >
+                  {snapshot.state === "playing"
+                    ? "Connected"
+                    : snapshot.state === "paused"
+                      ? "Paused"
+                      : "Reconnecting"}
+                </Badge>
+              </div>
+            </TabsContent>
+          </Tabs>
+        )}
+      </ScrollArea>
+    </Fragment>
+  );
+
+  if (contentOnly) {
+    return (
+      <TooltipProvider>
+        <div className="w-[950px] p-4">{content}</div>
+      </TooltipProvider>
+    );
+  }
+
   return (
     <TooltipProvider>
       <Popover open={open} onOpenChange={onOpenChange}>
@@ -564,390 +962,7 @@ export function BandwidthGraphModal({
           <PopoverTrigger asChild><span /></PopoverTrigger>
         </div>
         <PopoverContent side="top" align="center" className="w-[950px] p-4">
-          <div className="text-lg font-semibold mb-4 text-text-primary">
-            Bandwidth
-          </div>
-
-          <ScrollArea className="max-h-[calc(85vh-8rem)] pr-2">
-            {/* ── Summary Row ── */}
-            <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4 text-sm">
-              <SummaryItem
-                label="Current"
-                value={fmtByteRate(snapshot.currentBitsPerSecond / 8)}
-              />
-              <SummaryItem label="30s Avg" value={fmtByteRate(avg30s / 8)} />
-              <SummaryItem
-                label="Peak"
-                value={fmtByteRate(snapshot.peakBitsPerSecond / 8)}
-              />
-              <SummaryItem
-                label="Total"
-                value={fmtCumulativeBytes(snapshot.totalBytes)}
-              />
-              <SummaryItem
-                label="Est/hr"
-                value={
-                  hourlyEstimate > 0
-                    ? fmtHourlyUsage(hourlyEstimate)
-                    : "\u2014"
-                }
-              />
-              <SummaryItem label="Duration">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="font-mono tabular-nums">
-                    {fmtDuration(snapshot.durationMs)}
-                  </span>
-                  {snapshot.state === "paused" && (
-                    <Badge variant="warning" className="text-[10px] px-1.5 py-0">
-                      paused
-                    </Badge>
-                  )}
-                  {snapshot.state === "reconnecting" && (
-                    <Badge
-                      variant="destructive"
-                      className="text-[10px] px-1.5 py-0"
-                    >
-                      reconnecting
-                    </Badge>
-                  )}
-                </div>
-              </SummaryItem>
-            </div>
-
-            {/* ── Time Range Selector ── */}
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex gap-0.5">
-                {TIME_RANGES.map((r) => (
-                  <Button
-                    key={r.label}
-                    variant={timeRange === r.value ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => setTimeRange(r.value)}
-                    className="text-xs"
-                  >
-                    {r.label}
-                  </Button>
-                ))}
-              </div>
-
-              {chartData.length > 0 &&
-                snapshot.rawSamples.length > 0 &&
-                timeRange <= 300_000 && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={showRaw ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => setShowRaw(!showRaw)}
-                        className="text-xs"
-                      >
-                        Raw
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">
-                      Toggle raw bandwidth samples
-                    </TooltipContent>
-                  </Tooltip>
-                )}
-            </div>
-
-            {/* ── Per-Viewer Selector (Host Mode) ── */}
-            {role === "host" && viewerOptions.length > 1 && (
-              <div className="mb-3">
-                <Select
-                  value={selectedViewer}
-                  onValueChange={setSelectedViewer}
-                >
-                  <SelectTrigger className="w-48 h-8 text-xs">
-                    <SelectValue placeholder="All Viewers" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {viewerOptions.map((opt) => (
-                      <SelectItem
-                        key={opt.value}
-                        value={opt.value}
-                        className="text-xs"
-                      >
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
-            {/* ── Empty State ── */}
-            {!hasData ? (
-              <div className="h-64 flex items-center justify-center text-sm text-text-muted">
-                Aucune donnée de bande passante disponible pour l&apos;instant.
-              </div>
-            ) : (
-              <Tabs defaultValue="throughput">
-                <TabsList className="mb-2">
-                  <TabsTrigger value="throughput">Throughput</TabsTrigger>
-                  <TabsTrigger value="health">
-                    Connection Health
-                  </TabsTrigger>
-                </TabsList>
-
-                {/* ── Throughput Tab ── */}
-                <TabsContent value="throughput">
-                  {chartData.length === 0 ? (
-                    <div className="h-48 flex items-center justify-center text-sm text-text-muted">
-                      Aucune donnée de bande passante disponible pour
-                      l&apos;instant.
-                    </div>
-                  ) : (
-                    <div className="h-72">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart
-                          data={chartData}
-                          margin={{
-                            top: 16,
-                            right: 16,
-                            left: 8,
-                            bottom: 8,
-                          }}
-                        >
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                            stroke="var(--color-border)"
-                          />
-                          <XAxis
-                            dataKey="time"
-                            tickFormatter={formatTimeAxis}
-                            tick={{ fontSize: 11 }}
-                            stroke="var(--color-text-muted)"
-                          />
-                          <YAxis
-                            tickFormatter={formatByteAxis}
-                            tick={{ fontSize: 11 }}
-                            stroke="var(--color-text-muted)"
-                            label={{
-                              value: "B/s",
-                              angle: -90,
-                              position: "insideLeft",
-                              style: {
-                                fontSize: 11,
-                                fill: "var(--color-text-muted)",
-                              },
-                            }}
-                          />
-                          <RechartsTooltip
-                            content={<ThroughputTooltip />}
-                          />
-
-                          {/* Smoothed (EWMA) line */}
-                          <Area
-                            type="monotone"
-                            dataKey="smoothed"
-                            name="Smoothed"
-                            stroke="var(--color-accent)"
-                            fill="var(--color-accent)"
-                            fillOpacity={0.08}
-                            isAnimationActive={false}
-                            dot={false}
-                            strokeWidth={2}
-                          />
-
-                          {/* Raw samples area (optional toggle) */}
-                          {showRaw && (
-                            <Area
-                              type="monotone"
-                              dataKey="raw"
-                              name="Raw"
-                              stroke="var(--color-text-muted)"
-                              fill="var(--color-text-muted)"
-                              fillOpacity={0.04}
-                              isAnimationActive={false}
-                              dot={false}
-                              strokeWidth={1}
-                            />
-                          )}
-
-                          {/* Target reference line */}
-                          {snapshot.configuredBitsPerSecond != null &&
-                            snapshot.configuredBitsPerSecond > 0 && (
-                              <ReferenceLine
-                                y={snapshot.configuredBitsPerSecond / 8}
-                                stroke="var(--color-warning)"
-                                strokeDasharray="6 3"
-                                label={
-                                  <Label
-                                    value={`Target: ${fmtByteRate(snapshot.configuredBitsPerSecond / 8)}`}
-                                    position="right"
-                                    style={{
-                                      fontSize: 10,
-                                      fill: "var(--color-warning)",
-                                    }}
-                                  />
-                                }
-                              />
-                            )}
-
-                          {/* Marker reference lines */}
-                          {visibleMarkers.map((cluster) => {
-                            const first = cluster[0];
-                            const markerTime =
-                              (first.timestampMs - baseTime) / 1000;
-                            const label =
-                              cluster.length === 1
-                                ? first.label
-                                : `${first.label} +${cluster.length - 1}`;
-                            const color = getMarkerColor(first.type);
-
-                            return (
-                              <ReferenceLine
-                                key={first.id}
-                                x={markerTime}
-                                stroke={color}
-                                strokeDasharray="4 4"
-                                label={
-                                  <Label
-                                    value={label}
-                                    position="top"
-                                    style={{
-                                      fontSize: 10,
-                                      fill: color,
-                                    }}
-                                  />
-                                }
-                              />
-                            );
-                          })}
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </div>
-                  )}
-                </TabsContent>
-
-                {/* ── Connection Health Tab ── */}
-                <TabsContent value="health">
-                  {healthData.length === 0 ? (
-                    <div className="h-48 flex items-center justify-center text-sm text-text-muted">
-                      No connection health data available.
-                    </div>
-                  ) : (
-                    <div className="h-72">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart
-                          data={healthData}
-                          margin={{
-                            top: 16,
-                            right: 16,
-                            left: 8,
-                            bottom: 8,
-                          }}
-                        >
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                            stroke="var(--color-border)"
-                          />
-                          <XAxis
-                            dataKey="time"
-                            tickFormatter={formatTimeAxis}
-                            tick={{ fontSize: 11 }}
-                            stroke="var(--color-text-muted)"
-                          />
-                          <YAxis
-                            tick={{ fontSize: 11 }}
-                            stroke="var(--color-text-muted)"
-                            yAxisId="left"
-                            label={{
-                              value: "ms",
-                              angle: -90,
-                              position: "insideLeft",
-                              style: {
-                                fontSize: 11,
-                                fill: "var(--color-text-muted)",
-                              },
-                            }}
-                          />
-                          <YAxis
-                            tick={{ fontSize: 11 }}
-                            stroke="var(--color-text-muted)"
-                            orientation="right"
-                            yAxisId="right"
-                            domain={[0, 100]}
-                            label={{
-                              value: "%",
-                              angle: 90,
-                              position: "insideRight",
-                              style: {
-                                fontSize: 11,
-                                fill: "var(--color-text-muted)",
-                              },
-                            }}
-                          />
-                          <RechartsTooltip
-                            content={<HealthTooltip />}
-                          />
-
-                          <Area
-                            type="monotone"
-                            dataKey="rtt"
-                            name="RTT"
-                            yAxisId="left"
-                            stroke="var(--color-accent)"
-                            fill="var(--color-accent)"
-                            fillOpacity={0.06}
-                            isAnimationActive={false}
-                            dot={false}
-                            strokeWidth={1.5}
-                          />
-                          <Area
-                            type="monotone"
-                            dataKey="jitter"
-                            name="Jitter"
-                            yAxisId="left"
-                            stroke="var(--color-warning)"
-                            fill="var(--color-warning)"
-                            fillOpacity={0.06}
-                            isAnimationActive={false}
-                            dot={false}
-                            strokeWidth={1.5}
-                          />
-                          <Area
-                            type="monotone"
-                            dataKey="packetLoss"
-                            name="Packet Loss"
-                            yAxisId="right"
-                            stroke="var(--color-destructive)"
-                            fill="var(--color-destructive)"
-                            fillOpacity={0.06}
-                            isAnimationActive={false}
-                            dot={false}
-                            strokeWidth={1.5}
-                          />
-                        </AreaChart>
-                      </ResponsiveContainer>
-                    </div>
-                  )}
-
-                  {/* Connection status badge */}
-                  <div className="flex items-center gap-2 mt-3">
-                    <span className="text-xs text-text-muted">Status:</span>
-                    <Badge
-                      variant={
-                        snapshot.state === "playing"
-                          ? "success"
-                          : snapshot.state === "paused"
-                            ? "warning"
-                            : "destructive"
-                      }
-                      className="text-xs"
-                    >
-                      {snapshot.state === "playing"
-                        ? "Connected"
-                        : snapshot.state === "paused"
-                          ? "Paused"
-                          : "Reconnecting"}
-                    </Badge>
-                  </div>
-                </TabsContent>
-              </Tabs>
-            )}
-          </ScrollArea>
+          {content}
         </PopoverContent>
       </Popover>
     </TooltipProvider>

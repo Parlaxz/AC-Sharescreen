@@ -188,11 +188,6 @@ export function EnhancedVideoSurface({
             onProcessorStateChange?.(state);
           },
           onError: (reason: string) => {
-            if (effective === "nvidia-vsr" && retryAttempt < 1) {
-              // Retry with WebGL2 fallback
-              setRetryAttempt((n) => n + 1);
-              return; // Don't set fallback yet
-            }
             setFirstFrameReceived(false);
             setFallback(true);
             onProcessingError?.(reason);

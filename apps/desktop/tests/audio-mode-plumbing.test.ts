@@ -9,6 +9,9 @@ let _mockSsm: Record<string, any> = {};
 vi.mock("../src/renderer/services/phase3-runtime.js", () => ({
   getRuntime: () => ({
     getStreamSessionManager: () => _mockSsm,
+    getSyncService: () => ({
+      getSyncState: () => null,
+    }),
   }),
 }));
 

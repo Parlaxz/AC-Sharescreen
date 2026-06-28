@@ -26,6 +26,10 @@ void DiagnosticsCounters::Reset() {
     minProcessingTimeUs = UINT64_MAX;
 }
 
+DiagnosticsCounters& GetDiagnosticsCounters() {
+    return g_counters;
+}
+
 DiagnosticSnapshot GetDiagnostics() {
     DiagnosticSnapshot snap;
     snap.totalFramesSubmitted = g_counters.totalFramesSubmitted;

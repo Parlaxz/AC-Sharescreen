@@ -1,7 +1,7 @@
 ﻿import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { StreamMetricsService, type StreamHistoryRecord, type StreamHistorySample, type StreamSettingMarker } from "@/services/stream-metrics-service";
+import { StreamMetricsService, type StreamHistoryRecord } from "@/services/stream-metrics-service";
 import { formatBytes, formatDuration } from "@/lib/utils";
 import { Monitor, Users, ArrowUp, ArrowDown, Clock, Wifi, AlertCircle } from "lucide-react";
 
@@ -11,7 +11,7 @@ function fmtBytesPerSecond(bps: number): string {
   return `${bps} B/s`;
 }
 
-function Sparkline({ samples, width = 120, height = 28 }: { samples: StreamHistorySample[]; width?: number; height?: number }) {
+function Sparkline({ samples, width = 120, height = 28 }: { samples: Array<{ timestamp: number; bytesPerSecond: number; totalBytes: number }>; width?: number; height?: number }) {
   if (samples.length === 0) return <span className="text-[10px] text-text-muted italic">No data</span>;
   const maxBps = Math.max(...samples.map(s => s.bytesPerSecond), 1);
   const barWidth = Math.max(2, Math.floor(width / samples.length));

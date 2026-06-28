@@ -364,7 +364,7 @@ export class StreamSessionManager {
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
       // Notify metrics service
       const qualityLabel = `${videoWidth}x${videoHeight}@${videoFps},${videoBitrate}kbps`;
-      StreamMetricsService.getInstance().onStreamStart(
+      StreamMetricsService.getInstance().startHostSession(
         this.mediaSessionId!,
         this.logicalStreamId!,
         this.groupId!,
@@ -373,7 +373,6 @@ export class StreamSessionManager {
         !!this._sessionQualityOverride,
         qualityLabel,
       );
-
 
       // 0. Generate VDO credentials
       const vdoStreamId = generateVdoStreamId();
@@ -791,10 +790,11 @@ export class StreamSessionManager {
 
       // Notify metrics service
       if (this.mediaSessionId) {
-        // onStreamStop is called once in the try block. If cleanupPublisher
-        // throws, the catch block still resets state but does NOT call
-        // onStreamStop again — the finalization already happened.
-        StreamMetricsService.getInstance().onStreamStop(this.mediaSessionId);
+        const svc = StreamMetricsService.getInstance();
+        const historyId = svc.findHistoryIdByMediaSessionId(this.mediaSessionId);
+        if (historyId) {
+          svc.finalizeSession(historyId);
+        }
       }
       this.resetSessionState();
       this._state = "idle";
@@ -918,7 +918,7 @@ export class StreamSessionManager {
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
       // Notify metrics service
       const qualityLabel = `${videoWidth}x${videoHeight}@${videoFps},${videoBitrate}kbps`;
-      StreamMetricsService.getInstance().onStreamStart(
+      StreamMetricsService.getInstance().startHostSession(
         this.mediaSessionId!,
         this.logicalStreamId!,
         this.groupId!,
@@ -927,7 +927,6 @@ export class StreamSessionManager {
         !!this._sessionQualityOverride,
         qualityLabel,
       );
-
 
       // Bitrate readback: log the effective bitrate after precedence resolution
       // so we can verify a custom 300 Kbps override reaches the publisher.

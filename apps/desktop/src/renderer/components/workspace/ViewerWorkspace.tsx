@@ -35,13 +35,10 @@ import { useStore } from "@/stores/main-store";
 import type { StreamAnnouncement } from "@/stores/main-store";
 import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
-import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
+import { ViewerPanelShell } from "./viewer/ViewerPanelShell.js";
+import type { ActivePanel } from "./viewer/ViewerPanelShell.js";
 import type { ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
-import {
-  createBandwidthTracker,
-  updateBandwidthTracker,
-} from "@/services/viewer-bandwidth.js";
 import {
   getViewerQualityDispatchError,
   resolveViewerQualityFeedbackStreamId,
@@ -159,6 +156,10 @@ function sessionStateToViewStatus(state: ViewerSessionState): string {
       return "connecting";
     case "watching":
       return "watching";
+    case "paused":
+      return "paused";
+    case "reconnecting":
+      return "connecting";
     case "ended":
       return "ended";
     case "error":
@@ -234,10 +235,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [qualityRequestPending, setQualityRequestPending] = useState(false);
   const [qualityFeedback, setQualityFeedback] = useState<string | null>(null);
   const [lastQualityAccepted, setLastQualityAccepted] = useState<boolean | undefined>(undefined);
-  /** Track whether any popover panel is open to keep controls visible */
-  const [panelsOpen, setPanelsOpen] = useState(false);
-  /** Bandwidth graph dialog */
-  const [bandwidthGraphOpen, setBandwidthGraphOpen] = useState(false);
+  /** Track which popover panel is active (null = closed) */
+  const [activePanel, setActivePanel] = useState<ActivePanel | null>(null);
   /** Viewer history ID for StreamMetricsService session */
   const [viewerHistoryId, setViewerHistoryId] = useState<string | null>(null);
   const viewerHistoryIdRef = useRef<string | null>(null);
@@ -313,7 +312,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Bandwidth tracking ──
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
-  const bandwidthTrackerRef = useRef(createBandwidthTracker());
   const bandwidthPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Poll WebRTC stats for bandwidth
@@ -322,7 +320,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     if (!sessionRef.current || sessionState === "ended" || sessionState === "error") {
       setCurrentBandwidthBps(0);
       setTotalBytesReceived(0);
-      bandwidthTrackerRef.current = createBandwidthTracker();
       if (bandwidthPollRef.current) {
         clearInterval(bandwidthPollRef.current);
         bandwidthPollRef.current = null;
@@ -337,11 +334,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       return;
     }
 
-    // Paused or reconnecting: keep tracker alive, don't poll
+    // Paused or reconnecting: clear rate display
     if (sessionState === "paused" || sessionState === "reconnecting") {
       setCurrentBandwidthBps(0);
-      // DON'T reset tracker - keep bytes total alive
-      bandwidthTrackerRef.current = { ...bandwidthTrackerRef.current, paused: true };
       if (bandwidthPollRef.current) {
         clearInterval(bandwidthPollRef.current);
         bandwidthPollRef.current = null;
@@ -372,17 +367,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           const audioBytes = diag.inboundAudio.bytesReceived ?? 0;
           const totalNow = videoBytes + audioBytes;
           const ssrc = diag.inboundVideo.ssrc ?? null;
-          const next = updateBandwidthTracker(
-            bandwidthTrackerRef.current,
-            totalNow,
-            performance.now(),
-            ssrc,
-          );
-          bandwidthTrackerRef.current = next;
-          setTotalBytesReceived(next.totalBytes);
-          setCurrentBandwidthBps(next.currentBitsPerSecond);
 
-          // Feed viewer bytes into StreamMetricsService
+          // Feed viewer bytes into StreamMetricsService (canonical tracker)
           if (viewerHistoryIdRef.current) {
             StreamMetricsService.getInstance().feedViewerBytes(
               viewerHistoryIdRef.current,
@@ -390,6 +376,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               performance.now(),
               ssrc,
             );
+            // Read back bandwidth from the canonical source
+            const snapshot = StreamMetricsService.getInstance().getSnapshot(viewerHistoryIdRef.current);
+            setTotalBytesReceived(snapshot.totalBytes);
+            setCurrentBandwidthBps(snapshot.currentBitsPerSecond);
           }
         }
       } catch {
@@ -421,7 +411,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // Auto-hide controls — stay visible while any popover panel is open
   // Track panel open state as a synthetic "always show" signal
   const { visible: controlsVisible, show: showControls, keepVisible, hide: hideControls } =
-    useControlsAutoHide(panelsOpen ? 999999 : 3000);
+    useControlsAutoHide(activePanel !== null ? 999999 : 3000);
 
   // Fullscreen change listener — use Electron IPC when available.
   // Syncs focusMode with fullscreen state so AppShell hides chrome
@@ -482,8 +472,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     setCurrentStreamId(null);
     setCurrentBandwidthBps(0);
     setTotalBytesReceived(0);
-    setBandwidthGraphOpen(false);
-    bandwidthTrackerRef.current = createBandwidthTracker();
 
     // Finalize viewer session if active
     if (viewerHistoryIdRef.current) {
@@ -556,22 +544,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setViewStatus("connecting");
     }
   }, [setViewStatus]);
-
-  // ── Bandwidth graph click ───────────────────────────────────────
-  const bandwidthPrevPanelsOpenRef = useRef(false);
-
-  const handleBandwidthClick = useCallback(() => {
-    bandwidthPrevPanelsOpenRef.current = panelsOpen;
-    setPanelsOpen(true);
-    setBandwidthGraphOpen(true);
-  }, [panelsOpen]);
-
-  // Restore panels open state when bandwidth graph closes
-  useEffect(() => {
-    if (!bandwidthGraphOpen) {
-      setPanelsOpen(bandwidthPrevPanelsOpenRef.current);
-    }
-  }, [bandwidthGraphOpen]);
 
   // ── Pause/resume callbacks (single owner of toggle) ──────────────
   const handlePauseStream = useCallback(async () => {
@@ -773,12 +745,32 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         handleToggleFullscreen();
       }
     };
+    // Panel toggle handlers
+    const handleToggleSettings = () => {
+      setActivePanel((prev) => (prev === "settings" ? null : "settings"));
+    };
+    const handleToggleInfo = () => {
+      setActivePanel((prev) => (prev === "diagnostics" ? null : "diagnostics"));
+    };
+    const handlePanelEscape = () => {
+      setActivePanel((prev) => {
+        if (prev !== null) return null;
+        return prev;
+      });
+    };
+
     window.addEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
     window.addEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
+    window.addEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
+    window.addEventListener("screenlink:viewer-toggle-info", handleToggleInfo);
+    window.addEventListener("screenlink:viewer-escape", handlePanelEscape);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
       window.removeEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
+      window.removeEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
+      window.removeEventListener("screenlink:viewer-toggle-info", handleToggleInfo);
+      window.removeEventListener("screenlink:viewer-escape", handlePanelEscape);
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [handleToggleFullscreen, handleToggleMute, isFullscreen, streamPauseState]);
@@ -1197,7 +1189,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           sessionRef.current.destroy();
           sessionRef.current = null;
           setViewStatus("ended");
-          setBandwidthGraphOpen(false);
+          setActivePanel(null);
 
           // Finalize viewer session
           if (viewerHistoryIdRef.current) {
@@ -1226,7 +1218,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           sessionRef.current = null;
         }
         setViewStatus("ended");
-        setBandwidthGraphOpen(false);
+        setActivePanel(null);
 
         // Finalize viewer session
         if (viewerHistoryIdRef.current) {
@@ -1353,13 +1345,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isMuted={isMuted}
             onVolumeChange={handleVolumeChange}
             onToggleMute={handleToggleMute}
-            viewerRequest={viewerRequest}
-            onQualityRequestChange={handleQualityRequestChange}
-            qualityRequestPending={qualityRequestPending}
-            qualityFeedback={qualityFeedback}
-            lastQualityAccepted={lastQualityAccepted}
-            effectiveBitrateKbps={effectiveBitrateKbps}
-            configuredBitrateBps={configuredBitrateBps}
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState="reconnecting"
@@ -1369,7 +1354,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             controlsVisible={controlsVisible}
             showControls={showControls}
             isLive
-            onPanelsOpenChange={setPanelsOpen}
             isScreenLinkDeafened={isScreenLinkDeafened}
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
@@ -1378,7 +1362,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
             maxVolumePercent={maxVolumePercent}
-            onBandwidthClick={handleBandwidthClick}
+            activePanel={activePanel}
+            onActivePanelChange={setActivePanel}
           />
         </motion.div>
       </ViewerShell>
@@ -1431,13 +1416,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isMuted={isMuted}
             onVolumeChange={handleVolumeChange}
             onToggleMute={handleToggleMute}
-            viewerRequest={viewerRequest}
-            onQualityRequestChange={handleQualityRequestChange}
-            qualityRequestPending={qualityRequestPending}
-            qualityFeedback={qualityFeedback}
-            lastQualityAccepted={lastQualityAccepted}
-            effectiveBitrateKbps={effectiveBitrateKbps}
-            configuredBitrateBps={configuredBitrateBps}
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState="degraded"
@@ -1447,7 +1425,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             controlsVisible={controlsVisible}
             showControls={showControls}
             isLive
-            onPanelsOpenChange={setPanelsOpen}
             isScreenLinkDeafened={isScreenLinkDeafened}
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
@@ -1456,7 +1433,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
             maxVolumePercent={maxVolumePercent}
-            onBandwidthClick={handleBandwidthClick}
+            activePanel={activePanel}
+            onActivePanelChange={setActivePanel}
           />
         </motion.div>
       </ViewerShell>
@@ -1672,13 +1650,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isMuted={isMuted}
             onVolumeChange={handleVolumeChange}
             onToggleMute={handleToggleMute}
-            viewerRequest={viewerRequest}
-            onQualityRequestChange={handleQualityRequestChange}
-            qualityRequestPending={qualityRequestPending}
-            qualityFeedback={qualityFeedback}
-            lastQualityAccepted={lastQualityAccepted}
-            effectiveBitrateKbps={effectiveBitrateKbps}
-            configuredBitrateBps={configuredBitrateBps}
             currentStreamId={currentStreamId ?? ""}
             onStreamSwitch={handleStreamSwitch}
             connectionState={
@@ -1694,8 +1665,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             controlsVisible={controlsVisible}
             showControls={showControls}
             isLive
-            session={sessionRef.current}
-            onPanelsOpenChange={setPanelsOpen}
             isScreenLinkDeafened={isScreenLinkDeafened}
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
@@ -1704,20 +1673,29 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
             maxVolumePercent={maxVolumePercent}
-            enhancementSettings={enhancementSettings}
-            onEnhancementChange={handleEnhancementChange}
-            onEnhancementReset={handleEnhancementReset}
-            enhancementStats={enhancementStats}
-            onBandwidthClick={handleBandwidthClick}
+            activePanel={activePanel}
+            onActivePanelChange={setActivePanel}
           />
         </div>
 
-        {/* Bandwidth graph modal */}
-        <BandwidthGraphModal
-          open={bandwidthGraphOpen}
-          onOpenChange={setBandwidthGraphOpen}
+        {/* Unified panel shell */}
+        <ViewerPanelShell
+          activePanel={activePanel}
+          onActivePanelChange={setActivePanel}
+          session={sessionRef.current}
+          lastRequestedQuality={lastRequestedQuality}
+          effectiveBitrateKbps={effectiveBitrateKbps}
+          configuredBitrateBps={configuredBitrateBps}
+          requestState={viewerRequest}
+          onRequestChange={handleQualityRequestChange}
+          requestPending={qualityRequestPending}
+          lastRequestAccepted={lastQualityAccepted}
+          requestFeedback={qualityFeedback}
+          enhancementSettings={enhancementSettings}
+          onEnhancementChange={handleEnhancementChange}
+          onEnhancementReset={handleEnhancementReset}
+          enhancementStats={enhancementStats}
           mediaSessionId={watchedSessionId}
-          viewerMode={true}
           viewerHistoryId={viewerHistoryId}
         />
       </motion.div>
@@ -1764,13 +1742,6 @@ function VideoControlsOverlay({
   isMuted,
   onVolumeChange,
   onToggleMute,
-  viewerRequest,
-  onQualityRequestChange,
-  qualityRequestPending,
-  qualityFeedback,
-  lastQualityAccepted,
-  effectiveBitrateKbps,
-  configuredBitrateBps,
   currentStreamId,
   onStreamSwitch,
   connectionState,
@@ -1780,8 +1751,6 @@ function VideoControlsOverlay({
   controlsVisible,
   showControls,
   isLive,
-  session,
-  onPanelsOpenChange,
   isScreenLinkDeafened,
   onToggleScreenLinkDeafen,
   currentBandwidthBps,
@@ -1790,11 +1759,8 @@ function VideoControlsOverlay({
   discordDeafenBinding,
   syncScreenLinkDeafen,
   maxVolumePercent,
-  enhancementSettings,
-  onEnhancementChange,
-  onEnhancementReset,
-  enhancementStats,
-  onBandwidthClick,
+  activePanel,
+  onActivePanelChange,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
@@ -1805,13 +1771,6 @@ function VideoControlsOverlay({
   isMuted: boolean;
   onVolumeChange: (v: number) => void;
   onToggleMute: () => void;
-  viewerRequest: ViewerRequestState | null;
-  onQualityRequestChange: (state: ViewerRequestState | null) => void;
-  qualityRequestPending: boolean;
-  qualityFeedback: string | null;
-  lastQualityAccepted: boolean | undefined;
-  effectiveBitrateKbps: number | null;
-  configuredBitrateBps: number | null;
   currentStreamId: string;
   onStreamSwitch: (stream: StreamAnnouncement) => void;
   connectionState: "connecting" | "connected" | "degraded" | "reconnecting" | "ended" | "error";
@@ -1821,8 +1780,6 @@ function VideoControlsOverlay({
   controlsVisible: boolean;
   showControls: () => void;
   isLive: boolean;
-  session?: ViewerSession | null;
-  onPanelsOpenChange?: (open: boolean) => void;
   isScreenLinkDeafened?: boolean;
   onToggleScreenLinkDeafen?: () => void;
   currentBandwidthBps?: number;
@@ -1831,19 +1788,8 @@ function VideoControlsOverlay({
   discordDeafenBinding?: ShortcutBinding;
   syncScreenLinkDeafen?: boolean;
   maxVolumePercent?: number;
-  enhancementSettings?: ViewerImageEnhancementSettings;
-  onEnhancementChange?: (partial: Partial<ViewerImageEnhancementSettings>) => void;
-  onEnhancementReset?: () => void;
-  enhancementStats?: {
-    inputWidth: number;
-    inputHeight: number;
-    outputWidth: number;
-    outputHeight: number;
-    processingTimeMs: number | null;
-    enhancedScalingActive: boolean;
-    backend: string;
-  } | null;
-  onBandwidthClick?: () => void;
+  activePanel: ActivePanel | null;
+  onActivePanelChange: (panel: ActivePanel | null) => void;
 }) {
   return (
     <VideoControls
@@ -1856,13 +1802,6 @@ function VideoControlsOverlay({
       isMuted={isMuted}
       onVolumeChange={onVolumeChange}
       onToggleMute={onToggleMute}
-      viewerRequest={viewerRequest}
-      onQualityRequestChange={onQualityRequestChange}
-      qualityRequestPending={qualityRequestPending}
-      qualityFeedback={qualityFeedback}
-      lastQualityAccepted={lastQualityAccepted}
-      effectiveBitrateKbps={effectiveBitrateKbps}
-      configuredBitrateBps={configuredBitrateBps}
       currentStreamId={currentStreamId}
       onStreamSwitch={onStreamSwitch}
       connectionState={connectionState}
@@ -1871,8 +1810,6 @@ function VideoControlsOverlay({
       onExit={onExit}
       visible={controlsVisible}
       isLive={isLive}
-      session={session}
-      onPanelsOpenChange={onPanelsOpenChange}
       isScreenLinkDeafened={isScreenLinkDeafened}
       onToggleScreenLinkDeafen={onToggleScreenLinkDeafen}
       currentBandwidthBps={currentBandwidthBps}
@@ -1881,11 +1818,8 @@ function VideoControlsOverlay({
       discordDeafenBinding={discordDeafenBinding}
       syncScreenLinkDeafen={syncScreenLinkDeafen}
       maxVolumePercent={maxVolumePercent}
-      enhancementSettings={enhancementSettings}
-      onEnhancementChange={onEnhancementChange}
-      onEnhancementReset={onEnhancementReset}
-      enhancementStats={enhancementStats}
-      onBandwidthClick={onBandwidthClick}
+      activePanel={activePanel}
+      onActivePanelChange={onActivePanelChange}
     />
   );
 }

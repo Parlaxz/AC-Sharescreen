@@ -1,6 +1,6 @@
 import { useStore } from "@/stores/main-store";
 import { startShare, type ShareSource } from "./share-coordinator";
-import { presetSettingsToOverride } from "./share-quality";
+import { presetSettingsToOverride, type PresetSettingsLike } from "./share-quality";
 import { showNotification } from "./notifications";
 import type { GroupShortcutConfigDTO, CaptureSourceDTO } from "../../preload/api-types.js";
 
@@ -178,7 +178,7 @@ export async function executeQuickShare(groupId: string): Promise<void> {
         return; // No fallback
       }
       qualityOverride = presetSettingsToOverride(
-        (preset as { settings: unknown }).settings,
+        (preset as { settings: PresetSettingsLike }).settings,
       );
     }
 

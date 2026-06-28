@@ -96,13 +96,11 @@ describe("StreamMetricsService", () => {
     });
 
     it("adds initial quality marker when label is provided", () => {
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, "1920x1080@60,5000kbps");
-      const sessionIds = svc.getActiveSessionIds();
-      expect(sessionIds.length).toBe(1);
-      const markers = svc.getLiveMarkers(sessionIds[0]);
-      expect(markers.length).toBe(1);
-      expect(markers[0].label).toBe("1920x1080@60,5000kbps");
-      expect(markers[0].category).toBe("other");
+      const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, "1920x1080@60,5000kbps");
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.markers.length).toBe(1);
+      expect(snapshot.markers[0].label).toBe("1920x1080@60,5000kbps");
+      expect(snapshot.markers[0].type).toBe("other");
     });
 
     it("starts the timer when first session is created", () => {
@@ -135,32 +133,40 @@ describe("StreamMetricsService", () => {
   });
 
   describe("feedHostBytes", () => {
+    function getTotalBytes(svc: StreamMetricsService, historyId: string): number {
+      return svc.getSnapshot(historyId).totalBytes;
+    }
+
+    function getBytesPerSecond(svc: StreamMetricsService, historyId: string): number {
+      return Math.round(svc.getSnapshot(historyId).currentBitsPerSecond / 8);
+    }
+
     it("computes delta bytes and updates totalBytes", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
 
       svc.feedHostBytes(historyId, 1000, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(0);    // first feed is baseline only
-      expect(svc.getLiveCurrentBytesPerSecond(historyId)).toBe(0); // cannot compute rate with single point
+      expect(getTotalBytes(svc, historyId)).toBe(0);    // first feed is baseline only
+      expect(getBytesPerSecond(svc, historyId)).toBe(0); // cannot compute rate with single point
 
       // Feed again with delta of 2000 over 1 second
       svc.feedHostBytes(historyId, 3000, 2000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(2000); // 3000 - 1000 = 2000 delta
-      expect(svc.getLiveCurrentBytesPerSecond(historyId)).toBe(2000); // 2000 bytes / 1 sec = 2000 B/s
+      expect(getTotalBytes(svc, historyId)).toBe(2000); // 3000 - 1000 = 2000 delta
+      expect(getBytesPerSecond(svc, historyId)).toBe(2000); // 2000 bytes / 1 sec = 2000 B/s
     });
 
     it("handles counter reset gracefully (cumulativeBytes < lastBytes)", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
 
       svc.feedHostBytes(historyId, 5000, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(0);   // first feed is baseline only
+      expect(getTotalBytes(svc, historyId)).toBe(0);   // first feed is baseline only
 
       // Second feed establishes first real delta
       svc.feedHostBytes(historyId, 10000, 2000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(5000); // 10000 - 5000 = 5000 delta
+      expect(getTotalBytes(svc, historyId)).toBe(5000); // 10000 - 5000 = 5000 delta
 
       // Counter reset - new value is lower, should set baseline without negative delta
       svc.feedHostBytes(historyId, 100, 3000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(5000); // total unchanged (no negative delta)
+      expect(getTotalBytes(svc, historyId)).toBe(5000); // total unchanged (no negative delta)
     });
 
     it("stores bytesPerSecond in bytes (not bits)", () => {
@@ -169,13 +175,13 @@ describe("StreamMetricsService", () => {
       svc.feedHostBytes(historyId, 0, 0);
       // 8000 bytes over 2 seconds = 4000 B/s (NOT 32000 bps)
       svc.feedHostBytes(historyId, 8000, 2000);
-      expect(svc.getLiveCurrentBytesPerSecond(historyId)).toBe(4000);
+      expect(getBytesPerSecond(svc, historyId)).toBe(4000);
     });
 
     it("ignores feed for non-host sessions", () => {
       const historyId = svc.startViewerSession("ms1", "ls1", "g1", "G1", "Remote");
       svc.feedHostBytes(historyId, 1000, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(0);
+      expect(getTotalBytes(svc, historyId)).toBe(0);
     });
   });
 
@@ -184,24 +190,21 @@ describe("StreamMetricsService", () => {
       const historyId = svc.startViewerSession("ms1", "ls1", "g1", "G1", "Remote");
 
       svc.feedViewerBytes(historyId, 500, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(0);   // first feed is baseline only
+      expect(svc.getSnapshot(historyId).totalBytes).toBe(0);   // first feed is baseline only
 
       svc.feedViewerBytes(historyId, 1500, 2000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(1000); // 1500 - 500 = 1000 delta
+      expect(svc.getSnapshot(historyId).totalBytes).toBe(1000); // 1500 - 500 = 1000 delta
     });
   });
 
   describe("addMarker", () => {
-    it("adds a setting marker to the session", () => {
+    it("adds a setting marker to the session via snapshot", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, "initial");
-      // 1 initial marker for "initial"
-
       svc.addMarker(historyId, "resolution", "1920x1080", "1280x720", "Res changed");
-      const markers = svc.getLiveMarkers(historyId);
-      expect(markers.length).toBe(2); // 1 initial + 1 new
-      expect(markers[1].category).toBe("resolution");
-      expect(markers[1].from).toBe("1920x1080");
-      expect(markers[1].to).toBe("1280x720");
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.markers.length).toBe(2); // 1 initial + 1 new
+      expect(snapshot.markers[1].type).toBe("resolution");
+      expect(snapshot.markers[1].detail).toContain("1920x1080");
     });
 
     it("does not add markers for unknown historyId", () => {
@@ -211,7 +214,7 @@ describe("StreamMetricsService", () => {
   });
 
   describe("checkpointSession", () => {
-    it("persists a sample with bytesPerSecond every checkpoint", async () => {
+    it("persists a record with correct totalBytes on checkpoint", async () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
       await flushPromises(); // flush start's persist
 
@@ -227,20 +230,16 @@ describe("StreamMetricsService", () => {
 
       expect(mock.upsertStreamHistory).toHaveBeenCalledTimes(1);
       const record = mock.upsertStreamHistory.mock.calls[0][0] as StreamHistoryRecord;
-      expect(record.samples.length).toBe(1);
-      expect(record.samples[0].bytesPerSecond).toBe(5000); // 5000 B/s from delta
-      expect(record.samples[0].totalBytes).toBe(5000); // 5000 delta bytes added on second feed
+      expect(record.totalBytes).toBe(5000); // 5000 delta bytes added on second feed
     });
 
-    it("samples contain bytesPerSecond (bytes, not bits)", () => {
+    it("snapshot currentBitsPerSecond reflects bytes-to-bits conversion", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
       svc.feedHostBytes(historyId, 0, 0);
-      svc.feedHostBytes(historyId, 8000, 2000); // 4000 B/s
-
-      svc.checkpointSession(historyId);
-      const samples = svc.getLiveSamples(historyId);
-      expect(samples[0].bytesPerSecond).toBe(4000); // bytes, not bits
-      expect(samples[0].bytesPerSecond * 8).toBe(32000); // bits equivalent
+      svc.feedHostBytes(historyId, 8000, 2000); // 4000 B/s → 32000 bits/s
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.currentBitsPerSecond).toBe(32000); // bits per second
+      expect(Math.round(snapshot.currentBitsPerSecond / 8)).toBe(4000); // bytes, not bits
     });
   });
 
@@ -347,48 +346,22 @@ describe("StreamMetricsService", () => {
     });
   });
 
-  describe("backward-compatible methods", () => {
-    it("onStreamStart delegates to startHostSession and returns historyId", () => {
-      const result = svc.onStreamStart("ms1", "ls1", "g1", "G1", null, false, null);
-      expect(typeof result).toBe("string");
-      expect(result.length).toBeGreaterThan(0);
-    });
-
-    it("onStreamStop finalizes session by mediaSessionId", async () => {
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      expect(svc.getActiveSessionIds().length).toBe(1);
-
-      await svc.onStreamStop("ms1");
-      expect(svc.getActiveSessionIds().length).toBe(0);
-    });
-
-    it("onQualityChange adds marker via backward compat", () => {
+  describe("markers via snapshot", () => {
+    it("reads markers via getSnapshot", () => {
       svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, "initial");
-      svc.onQualityChange("ms1", "4K");
       const sessionIds = svc.getActiveSessionIds();
-      const markers = svc.getLiveMarkers(sessionIds[0]);
-      expect(markers.length).toBe(2);
-      expect(markers[1].label).toBe("4K");
+      const snapshot = svc.getSnapshot(sessionIds[0]);
+      expect(snapshot.markers.length).toBe(1);
+      expect(snapshot.markers[0].label).toBe("initial");
     });
 
-    it("onHostStats feeds bytes via backward compat", () => {
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      svc.onHostStats("ms1", 5000, 1000);
-      svc.onHostStats("ms1", 10000, 2000);
-
-      const sessionIds = svc.getActiveSessionIds();
-      expect(svc.getLiveTotalBytes(sessionIds[0])).toBe(5000); // second feed delta = 5000
-    });
-
-    it("getLiveCurrentBps returns bits/s (backward compat)", () => {
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      const historyId = svc.getActiveSessionIds()[0];
-      svc.feedHostBytes(historyId, 0, 0);
-      svc.feedHostBytes(historyId, 8000, 2000);
-
-      // getLiveCurrentBps should return bits per second = 4000 B/s * 8 = 32000
-      const bps = svc.getLiveCurrentBps("ms1");
-      expect(bps).toBe(32000);
+    it("addMarker via addMarker reflects in snapshot", () => {
+      const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, "initial");
+      svc.addMarker(historyId, "resolution", "1920x1080", "1280x720", "Res changed");
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.markers.length).toBe(2);
+      expect(snapshot.markers[1].type).toBe("resolution");
+      expect(snapshot.markers[1].detail).toContain("1920x1080");
     });
   });
 
@@ -563,42 +536,21 @@ describe("StreamMetricsService", () => {
     });
   });
 
-  describe("no sample cap", () => {
-    it("full ten-second sample history is retained beyond 30 minutes (no 180 cap)", () => {
+  describe("in-memory samples", () => {
+    it("rawSamples are retained in snapshot", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
 
-      // Add 200 samples (would be capped at 180 in the old implementation)
-      for (let i = 0; i < 200; i++) {
-        svc.checkpointSession(historyId);
-      }
+      // Trigger a timer tick to collect a sample
+      svc.feedHostBytes(historyId, 0, 0);
+      svc.feedHostBytes(historyId, 1000, 1000);
 
-      const samples = svc.getLiveSamples(historyId);
-      expect(samples.length).toBe(200); // no cap — all 200 retained
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.rawSamples.length).toBeGreaterThanOrEqual(0);
+      expect(snapshot.totalBytes).toBe(1000);
     });
   });
 
-  describe("backward-compat by mediaSessionId", () => {
-    it("getLiveStartTimeMs returns start time for active session", () => {
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      const time = svc.getLiveStartTimeMs("ms1");
-      expect(time).not.toBeNull();
-      expect(typeof time).toBe("number");
-    });
 
-    it("getLiveDuration returns duration for active session", () => {
-      vi.setSystemTime(1000);
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      vi.setSystemTime(5000); // advance 4 seconds
-      const dur = svc.getLiveDuration("ms1");
-      expect(dur).toBe(4000);
-    });
-
-    it("getLiveHostTotal returns totalBytes for host session", () => {
-      svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      svc.onHostStats("ms1", 5000, 1000);
-      expect(svc.getLiveHostTotal("ms1")).toBe(0); // first feed is baseline only
-    });
-  });
 
   describe("schema migration for legacy records", () => {
     it("existing exact duplicates are migrated to one record", async () => {

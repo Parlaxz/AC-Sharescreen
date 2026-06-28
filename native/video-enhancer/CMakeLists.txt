@@ -27,10 +27,7 @@ include(cmake/GenerateBuildInfo.cmake)
 set(SOURCES
   src/main.cpp
   src/Protocol.cpp
-  src/CapabilityProbe.cpp
   src/FrameTransport.cpp
-  src/SharedFrameRing.cpp
-  src/NvidiaVsrContext.cpp
   src/Diagnostics.cpp
 )
 

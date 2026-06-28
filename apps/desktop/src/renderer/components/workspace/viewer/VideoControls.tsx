@@ -7,7 +7,6 @@ import {
   Maximize,
   Minimize,
   MonitorUp,
-  Radio,
   Settings2,
   Mic,
   MicOff,
@@ -29,13 +28,9 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import type { ViewerRequestState } from "./ViewerSettingsPanel.js";
-import { ViewerSettingsPanel } from "./ViewerSettingsPanel.js";
-import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
-import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "@/services/viewer-image-processing/viewer-image-defaults";
-import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { StreamSwitcher } from "./StreamSwitcher.js";
 import type { StreamAnnouncement } from "@/stores/main-store";
-import type { ViewerSession } from "@/services/viewer-session.js";
+import type { ActivePanel } from "./ViewerPanelShell.js";
 
 // ─── Connection state indicator ──────────────────────────────────────────
 
@@ -87,20 +82,7 @@ interface VideoControlsProps {
   onVolumeChange: (v: number) => void;
   /** Toggle mute */
   onToggleMute: () => void;
-  /** Current viewer request state (null = no request = host defaults) */
-  viewerRequest: ViewerRequestState | null;
-  /** Called when the user changes their quality request */
-  onQualityRequestChange: (state: ViewerRequestState | null) => void;
-  /** Whether a quality request is pending */
-  qualityRequestPending?: boolean;
-  /** Feedback message from last request */
-  qualityFeedback?: string | null;
-  /** Whether the last request was accepted */
-  lastQualityAccepted?: boolean;
-  /** Effective bitrate kbps from host feedback (for diagnostics) */
-  effectiveBitrateKbps?: number | null;
-  /** Configured sender max bitrate in bps (for diagnostics) */
-  configuredBitrateBps?: number | null;
+  /** Currently selected stream ID */
   /** Currently selected stream ID */
   currentStreamId: string;
   /** Called when switching streams */
@@ -117,12 +99,12 @@ interface VideoControlsProps {
   visible: boolean;
   /** Whether this is a live stream (vs VOD/recording) */
   isLive: boolean;
-  /** Active ViewerSession for diagnostics polling */
-  session?: ViewerSession | null;
-  /** Called when any popover panel opens or closes (keeps controls visible) */
-  onPanelsOpenChange?: (open: boolean) => void;
   /** Maximum volume percentage for the slider (default 100; >100 enables audio boost) */
   maxVolumePercent?: number;
+  /** Current active panel in the unified popover shell */
+  activePanel: ActivePanel | null;
+  /** Called when the user toggles a panel */
+  onActivePanelChange: (panel: ActivePanel | null) => void;
 
   /** Whether ScreenLink audio is locally deafened (for Discord deafen feature) */
   isScreenLinkDeafened?: boolean;
@@ -130,7 +112,6 @@ interface VideoControlsProps {
   onToggleScreenLinkDeafen?: () => void;
   /** Current bandwidth in bits per second (for bandwidth display) */
   currentBandwidthBps?: number;
-  onBandwidthClick?: () => void;
   /** Total bytes received in this session (for bandwidth display) */
   totalBytesReceived?: number;
   /** Discord mute shortcut binding */
@@ -139,22 +120,6 @@ interface VideoControlsProps {
   discordDeafenBinding?: ShortcutBinding;
   /** Whether Discord deafen should also mute ScreenLink playback */
   syncScreenLinkDeafen?: boolean;
-  /** Current GPU image enhancement settings */
-  enhancementSettings?: ViewerImageEnhancementSettings;
-  /** Called live when any enhancement control changes */
-  onEnhancementChange?: (settings: ViewerImageEnhancementSettings) => void;
-  /** Called when the user clicks Reset to Defaults in the enhancements tab */
-  onEnhancementReset?: () => void;
-  /** Processing statistics for GPU enhancement display */
-  enhancementStats?: {
-    inputWidth: number;
-    inputHeight: number;
-    outputWidth: number;
-    outputHeight: number;
-    processingTimeMs: number | null;
-    enhancedScalingActive: boolean;
-    backend: string;
-  } | null;
 }
 
 // ─── VideoControls ────────────────────────────────────────────────────────
@@ -182,13 +147,6 @@ export function VideoControls({
   isMuted,
   onVolumeChange,
   onToggleMute,
-  viewerRequest,
-  onQualityRequestChange,
-  qualityRequestPending = false,
-  qualityFeedback = null,
-  lastQualityAccepted,
-  effectiveBitrateKbps = null,
-  configuredBitrateBps = null,
   currentStreamId,
   onStreamSwitch,
   connectionState,
@@ -197,21 +155,16 @@ export function VideoControls({
   onExit,
   visible,
   isLive,
-  session = null,
-  onPanelsOpenChange,
+  maxVolumePercent = 200,
+  activePanel,
+  onActivePanelChange,
   isScreenLinkDeafened = false,
   onToggleScreenLinkDeafen,
-  maxVolumePercent = 200,
   currentBandwidthBps = 0,
-  onBandwidthClick,
   totalBytesReceived = 0,
   discordMuteBinding = { modifiers: ["alt"], key: "M" },
   discordDeafenBinding = { modifiers: ["alt"], key: "D" },
   syncScreenLinkDeafen = true,
-  enhancementSettings = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
-  onEnhancementChange,
-  onEnhancementReset,
-  enhancementStats = null,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),
@@ -292,11 +245,10 @@ export function VideoControls({
   }, [discordDeafened, onToggleScreenLinkDeafen, discordDeafenBinding, formatBindingLabel, syncScreenLinkDeafen]);
 
   // ── Bandwidth formatting ──
-  const formatBandwidth = useCallback((Bps: number): string => {
-    if (Bps <= 0) return "0 KB/s";
-    const KBps = Bps / 1000;
-    if (KBps < 1000) return `${KBps.toFixed(0)} KB/s`;
-    return `${(KBps / 1000).toFixed(1)} MB/s`;
+  const formatBandwidth = useCallback((bps: number): string => {
+    if (bps <= 0) return "0 kbps";
+    if (bps < 1_000_000) return `${Math.round(bps / 1000)} kbps`;
+    return `${(bps / 1_000_000).toFixed(1)} Mbps`;
   }, []);
 
   const formatTotalBytes = useCallback((bytes: number): string => {
@@ -477,7 +429,7 @@ export function VideoControls({
           {currentBandwidthBps > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="text-[10px] text-white/50 font-mono px-1.5 cursor-pointer select-none tabular-nums" onClick={onBandwidthClick}>
+                <span className="text-[10px] text-white/50 font-mono px-1.5 cursor-pointer select-none tabular-nums" onClick={() => onActivePanelChange(activePanel === "bandwidth" ? null : "bandwidth")}>
                   {formatBandwidth(currentBandwidthBps)}
                 </span>
               </TooltipTrigger>
@@ -512,26 +464,19 @@ export function VideoControls({
             </StreamSwitcher>
 
             {/* Connection state dot — click to open diagnostics */}
-            <DiagnosticsPanel
-              session={session}
-              onOpenChange={onPanelsOpenChange}
-              lastRequestedQuality={viewerRequest}
-              effectiveBitrateKbps={effectiveBitrateKbps}
-              configuredBitrateBps={configuredBitrateBps}
+            <button
+              className="flex items-center gap-1.5 px-1.5 cursor-pointer hover:opacity-80 transition-opacity"
+              onClick={() => onActivePanelChange(activePanel === "diagnostics" ? null : "diagnostics")}
+              aria-label={`Connection: ${STATE_LABELS[connectionState]} — click for diagnostics`}
+              title={`${STATE_LABELS[connectionState]} — click for diagnostics`}
             >
-              <button
-                className="flex items-center gap-1.5 px-1.5 cursor-pointer hover:opacity-80 transition-opacity"
-                aria-label={`Connection: ${STATE_LABELS[connectionState]} — click for diagnostics`}
-                title={`${STATE_LABELS[connectionState]} — click for diagnostics`}
-              >
-                <span
-                  className={cn(
-                    "h-2 w-2 rounded-full",
-                    STATE_DOT_CLASSES[connectionState],
-                  )}
-                />
-              </button>
-            </DiagnosticsPanel>
+              <span
+                className={cn(
+                  "h-2 w-2 rounded-full",
+                  STATE_DOT_CLASSES[connectionState],
+                )}
+              />
+            </button>
 
             {/* Separator */}
             <span className="w-px h-5 bg-white/10 mx-0.5" />
@@ -543,7 +488,7 @@ export function VideoControls({
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
-                  onClick={() => window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"))}
+                  onClick={() => onActivePanelChange(activePanel === "settings" ? null : "settings")}
                   aria-label="Viewer settings"
                 >
                   <Settings2 className="h-3.5 w-3.5" />
@@ -591,25 +536,6 @@ export function VideoControls({
             )}
           </div>
 
-          {/* Settings popover remains mounted (hidden)
-              so keyboard events (S) and header button dispatches work.
-              PopoverContent portals to document.body so it's visible. */}
-          <div className="absolute opacity-0 pointer-events-none overflow-hidden w-0 h-0" aria-hidden="true">
-            <ViewerSettingsPanel
-              requestState={viewerRequest}
-              onRequestChange={onQualityRequestChange}
-              requestPending={qualityRequestPending}
-              lastRequestAccepted={lastQualityAccepted}
-              requestFeedback={qualityFeedback}
-              onOpenChange={onPanelsOpenChange}
-              enhancementSettings={enhancementSettings}
-              onEnhancementChange={onEnhancementChange ?? (() => {})}
-              onEnhancementReset={onEnhancementReset ?? (() => {})}
-              enhancementStats={enhancementStats}
-            >
-              <span />
-            </ViewerSettingsPanel>
-          </div>
         </div>
       </div>
     </motion.div>

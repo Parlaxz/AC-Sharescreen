@@ -113,6 +113,8 @@ interface ViewerSettingsPanelProps {
   effectiveBackend?: string;
   /** Fallback reason if the requested backend couldn't be used */
   fallbackReason?: string;
+  /** When true, the quality tab in the popover is hidden */
+  hideQuality?: boolean;
   /** Processing statistics (shown when enhancements enabled) */
   enhancementStats?: {
     inputWidth: number;
@@ -133,6 +135,8 @@ interface ViewerSettingsPanelProps {
     generation?: number;
   } | null;
   children: React.ReactNode;
+  /** When true, render only the content tabs without Popover wrappers */
+  contentOnly?: boolean;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -253,6 +257,7 @@ export function ViewerSettingsPanel({
   fallbackReason,
   enhancementStats = null,
   children,
+  contentOnly = false,
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
   const [effectiveMaxBitrate, setEffectiveMaxBitrate] = useState(maxSliderBitrateKbps);
@@ -310,6 +315,7 @@ export function ViewerSettingsPanel({
 
   // Listen for keyboard shortcut S to toggle settings panel, and Escape to close
   useEffect(() => {
+    if (contentOnly) return;
     const handleToggle = () => {
       setOpen((prev) => !prev);
     };
@@ -394,517 +400,525 @@ export function ViewerSettingsPanel({
   const algorithm = enhancementSettings.webglScalingAlgorithm ?? "native";
   const isFsr = algorithm === "fsr1-easu";
 
-  return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
-      <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-[750px] p-4">
-        <Tabs defaultValue="general" className="w-full">
-          <TabsList className="w-full mb-2">
-            <TabsTrigger value="general" className="flex-1 text-xs">General</TabsTrigger>
-            <TabsTrigger value="enhancements" className="flex-1 text-xs">Image Enhancements</TabsTrigger>
-          </TabsList>
+  const content = (
+    <Tabs defaultValue="general" className="w-full">
+      <TabsList className="w-full mb-2">
+        <TabsTrigger value="general" className="flex-1 text-xs">General</TabsTrigger>
+        <TabsTrigger value="enhancements" className="flex-1 text-xs">Image Enhancements</TabsTrigger>
+      </TabsList>
 
-          {/* ── General tab (existing quality controls) ──── */}
-          <TabsContent value="general" className="mt-0">
-            <div className="grid grid-cols-2 gap-3">
-              {qualityPresets.length > 0 && (
-                <div className="col-span-2 sm:col-span-1">
-                  <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
-                  <div className="flex flex-wrap gap-1">
-                    {qualityPresets.map((preset) => {
-                      const video = preset.settings.video as Record<string, unknown>;
-                      const pw = video.sendWidth as number;
-                      const ph = video.sendHeight as number;
-                      const pf = video.sendFps as number;
-                      const pb = video.videoBitrateKbps as number;
-                      const isMatch = localQuality.maxWidth === pw &&
-                        localQuality.maxHeight === ph &&
-                        localQuality.maxFps === pf &&
-                        localQuality.videoBitrateKbps === pb;
-                      return (
-                        <button
-                          key={preset.id}
-                          className={cn(
-                            "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
-                            isMatch
-                              ? "bg-accent/10 border-accent/30 text-text-primary"
-                              : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
-                          )}
-                          onClick={() => applyPreset({
-                            videoBitrateKbps: pb,
-                            maxWidth: pw,
-                            maxHeight: ph,
-                            maxFps: pf,
-                          })}
-                          disabled={requestPending}
-                        >
-                          {preset.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <div className={cn(qualityPresets.length > 0 ? "col-span-2 sm:col-span-1" : "col-span-2")}>
-                <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
-                <div className="flex flex-wrap gap-1">
-                  {VIEWER_REQUEST_PRESETS.map((preset) => {
-                    const isMatch = requestState !== null &&
-                      requestState.videoBitrateKbps === preset.value.videoBitrateKbps &&
-                      requestState.maxWidth === preset.value.maxWidth &&
-                      requestState.maxFps === preset.value.maxFps;
-                    return (
-                      <button
-                        key={preset.label}
-                        className={cn(
-                          "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
-                          isMatch
-                            ? "bg-accent/10 border-accent/30 text-text-primary"
-                            : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
-                        )}
-                        onClick={() => applyPreset(preset.value)}
-                        disabled={requestPending}
-                      >
-                        {preset.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="col-span-2">
-                <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
-                <div className="flex flex-wrap gap-1">
-                  {RESOLUTION_CHOICES.map((r) => (
+      {/* ── General tab (existing quality controls) ──── */}
+      <TabsContent value="general" className="mt-0">
+        <div className="grid grid-cols-2 gap-3">
+          {qualityPresets.length > 0 && (
+            <div className="col-span-2 sm:col-span-1">
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
+              <div className="flex flex-wrap gap-1">
+                {qualityPresets.map((preset) => {
+                  const video = preset.settings.video as Record<string, unknown>;
+                  const pw = video.sendWidth as number;
+                  const ph = video.sendHeight as number;
+                  const pf = video.sendFps as number;
+                  const pb = video.videoBitrateKbps as number;
+                  const isMatch = localQuality.maxWidth === pw &&
+                    localQuality.maxHeight === ph &&
+                    localQuality.maxFps === pf &&
+                    localQuality.videoBitrateKbps === pb;
+                  return (
                     <button
-                      key={r.label}
+                      key={preset.id}
                       className={cn(
-                        "px-2.5 py-1 rounded-standard text-[11px] transition-colors border",
-                        localQuality.maxWidth === r.w && localQuality.maxHeight === r.h
+                        "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
+                        isMatch
                           ? "bg-accent/10 border-accent/30 text-text-primary"
                           : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
                       )}
-                      onClick={() => setLocalQuality((prev) => ({ ...prev, maxWidth: r.w, maxHeight: r.h }))}
+                      onClick={() => applyPreset({
+                        videoBitrateKbps: pb,
+                        maxWidth: pw,
+                        maxHeight: ph,
+                        maxFps: pf,
+                      })}
+                      disabled={requestPending}
                     >
-                      {r.label}
+                      {preset.name}
                     </button>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
+            </div>
+          )}
 
-              <div className="col-span-2 grid grid-cols-2 gap-4">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1">
-                      <Slider
-                        value={[localQuality.maxFps]}
-                        onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 5, 60) }))}
-                        min={5}
-                        max={60}
-                        step={1}
-                        aria-label="Requested FPS"
-                        className="[&>div]:h-1"
-                      />
-                    </div>
-                    <Input
-                      type="number"
-                      value={fpsText}
-                      onChange={(e) => handleFpsTextChange(e.target.value)}
-                      onBlur={handleFpsTextBlur}
-                      min={1}
-                      max={60}
-                      className="w-16 h-7 text-xs text-center font-mono"
-                      disabled={requestPending}
-                    />
-                  </div>
-                </div>
+          <div className={cn(qualityPresets.length > 0 ? "col-span-2 sm:col-span-1" : "col-span-2")}>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
+            <div className="flex flex-wrap gap-1">
+              {VIEWER_REQUEST_PRESETS.map((preset) => {
+                const isMatch = requestState !== null &&
+                  requestState.videoBitrateKbps === preset.value.videoBitrateKbps &&
+                  requestState.maxWidth === preset.value.maxWidth &&
+                  requestState.maxFps === preset.value.maxFps;
+                return (
+                  <button
+                    key={preset.label}
+                    className={cn(
+                      "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
+                      isMatch
+                        ? "bg-accent/10 border-accent/30 text-text-primary"
+                        : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
+                    )}
+                    onClick={() => applyPreset(preset.value)}
+                    disabled={requestPending}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-text-muted uppercase tracking-wide">Bitrate</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1">
-                      <Slider
-                        value={[localQuality.videoBitrateKbps]}
-                        onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
-                        min={100}
-                        max={effectiveMaxBitrate}
-                        step={50}
-                        aria-label="Requested bitrate"
-                        className="[&>div]:h-1"
-                      />
-                    </div>
-                    <Input
-                      type="number"
-                      value={bitrateText}
-                      onChange={(e) => handleBitrateTextChange(e.target.value)}
-                      onBlur={handleBitrateTextBlur}
-                      min={100}
-                      max={effectiveMaxBitrate}
-                      className="w-20 h-7 text-xs text-center font-mono"
-                      disabled={requestPending}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="col-span-2 flex items-center gap-2 pt-1">
-                <Button
-                  variant="default"
-                  size="sm"
-                  className="flex-1 text-xs"
-                  onClick={handleSend}
-                  disabled={requestPending}
+          <div className="col-span-2">
+            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
+            <div className="flex flex-wrap gap-1">
+              {RESOLUTION_CHOICES.map((r) => (
+                <button
+                  key={r.label}
+                  className={cn(
+                    "px-2.5 py-1 rounded-standard text-[11px] transition-colors border",
+                    localQuality.maxWidth === r.w && localQuality.maxHeight === r.h
+                      ? "bg-accent/10 border-accent/30 text-text-primary"
+                      : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
+                  )}
+                  onClick={() => setLocalQuality((prev) => ({ ...prev, maxWidth: r.w, maxHeight: r.h }))}
                 >
-                  {requestPending ? "Sending..." : "Apply"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs"
-                  onClick={handleClear}
-                  disabled={requestPending}
-                >
-                  {isCustom ? "Defaults" : "Clear"}
-                </Button>
-              </div>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-              {requestFeedback && (
-                <p className={cn(
-                  "col-span-2 text-xs",
-                  lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
-                )}>
-                  {requestFeedback}
+          <div className="col-span-2 grid grid-cols-2 gap-4">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Slider
+                    value={[localQuality.maxFps]}
+                    onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, maxFps: clamp(Math.round(v), 5, 60) }))}
+                    min={5}
+                    max={60}
+                    step={1}
+                    aria-label="Requested FPS"
+                    className="[&>div]:h-1"
+                  />
+                </div>
+                <Input
+                  type="number"
+                  value={fpsText}
+                  onChange={(e) => handleFpsTextChange(e.target.value)}
+                  onBlur={handleFpsTextBlur}
+                  min={1}
+                  max={60}
+                  className="w-16 h-7 text-xs text-center font-mono"
+                  disabled={requestPending}
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">Bitrate</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex-1">
+                  <Slider
+                    value={[localQuality.videoBitrateKbps]}
+                    onValueChange={([v]) => setLocalQuality((prev) => ({ ...prev, videoBitrateKbps: clamp(Math.round(v), 100, effectiveMaxBitrate) }))}
+                    min={100}
+                    max={effectiveMaxBitrate}
+                    step={50}
+                    aria-label="Requested bitrate"
+                    className="[&>div]:h-1"
+                  />
+                </div>
+                <Input
+                  type="number"
+                  value={bitrateText}
+                  onChange={(e) => handleBitrateTextChange(e.target.value)}
+                  onBlur={handleBitrateTextBlur}
+                  min={100}
+                  max={effectiveMaxBitrate}
+                  className="w-20 h-7 text-xs text-center font-mono"
+                  disabled={requestPending}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="col-span-2 flex items-center gap-2 pt-1">
+            <Button
+              variant="default"
+              size="sm"
+              className="flex-1 text-xs"
+              onClick={handleSend}
+              disabled={requestPending}
+            >
+              {requestPending ? "Sending..." : "Apply"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={handleClear}
+              disabled={requestPending}
+            >
+              {isCustom ? "Defaults" : "Clear"}
+            </Button>
+          </div>
+
+          {requestFeedback && (
+            <p className={cn(
+              "col-span-2 text-xs",
+              lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
+            )}>
+              {requestFeedback}
+            </p>
+          )}
+        </div>
+      </TabsContent>
+
+      {/* ── Image Enhancements tab ────────────────────── */}
+      <TabsContent value="enhancements" className="mt-0 max-h-[60vh] overflow-y-auto">
+        <div className="space-y-3">
+          {/* Master toggle */}
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-text-muted uppercase tracking-wide">GPU Image Enhancements</span>
+            <Switch
+              checked={enhancementSettings.enabled}
+              onCheckedChange={(checked) =>
+                onEnhancementChange({ ...enhancementSettings, enabled: checked })
+              }
+              aria-label="Toggle GPU Image Enhancements"
+            />
+          </div>
+
+          {/* Processing Backend + WebGL Scaler side by side */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">Processing Backend</span>
+              </div>
+              <select
+                className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                value={enhancementSettings.processingBackend ?? "webgl2"}
+                onChange={(e) =>
+                  onEnhancementChange({
+                    ...enhancementSettings,
+                    processingBackend: e.target.value as ProcessingBackend,
+                  })
+                }
+                disabled={!enhancementSettings.enabled}
+                aria-label="Processing Backend"
+              >
+                {PROCESSING_BACKENDS.map((backend) => (
+                  <option key={backend} value={backend}>
+                    {PROCESSING_BACKEND_LABELS[backend]}
+                  </option>
+                ))}
+              </select>
+              {fallbackReason && (
+                <p className="text-[10px] text-amber-500 mt-1">{fallbackReason}</p>
+              )}
+              {effectiveBackend && effectiveBackend !== enhancementSettings.processingBackend && (
+                <p className="text-[10px] text-text-muted mt-0.5">
+                  Active: {effectiveBackend}
                 </p>
               )}
             </div>
-          </TabsContent>
 
-          {/* ── Image Enhancements tab ────────────────────── */}
-          <TabsContent value="enhancements" className="mt-0 max-h-[60vh] overflow-y-auto">
-            <div className="space-y-3">
-              {/* Master toggle */}
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-text-muted uppercase tracking-wide">GPU Image Enhancements</span>
-                <Switch
-                  checked={enhancementSettings.enabled}
-                  onCheckedChange={(checked) =>
-                    onEnhancementChange({ ...enhancementSettings, enabled: checked })
-                  }
-                  aria-label="Toggle GPU Image Enhancements"
-                />
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">WebGL Scaler</span>
               </div>
-
-              {/* Processing Backend + WebGL Scaler side by side */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-text-muted uppercase tracking-wide">Processing Backend</span>
-                  </div>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                    value={enhancementSettings.processingBackend ?? "webgl2"}
-                    onChange={(e) =>
-                      onEnhancementChange({
-                        ...enhancementSettings,
-                        processingBackend: e.target.value as ProcessingBackend,
-                      })
-                    }
-                    disabled={!enhancementSettings.enabled}
-                    aria-label="Processing Backend"
-                  >
-                    {PROCESSING_BACKENDS.map((backend) => (
-                      <option key={backend} value={backend}>
-                        {PROCESSING_BACKEND_LABELS[backend]}
-                      </option>
-                    ))}
-                  </select>
-                  {fallbackReason && (
-                    <p className="text-[10px] text-amber-500 mt-1">{fallbackReason}</p>
-                  )}
-                  {effectiveBackend && effectiveBackend !== enhancementSettings.processingBackend && (
-                    <p className="text-[10px] text-text-muted mt-0.5">
-                      Active: {effectiveBackend}
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-text-muted uppercase tracking-wide">WebGL Scaler</span>
-                  </div>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                    value={enhancementSettings.webglScalingAlgorithm ?? "native"}
-                    onChange={(e) =>
-                      onEnhancementChange({
-                        ...enhancementSettings,
-                        webglScalingAlgorithm: e.target.value as ScalingAlgorithm,
-                      })
-                    }
-                    disabled={!enhancementSettings.enabled}
-                    aria-label="WebGL Scaler"
-                  >
-                    {SCALING_ALGORITHMS.map((algo) => (
-                      <option key={algo} value={algo}>
-                        {SCALING_ALGORITHM_LABELS[algo]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <hr className="border-border-subtle" />
-
-              {/* Sliders in a 2-column grid */}
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                <EnhancementSliderControl
-                  label="Sharpness"
-                  value={enhancementSettings.sharpeningStrength}
-                  disabled={!enhancementSettings.enabled}
-                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
-                />
-
-                <EnhancementSliderControl
-                  label="Noise Protection"
-                  value={enhancementSettings.noiseProtection}
-                  disabled={!enhancementSettings.enabled}
-                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
-                />
-
-                <EnhancementSliderControl
-                  label="Compression Cleanup"
-                  value={enhancementSettings.compressionCleanup}
-                  disabled={!enhancementSettings.enabled}
-                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
-                />
-
-                <EnhancementSliderControl
-                  label="Debanding"
-                  value={enhancementSettings.debanding}
-                  disabled={!enhancementSettings.enabled}
-                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
-                />
-              </div>
-
-              {/* FSR Target Scale — only when FSR 1 EASU is selected */}
-              {isFsr && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Target Scale</span>
-                  </div>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                    value={enhancementSettings.fsrTargetScale}
-                    onChange={(e) =>
-                      onEnhancementChange({
-                        ...enhancementSettings,
-                        fsrTargetScale: parseFsrTargetScale(e.target.value),
-                      })
-                    }
-                    disabled={!enhancementSettings.enabled}
-                    aria-label="FSR Target Scale"
-                  >
-                    {FSR_TARGET_SCALES.map((s) => (
-                      <option key={s} value={s}>
-                        {FSR_TARGET_SCALE_LABELS[s]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* FSR Final Scaler — only when FSR is selected */}
-              {isFsr && (
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Final Scaler</span>
-                  </div>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                    value={enhancementSettings.fsrFinalScaler}
-                    onChange={(e) =>
-                      onEnhancementChange({
-                        ...enhancementSettings,
-                        fsrFinalScaler: e.target.value as FsrFinalScaler,
-                      })
-                    }
-                    disabled={!enhancementSettings.enabled}
-                    aria-label="FSR Final Scaler"
-                  >
-                    {FSR_FINAL_SCALERS.map((s) => (
-                      <option key={s} value={s}>
-                        {FSR_FINAL_SCALER_LABELS[s]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* NVIDIA RTX Video Settings - shown when relevant */}
-              {(enhancementSettings.processingBackend === "nvidia-vsr" || enhancementSettings.processingBackend === "auto") && (
-                <>
-                  <hr className="border-border-subtle" />
-                  <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
-                  <div className="space-y-2">
-                    {/* Mode */}
-                    <div>
-                      <span className="text-[10px] text-text-muted">Mode</span>
-                      <select
-                        className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
-                        value={enhancementSettings.nvidiaMode}
-                        onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaMode: e.target.value as NvidiaProcessingMode })}
-                        disabled={!enhancementSettings.enabled}
-                      >
-                        {NVIDIA_PROCESSING_MODES.map((mode) => (
-                          <option key={mode} value={mode}>{mode}</option>
-                        ))}
-                      </select>
-                    </div>
-                    {/* Quality */}
-                    <div>
-                      <span className="text-[10px] text-text-muted">Quality</span>
-                      <select
-                        className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
-                        value={enhancementSettings.nvidiaQuality}
-                        onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaQuality: e.target.value as NvidiaQuality })}
-                        disabled={!enhancementSettings.enabled}
-                      >
-                        {NVIDIA_QUALITIES.map((q) => (
-                          <option key={q} value={q}>{q}</option>
-                        ))}
-                      </select>
-                    </div>
-                    {/* Output mode */}
-                    <div>
-                      <span className="text-[10px] text-text-muted">Output</span>
-                      <select
-                        className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
-                        value={enhancementSettings.nvidiaOutput}
-                        onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaOutput: e.target.value as NvidiaOutput })}
-                        disabled={!enhancementSettings.enabled}
-                      >
-                        {NVIDIA_OUTPUTS.map((o) => (
-                          <option key={o} value={o}>{o}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                </>
-              )}
-
-              {/* Reset button */}
-              <div className="pt-1">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full text-xs"
-                  onClick={onEnhancementReset}
-                >
-                  Reset to Defaults
-                </Button>
-              </div>
-
-              {/* ── Processing statistics ──────────────────────── */}
-                  {enhancementSettings.enabled && enhancementStats && (
-                <div className="pt-2 border-t border-border-subtle">
-                  <p className="text-[10px] text-text-muted uppercase tracking-wide mb-2">Processing Stats</p>
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-                    <span className="text-text-muted">Input</span>
-                    <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.inputWidth}x{enhancementStats.inputHeight}
-                    </span>
-                    {enhancementStats.easuTargetWidth != null && enhancementStats.easuTargetWidth > 0 && (
-                      <>
-                        <span className="text-text-muted">EASU Target</span>
-                        <span className="text-text-secondary font-mono text-right">
-                          {enhancementStats.easuTargetWidth}x{enhancementStats.easuTargetHeight}
-                        </span>
-                      </>
-                    )}
-                    <span className="text-text-muted">Display</span>
-                    <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.outputWidth}x{enhancementStats.outputHeight}
-                    </span>
-                    {enhancementStats.finalBicubicActive != null && (
-                      <>
-                        <span className="text-text-muted">Final Scaling</span>
-                        <span className="text-text-secondary font-mono text-right">
-                          {enhancementStats.finalBicubicActive
-                            ? (enhancementStats.fsrFinalScaler
-                              ? FSR_FINAL_SCALER_LABELS[enhancementStats.fsrFinalScaler]
-                              : (enhancementStats.scalingAlgorithm === "lanczos" ? "Lanczos 3" : "Bicubic"))
-                            : enhancementStats.easuTargetWidth ? "EASU only" : "Native"}
-                        </span>
-                      </>
-                    )}
-                    {enhancementStats.fsrFinalScaler != null && (
-                      <>
-                        <span className="text-text-muted">FSR Final Scaler</span>
-                        <span className="text-text-secondary font-mono text-right">
-                          {FSR_FINAL_SCALER_LABELS[enhancementStats.fsrFinalScaler] ?? enhancementStats.fsrFinalScaler}
-                        </span>
-                      </>
-                    )}
-                    {enhancementStats.rcasActive != null && (
-                      <>
-                        <span className="text-text-muted">RCAS</span>
-                        <span className="text-text-secondary font-mono text-right">
-                          {enhancementStats.rcasActive ? "Active" : "—"}
-                        </span>
-                      </>
-                    )}
-                    {enhancementStats.activePasses && enhancementStats.activePasses.length > 0 && (
-                      <>
-                        <span className="text-text-muted">Passes</span>
-                        <span className="text-text-secondary font-mono text-right text-[10px]">
-                          {enhancementStats.activePasses.join(" → ")}
-                        </span>
-                      </>
-                    )}
-                    <span className="text-text-muted">Backend</span>
-                    <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.backend}
-                    </span>
-                    {enhancementStats.backpressureDrops != null && (
-                      <>
-                        <span className="text-text-muted">Backpressure Drops</span>
-                        <span className="text-text-secondary font-mono text-right">
-                          {enhancementStats.backpressureDrops}
-                        </span>
-                      </>
-                    )}
-                    {enhancementStats.generation != null && (
-                      <>
-                        <span className="text-text-muted">Generation</span>
-                        <span className="text-text-secondary font-mono text-right">
-                          {enhancementStats.generation}
-                        </span>
-                      </>
-                    )}
-                    <span className="text-text-muted">GPU Time</span>
-                    <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.processingTimeMs != null
-                        ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
-                        : "—"}
-                    </span>
-                    <span className="text-text-muted">Algorithm</span>
-                    <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.scalingAlgorithm
-                        ? SCALING_ALGORITHM_LABELS[enhancementStats.scalingAlgorithm] ?? enhancementStats.scalingAlgorithm
-                        : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
-                    </span>
-                  </div>
-                </div>
-              )}
+              <select
+                className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                value={enhancementSettings.webglScalingAlgorithm ?? "native"}
+                onChange={(e) =>
+                  onEnhancementChange({
+                    ...enhancementSettings,
+                    webglScalingAlgorithm: e.target.value as ScalingAlgorithm,
+                  })
+                }
+                disabled={!enhancementSettings.enabled}
+                aria-label="WebGL Scaler"
+              >
+                {SCALING_ALGORITHMS.map((algo) => (
+                  <option key={algo} value={algo}>
+                    {SCALING_ALGORITHM_LABELS[algo]}
+                  </option>
+                ))}
+              </select>
             </div>
-          </TabsContent>
-        </Tabs>
+          </div>
+
+          <hr className="border-border-subtle" />
+
+          {/* Sliders in a 2-column grid */}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+            <EnhancementSliderControl
+              label="Sharpness"
+              value={enhancementSettings.sharpeningStrength}
+              disabled={!enhancementSettings.enabled}
+              onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
+            />
+
+            <EnhancementSliderControl
+              label="Noise Protection"
+              value={enhancementSettings.noiseProtection}
+              disabled={!enhancementSettings.enabled}
+              onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
+            />
+
+            <EnhancementSliderControl
+              label="Compression Cleanup"
+              value={enhancementSettings.compressionCleanup}
+              disabled={!enhancementSettings.enabled}
+              onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
+            />
+
+            <EnhancementSliderControl
+              label="Debanding"
+              value={enhancementSettings.debanding}
+              disabled={!enhancementSettings.enabled}
+              onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
+            />
+          </div>
+
+          {/* FSR Target Scale — only when FSR 1 EASU is selected */}
+          {isFsr && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Target Scale</span>
+              </div>
+              <select
+                className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                value={enhancementSettings.fsrTargetScale}
+                onChange={(e) =>
+                  onEnhancementChange({
+                    ...enhancementSettings,
+                    fsrTargetScale: parseFsrTargetScale(e.target.value),
+                  })
+                }
+                disabled={!enhancementSettings.enabled}
+                aria-label="FSR Target Scale"
+              >
+                {FSR_TARGET_SCALES.map((s) => (
+                  <option key={s} value={s}>
+                    {FSR_TARGET_SCALE_LABELS[s]}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* FSR Final Scaler — only when FSR is selected */}
+          {isFsr && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Final Scaler</span>
+              </div>
+              <select
+                className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                value={enhancementSettings.fsrFinalScaler}
+                onChange={(e) =>
+                  onEnhancementChange({
+                    ...enhancementSettings,
+                    fsrFinalScaler: e.target.value as FsrFinalScaler,
+                  })
+                }
+                disabled={!enhancementSettings.enabled}
+                aria-label="FSR Final Scaler"
+              >
+                {FSR_FINAL_SCALERS.map((s) => (
+                  <option key={s} value={s}>
+                    {FSR_FINAL_SCALER_LABELS[s]}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* NVIDIA RTX Video Settings - shown when relevant */}
+          {(enhancementSettings.processingBackend === "nvidia-vsr" || enhancementSettings.processingBackend === "auto") && (
+            <>
+              <hr className="border-border-subtle" />
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
+              <div className="space-y-2">
+                {/* Mode */}
+                <div>
+                  <span className="text-[10px] text-text-muted">Mode</span>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
+                    value={enhancementSettings.nvidiaMode}
+                    onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaMode: e.target.value as NvidiaProcessingMode })}
+                    disabled={!enhancementSettings.enabled}
+                  >
+                    {NVIDIA_PROCESSING_MODES.map((mode) => (
+                      <option key={mode} value={mode}>{mode}</option>
+                    ))}
+                  </select>
+                </div>
+                {/* Quality */}
+                <div>
+                  <span className="text-[10px] text-text-muted">Quality</span>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
+                    value={enhancementSettings.nvidiaQuality}
+                    onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaQuality: e.target.value as NvidiaQuality })}
+                    disabled={!enhancementSettings.enabled}
+                  >
+                    {NVIDIA_QUALITIES.map((q) => (
+                      <option key={q} value={q}>{q}</option>
+                    ))}
+                  </select>
+                </div>
+                {/* Output mode */}
+                <div>
+                  <span className="text-[10px] text-text-muted">Output</span>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
+                    value={enhancementSettings.nvidiaOutput}
+                    onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaOutput: e.target.value as NvidiaOutput })}
+                    disabled={!enhancementSettings.enabled}
+                  >
+                    {NVIDIA_OUTPUTS.map((o) => (
+                      <option key={o} value={o}>{o}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Reset button */}
+          <div className="pt-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full text-xs"
+              onClick={onEnhancementReset}
+            >
+              Reset to Defaults
+            </Button>
+          </div>
+
+          {/* ── Processing statistics ──────────────────────── */}
+              {enhancementSettings.enabled && enhancementStats && (
+            <div className="pt-2 border-t border-border-subtle">
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-2">Processing Stats</p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                <span className="text-text-muted">Input</span>
+                <span className="text-text-secondary font-mono text-right">
+                  {enhancementStats.inputWidth}x{enhancementStats.inputHeight}
+                </span>
+                {enhancementStats.easuTargetWidth != null && enhancementStats.easuTargetWidth > 0 && (
+                  <>
+                    <span className="text-text-muted">EASU Target</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.easuTargetWidth}x{enhancementStats.easuTargetHeight}
+                    </span>
+                  </>
+                )}
+                <span className="text-text-muted">Display</span>
+                <span className="text-text-secondary font-mono text-right">
+                  {enhancementStats.outputWidth}x{enhancementStats.outputHeight}
+                </span>
+                {enhancementStats.finalBicubicActive != null && (
+                  <>
+                    <span className="text-text-muted">Final Scaling</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.finalBicubicActive
+                        ? (enhancementStats.fsrFinalScaler
+                          ? FSR_FINAL_SCALER_LABELS[enhancementStats.fsrFinalScaler]
+                          : (enhancementStats.scalingAlgorithm === "lanczos" ? "Lanczos 3" : "Bicubic"))
+                        : enhancementStats.easuTargetWidth ? "EASU only" : "Native"}
+                    </span>
+                  </>
+                )}
+                {enhancementStats.fsrFinalScaler != null && (
+                  <>
+                    <span className="text-text-muted">FSR Final Scaler</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {FSR_FINAL_SCALER_LABELS[enhancementStats.fsrFinalScaler] ?? enhancementStats.fsrFinalScaler}
+                    </span>
+                  </>
+                )}
+                {enhancementStats.rcasActive != null && (
+                  <>
+                    <span className="text-text-muted">RCAS</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.rcasActive ? "Active" : "—"}
+                    </span>
+                  </>
+                )}
+                {enhancementStats.activePasses && enhancementStats.activePasses.length > 0 && (
+                  <>
+                    <span className="text-text-muted">Passes</span>
+                    <span className="text-text-secondary font-mono text-right text-[10px]">
+                      {enhancementStats.activePasses.join(" → ")}
+                    </span>
+                  </>
+                )}
+                <span className="text-text-muted">Backend</span>
+                <span className="text-text-secondary font-mono text-right">
+                  {enhancementStats.backend}
+                </span>
+                {enhancementStats.backpressureDrops != null && (
+                  <>
+                    <span className="text-text-muted">Backpressure Drops</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.backpressureDrops}
+                    </span>
+                  </>
+                )}
+                {enhancementStats.generation != null && (
+                  <>
+                    <span className="text-text-muted">Generation</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.generation}
+                    </span>
+                  </>
+                )}
+                <span className="text-text-muted">GPU Time</span>
+                <span className="text-text-secondary font-mono text-right">
+                  {enhancementStats.processingTimeMs != null
+                    ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
+                    : "—"}
+                </span>
+                <span className="text-text-muted">Algorithm</span>
+                <span className="text-text-secondary font-mono text-right">
+                  {enhancementStats.scalingAlgorithm
+                    ? SCALING_ALGORITHM_LABELS[enhancementStats.scalingAlgorithm] ?? enhancementStats.scalingAlgorithm
+                    : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </TabsContent>
+    </Tabs>
+  );
+
+  if (contentOnly) {
+    return <div className="w-[750px] p-4 max-h-[80vh] overflow-y-auto">{content}</div>;
+  }
+
+  return (
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <PopoverTrigger asChild>{children}</PopoverTrigger>
+      <PopoverContent side="top" align="center" className="w-[750px] p-4 max-h-[80vh] overflow-y-auto">
+        {content}
       </PopoverContent>
     </Popover>
   );

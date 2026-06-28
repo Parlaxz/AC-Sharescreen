@@ -683,14 +683,24 @@ describe("Task 2 — Quality control removal", () => {
     expect(content).not.toContain("Quality request sent");
   });
 
-  it("VideoControls hides quality popover by default", async () => {
+  it("VideoControls delegates panel toggling to onActivePanelChange", async () => {
     const fs = await import("fs");
     const content = fs.readFileSync(
       new URL("../src/renderer/components/workspace/viewer/VideoControls.tsx", import.meta.url),
       "utf-8",
     );
-    expect(content).toContain("hideQuality = true");
-    expect(content).toContain("!hideQuality");
+    expect(content).toContain("onActivePanelChange");
+    expect(content).toContain("activePanel");
+  });
+
+  it("ViewerPanelShell uses contentOnly for panel content", async () => {
+    const fs = await import("fs");
+    const content = fs.readFileSync(
+      new URL("../src/renderer/components/workspace/viewer/ViewerPanelShell.tsx", import.meta.url),
+      "utf-8",
+    );
+    expect(content).toContain("contentOnly");
+    expect(content).toContain("activePanel");
   });
 });
 

@@ -16,7 +16,7 @@ import type {
 
 // ─── Backend kind ────────────────────────────────────────────────────────────
 
-export type BackendKind = "webgl2" | "nvidia-vsr" | "unavailable";
+export type BackendKind = "webgl2" | "unavailable";
 
 // ─── Shared result types ─────────────────────────────────────────────────────
 

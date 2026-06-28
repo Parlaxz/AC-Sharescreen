@@ -132,6 +132,7 @@ describe("Competing UI library prohibition", () => {
       "tailwind-merge",
       "class-variance-authority",
       "zustand",
+      "recharts",
     ];
 
     const violations: string[] = [];

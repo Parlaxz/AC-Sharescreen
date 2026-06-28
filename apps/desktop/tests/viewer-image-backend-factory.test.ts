@@ -53,27 +53,7 @@ describe("createImageProcessingBackend", () => {
     expect(result.requested).toBe("webgl2");
   });
 
-  it("creates NVIDIA VSR backend when processingBackend is 'nvidia-vsr' and capabilities say available", () => {
-    const result = createImageProcessingBackend(
-      { ...baseSettings, processingBackend: "nvidia-vsr" },
-      makeCapabilities({ nvidiaVsrAvailable: true }),
-    );
-    expect(result.backend.kind).toBe("nvidia-vsr");
-    expect(result.effective).toBe("nvidia-vsr");
-    expect(result.requested).toBe("nvidia-vsr");
-  });
-
-  it("creates NVIDIA VSR backend when processingBackend is 'auto' and NVIDIA is available", () => {
-    const result = createImageProcessingBackend(
-      { ...baseSettings, processingBackend: "auto" },
-      makeCapabilities({ nvidiaVsrAvailable: true }),
-    );
-    expect(result.backend.kind).toBe("nvidia-vsr");
-    expect(result.effective).toBe("nvidia-vsr");
-    expect(result.requested).toBe("auto");
-  });
-
-  it("creates WebGL2 backend when processingBackend is 'auto' but NVIDIA unavailable", () => {
+  it("creates WebGL2 backend when processingBackend is 'auto'", () => {
     const result = createImageProcessingBackend(
       { ...baseSettings, processingBackend: "auto" },
       makeCapabilities({ nvidiaVsrAvailable: false }),
@@ -81,39 +61,9 @@ describe("createImageProcessingBackend", () => {
     expect(result.backend.kind).toBe("webgl2");
     expect(result.effective).toBe("webgl2");
     expect(result.requested).toBe("auto");
-    // No fallbackReason when NVIDIA was never requested
-    expect(result.fallbackReason).toBeUndefined();
   });
 
-  it("creates WebGL2 backend when processingBackend is 'nvidia-vsr' but capabilities say unavailable", () => {
-    const result = createImageProcessingBackend(
-      { ...baseSettings, processingBackend: "nvidia-vsr" },
-      makeCapabilities({
-        nvidiaVsrAvailable: false,
-        nvidiaVsrReason: "No RTX GPU detected",
-      }),
-    );
-    expect(result.backend.kind).toBe("webgl2");
-    expect(result.effective).toBe("webgl2");
-    expect(result.requested).toBe("nvidia-vsr");
-    // fallbackReason is populated when a requested backend falls through
-    expect(result.fallbackReason).toBeDefined();
-  });
-
-  it("fallbackReason is set when requested backend unavailable", () => {
-    const result = createImageProcessingBackend(
-      { ...baseSettings, processingBackend: "nvidia-vsr" },
-      makeCapabilities({
-        nvidiaVsrAvailable: false,
-        nvidiaVsrReason: "No RTX GPU detected",
-      }),
-    );
-    expect(result.fallbackReason).toBeDefined();
-    expect(result.fallbackReason!.length).toBeGreaterThan(0);
-    expect(result.fallbackReason).toBe("No RTX GPU detected");
-  });
-
-  it("throws error when no backend is available (no WebGL2, no NVIDIA)", () => {
+  it("throws error when no backend is available (no WebGL2)", () => {
     expect(() =>
       createImageProcessingBackend(
         { ...baseSettings, processingBackend: "auto" },
@@ -125,15 +75,15 @@ describe("createImageProcessingBackend", () => {
     ).toThrow("No image processing backend available");
   });
 
-  it("accepts injected capabilities", () => {
-    const customCaps = makeCapabilities({ nvidiaVsrAvailable: true });
+  it("accepts injected capabilities with WebGL2 backend", () => {
+    const customCaps = makeCapabilities({ webgl2MaxTextureSize: 8192 });
     const result = createImageProcessingBackend(
-      { ...baseSettings, processingBackend: "nvidia-vsr" },
+      { ...baseSettings, processingBackend: "webgl2" },
       customCaps,
     );
-    expect(result.backend.kind).toBe("nvidia-vsr");
-    // Verify the caps object we passed is the one used
-    expect(customCaps.nvidiaVsrAvailable).toBe(true);
+    expect(result.backend.kind).toBe("webgl2");
+    expect(result.effective).toBe("webgl2");
+    expect(result.requested).toBe("webgl2");
   });
 
   it("defaults to webgl2 when processingBackend is undefined", () => {

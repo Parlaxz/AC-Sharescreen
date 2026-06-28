@@ -9,16 +9,9 @@
  *   3. State tracking:          setSessionState
  *   4. Markers:                 addMarker
  *   5. Subscription:            subscribe / getSnapshot  (useSyncExternalStore)
- *   6. Getters (new):           getViewerRates
- *   7. Getters (backward-compat):  getLiveSamples / getLiveMarkers / getLiveDuration /
- *                                  getLiveTotalBytes / getLiveCurrentBytesPerSecond /
- *                                  getLiveHostTotal / getLiveCurrentBps / getLiveStartTimeMs /
- *                                  getLiveViewerCount / getViewerBps / getViewerTotalBytes /
- *                                  getViewerSamples / feedViewerBandwidth
- *   8. Backward-compat lifecycle:  onStreamStart / onStreamStop / onQualityChange /
- *                                  onHostStats / onViewerStats
- *   9. Persistence:             checkpointSession
- *  10. Crash recovery:          recoverInterruptedSessions
+ *   6. Getters:                 getViewerRates / getActiveSessionIds / getActiveMediaSessionIds
+ *   7. Persistence:             checkpointSession / getHistory
+ *   8. Crash recovery:          recoverInterruptedSessions
  *
  * ─── Telemetry contract ─────────────────────────────────────────────────────
  *   - Rates stored internally as bits per second (TelemetrySample.mediaBitsPerSecond)
@@ -50,29 +43,12 @@ import type {
   ViewerRateEntry,
 } from "./bandwidth-telemetry-types.js";
 
-// ─── Backward-compat type re-exports ────────────────────────────────────────
-
-export type StreamHistoryRole = "host" | "viewer";
-export type StreamHistoryStatus = "active" | "completed" | "interrupted";
-
-export interface StreamHistorySample {
-  timestamp: number;
-  bytesPerSecond: number;   // bytes per second (NOT bits)
-  totalBytes: number;
-}
-
-export interface StreamSettingMarker {
-  timestamp: number;
-  category: string;
-  from: string | null;
-  to: string;
-  label: string;
-}
+// ─── History record type ────────────────────────────────────────────────────
 
 export interface StreamHistoryRecord {
   historyId: string;
-  role: StreamHistoryRole;
-  status: StreamHistoryStatus;
+  role: "host" | "viewer";
+  status: "active" | "completed" | "interrupted";
   mediaSessionId: string;
   logicalStreamId: string;
   groupId: string;
@@ -86,13 +62,10 @@ export interface StreamHistoryRecord {
   averageBytesPerSecond: number;
   presetName: string | null;
   customQuality: boolean;
-  samples: StreamHistorySample[];
-  markers: StreamSettingMarker[];
+  samples: Array<{ timestamp: number; bytesPerSecond: number; totalBytes: number }>;
+  markers: Array<{ timestamp: number; category: string; from: string | null; to: string; label: string }>;
   interrupted: boolean;
 }
-
-export type BandwidthSample = StreamHistorySample;
-export type SettingMarker = StreamSettingMarker;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -156,7 +129,7 @@ interface BucketMeta {
 interface InternalSessionState {
   // Identity
   historyId: string;
-  role: StreamHistoryRole;
+  role: "host" | "viewer";
   mediaSessionId: string;
   logicalStreamId: string;
   groupId: string;
@@ -188,12 +161,9 @@ interface InternalSessionState {
   ewmaSeries: number[];
 
   // Samples
-  rawSamples: TelemetrySample[];
+    rawSamples: TelemetrySample[];
 
-  // Persisted-format samples (for getLiveSames / checkpointSession backward compat)
-  persistSamples: StreamHistorySample[];
-
-  // Buckets
+    // Buckets
   mediumBuckets: AggregatedBucket[];
   longBuckets: AggregatedBucket[];
 
@@ -206,10 +176,8 @@ interface InternalSessionState {
   pausedAt: number | null;   // performance.now() when paused started
   totalPausedMs: number;
 
-  // Markers (new format for snapshot)
+  // Markers
   markers: TelemetryMarker[];
-  // Markers (old format for persistence & backward compat getLiveMarkers)
-  oldMarkers: StreamSettingMarker[];
 
   // Viewer rates (host only)
   viewerRates: Map<string, ViewerRateEntry>;
@@ -218,7 +186,7 @@ interface InternalSessionState {
   lastSnapshot: BandwidthSnapshot | null;
 
   // Status for persistence
-  status: StreamHistoryStatus;
+  status: "active" | "completed" | "interrupted";
   lastCheckpointAt: number;
 }
 
@@ -240,11 +208,6 @@ export class StreamMetricsService {
 
   // Subscribers keyed by historyId
   private subscribers = new Map<string, Set<() => void>>();
-
-  // Viewer-side tracker (backward compat)
-  private _viewerBps = 0;
-  private _viewerTotalBytes = 0;
-  private _viewerSamples: { timestamp: number; bps: number }[] = [];
 
   // ─── Singleton ──────────────────────────────────────────────────────────
 
@@ -323,13 +286,6 @@ export class StreamMetricsService {
         label: initialQualityLabel,
         detail: null,
       });
-      state.oldMarkers.push({
-        timestamp: now,
-        category: "other",
-        from: null,
-        to: initialQualityLabel,
-        label: initialQualityLabel,
-      });
     }
 
     this.sessions.set(historyId, state);
@@ -359,7 +315,7 @@ export class StreamMetricsService {
 
   private makeState(
     historyId: string,
-    role: StreamHistoryRole,
+    role: "host" | "viewer",
     mediaSessionId: string,
     logicalStreamId: string,
     groupId: string,
@@ -391,7 +347,6 @@ export class StreamMetricsService {
       ewma: createEwma(),
       ewmaSeries: [],
       rawSamples: [],
-      persistSamples: [],
       mediumBuckets: [],
       longBuckets: [],
       mediumBucketMeta: new Map(),
@@ -400,7 +355,6 @@ export class StreamMetricsService {
       pausedAt: null,
       totalPausedMs: 0,
       markers: [],
-      oldMarkers: [],
       viewerRates: new Map(),
       lastSnapshot: null,
       status: "active",
@@ -436,7 +390,7 @@ export class StreamMetricsService {
     historyId: string,
     cumulativeBytes: number,
     timestamp: number,
-    expectedRole: StreamHistoryRole,
+    expectedRole: "host" | "viewer",
     ssrc?: number | null,
   ): void {
     const state = this.sessions.get(historyId);
@@ -511,8 +465,19 @@ export class StreamMetricsService {
       }
     }
 
-    state.lastSnapshot = null;
-    this.notifySessionSubscribers(historyId);
+    // Auto-marker for state transitions
+    if (oldState === "playing" && newState === "paused") {
+      this.addMarker(historyId, "pause", oldState, newState, "Session paused");
+    } else if (oldState === "paused" && newState === "playing") {
+      this.addMarker(historyId, "resume", oldState, newState, "Session resumed");
+    } else if (newState === "reconnecting") {
+      this.addMarker(historyId, "reconnect", oldState, newState, "Session reconnecting");
+    } else {
+      this.addMarker(historyId, "other", oldState, newState, `${oldState} → ${newState}`);
+    }
+
+    // addMarker already invalidates snapshot cache + notifies subscribers.
+    // Still need to notify history change listeners.
     this.notifyHistoryChanged();
   }
 
@@ -541,13 +506,6 @@ export class StreamMetricsService {
       label,
       detail: from ? `${from} → ${to}` : to,
     });
-    state.oldMarkers.push({
-      timestamp: now,
-      category: type,
-      from,
-      to,
-      label,
-    });
 
     state.lastSnapshot = null;
     this.notifySessionSubscribers(historyId);
@@ -556,22 +514,14 @@ export class StreamMetricsService {
   // ─── Checkpoint (persistence & backward compat) ─────────────────────────
 
   /**
-   * Persist a checkpoint sample for the session.
-   * Public for backward compat — also called internally every 10th timer tick.
+   * Persist a checkpoint snapshot for the session.
+   * Called internally every 10th timer tick.
    */
   checkpointSession(historyId: string): void {
     const state = this.sessions.get(historyId);
     if (!state) return;
 
-    const now = Date.now();
-    const bytesPerSecond = Math.round(state.lastBitsPerSecond / 8);
-
-    state.persistSamples.push({
-      timestamp: now,
-      bytesPerSecond,
-      totalBytes: state.totalBytes,
-    });
-    state.lastCheckpointAt = now;
+    state.lastCheckpointAt = Date.now();
 
     this.upsertRecord(this.buildRecord(state)).catch(() => {});
     state.lastSnapshot = null;
@@ -593,17 +543,7 @@ export class StreamMetricsService {
 
     const promise = (async () => {
       try {
-        // Push final sample
-        {
-          const now = Date.now();
-          const bytesPerSecond = Math.round(state.lastBitsPerSecond / 8);
-          state.persistSamples.push({
-            timestamp: now,
-            bytesPerSecond,
-            totalBytes: state.totalBytes,
-          });
-          state.lastCheckpointAt = now;
-        }
+        state.lastCheckpointAt = Date.now();
 
         const now = Date.now();
         const durationMs = now - state.startedAt;
@@ -624,8 +564,18 @@ export class StreamMetricsService {
           averageBytesPerSecond: durationMs > 0 ? Math.round((state.totalBytes * 1000) / durationMs) : 0,
           presetName: state.presetName,
           customQuality: state.customQuality,
-          samples: [...state.persistSamples],
-          markers: [...state.oldMarkers],
+          samples: state.rawSamples.map(s => ({
+            timestamp: s.timestampMs,
+            bytesPerSecond: Math.round(s.mediaBitsPerSecond / 8),
+            totalBytes: s.cumulativeMediaBytes,
+          })),
+          markers: state.markers.map(m => ({
+            timestamp: m.timestampMs,
+            category: m.type,
+            from: m.detail ? m.detail.split(' → ')[0] : null,
+            to: m.detail ? m.detail.split(' → ')[1] || m.label : m.label,
+            label: m.label,
+          })),
           interrupted: false,
         };
 
@@ -644,7 +594,7 @@ export class StreamMetricsService {
     return promise;
   }
 
-  // ─── Public getters (backward compat) ───────────────────────────────────
+  // ─── Public getters ─────────────────────────────────────────────────────
 
   getActiveSessionIds(): string[] {
     return Array.from(this.sessions.keys());
@@ -659,178 +609,6 @@ export class StreamMetricsService {
   }
 
   /**
-   * Get live samples (persisted-format).
-   * @param id - historyId (preferred) or mediaSessionId (backward compat)
-   */
-  getLiveSamples(id: string): StreamHistorySample[] {
-    const byHistoryId = this.sessions.get(id);
-    if (byHistoryId) return byHistoryId.persistSamples;
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === id) return state.persistSamples;
-    }
-    return [];
-  }
-
-  /**
-   * Get live markers.
-   * @param id - historyId (preferred) or mediaSessionId (backward compat)
-   */
-  getLiveMarkers(id: string): StreamSettingMarker[] {
-    const byHistoryId = this.sessions.get(id);
-    if (byHistoryId) return byHistoryId.oldMarkers;
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === id) return state.oldMarkers;
-    }
-    return [];
-  }
-
-  /**
-   * Get live duration.
-   * @param id - historyId (preferred) or mediaSessionId (backward compat)
-   */
-  getLiveDuration(id: string): number {
-    const byHistoryId = this.sessions.get(id);
-    if (byHistoryId) return Date.now() - byHistoryId.startedAt;
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === id) return Date.now() - state.startedAt;
-    }
-    return 0;
-  }
-
-  /**
-   * Get total bytes (raw cumulative bytes).
-   */
-  getLiveTotalBytes(historyId: string): number {
-    return this.sessions.get(historyId)?.totalBytes ?? 0;
-  }
-
-  /**
-   * Get current rate in bytes per second (backward compat with old tests).
-   */
-  getLiveCurrentBytesPerSecond(historyId: string): number {
-    return Math.round((this.sessions.get(historyId)?.lastBitsPerSecond ?? 0) / 8);
-  }
-
-  /**
-   * Get total host bytes for a session.
-   */
-  getLiveHostTotal(id: string): number {
-    const byHistoryId = this.sessions.get(id);
-    if (byHistoryId) return byHistoryId.totalBytes;
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === id && state.role === "host") return state.totalBytes;
-    }
-    return 0;
-  }
-
-  // ─── Backward-compat lifecycle methods ──────────────────────────────────
-
-  /** @returns historyId */
-  onStreamStart(
-    mediaSessionId: string,
-    logicalStreamId: string,
-    groupId: string,
-    groupName: string,
-    presetName: string | null,
-    customQuality: boolean,
-    initialQualityLabel: string | null,
-  ): string {
-    const id = this.startHostSession(
-      mediaSessionId,
-      logicalStreamId,
-      groupId,
-      groupName,
-      presetName,
-      customQuality,
-      initialQualityLabel,
-    );
-    return id;
-  }
-
-  async onStreamStop(mediaSessionId: string): Promise<void> {
-    const toFinalize: string[] = [];
-    for (const [historyId, state] of this.sessions) {
-      if (state.mediaSessionId === mediaSessionId) {
-        toFinalize.push(historyId);
-      }
-    }
-    await Promise.all(toFinalize.map((id) => this.finalizeSession(id)));
-  }
-
-  onQualityChange(mediaSessionId: string, label: string): void {
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === mediaSessionId && state.role === "host") {
-        this.addMarker(state.historyId, "other", null, label, label);
-        return;
-      }
-    }
-  }
-
-  onHostStats(mediaSessionId: string, bytes: number, timestamp: number): void {
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === mediaSessionId && state.role === "host") {
-        this.feedHostBytes(state.historyId, bytes, timestamp);
-        return;
-      }
-    }
-  }
-
-  onViewerStats(mediaSessionId: string, viewerDeviceId: string, displayName: string, bytes: number): void {
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === mediaSessionId && state.role === "host") {
-        this.feedHostBytes(state.historyId, bytes, Date.now());
-
-        // Update per-viewer rate tracking
-        const now = Date.now();
-        const existing = state.viewerRates.get(viewerDeviceId);
-        const entry: ViewerRateEntry = {
-          viewerDeviceId,
-          displayName,
-          bitsPerSecond: state.lastBitsPerSecond,
-          totalBytes: state.totalBytes,
-          rttMs: existing?.rttMs ?? null,
-          packetLossPercent: existing?.packetLossPercent ?? null,
-          width: existing?.width ?? null,
-          height: existing?.height ?? null,
-          framesPerSecond: existing?.framesPerSecond ?? null,
-          state: state.state,
-        };
-        state.viewerRates.set(viewerDeviceId, entry);
-        state.lastSnapshot = null;
-        return;
-      }
-    }
-  }
-
-  // ─── Backward-compat getters by mediaSessionId ──────────────────────────
-
-  getLiveStartTimeMs(mediaSessionId: string): number | null {
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === mediaSessionId) {
-        return state.startedAt;
-      }
-    }
-    return null;
-  }
-
-  getLiveViewerCount(_mediaSessionId: string): number {
-    return 0;
-  }
-
-  /**
-   * Returns bits per second (the name "Bps" means bits per second).
-   * Now correctly sourced from internal bitsPerSecond (not bytesPerSecond * 8).
-   */
-  getLiveCurrentBps(mediaSessionId: string): number {
-    for (const state of this.sessions.values()) {
-      if (state.mediaSessionId === mediaSessionId) {
-        return state.lastBitsPerSecond;
-      }
-    }
-    return 0;
-  }
-
-  /**
    * Find the historyId for a given mediaSessionId.
    * Useful for mapping from mediaSessionId-based APIs to historyId-based subscriptions.
    */
@@ -842,24 +620,6 @@ export class StreamMetricsService {
     }
     return null;
   }
-
-  // ─── Viewer-side tracker (backward compat) ──────────────────────────────
-
-  feedViewerBandwidth(bps: number, totalBytes: number): void {
-    this._viewerBps = bps;
-    this._viewerTotalBytes = totalBytes;
-    this._viewerSamples = this._viewerSamples || [];
-    this._viewerSamples.push({ timestamp: Date.now(), bps });
-    if (this._viewerSamples.length > 180) {
-      this._viewerSamples = this._viewerSamples.slice(-180);
-    }
-  }
-
-  getViewerBps(): number { return this._viewerBps; }
-  getViewerTotalBytes(): number { return this._viewerTotalBytes; }
-  getViewerSamples(): { timestamp: number; bps: number }[] { return [...(this._viewerSamples || [])]; }
-
-  // ─── New getters ────────────────────────────────────────────────────────
 
   /**
    * Get per-viewer rate entries for a host session.
@@ -1025,27 +785,35 @@ export class StreamMetricsService {
   ): void {
     const bucketStart = Math.floor(sample.monotonicTimestampMs / bucketSize) * bucketSize;
 
-    // Compute delta bytes from last sample in this bucket
+    // Compute delta bytes — carry forward previous bucket's last position
     const bucketMeta = meta.get(bucketStart);
-    const deltaBytes = bucketMeta
-      ? Math.max(0, sample.cumulativeMediaBytes - bucketMeta.lastCumulativeBytes)
-      : 0;
+    const prevLastBytes = bucketMeta
+      ? bucketMeta.lastCumulativeBytes
+      : buckets.length > 0
+        ? (meta.get(buckets[buckets.length - 1].startTimestampMs)?.lastCumulativeBytes ?? 0)
+        : 0;
+
+    const deltaBytes = Math.max(0, sample.cumulativeMediaBytes - prevLastBytes);
 
     const existingBucket = buckets.length > 0 && buckets[buckets.length - 1].startTimestampMs === bucketStart
       ? buckets[buckets.length - 1]
       : null;
 
     if (existingBucket) {
-      // Update existing bucket
+      // Update existing bucket — accumulate deltas
       const count = existingBucket.sampleCount;
-      const newWeightedAvg = (existingBucket.weightedAverageBitsPerSecond * count + sample.mediaBitsPerSecond) / (count + 1);
-
-      existingBucket.weightedAverageBitsPerSecond = Math.round(newWeightedAvg);
-      existingBucket.maxBitsPerSecond = Math.max(existingBucket.maxBitsPerSecond, sample.mediaBitsPerSecond);
-      existingBucket.minBitsPerSecond = Math.min(existingBucket.minBitsPerSecond, sample.mediaBitsPerSecond);
       existingBucket.bucketTotalBytes += deltaBytes;
       existingBucket.sampleCount++;
+      // Use the larger of the monotonic end-time or the existing boundary
       existingBucket.endTimestampMs = Math.max(existingBucket.endTimestampMs, sample.monotonicTimestampMs);
+
+      // Compute weighted average from actual byte delta and total elapsed
+      const elapsedMs = existingBucket.endTimestampMs - existingBucket.startTimestampMs;
+      existingBucket.weightedAverageBitsPerSecond =
+        elapsedMs > 0 ? Math.round((existingBucket.bucketTotalBytes * 8000) / elapsedMs) : sample.mediaBitsPerSecond;
+
+      existingBucket.maxBitsPerSecond = Math.max(existingBucket.maxBitsPerSecond, sample.mediaBitsPerSecond);
+      existingBucket.minBitsPerSecond = Math.min(existingBucket.minBitsPerSecond, sample.mediaBitsPerSecond);
       existingBucket.width = sample.width ?? existingBucket.width;
       existingBucket.height = sample.height ?? existingBucket.height;
       existingBucket.framesPerSecond = sample.framesPerSecond ?? existingBucket.framesPerSecond;
@@ -1082,11 +850,31 @@ export class StreamMetricsService {
     }
   }
 
+  // ─── Bucket timestamp correction ─────────────────────────────────────
+
+  /**
+   * Convert monotonic bucket timestamps to epoch timestamps by applying
+   * the monotonic→epoch offset from session start.
+   */
+  private epochAdjustBuckets(
+    state: InternalSessionState,
+    buckets: AggregatedBucket[],
+  ): AggregatedBucket[] {
+    if (buckets.length === 0) return [];
+    const offset = state.startedAt - state.startedAtMonotonic;
+    return buckets.map((b) => ({
+      ...b,
+      startTimestampMs: b.startTimestampMs + offset,
+      endTimestampMs: b.endTimestampMs + offset,
+    }));
+  }
+
   // ─── Snapshot building ──────────────────────────────────────────────────
 
   private buildSnapshot(state: InternalSessionState): BandwidthSnapshot {
     const now = Date.now();
-    const durationMs = now - state.startedAt;
+    const monoNow = performance.now();
+    const durationMs = monoNow - state.startedAtMonotonic;
     const activeDurationMs = Math.max(0, durationMs - state.totalPausedMs);
     const totalObservedBits = state.totalBytes * 8;
 
@@ -1099,7 +887,7 @@ export class StreamMetricsService {
     }
 
     const latestSample = state.rawSamples[state.rawSamples.length - 1];
-    const currentBitsPerSecond = latestSample?.mediaBitsPerSecond ?? 0;
+    const currentBitsPerSecond = latestSample?.mediaBitsPerSecond ?? state.lastBitsPerSecond;
 
     const averageBitsPerSecond = activeDurationMs > 0
       ? Math.round(totalObservedBits / (activeDurationMs / 1000))
@@ -1115,8 +903,8 @@ export class StreamMetricsService {
 
     return Object.freeze({
       rawSamples: Object.freeze([...state.rawSamples]),
-      mediumBuckets: Object.freeze([...state.mediumBuckets]),
-      longBuckets: Object.freeze([...state.longBuckets]),
+      mediumBuckets: Object.freeze(this.epochAdjustBuckets(state, state.mediumBuckets)),
+      longBuckets: Object.freeze(this.epochAdjustBuckets(state, state.longBuckets)),
       ewmaSeries: Object.freeze([...state.ewmaSeries]),
       currentBitsPerSecond,
       averageBitsPerSecond,
@@ -1179,8 +967,18 @@ export class StreamMetricsService {
       averageBytesPerSecond: durationMs > 0 ? Math.round((state.totalBytes * 1000) / durationMs) : 0,
       presetName: state.presetName,
       customQuality: state.customQuality,
-      samples: [...state.persistSamples],
-      markers: [...state.oldMarkers],
+      samples: state.rawSamples.map(s => ({
+        timestamp: s.timestampMs,
+        bytesPerSecond: Math.round(s.mediaBitsPerSecond / 8),
+        totalBytes: s.cumulativeMediaBytes,
+      })),
+      markers: state.markers.map(m => ({
+        timestamp: m.timestampMs,
+        category: m.type,
+        from: m.detail ? m.detail.split(' → ')[0] : null,
+        to: m.detail ? m.detail.split(' → ')[1] || m.label : m.label,
+        label: m.label,
+      })),
       interrupted: false,
     };
   }

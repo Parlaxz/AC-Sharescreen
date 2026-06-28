@@ -44,4 +44,7 @@ struct DiagnosticSnapshot {
 /// Get a snapshot of current diagnostics.
 DiagnosticSnapshot GetDiagnostics();
 
+/// Get the global diagnostics counters instance.
+DiagnosticsCounters& GetDiagnosticsCounters();
+
 } // namespace screenlink::video
