@@ -1,11 +1,10 @@
-﻿import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { QualityCoordinator } from "@/services/quality-coordinator";
 import type { ViewerQualityRequest } from "@screenlink/shared";
-import { pollStats } from "@screenlink/vdo-adapter";
-import type { StatsSnapshot, VDONinjaSDK } from "@screenlink/vdo-adapter";
+import type { VDONinjaSDK } from "@screenlink/vdo-adapter";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
 
-// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 interface ViewerStatusEvent {
   viewerDeviceId: string;
@@ -64,10 +63,6 @@ export interface ViewerRow {
   lastStatusAt: number | null;
 }
 
-/**
- * Minimal viewer binding info: maps a viewerDeviceId to its media peer UUID
- * so the hook can correlate host-side WebRTC stats with status events.
- */
 export interface ViewerBinding {
   viewerDeviceId: string;
   mediaPeerUuid: string;
@@ -101,67 +96,37 @@ function isViewerStatusEvent(value: unknown): value is ViewerStatusEvent {
   );
 }
 
-// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-function computeHostStats(snapshot: StatsSnapshot): Omit<HostObservedViewerStats, "sentBitrateKbps"> {
-  const outbound = snapshot.outbound as Record<string, unknown> | undefined;
-  const remoteInbound = snapshot.remoteInbound as Record<string, unknown> | undefined;
-  const candidatePair = snapshot.candidatePair as Record<string, unknown> | undefined;
-  const codec = snapshot.codec as Record<string, unknown> | undefined;
-
-  const sentWidth = (outbound?.frameWidth as number) ?? null;
-  const sentHeight = (outbound?.frameHeight as number) ?? null;
-  const sentFps = (outbound?.framesPerSecond as number) ?? null;
-
-  let packetLossPercent: number | null = null;
-  if (remoteInbound) {
-    const fractionLost = remoteInbound.fractionLost as number | undefined;
-    if (typeof fractionLost === "number" && fractionLost >= 0) {
-      packetLossPercent = fractionLost * 100;
-    }
-  }
-
-  let rttMs: number | null = null;
-  if (candidatePair) {
-    const rtt = candidatePair.currentRoundTripTime as number | undefined;
-    if (typeof rtt === "number") {
-      rttMs = rtt * 1000;
-    }
-  }
-
-  const codecMimeType = typeof codec?.mimeType === "string" ? codec.mimeType : null;
-
-  return {
-    packetLossPercent,
-    rttMs,
-    sentWidth,
-    sentHeight,
-    sentFps,
-    codec: codecMimeType,
-  };
+function computeBitrate(
+  bytesSent: number,
+  uuid: string,
+  bytesRef: React.MutableRefObject<Map<string, { lastBytes: number; lastTime: number }>>,
+): number | null {
+  const prev = bytesRef.current.get(uuid);
+  if (!prev || prev.lastTime <= 0) return null;
+  const elapsed = (Date.now() - prev.lastTime) / 1000;
+  const delta = bytesSent - prev.lastBytes;
+  if (elapsed <= 0 || delta < 0) return null;
+  return Math.round((delta * 8) / elapsed / 1000);
 }
 
-// â”€â”€â”€ Hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Hook ───────────────────────────────────────────────────────────────────
 
 export function useHostViewerDiagnostics(
   sdk: VDONinjaSDK | null,
-  /** Viewer bindings from ViewerMediaBinding — bridges viewerDeviceId ↔ mediaPeerUuid for host stats. */
   viewerBindings: ViewerBinding[],
   qualityCoordinator: QualityCoordinator | null,
   groupId: string,
   logicalStreamId: string,
-  /** mediaSessionId for feeding host outbound bytes to StreamMetricsService */
   mediaSessionId?: string | null,
 ): ViewerRow[] {
   const [rows, setRows] = useState<ViewerRow[]>([]);
   const statusMapRef = useRef<Map<string, ViewerStatusEvent>>(new Map());
   const bytesRef = useRef<Map<string, { lastBytes: number; lastTime: number }>>(new Map());
-  const registeredRef = useRef<Set<string>>(new Set());
+  const registrationsRef = useRef<Map<string, { pc: RTCPeerConnection; unregister: () => void }>>(new Map());
   const historyIdRef = useRef<string | null>(null);
   const bindingRef = useRef(viewerBindings);
   bindingRef.current = viewerBindings;
 
-  // Listen for viewer.status events
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
@@ -173,53 +138,119 @@ export function useHostViewerDiagnostics(
     return () => window.removeEventListener("screenlink:viewer-status", handler);
   }, []);
 
-  // Poll host-side SDK stats per peer UUID
+  // ─── Return cleanup on unmount (audit item 2) ──────────────────────
+
+  useEffect(() => {
+    return () => {
+      const svc = StreamMetricsService.getInstance();
+      for (const [connId, entry] of registrationsRef.current) {
+        entry.unregister();
+      }
+      registrationsRef.current.clear();
+      if (historyIdRef.current) {
+        const id = historyIdRef.current;
+        historyIdRef.current = null;
+        svc.finalizeSession(id).catch(() => {});
+      }
+    };
+  }, []);
+
   const pollHostStats = useCallback(async () => {
     if (!sdk) return null;
 
     const newBytes = new Map<string, { lastBytes: number; lastTime: number }>();
     const newStats = new Map<string, HostObservedViewerStats>();
+    const svc = StreamMetricsService.getInstance();
+
+    const peerToViewer = new Map<string, ViewerBinding>();
+    for (const b of bindingRef.current) {
+      peerToViewer.set(b.mediaPeerUuid, b);
+    }
+
+    const activeUuids = new Set<string>();
 
     for (const [uuid, group] of sdk.connections) {
+      activeUuids.add(uuid);
       const pc = group.publisher?.pc;
       if (!pc) continue;
 
       try {
-        const snapshot = await pollStats(pc);
-        const base = computeHostStats(snapshot);
+        const report = await pc.getStats();
+        let bytesSent = 0;
+        let sentWidth: number | null = null;
+        let sentHeight: number | null = null;
+        let sentFps: number | null = null;
+        let mimeType: string | null = null;
+        let fractionLost: number | null = null;
+        let rttMsVal: number | null = null;
 
-        let sentBitrateKbps: number | null = null;
-        const outbound = snapshot.outbound as Record<string, unknown> | undefined;
-        const bytesSent = typeof outbound?.bytesSent === "number" ? outbound.bytesSent : 0;
-        const prev = bytesRef.current.get(uuid);
-        if (prev && prev.lastTime > 0) {
-          const elapsed = (Date.now() - prev.lastTime) / 1000;
-          const delta = bytesSent - prev.lastBytes;
-          if (elapsed > 0 && delta >= 0) {
-            sentBitrateKbps = Math.round((delta * 8) / elapsed / 1000);
+        for (const [, r] of report) {
+          if (r.type === "outbound-rtp" && r.kind === "video") {
+            bytesSent = (r as Record<string, unknown>).bytesSent as number ?? 0;
+            sentWidth = (r as Record<string, unknown>).frameWidth as number ?? null;
+            sentHeight = (r as Record<string, unknown>).frameHeight as number ?? null;
+            sentFps = (r as Record<string, unknown>).framesPerSecond as number ?? null;
+          }
+          if (r.type === "remote-inbound-rtp" && r.kind === "video") {
+            fractionLost = (r as Record<string, unknown>).fractionLost as number ?? null;
+          }
+          if (r.type === "candidate-pair") {
+            const state = (r as Record<string, unknown>).state as string;
+            const nom = (r as Record<string, unknown>).nominated as boolean;
+            if (state === "succeeded" || nom) {
+              const rtt = (r as Record<string, unknown>).currentRoundTripTime as number;
+              if (typeof rtt === "number") rttMsVal = rtt * 1000;
+            }
+          }
+          if (r.type === "codec") {
+            mimeType = (r as Record<string, unknown>).mimeType as string ?? null;
           }
         }
+
+        const sentBitrateKbps = computeBitrate(bytesSent, uuid, bytesRef);
         newBytes.set(uuid, { lastBytes: bytesSent, lastTime: Date.now() });
-        newStats.set(uuid, { ...base, sentBitrateKbps });
-        // Register each publisher PC with StreamMetricsService
+
+        newStats.set(uuid, {
+          sentBitrateKbps,
+          packetLossPercent: fractionLost !== null ? fractionLost * 100 : null,
+          rttMs: rttMsVal,
+          sentWidth,
+          sentHeight,
+          sentFps,
+          codec: mimeType,
+        });
+
+        // Register with StreamMetricsService (audit items 2-3)
         if (mediaSessionId && pc) {
-          const svc = StreamMetricsService.getInstance();
           const connId = `host-${uuid}`;
-          if (!registeredRef.current.has(connId)) {
+          const existing = registrationsRef.current.get(connId);
+
+          // PC changed (reconnect) — replace registration
+          if (existing && existing.pc !== pc) {
+            existing.unregister();
+            registrationsRef.current.delete(connId);
+          }
+
+          if (!registrationsRef.current.has(connId)) {
             let historyId = historyIdRef.current;
             if (!historyId) {
               historyId = svc.startHostSession(mediaSessionId, logicalStreamId, groupId, "");
               historyIdRef.current = historyId;
             }
-            svc.registerConnection({
+
+            const binding = peerToViewer.get(uuid);
+            const viewerDeviceId = binding?.viewerDeviceId ?? null;
+            const displayName = viewerDeviceId?.slice(0, 8) ?? null;
+
+            const unregister = svc.registerConnection({
               historyId,
               connectionId: connId,
-              viewerDeviceId: null,
-              displayName: null,
+              viewerDeviceId,
+              displayName,
               peerConnection: pc,
               direction: "outbound",
             });
-            registeredRef.current.add(connId);
+            registrationsRef.current.set(connId, { pc, unregister });
           }
         }
       } catch {
@@ -227,8 +258,16 @@ export function useHostViewerDiagnostics(
       }
     }
 
-    bytesRef.current = newBytes;
+    // Unregister disappeared peers (audit item 2)
+    for (const [connId, entry] of registrationsRef.current) {
+      const uuid = connId.replace("host-", "");
+      if (!activeUuids.has(uuid)) {
+        entry.unregister();
+        registrationsRef.current.delete(connId);
+      }
+    }
 
+    bytesRef.current = newBytes;
     return newStats;
   }, [sdk, mediaSessionId, logicalStreamId, groupId]);
 
@@ -244,7 +283,6 @@ export function useHostViewerDiagnostics(
       const newRows: ViewerRow[] = [];
       const seen = new Set<string>();
 
-      // Build a peerUuid â†’ viewerDeviceId map from bindings
       const peerToViewer = new Map<string, string>();
       for (const b of bindingRef.current) {
         peerToViewer.set(b.mediaPeerUuid, b.viewerDeviceId);
@@ -296,7 +334,7 @@ export function useHostViewerDiagnostics(
         });
       }
 
-            // 2) Augment existing rows with host stats (skip connections without viewer bindings)
+      // 2) Augment existing rows with host stats
       if (hostStats) {
         for (const [peerUuid] of hostStats) {
           const viewerDeviceId = peerToViewer.get(peerUuid);
@@ -322,4 +360,3 @@ export function useHostViewerDiagnostics(
 
   return rows;
 }
-

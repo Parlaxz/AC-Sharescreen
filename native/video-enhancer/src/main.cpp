@@ -132,61 +132,6 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
     return true;
 }
 
-static bool HandleSubmitFrame(const sv::JsonObject& /*payload*/,
-                               sv::FrameTransport& transport) {
-    if (!g_config.configured) {
-        fprintf(stderr, "[Serve] submit-frame: not configured\n");
-        return false;
-    }
-
-    sv::FrameHeader header;
-    std::vector<uint8_t> frameData;
-
-    if (!transport.ReadFrame(header, frameData)) {
-        fprintf(stderr, "[Serve] submit-frame: read failed\n");
-        return false;
-    }
-
-    // Validate frame dimensions
-    if (header.payloadBytes > sv::kMaxFrameSize) {
-        fprintf(stderr, "[Serve] submit-frame: frame too large (%u > %u)\n",
-                header.payloadBytes, sv::kMaxFrameSize);
-        return false;
-    }
-
-    // Record receipt
-    auto start = std::chrono::steady_clock::now();
-
-    // Processing: non-VFX build returns the input frame unchanged (passthrough).
-    // The real VFX build (SCREENLINK_NVIDIA_VFX_ENABLED) will invoke the
-    // NVIDIA Video Effects SDK in Phase Q.
-    std::vector<uint8_t> outputData(frameData);
-
-    auto end = std::chrono::steady_clock::now();
-    uint64_t elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
-    sv::GetDiagnosticsCounters().RecordFrame(elapsedUs, true);
-
-    // Write result back
-    sv::FrameHeader resultHeader = header;
-    resultHeader.resultCode = 1; // success
-    resultHeader.payloadBytes = static_cast<uint32_t>(outputData.size());
-    resultHeader.requestedOutputWidth = header.inputWidth;
-    resultHeader.requestedOutputHeight = header.inputHeight;
-
-    if (!transport.WriteFrame(resultHeader, outputData.data(), outputData.size())) {
-        fprintf(stderr, "[Serve] submit-frame: write result failed\n");
-        return false;
-    }
-
-    printf("[Serve] Frame %u processed (passthrough): %ux%u %u bytes in %lluus\n",
-           header.frameSequence,
-           header.inputWidth, header.inputHeight,
-           header.payloadBytes,
-           static_cast<unsigned long long>(elapsedUs));
-    return true;
-}
-
 static sv::DiagnosticSnapshot BuildStatsResponse() {
     return sv::GetDiagnostics();
 }
@@ -260,7 +205,44 @@ static int RunServe(const std::vector<std::string>& args) {
 
     printf("[Serve] Pipes created, waiting for control client...\n");
 
-    // Accept the persistent frame pipe client first (one-time connection)
+    // Accept control connection first (audit item 11)
+    // This avoids a deadlock where native waits for frame pipe while
+    // Electron waits for the control handshake response.
+    if (!transport.WaitForClient(transport.GetControlPipe())) {
+        fprintf(stderr, "[Serve] Control pipe client never connected\n");
+        transport.CloseControlPipe();
+        transport.CloseFramePipe();
+        return static_cast<int>(sv::ExitCode::kServeFailed);
+    }
+    printf("[Serve] Control client connected\n");
+
+    // Perform hello handshake on the control pipe
+    {
+        auto helloMsg = transport.ReadControlMessage();
+        if (helloMsg.empty()) {
+            fprintf(stderr, "[Serve] No hello message from control client\n");
+            transport.CloseControlPipe();
+            transport.CloseFramePipe();
+            return static_cast<int>(sv::ExitCode::kServeFailed);
+        }
+        sv::JsonObject helloReq;
+        try { helloReq = sv::ParseJson(helloMsg); }
+        catch (const std::exception& e) {
+            fprintf(stderr, "[Serve] Hello JSON parse error: %s\n", e.what());
+            return static_cast<int>(sv::ExitCode::kServeFailed);
+        }
+        bool helloOk = HandleHello(helloReq);
+        transport.WriteControlResponse(
+            sv::SerializeJson(MakeResponse(helloOk, helloOk ? "hello OK" : "auth failed")));
+        if (!helloOk) {
+            fprintf(stderr, "[Serve] Hello authentication failed\n");
+            transport.CloseControlPipe();
+            transport.CloseFramePipe();
+            return static_cast<int>(sv::ExitCode::kServeFailed);
+        }
+    }
+
+    // Now accept persistent frame pipe (after handshake, Electron knows we're alive)
     printf("[Serve] Waiting for persistent frame pipe client...\n");
     if (!transport.WaitForClient(transport.GetFramePipe())) {
         fprintf(stderr, "[Serve] Frame pipe client never connected\n");
@@ -270,120 +252,159 @@ static int RunServe(const std::vector<std::string>& args) {
     }
     printf("[Serve] Frame pipe client connected\n");
 
-    while (true) {
-        if (!transport.WaitForClient(transport.GetControlPipe())) {
-            fprintf(stderr, "[Serve] Control pipe connection failed, retrying...\n");
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            continue;
-        }
+    // Start frame-processing worker thread (audit item 12)
+    // Continuously reads frames from the persistent frame pipe,
+    // processes them, and writes results back.
+    std::thread frameWorker([&transport]() {
+        while (true) {
+            sv::FrameHeader header;
+            std::vector<uint8_t> frameData;
 
-        printf("[Serve] Control client connected\n");
-
-        bool clientDone = false;
-        while (!clientDone) {
-            auto msg = transport.ReadControlMessage();
-            if (msg.empty()) {
-                printf("[Serve] Control client disconnected\n");
+            if (!transport.ReadFrame(header, frameData)) {
+                // Pipe closed or error — exit worker
+                fprintf(stderr, "[FrameWorker] Frame pipe read failed, stopping\n");
                 break;
             }
 
-            // Parse JSON
-            sv::JsonObject req;
-            try {
-                req = sv::ParseJson(msg);
-            } catch (const std::exception& e) {
-                fprintf(stderr, "[Serve] JSON parse error: %s\n", e.what());
-                transport.WriteControlResponse(
-                    sv::SerializeJson(MakeResponse(false, "JSON parse error")));
+            if (!g_config.configured) {
+                // Configuration required first — skip
                 continue;
             }
 
-            auto cmdStr = sv::GetString(req, "command");
-            if (!cmdStr.has_value()) {
-                transport.WriteControlResponse(
-                    sv::SerializeJson(MakeResponse(false, "Missing 'command' field")));
-                continue;
+            // Validate dimensions match configured size
+            if (header.inputWidth != g_config.inputWidth ||
+                header.inputHeight != g_config.inputHeight) {
+                fprintf(stderr,
+                    "[FrameWorker] Frame size mismatch: %ux%u vs configured %ux%u\n",
+                    header.inputWidth, header.inputHeight,
+                    g_config.inputWidth, g_config.inputHeight);
+                // Still process with actual dimensions
             }
 
-            auto cmd = sv::ParseCommand(*cmdStr);
+            auto& diag = sv::GetDiagnosticsCounters();
+            diag.totalFramesSubmitted++;
 
-            // Extract payload from the nested "payload" field
-            sv::JsonObject payload;
-            auto it = req.find("payload");
-            if (it != req.end()) {
-                if (std::holds_alternative<std::shared_ptr<sv::JsonObject>>(it->second)) {
-                    payload = *std::get<std::shared_ptr<sv::JsonObject>>(it->second);
-                }
+            // Process the frame
+            auto start = std::chrono::high_resolution_clock::now();
+            bool ok = false;
+            sv::FrameHeader outHeader = header;  // copy metadata
+            std::vector<uint8_t> outData;
+
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+            // Real NVIDIA VFX processing (item 18)
+            ok = ProcessFrameNvidiaVfx(header, frameData, outHeader, outData);
+#else
+            // Passthrough: copy input to output (item 18)
+            {
+                outHeader.inputWidth = header.inputWidth;
+                outHeader.inputHeight = header.inputHeight;
+                outHeader.inputStride = header.inputWidth * 4;
+                outHeader.payloadBytes = static_cast<uint32_t>(frameData.size());
+                outData = frameData;
+                ok = true;
             }
+#endif
 
-            // Extract request ID for correlation
-            auto reqId = sv::GetString(req, "id");
-            std::string id = reqId.has_value() ? *reqId : "";
+            auto end = std::chrono::high_resolution_clock::now();
+            auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+            diag.RecordFrame(static_cast<uint64_t>(us), ok);
 
-            sv::JsonObject response;
-            bool success = false;
-
-            switch (cmd) {
-                case sv::Command::kHello:
-                    success = HandleHello(req);
-                    response = MakeResponse(success, success ? "" : "Authentication failed", id);
-                    break;
-
-                case sv::Command::kCapabilities:
-                    HandleCapabilities(payload, transport, id);
-                    continue;
-
-                case sv::Command::kConfigure:
-                    success = HandleConfigure(payload);
-                    response = MakeResponse(success, success ? "" : "Configuration failed", id);
-                    break;
-
-                case sv::Command::kFrameAvailable: {
-                    success = HandleSubmitFrame(payload, transport);
-                    response = MakeResponse(success, success ? "" : "Frame processing failed", id);
-                    break;
+            if (ok) {
+                // Write back the processed frame
+                if (!transport.WriteFrame(outHeader, outData.data(), outData.size())) {
+                    fprintf(stderr, "[FrameWorker] Failed to write output frame\n");
                 }
-
-                case sv::Command::kFlush:
-                    response = MakeResponse(true, "", id);
-                    break;
-
-                case sv::Command::kStats: {
-                    auto stats = BuildStatsResponse();
-                    sv::JsonObject resp;
-                    resp["id"] = sv::JsonValue(id);
-                    resp["success"] = sv::JsonValue(true);
-                    resp["totalFramesSubmitted"] = sv::JsonValue(static_cast<double>(stats.totalFramesSubmitted));
-                    resp["totalFramesCompleted"] = sv::JsonValue(static_cast<double>(stats.totalFramesCompleted));
-                    resp["totalFramesDropped"] = sv::JsonValue(static_cast<double>(stats.totalFramesDropped));
-                    resp["totalProcessingErrors"] = sv::JsonValue(static_cast<double>(stats.totalProcessingErrors));
-                    resp["totalBytesProcessed"] = sv::JsonValue(static_cast<double>(stats.totalBytesProcessed));
-                    resp["lastProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.lastProcessingTimeUs));
-                    resp["maxProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.maxProcessingTimeUs));
-                    resp["minProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.minProcessingTimeUs));
-                    response = resp;
-                    break;
-                }
-
-                case sv::Command::kShutdown:
-                    printf("[Serve] Shutdown requested\n");
-                    transport.WriteControlResponse(sv::SerializeJson(MakeResponse(true, "", id)));
-                    transport.CloseControlPipe();
-                    transport.CloseFramePipe();
-                    return 0;
-
-                default:
-                    fprintf(stderr, "[Serve] Unknown command: %s\n", cmdStr->c_str());
-                    response = MakeResponse(false, "Unknown command", id);
-                    break;
+            } else {
+                fprintf(stderr, "[FrameWorker] Frame processing failed\n");
             }
+        }
+    });
 
-            transport.WriteControlResponse(sv::SerializeJson(response));
+    // Control loop: process commands on the control pipe
+    while (true) {
+        auto msg = transport.ReadControlMessage();
+        if (msg.empty()) {
+            printf("[Serve] Control client disconnected\n");
+            break;
         }
 
-        DisconnectNamedPipe(transport.GetControlPipe());
-        printf("[Serve] Waiting for next client...\n");
+        // Parse and handle control commands
+        sv::JsonObject req;
+        try { req = sv::ParseJson(msg); }
+        catch (const std::exception& e) {
+            fprintf(stderr, "[Serve] JSON parse error: %s\n", e.what());
+            transport.WriteControlResponse(sv::SerializeJson(MakeResponse(false, "JSON parse error")));
+            continue;
+        }
+
+        auto cmdStr = sv::GetString(req, "command");
+        if (!cmdStr.has_value()) {
+            transport.WriteControlResponse(sv::SerializeJson(MakeResponse(false, "Missing 'command'")));
+            continue;
+        }
+
+        auto cmd = sv::ParseCommand(*cmdStr);
+        sv::JsonObject payload;
+        auto it = req.find("payload");
+        if (it != req.end()) {
+            if (std::holds_alternative<std::shared_ptr<sv::JsonObject>>(it->second)) {
+                payload = *std::get<std::shared_ptr<sv::JsonObject>>(it->second);
+            }
+        }
+        auto reqId = sv::GetString(req, "id");
+        std::string id = reqId.has_value() ? *reqId : "";
+
+        sv::JsonObject response;
+        bool success = false;
+
+        switch (cmd) {
+            case sv::Command::kConfigure:
+                success = HandleConfigure(payload);
+                response = MakeResponse(success, success ? "" : "Configuration failed", id);
+                break;
+
+            case sv::Command::kCapabilities:
+                HandleCapabilities(payload, transport, id);
+                continue;
+
+            case sv::Command::kStats: {
+                auto stats = BuildStatsResponse();
+                sv::JsonObject resp;
+                resp["id"] = sv::JsonValue(id);
+                resp["success"] = sv::JsonValue(true);
+                resp["totalFramesSubmitted"] = sv::JsonValue(static_cast<double>(stats.totalFramesSubmitted));
+                resp["totalFramesCompleted"] = sv::JsonValue(static_cast<double>(stats.totalFramesCompleted));
+                resp["totalFramesDropped"] = sv::JsonValue(static_cast<double>(stats.totalFramesDropped));
+                resp["totalProcessingErrors"] = sv::JsonValue(static_cast<double>(stats.totalProcessingErrors));
+                resp["totalBytesProcessed"] = sv::JsonValue(static_cast<double>(stats.totalBytesProcessed));
+                resp["lastProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.lastProcessingTimeUs));
+                resp["maxProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.maxProcessingTimeUs));
+                resp["minProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.minProcessingTimeUs));
+                response = resp;
+                break;
+            }
+
+            case sv::Command::kShutdown:
+                printf("[Serve] Shutdown requested\n");
+                transport.WriteControlResponse(sv::SerializeJson(MakeResponse(true, "", id)));
+                // Disconnect pipes to wake the frame worker
+                transport.CloseFramePipe();
+                transport.CloseControlPipe();
+                if (frameWorker.joinable()) frameWorker.join();
+                return 0;
+
+            default:
+                response = MakeResponse(false, "Unknown command: " + *cmdStr, id);
+                break;
+        }
+
+        transport.WriteControlResponse(sv::SerializeJson(response));
     }
+
+    // Cleanup control pipe and join frame worker
+    transport.CloseFramePipe();
+    transport.CloseControlPipe();
+    if (frameWorker.joinable()) frameWorker.join();
 
     return 0;
 }

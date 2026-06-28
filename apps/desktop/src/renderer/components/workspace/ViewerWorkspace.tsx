@@ -539,31 +539,25 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   const handleRetry = useCallback(() => {
     if (viewerHistoryIdRef.current) {
-      StreamMetricsService.getInstance().addMarker(
-        viewerHistoryIdRef.current, "reconnect", "error", "reconnecting", "Retry initiated"
-      );
+      StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "reconnecting");
     }
     if (sessionRef.current) {
       setViewStatus("connecting");
       void sessionRef.current.retry();
     } else {
-      // If no session, reset view status to trigger re-mount effect
       setViewStatus("connecting");
     }
   }, [setViewStatus]);
 
-  // ── Pause/resume callbacks (single owner of toggle) ──────────────
+  // ── Pause/resume callbacks (media op first, marker via setSessionState) ──
   const handlePauseStream = useCallback(async () => {
     const session = sessionRef.current;
     if (!session || session.pauseState !== "playing") return;
-    if (viewerHistoryIdRef.current) {
-      StreamMetricsService.getInstance().addMarker(
-        viewerHistoryIdRef.current, "pause", "playing", "paused", "User paused stream"
-      );
-      StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "paused");
-    }
     try {
       await session.pause();
+      if (viewerHistoryIdRef.current) {
+        StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "paused");
+      }
     } catch (err) {
       console.error("[ViewerWorkspace] pause failed:", err);
     }
@@ -572,14 +566,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const handleResumeStream = useCallback(async () => {
     const session = sessionRef.current;
     if (!session || session.pauseState !== "paused") return;
-    if (viewerHistoryIdRef.current) {
-      StreamMetricsService.getInstance().addMarker(
-        viewerHistoryIdRef.current, "resume", "paused", "playing", "User resumed stream"
-      );
-      StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "playing");
-    }
     try {
       await session.resume();
+      if (viewerHistoryIdRef.current) {
+        StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "playing");
+        // Force counter rebaseline so paused bytes aren't measured across the gap
+        const svc = StreamMetricsService.getInstance();
+        (svc as unknown as { forceRebaseline?: (id: string) => void }).forceRebaseline?.(
+          viewerHistoryIdRef.current,
+        );
+      }
     } catch (err) {
       console.error("[ViewerWorkspace] resume failed:", err);
     }

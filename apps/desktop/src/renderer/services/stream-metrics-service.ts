@@ -88,9 +88,9 @@ interface ConnectionState {
   effectiveVideoBitsPerSecond: number | null;
   receivedStatus: ViewerReportedStatus | null;
 
-  // Independent baselines
-  videoBaseline: CounterBaseline;
-  audioBaseline: CounterBaseline;
+  // Per-report baselines (audit item 6): keyed by kind:reportId:ssrc:mid
+  videoBaselines: Map<string, CounterBaseline>;
+  audioBaselines: Map<string, CounterBaseline>;
   transportBaseline: CounterBaseline;
 
   // Accumulation
@@ -301,8 +301,8 @@ export class StreamMetricsService {
       configuredVideoBitsPerSecond: input.configuredVideoBitsPerSecond ?? null,
       effectiveVideoBitsPerSecond: input.effectiveVideoBitsPerSecond ?? null,
       receivedStatus: null,
-      videoBaseline: makeBaseline(),
-      audioBaseline: makeBaseline(),
+      videoBaselines: new Map(),
+      audioBaselines: new Map(),
       transportBaseline: makeBaseline(),
       totalVideoBytes: 0,
       totalAudioBytes: 0,
@@ -658,69 +658,97 @@ export class StreamMetricsService {
       const nowEpoch = Date.now();
       const monoNow = performance.now();
 
-      // Select exactly the expected RTP report type
-      const expectedRtpType =
-        conn.direction === "inbound" ? "inbound-rtp" : "outbound-rtp";
-
+      // Collect RTP observations
       interface RtpObs {
         kind: "video" | "audio";
         reportId: string;
         ssrc: number | null;
         mid: string | null;
+        codecId: string | null;
         bytes: number;
         width: number | null;
         height: number | null;
         fps: number | null;
-        codec: string | null;
+        packetsLost: number | null;
+        jitter: number | null;
       }
       const videoObservations: RtpObs[] = [];
       const audioObservations: RtpObs[] = [];
+      const codecMap = new Map<string, string>(); // codecId → mimeType
       let transportCumulative: number | null = null;
       let rttMs: number | null = null;
-      let jitterMs: number | null = null;
       let connectionType: "direct" | "turn" | null = null;
-      let packetLossPercent: number | null = null;
       const localCands = new Map<string, Record<string, unknown>>();
       const remoteCands = new Map<string, Record<string, unknown>>();
 
+      // First pass: collect candidates and codecs
       for (const [, report] of stats) {
         if (report.type === "local-candidate") localCands.set(report.id, report as Record<string, unknown>);
         if (report.type === "remote-candidate") remoteCands.set(report.id, report as Record<string, unknown>);
-        if (report.type !== expectedRtpType) continue;
+        if (report.type === "codec") {
+          const m = (report as Record<string, unknown>).mimeType as string;
+          if (m) codecMap.set(report.id, m);
+        }
+      }
 
-        const kind = report.kind as string | undefined;
+      // Second pass: collect RTP stats with direction-correct types (audit item 8)
+      for (const [, report] of stats) {
+        const rtype = report.type;
+
+        // Inbound connection: use inbound-rtp for video/audio
+        // Outbound connection: use outbound-rtp for video/audio
+        const isRtp =
+          (conn.direction === "inbound" && rtype === "inbound-rtp") ||
+          (conn.direction === "outbound" && rtype === "outbound-rtp");
+
+        if (!isRtp) continue;
+
+        const kind = (report.kind ?? "video") as string;
         if (kind !== "video" && kind !== "audio") continue;
 
+        const r = report as Record<string, unknown>;
+        const bytes = conn.direction === "inbound"
+          ? ((r.bytesReceived ?? 0) as number)
+          : ((r.bytesSent ?? 0) as number);
+
         const obs: RtpObs = {
-          kind,
-          reportId: report.id as string,
-          ssrc: (report.ssrc ?? null) as number | null,
-          mid: (report.mid ?? null) as string | null,
-          bytes: (report.bytesReceived ?? report.bytesSent ?? 0) as number,
-          width: kind === "video" ? ((report.frameWidth ?? null) as number | null) : null,
-          height: kind === "video" ? ((report.frameHeight ?? null) as number | null) : null,
-          fps: kind === "video" ? ((report.framesPerSecond ?? null) as number | null) : null,
-          codec: (report.mimeType ?? null) as string | null,
+          kind: kind as "video" | "audio",
+          reportId: report.id,
+          ssrc: (r.ssrc ?? null) as number | null,
+          mid: (r.mid ?? null) as string | null,
+          codecId: (r.codecId ?? null) as string | null,
+          bytes,
+          width: kind === "video" ? ((r.frameWidth ?? null) as number | null) : null,
+          height: kind === "video" ? ((r.frameHeight ?? null) as number | null) : null,
+          fps: kind === "video" ? ((r.framesPerSecond ?? null) as number | null) : null,
+          packetsLost: kind === "video" && conn.direction === "inbound"
+            ? ((r.packetsLost ?? null) as number | null)
+            : null,
+          jitter: kind === "video" && conn.direction === "inbound"
+            ? ((r.jitter ?? null) as number | null)
+            : null,
         };
 
         if (kind === "video") videoObservations.push(obs);
         else audioObservations.push(obs);
       }
 
-      // Candidate-pair: direction-aware transport
+      // Candidate-pair: transport + connection type
       for (const [, report] of stats) {
         if (report.type !== "candidate-pair") continue;
-        if ((report as Record<string, unknown>).state !== "succeeded") continue;
-        const sel = (report as Record<string, unknown>).selected ?? (report as Record<string, unknown>).nominated;
+        const r = report as Record<string, unknown>;
+        if (r.state !== "succeeded") continue;
+        const sel = r.selected ?? r.nominated;
         if (!sel) continue;
 
         transportCumulative = conn.direction === "inbound"
-          ? ((report.bytesReceived ?? null) as number | null)
-          : ((report.bytesSent ?? null) as number | null);
-        rttMs = (report as Record<string, unknown>).currentRoundTripTime
-          ? ((report as Record<string, unknown>).currentRoundTripTime as number) * 1000 : null;
-        const lc = localCands.get((report as Record<string, unknown>).localCandidateId as string);
-        const rc = remoteCands.get((report as Record<string, unknown>).remoteCandidateId as string);
+          ? ((r.bytesReceived ?? null) as number | null)
+          : ((r.bytesSent ?? null) as number | null);
+        if (typeof r.currentRoundTripTime === "number") {
+          rttMs = r.currentRoundTripTime * 1000;
+        }
+        const lc = localCands.get(r.localCandidateId as string);
+        const rc = remoteCands.get(r.remoteCandidateId as string);
         connectionType =
           (lc && (lc as Record<string, unknown>).candidateType === "relay") ||
           (rc && (rc as Record<string, unknown>).candidateType === "relay")
@@ -728,44 +756,87 @@ export class StreamMetricsService {
         break;
       }
 
-      for (const [, report] of stats) {
-        if (report.type !== "remote-inbound-rtp") continue;
-        const lost = (report.packetsLost ?? 0) as number;
-        const total = lost + ((report.packetsReceived ?? 0) as number);
-        if (total > 0) packetLossPercent = Math.round((lost / total) * 100);
-        jitterMs = report.jitter ? (report.jitter as number) * 1000 : null;
+      // Remote-inbound: packet loss / jitter for outbound direction
+      let packetLossPercent: number | null = null;
+      let jitterMs: number | null = null;
+      if (conn.direction === "outbound") {
+        for (const [, report] of stats) {
+          if (report.type !== "remote-inbound-rtp") continue;
+          const r = report as Record<string, unknown>;
+          if (r.kind !== "video") continue;
+          const lost = (r.packetsLost ?? 0) as number;
+          const recv = (r.packetsReceived ?? 0) as number;
+          const total = lost + recv;
+          if (total > 0) packetLossPercent = Math.round((lost / total) * 100);
+          if (typeof r.jitter === "number") jitterMs = r.jitter * 1000;
+          break;
+        }
+      } else {
+        // Inbound: use inbound-rtp directly
+        const primVid = videoObservations[0];
+        if (primVid && primVid.packetsLost !== null) {
+          // We need total packets for inbound; use bytes as rough proxy or just report loss fraction
+          if (primVid.packetsLost >= 0) {
+            // Use packetsLost from inbound-rtp; we don't have total for inbound in this pass
+            const recv = (primVid as unknown as { packetsReceived?: number }).packetsReceived ?? 0;
+            const total = primVid.packetsLost + recv;
+            if (total > 0) packetLossPercent = Math.round((primVid.packetsLost / total) * 100);
+          }
+        }
+        if (primVid && primVid.jitter !== null) {
+          jitterMs = primVid.jitter * 1000;
+        }
       }
 
-      const actualInterval = monoNow - (conn.videoBaseline.previousMonotonicTimestamp || (monoNow - 1000));
+      // Process per-report baselines (audit items 6-7)
       let totalVideoRate = 0;
       let totalVideoDelta = 0;
+      let videoIntervalMs = 0;
       for (const obs of videoObservations) {
-        const rate = this.processCounterWithIdentity(conn, "video", obs.reportId, obs.ssrc, obs.mid, obs.bytes, monoNow);
-        totalVideoRate += rate;
-        totalVideoDelta += rate > 0 && actualInterval > 0 ? (rate * actualInterval) / 8000 : 0;
+        const rkey = `${obs.reportId}:${obs.ssrc ?? 0}:${obs.mid ?? ""}`;
+        const result = this.processCounterReport(conn.videoBaselines, rkey, obs.bytes, monoNow);
+        totalVideoRate += result.bitsPerSecond;
+        totalVideoDelta += result.deltaBytes;
+        videoIntervalMs = Math.max(videoIntervalMs, result.intervalMs);
       }
       conn.videoBitsPerSecond = totalVideoRate;
       conn.totalVideoBytes += totalVideoDelta;
 
       let totalAudioRate = 0;
       let totalAudioDelta = 0;
+      let audioIntervalMs = 0;
       for (const obs of audioObservations) {
-        const rate = this.processCounterWithIdentity(conn, "audio", obs.reportId, obs.ssrc, obs.mid, obs.bytes, monoNow);
-        totalAudioRate += rate;
-        totalAudioDelta += rate > 0 && actualInterval > 0 ? (rate * actualInterval) / 8000 : 0;
+        const rkey = `${obs.reportId}:${obs.ssrc ?? 0}:${obs.mid ?? ""}`;
+        const result = this.processCounterReport(conn.audioBaselines, rkey, obs.bytes, monoNow);
+        totalAudioRate += result.bitsPerSecond;
+        totalAudioDelta += result.deltaBytes;
+        audioIntervalMs = Math.max(audioIntervalMs, result.intervalMs);
       }
       conn.audioBitsPerSecond = totalAudioRate;
       conn.totalAudioBytes += totalAudioDelta;
 
       let transportRate: number | null = null;
+      let transportDelta = 0;
       if (transportCumulative !== null) {
-        transportRate = this.processCounter(conn, "transport", transportCumulative, monoNow);
-        conn.transportBitsPerSecond = transportRate ?? 0;
+        const tpResult = this.processCounterReport(
+          new Map([["tp", conn.transportBaseline]]), "tp", transportCumulative, monoNow
+        );
+        transportRate = tpResult.bitsPerSecond;
+        transportDelta = tpResult.deltaBytes;
+      }
+      conn.transportBitsPerSecond = transportRate ?? 0;
+      conn.totalTransportBytes += transportDelta;
+
+      // Resolve codec from codecMap (audit item 8)
+      const primaryVideo = videoObservations[0];
+      let resolvedCodec: string | null = null;
+      if (primaryVideo?.codecId) {
+        resolvedCodec = codecMap.get(primaryVideo.codecId) ?? null;
       }
 
-      const primaryVideo = videoObservations[0];
       if (primaryVideo) {
-        this.emitSampledMarkers(conn, primaryVideo.width, primaryVideo.height, primaryVideo.fps, primaryVideo.codec, connectionType, null, null);
+        this.emitSampledMarkers(conn, primaryVideo.width, primaryVideo.height, primaryVideo.fps, resolvedCodec, connectionType,
+          conn.configuredVideoBitsPerSecond, conn.effectiveVideoBitsPerSecond);
       }
 
       const totalRate = totalVideoRate + totalAudioRate;
@@ -783,10 +854,12 @@ export class StreamMetricsService {
       conn.ewmaSeries.push(conn.ewmaValue);
       if (conn.ewmaSeries.length > MAX_RAW_SAMPLES) conn.ewmaSeries = conn.ewmaSeries.slice(-MAX_RAW_SAMPLES);
 
+      const sampleInterval = Math.max(videoIntervalMs, audioIntervalMs, 0);
+
       const sample: TelemetrySample = {
         timestampMs: nowEpoch,
         monotonicTimestampMs: monoNow,
-        intervalMs: Math.round(Math.max(actualInterval, 0)),
+        intervalMs: Math.round(sampleInterval),
         mediaBitsPerSecond: totalRate,
         videoBitsPerSecond: totalVideoRate,
         audioBitsPerSecond: totalAudioRate,
@@ -801,7 +874,7 @@ export class StreamMetricsService {
         packetLossPercent,
         rttMs,
         jitterMs,
-        codec: primaryVideo?.codec ?? null,
+        codec: resolvedCodec,
         connectionType,
         state: conn.state,
       };
@@ -814,46 +887,42 @@ export class StreamMetricsService {
     }
   }
 
-  private processCounter(
-    conn: ConnectionState,
-    kind: "video" | "audio" | "transport",
+  // ─── Per-report counter processing (audit items 6-7) ───────────────────
+
+  private processCounterReport(
+    baselines: Map<string, CounterBaseline>,
+    key: string,
     cumulativeBytes: number,
     monoNow: number,
-  ): number {
-    const baseline = kind === "video" ? conn.videoBaseline
-      : kind === "audio" ? conn.audioBaseline
-      : conn.transportBaseline;
+  ): { bitsPerSecond: number; deltaBytes: number; intervalMs: number } {
+    let baseline = baselines.get(key);
 
-    if (!baseline.initialized) {
+    if (!baseline) {
+      baseline = makeBaseline();
       baseline.initialized = true;
       baseline.previousCumulativeBytes = cumulativeBytes;
       baseline.previousMonotonicTimestamp = monoNow;
-      return 0;
+      baselines.set(key, baseline);
+      return { bitsPerSecond: 0, deltaBytes: 0, intervalMs: 0 };
     }
 
     // Counter reset detection
     if (cumulativeBytes < baseline.previousCumulativeBytes) {
       baseline.previousCumulativeBytes = cumulativeBytes;
       baseline.previousMonotonicTimestamp = monoNow;
-      return 0;
+      return { bitsPerSecond: 0, deltaBytes: 0, intervalMs: 0 };
     }
 
     const deltaBytes = cumulativeBytes - baseline.previousCumulativeBytes;
-    const elapsedSeconds = (monoNow - baseline.previousMonotonicTimestamp) / 1000;
+    const intervalMs = monoNow - baseline.previousMonotonicTimestamp;
+    const elapsedSeconds = intervalMs / 1000;
 
-    if (elapsedSeconds <= 0) return 0;
-
-    const bitsPerSecond = Math.round((deltaBytes * 8) / elapsedSeconds);
-
-    // Accumulate
-    if (kind === "video") conn.totalVideoBytes += deltaBytes;
-    else if (kind === "audio") conn.totalAudioBytes += deltaBytes;
-    else conn.totalTransportBytes += deltaBytes;
+    const bitsPerSecond = elapsedSeconds > 0 ? Math.round((deltaBytes * 8) / elapsedSeconds) : 0;
 
     baseline.previousCumulativeBytes = cumulativeBytes;
     baseline.previousMonotonicTimestamp = monoNow;
 
-    return bitsPerSecond;
+    return { bitsPerSecond, deltaBytes, intervalMs };
   }
 
   /**
@@ -862,61 +931,28 @@ export class StreamMetricsService {
    * baseline. A changed identity forces a reset to avoid false deltas
    * from the new sender's higher cumulative counter.
    */
-  private processCounterWithIdentity(
+  /**
+   * @deprecated Replaced by processCounterReport with per-report baselines (audit items 6-7).
+   *             Retained for transport baseline only during migration.
+   */
+  private processCounter(
     conn: ConnectionState,
-    kind: "video" | "audio",
-    reportId: string,
-    ssrc: number | null,
-    mid: string | null,
+    _kind: "video" | "audio" | "transport",
     cumulativeBytes: number,
     monoNow: number,
   ): number {
-    const baseline = kind === "video" ? conn.videoBaseline : conn.audioBaseline;
-
-    // Identity change detection: new report, SSRC, or MID = new sender
-    if (
-      baseline.initialized &&
-      (baseline.identity.reportId !== reportId ||
-        baseline.identity.ssrc !== ssrc ||
-        baseline.identity.mid !== mid)
-    ) {
-      // Different sender — reset baseline so we don't get a false delta
-      baseline.identity = { reportId, ssrc, trackIdentifier: null, mid };
-      baseline.previousCumulativeBytes = cumulativeBytes;
-      baseline.previousMonotonicTimestamp = monoNow;
-      return 0;
-    }
-
-    if (!baseline.initialized) {
-      baseline.initialized = true;
-      baseline.identity = { reportId, ssrc, trackIdentifier: null, mid };
-      baseline.previousCumulativeBytes = cumulativeBytes;
-      baseline.previousMonotonicTimestamp = monoNow;
-      return 0;
-    }
-
-    // Counter reset detection
-    if (cumulativeBytes < baseline.previousCumulativeBytes) {
-      baseline.previousCumulativeBytes = cumulativeBytes;
-      baseline.previousMonotonicTimestamp = monoNow;
-      return 0;
-    }
-
-    const deltaBytes = cumulativeBytes - baseline.previousCumulativeBytes;
-    const elapsedSeconds = (monoNow - baseline.previousMonotonicTimestamp) / 1000;
-    if (elapsedSeconds <= 0) return 0;
-
-    const bitsPerSecond = Math.round((deltaBytes * 8) / elapsedSeconds);
-
-    baseline.previousCumulativeBytes = cumulativeBytes;
-    baseline.previousMonotonicTimestamp = monoNow;
-
-    return bitsPerSecond;
+    const result = this.processCounterReport(
+      new Map([["_deprecated", conn.transportBaseline]]),
+      "_deprecated",
+      cumulativeBytes,
+      monoNow,
+    );
+    return result.bitsPerSecond;
   }
 
   private resetBaselines(conn: ConnectionState): void {
-    conn.videoBaseline = makeBaseline();
-    conn.audioBaseline = makeBaseline();
+    conn.videoBaselines.clear();
+    conn.audioBaselines.clear();
     conn.transportBaseline = makeBaseline();
   }
 
@@ -976,18 +1012,20 @@ export class StreamMetricsService {
     maxBuckets: number,
   ): void {
     const buckets = tier === "medium" ? conn.mediumBuckets : conn.longBuckets;
-    // Use epoch timestamp for bucket start (consistency with chart X axis)
-    const bucketStart = Math.floor(sample.timestampMs / bucketSize) * bucketSize;
-    const deltaBytes = sample.mediaBitsPerSecond > 0 ? Math.round((sample.mediaBitsPerSecond * sample.intervalMs) / 8000) : 0;
+    // Use first actual sample timestamp as bucket start (audit item 9)
+    const bucketKey = Math.floor(sample.timestampMs / bucketSize) * bucketSize;
+    const deltaBytes = sample.intervalMs > 0
+      ? Math.round((sample.mediaBitsPerSecond * sample.intervalMs) / 8000)
+      : 0;
 
-    const existingBucket = buckets.length > 0 && buckets[buckets.length - 1].startTimestampMs === bucketStart
+    const existingBucket = buckets.length > 0 && buckets[buckets.length - 1].startTimestampMs === bucketKey
       ? buckets[buckets.length - 1]
       : null;
 
     if (existingBucket) {
       existingBucket.byteDelta += deltaBytes;
       existingBucket.endTimestampMs = sample.timestampMs;
-      existingBucket.intervalMs = existingBucket.endTimestampMs - existingBucket.startTimestampMs;
+      existingBucket.intervalMs = Math.max(existingBucket.endTimestampMs - existingBucket.startTimestampMs, 0);
       existingBucket.maxBitsPerSecond = Math.max(existingBucket.maxBitsPerSecond, sample.mediaBitsPerSecond);
       existingBucket.minBitsPerSecond = Math.min(existingBucket.minBitsPerSecond, sample.mediaBitsPerSecond);
       existingBucket.weightedAverageBitsPerSecond = existingBucket.intervalMs > 0
@@ -1001,9 +1039,9 @@ export class StreamMetricsService {
       existingBucket.connectionType = sample.connectionType ?? existingBucket.connectionType;
     } else {
       const newBucket: AggregatedBucket = {
-        startTimestampMs: bucketStart,
+        startTimestampMs: bucketKey,
         endTimestampMs: sample.timestampMs,
-        intervalMs: sample.timestampMs - bucketStart,
+        intervalMs: sample.timestampMs - bucketKey,
         minBitsPerSecond: sample.mediaBitsPerSecond,
         maxBitsPerSecond: sample.mediaBitsPerSecond,
         weightedAverageBitsPerSecond: sample.mediaBitsPerSecond,

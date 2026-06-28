@@ -78,8 +78,8 @@ export class VideoHelperManager {
     frameData: Uint8Array,
     inputWidth: number,
     inputHeight: number,
-  ): Promise<boolean> {
-    if (this.state !== "ready" && this.state !== "processing") return false;
+  ): Promise<{ generation: number; sequence: number; pixels: Uint8Array; width: number; height: number } | null> {
+    if (this.state !== "ready" && this.state !== "processing") return null;
 
     try {
       const config = this.lastConfig;
@@ -93,7 +93,7 @@ export class VideoHelperManager {
       // Ensure persistent frame pipe connection
       if (!this.framePipeConnected) {
         const connected = await this.connectFramePipe();
-        if (!connected) return false;
+        if (!connected) return null;
       }
 
       const sent = await this.sendFrameData({
@@ -113,7 +113,7 @@ export class VideoHelperManager {
 
       return sent;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -295,8 +295,8 @@ export class VideoHelperManager {
         }
       }
 
-      // Send configure
-      await this.sendCommand("configure", {
+      // Send configure (audit item 15: require response)
+      const configReply = await this.sendCommand("configure", {
         inputWidth: config.inputWidth,
         inputHeight: config.inputHeight,
         outputWidth: config.outputWidth,
@@ -305,6 +305,10 @@ export class VideoHelperManager {
         qualityLevel: config.qualityLevel,
         pixelFormat: config.pixelFormat,
       });
+      if (!configReply || gen !== this.lifecycleGeneration) {
+        this.handleHelperError("Configuration rejected by helper");
+        return false;
+      }
 
       this.state = "ready";
       this.restartAttempts = 0;
@@ -543,18 +547,17 @@ export class VideoHelperManager {
       payloadBytes: number;
     },
     pixelData: Uint8Array,
-  ): Promise<boolean> {
+  ): Promise<{ generation: number; sequence: number; pixels: Uint8Array; width: number; height: number } | null> {
     return new Promise((resolve) => {
       const socket = this.framePipeClient;
-      if (!socket || !socket.writable) { resolve(false); return; }
+      if (!socket || !socket.writable) { resolve(null); return; }
 
       let settled = false;
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        // Don't destroy persistent pipe — just mark stale
         this.framePipeConnected = false;
-        resolve(false);
+        resolve(null);
       }, 5000);
 
       // Build binary header (80 bytes to match FrameHeader)
@@ -584,26 +587,93 @@ export class VideoHelperManager {
       headerBuf.writeUInt32LE(0, off); off += 4; // flags
       headerBuf.writeUInt32LE(0, off); // resultCode (0 = pending)
 
-      // Write header + pixel data
-      const ok = socket.write(Buffer.concat([headerBuf, pixelData]));
-      if (!ok) {
-        // Backpressure — schedule drain and retry concept, but for now mark failure
-        clearTimeout(timeout);
-        settled = true;
-        resolve(false);
-        return;
+      // Write header + pixel data (audit item 14: backpressure handling)
+      const combined = Buffer.concat([headerBuf, pixelData]);
+      const writeResult = socket.write(combined);
+
+      if (!writeResult) {
+        // Data accepted into buffer, wait for drain before reading response
+        socket.once("drain", () => {
+          // Drain complete — continue to read response below
+        });
+      } else {
+        // Immediate write — proceed
       }
 
-      // Read result header back (same size)
+      // Read result frame header + payload back (audit item 13)
       let resultBuf = Buffer.alloc(0);
+      let resultPayload: Buffer | null = null;
+      let resultPayloadRead = 0;
+
       const onResultData = (chunk: Buffer): void => {
         resultBuf = Buffer.concat([resultBuf, chunk]);
-        if (resultBuf.length >= HEADER_SIZE) {
+
+        // Read header first
+        if (resultBuf.length >= HEADER_SIZE && resultPayload === null) {
+          const magic = resultBuf.readBigUInt64LE(0);
+          if (magic !== 0x464C4156454D5246n) {
+            // Not a valid frame header — discard
+            settled = true;
+            clearTimeout(timeout);
+            socket.removeListener("data", onResultData);
+            resolve(null);
+            return;
+          }
+
+          const payloadBytes = resultBuf.readUInt32LE(28); // offset to payloadBytes
+          if (payloadBytes === 0) {
+            // No payload — success with empty output
+            settled = true;
+            clearTimeout(timeout);
+            socket.removeListener("data", onResultData);
+            resolve({ generation: header.generation, sequence: header.frameSequence, pixels: Buffer.alloc(0), width: header.requestedOutputWidth, height: header.requestedOutputHeight });
+            return;
+          }
+
+          if (payloadBytes > 200 * 1024 * 1024) {
+            // Too large — protocol error
+            settled = true;
+            clearTimeout(timeout);
+            socket.removeListener("data", onResultData);
+            socket.destroy();
+            this.framePipeConnected = false;
+            resolve(null);
+            return;
+          }
+
+          resultPayload = Buffer.alloc(payloadBytes);
+          // Copy any payload bytes already in resultBuf after the header
+          const extra = resultBuf.length - HEADER_SIZE;
+          if (extra > 0) {
+            const toCopy = Math.min(extra, payloadBytes);
+            resultBuf.copy(resultPayload, 0, HEADER_SIZE, HEADER_SIZE + toCopy);
+            resultPayloadRead = toCopy;
+          }
+        }
+
+        // Read payload
+        if (resultPayload && resultPayloadRead < resultPayload.length) {
+          const remaining = resultPayload.length - resultPayloadRead;
+          const avail = resultBuf.length - HEADER_SIZE - resultPayloadRead;
+          const toCopy = Math.min(remaining, avail);
+          if (toCopy > 0) {
+            resultBuf.copy(resultPayload, resultPayloadRead,
+              HEADER_SIZE + resultPayloadRead, HEADER_SIZE + resultPayloadRead + toCopy);
+            resultPayloadRead += toCopy;
+          }
+        }
+
+        if (resultPayload && resultPayloadRead >= resultPayload.length) {
           settled = true;
           clearTimeout(timeout);
           socket.removeListener("data", onResultData);
-          const resultCode = resultBuf.readUInt32LE(HEADER_SIZE - 4);
-          resolve(resultCode === 1);
+          resolve({
+            generation: header.generation,
+            sequence: header.frameSequence,
+            pixels: resultPayload,
+            width: resultBuf.readUInt32LE(12),   // inputWidth in output header
+            height: resultBuf.readUInt32LE(16),   // inputHeight in output header
+          });
         }
       };
       socket.on("data", onResultData);

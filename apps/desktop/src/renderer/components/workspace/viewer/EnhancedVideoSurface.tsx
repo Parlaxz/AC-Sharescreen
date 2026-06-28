@@ -26,6 +26,7 @@ import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-
 import { getImageProcessingCapabilities, augmentWithNvidiaCapability } from "@/services/viewer-image-processing/viewer-image-capabilities";
 import { createImageProcessingBackend } from "@/services/viewer-image-processing/viewer-image-backend-factory";
 import { WebGL2ViewerImageBackend } from "@/services/viewer-image-processing/webgl2-viewer-image-backend";
+import { FallbackChainController } from "@/services/viewer-image-processing/fallback-chain-controller";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,8 @@ export function EnhancedVideoSurface({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const prevEnabledRef = useRef<boolean>(enabled);
   const prevSettingsRef = useRef<ViewerImageEnhancementSettings | null>(null);
+  const chainRef = useRef<FallbackChainController | null>(null);
+  const backendSignalledRef = useRef(false);
 
   const [processorState, setProcessorState] = useState<ProcessorState>("idle");
   const [fallback, setFallback] = useState<boolean>(false);
@@ -150,20 +153,22 @@ export function EnhancedVideoSurface({
         let backend: ViewerImageBackend;
         let effective: string;
         let fallbackReason: string | undefined;
+        let chainController: FallbackChainController | null = null;
 
         if (retryAttempt === 0) {
           const result = createImageProcessingBackend(settings);
           backend = result.backend;
           effective = result.effective;
           fallbackReason = result.fallbackReason;
+          chainController = result.chainController ?? null;
         } else {
           backend = new WebGL2ViewerImageBackend();
           effective = "webgl2";
-          fallbackReason =
-            "NVIDIA VSR unavailable, fell back to WebGL2";
+          fallbackReason = "NVIDIA VSR unavailable, fell back to WebGL2";
         }
 
-          onBackendChange?.(effective, fallbackReason);
+        chainRef.current = chainController;
+        backendSignalledRef.current = false;
 
         processor = new ViewerImageProcessor(
           canvasRef.current!,
@@ -171,13 +176,24 @@ export function EnhancedVideoSurface({
           backend,
         );
 
-        const activeBackend = effective;
-        const activeFallbackReason = fallbackReason;
-
         const handleFirstFrame = () => {
           setFirstFrameReceived(true);
           onFirstFrame?.();
-          onBackendChange?.(activeBackend, activeFallbackReason);
+          // Signal backend only after first visible frame (audit item 17)
+          onBackendChange?.(effective, fallbackReason);
+          backendSignalledRef.current = true;
+        };
+
+        const handleError = (reason: string) => {
+          setFirstFrameReceived(false);
+          // Try advancing the fallback chain if available (audit item 19)
+          if (chainRef.current) {
+            chainRef.current.advance(reason).catch(() => {});
+            const stage = chainRef.current.activeStage;
+            onBackendChange?.(stage === "nvidia-vsr" ? "nvidia-vsr" : "webgl2", reason);
+          }
+          setFallback(true);
+          onProcessingError?.(reason);
         };
 
         processor.setCallbacks({
@@ -185,11 +201,7 @@ export function EnhancedVideoSurface({
             setProcessorState(state);
             onProcessorStateChange?.(state);
           },
-          onError: (reason: string) => {
-            setFirstFrameReceived(false);
-            setFallback(true);
-            onProcessingError?.(reason);
-          },
+          onError: handleError,
           onFirstFrame: handleFirstFrame,
           onStatsUpdate: (stats: ProcessorStats) => {
             onStatsUpdate?.(stats);

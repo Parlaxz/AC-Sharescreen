@@ -86,7 +86,7 @@ describe("VideoHelperManager — disconnected state", () => {
       1920,
       1080,
     );
-    expect(result).toBe(false);
+    expect(result).toBe(null);
   });
 
   it("getDiagnostics returns null when helper not running", async () => {
