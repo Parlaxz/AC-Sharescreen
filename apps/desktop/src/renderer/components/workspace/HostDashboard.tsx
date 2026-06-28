@@ -211,7 +211,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     const interval = setInterval(() => {
       const svc = StreamMetricsService.getInstance();
       const historyId = svc.findHistoryIdByMediaSessionId(mediaSessionId);
-      const startedAt = historyId ? svc.getSnapshot(historyId).rawSamples[0]?.timestampMs ?? null : null;
+      const startedAt = historyId ? svc.getSnapshot(historyId).aggregate.rawSamples[0]?.timestampMs ?? null : null;
       if (startedAt) {
         const seconds = Math.floor((Date.now() - startedAt) / 1000);
         useStore.getState().setSessionDuration(seconds);

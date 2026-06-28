@@ -330,11 +330,13 @@ export class StreamMetricsService {
 
     state.connections.set(input.connectionId, conn);
     this.connections.set(input.connectionId, conn);
+    state.lastSnapshot = null;
     this.ensureTimer();
 
     return () => {
       state.connections.delete(input.connectionId);
       this.connections.delete(input.connectionId);
+      state.lastSnapshot = null;
     };
   }
 
@@ -1024,7 +1026,7 @@ export class StreamMetricsService {
   }
 
   private computeDuration(conn: ConnectionState): number {
-    return performance.now() - conn.rawSamples[0]?.monotonicTimestampMs ?? performance.now();
+    return performance.now() - (conn.rawSamples[0]?.monotonicTimestampMs ?? performance.now());
   }
 
   private computeActiveDuration(conn: ConnectionState): number {

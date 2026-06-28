@@ -912,16 +912,11 @@ export class StreamSessionManager {
       const captureHeight =
         ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
-      // Notify metrics service
-      const qualityLabel = `${videoWidth}x${videoHeight}@${videoFps},${videoBitrate}kbps`;
       StreamMetricsService.getInstance().startHostSession(
         this.mediaSessionId!,
         this.logicalStreamId!,
         this.groupId!,
         this.groupId!,
-        null,
-        !!this._sessionQualityOverride,
-        qualityLabel,
       );
 
       // Bitrate readback: log the effective bitrate after precedence resolution

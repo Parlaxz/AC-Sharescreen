@@ -176,12 +176,12 @@ function getChartData(
       const s = rawSamples[i];
       if (s.timestampMs < cutoff) continue;
       data.push({
-        time: (s.timestampMs - baseTime) / 1000,
-        smoothed: i < ewmaSeries.length ? ewmaSeries[i] : undefined,
+        time: s.timestampMs,
+        smoothed: s.mediaBitsPerSecond,
         raw: showRaw ? s.mediaBitsPerSecond : undefined,
         target: s.configuredVideoBitsPerSecond ?? undefined,
-        video: s.videoBitsPerSecond ?? null,
-        audio: s.audioBitsPerSecond ?? null,
+        video: null,
+        audio: null,
       });
     }
 
@@ -569,16 +569,16 @@ export function BandwidthGraphModal({
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4 text-sm">
           <SummaryItem
             label="Current"
-            value={fmtBitRate(snapshot.currentBitsPerSecond)}
+            value={fmtBitRate(snapshot.aggregate.currentBitsPerSecond)}
           />
           <SummaryItem label="30s Avg" value={fmtBitRate(avg30s)} />
           <SummaryItem
             label="Peak"
-            value={fmtBitRate(snapshot.peakBitsPerSecond)}
+            value={fmtBitRate(snapshot.aggregate.peakBitsPerSecond)}
           />
           <SummaryItem
             label="Total"
-            value={fmtCumulativeBytes(snapshot.totalBytes)}
+            value={fmtCumulativeBytes(snapshot.aggregate.totalBytes)}
           />
           <SummaryItem
             label="Est/hr"
@@ -591,14 +591,14 @@ export function BandwidthGraphModal({
           <SummaryItem label="Duration">
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="font-mono tabular-nums">
-                {fmtDuration(snapshot.durationMs)}
+                {fmtDuration(snapshot.aggregate.durationMs)}
               </span>
-              {snapshot.state === "paused" && (
+              {snapshot.aggregate.state === "paused" && (
                 <Badge variant="warning" className="text-[10px] px-1.5 py-0">
                   paused
                 </Badge>
               )}
-              {snapshot.state === "reconnecting" && (
+              {snapshot.aggregate.state === "reconnecting" && (
                 <Badge
                   variant="destructive"
                   className="text-[10px] px-1.5 py-0"
@@ -627,7 +627,7 @@ export function BandwidthGraphModal({
           </div>
 
           {chartData.length > 0 &&
-            snapshot.rawSamples.length > 0 &&
+            snapshot.aggregate.rawSamples.length > 0 &&
             timeRange <= 300_000 && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -762,15 +762,15 @@ export function BandwidthGraphModal({
                       )}
 
                       {/* Target reference line */}
-                      {snapshot.configuredBitsPerSecond != null &&
-                        snapshot.configuredBitsPerSecond > 0 && (
+                      {snapshot.aggregate.configuredBitsPerSecond != null &&
+                        snapshot.aggregate.configuredBitsPerSecond > 0 && (
                           <ReferenceLine
-                            y={snapshot.configuredBitsPerSecond}
+                            y={snapshot.aggregate.configuredBitsPerSecond}
                             stroke="var(--color-warning)"
                             strokeDasharray="6 3"
                             label={
                               <Label
-                                value={`Target: ${fmtBitRate(snapshot.configuredBitsPerSecond)}`}
+                                value={`Target: ${fmtBitRate(snapshot.aggregate.configuredBitsPerSecond)}`}
                                 position="right"
                                 style={{
                                   fontSize: 10,
@@ -925,17 +925,17 @@ export function BandwidthGraphModal({
                 <span className="text-xs text-text-muted">Status:</span>
                 <Badge
                   variant={
-                    snapshot.state === "playing"
+                    snapshot.aggregate.state === "playing"
                       ? "success"
-                      : snapshot.state === "paused"
+                      : snapshot.aggregate.state === "paused"
                         ? "warning"
                         : "destructive"
                   }
                   className="text-xs"
                 >
-                  {snapshot.state === "playing"
+                  {snapshot.aggregate.state === "playing"
                     ? "Connected"
-                    : snapshot.state === "paused"
+                    : snapshot.aggregate.state === "paused"
                       ? "Paused"
                       : "Reconnecting"}
                 </Badge>
