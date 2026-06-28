@@ -378,7 +378,8 @@ function migrateLegacySettings(
     }
     delete migrated.scalingAlgorithm;
 
-    // Existing users stay on webgl2 (not auto)
+    // Existing users stay on webgl2 (not auto) — but always effectively webgl2
+    // since NVIDIA pipeline is not built (sdk-not-built)
     if (!("processingBackend" in migrated)) {
       migrated.processingBackend = "webgl2";
     }

@@ -749,57 +749,10 @@ export function ViewerSettingsPanel({
             </div>
           )}
 
-          {/* NVIDIA RTX Video Settings - shown when relevant */}
-          {(enhancementSettings.processingBackend === "nvidia-vsr" || enhancementSettings.processingBackend === "auto") && (
-            <>
-              <hr className="border-border-subtle" />
-              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
-              <div className="space-y-2">
-                {/* Mode */}
-                <div>
-                  <span className="text-[10px] text-text-muted">Mode</span>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
-                    value={enhancementSettings.nvidiaMode}
-                    onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaMode: e.target.value as NvidiaProcessingMode })}
-                    disabled={!enhancementSettings.enabled}
-                  >
-                    {NVIDIA_PROCESSING_MODES.map((mode) => (
-                      <option key={mode} value={mode}>{mode}</option>
-                    ))}
-                  </select>
-                </div>
-                {/* Quality */}
-                <div>
-                  <span className="text-[10px] text-text-muted">Quality</span>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
-                    value={enhancementSettings.nvidiaQuality}
-                    onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaQuality: e.target.value as NvidiaQuality })}
-                    disabled={!enhancementSettings.enabled}
-                  >
-                    {NVIDIA_QUALITIES.map((q) => (
-                      <option key={q} value={q}>{q}</option>
-                    ))}
-                  </select>
-                </div>
-                {/* Output mode */}
-                <div>
-                  <span className="text-[10px] text-text-muted">Output</span>
-                  <select
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
-                    value={enhancementSettings.nvidiaOutput}
-                    onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaOutput: e.target.value as NvidiaOutput })}
-                    disabled={!enhancementSettings.enabled}
-                  >
-                    {NVIDIA_OUTPUTS.map((o) => (
-                      <option key={o} value={o}>{o}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </>
-          )}
+          {/* NVIDIA RTX Video Settings — disabled until renderer pipeline exists */}
+          <hr className="border-border-subtle" />
+          <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
+          <p className="text-[10px] text-amber-500">NVIDIA RTX Video unavailable: SDK support was not built.</p>
 
           {/* Reset button */}
           <div className="pt-1">
