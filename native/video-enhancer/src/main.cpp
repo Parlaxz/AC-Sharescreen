@@ -59,8 +59,9 @@ static struct {
 
 // ─── Helper: create JSON response ─────────────────────────────────────
 
-static sv::JsonObject MakeResponse(bool success, const std::string& errorMsg = "") {
+static sv::JsonObject MakeResponse(bool success, const std::string& errorMsg = "", const std::string& id = "") {
     sv::JsonObject resp;
+    if (!id.empty()) resp["id"] = sv::JsonValue(id);
     resp["success"] = sv::JsonValue(success);
     if (!errorMsg.empty()) {
         resp["error"] = sv::JsonValue(errorMsg);
@@ -193,9 +194,11 @@ static sv::DiagnosticSnapshot BuildStatsResponse() {
 // ─── Capabilities command ─────────────────────────────────────────────
 
 static void HandleCapabilities(const sv::JsonObject& /*payload*/,
-                                sv::FrameTransport& transport) {
+                                sv::FrameTransport& transport,
+                                const std::string& id) {
     auto result = sv::ProbeCapability();
     sv::JsonObject resp;
+    if (!id.empty()) resp["id"] = sv::JsonValue(id);
     resp["success"] = sv::JsonValue(true);
     resp["available"] = sv::JsonValue(result.available);
     resp["reason"] = sv::JsonValue(result.reason);
@@ -303,43 +306,47 @@ static int RunServe(const std::vector<std::string>& args) {
                 }
             }
 
+            // Extract request ID for correlation
+            auto reqId = sv::GetString(req, "id");
+            std::string id = reqId.has_value() ? *reqId : "";
+
             sv::JsonObject response;
             bool success = false;
 
             switch (cmd) {
                 case sv::Command::kHello:
-                    // hello fields (sessionId, authToken) are at envelope top-level
                     success = HandleHello(req);
-                    response = MakeResponse(success, success ? "" : "Authentication failed");
+                    response = MakeResponse(success, success ? "" : "Authentication failed", id);
                     break;
 
                 case sv::Command::kCapabilities:
-                    HandleCapabilities(payload, transport);
-                    continue; // already sent response
+                    HandleCapabilities(payload, transport, id);
+                    continue;
 
                 case sv::Command::kConfigure:
                     success = HandleConfigure(payload);
-                    response = MakeResponse(success, success ? "" : "Configuration failed");
+                    response = MakeResponse(success, success ? "" : "Configuration failed", id);
                     break;
 
                 case sv::Command::kFrameAvailable: {
                     if (!transport.WaitForClient(transport.GetFramePipe())) {
-                        response = MakeResponse(false, "Frame pipe connection failed");
+                        response = MakeResponse(false, "Frame pipe connection failed", id);
                     } else {
                         success = HandleSubmitFrame(payload, transport);
-                        response = MakeResponse(success, success ? "" : "Frame processing failed");
+                        response = MakeResponse(success, success ? "" : "Frame processing failed", id);
                         DisconnectNamedPipe(transport.GetFramePipe());
                     }
                     break;
                 }
 
                 case sv::Command::kFlush:
-                    response = MakeResponse(true);
+                    response = MakeResponse(true, "", id);
                     break;
 
                 case sv::Command::kStats: {
                     auto stats = BuildStatsResponse();
                     sv::JsonObject resp;
+                    resp["id"] = sv::JsonValue(id);
                     resp["success"] = sv::JsonValue(true);
                     resp["totalFramesSubmitted"] = sv::JsonValue(static_cast<double>(stats.totalFramesSubmitted));
                     resp["totalFramesCompleted"] = sv::JsonValue(static_cast<double>(stats.totalFramesCompleted));
@@ -355,14 +362,14 @@ static int RunServe(const std::vector<std::string>& args) {
 
                 case sv::Command::kShutdown:
                     printf("[Serve] Shutdown requested\n");
-                    transport.WriteControlResponse(sv::SerializeJson(MakeResponse(true)));
+                    transport.WriteControlResponse(sv::SerializeJson(MakeResponse(true, "", id)));
                     transport.CloseControlPipe();
                     transport.CloseFramePipe();
                     return 0;
 
                 default:
                     fprintf(stderr, "[Serve] Unknown command: %s\n", cmdStr->c_str());
-                    response = MakeResponse(false, "Unknown command");
+                    response = MakeResponse(false, "Unknown command", id);
                     break;
             }
 

@@ -315,6 +315,9 @@ export class VideoHelperManager {
         this.state = "handshaking";
         this.callbacks.onStateChange?.("handshaking");
 
+        // Wire up shared data dispatcher for all command responses
+        socket.on("data", this.controlDataHandler);
+
         // Wire up error handling for the connected socket
         socket.on("error", (err) => {
           console.error(`[VideoHelper] Control socket error: ${err.message}`);
@@ -361,72 +364,127 @@ export class VideoHelperManager {
 
   // ─── IPC communication ────────────────────────────────────────────────
 
-  private sendCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-    return new Promise((resolve) => {
-      const socket = this.controlSocket;
-      if (!socket || !socket.writable) {
-        resolve(null);
-        return;
-      }
+  // Command queue: one active command at a time, FIFO
+  private commandQueue: Array<{
+    id: string;
+    command: string;
+    payload: Record<string, unknown>;
+    resolve: (result: Record<string, unknown> | null) => void;
+  }> = [];
+  private commandInFlight = false;
+  private responseBuffer = "";
 
-      const request = {
-        protocolVersion: VIDEO_ENHANCER_PROTOCOL_VERSION,
-        sessionId: this.sessionId,
-        authToken: this.authToken,
+  private enqueueCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    return new Promise((resolve) => {
+      this.commandQueue.push({
+        id: randomUUID(),
         command,
         payload,
-      };
-
-      const data = JSON.stringify(request) + "\n";
-
-      let responseData = "";
-      let settled = false;
-
-      const onData = (chunk: Buffer) => {
-        if (settled) return;
-        responseData += chunk.toString();
-        const newlineIdx = responseData.indexOf("\n");
-        if (newlineIdx >= 0) {
-          settled = true;
-          socket.removeListener("data", onData);
-          clearTimeout(timeout);
-          try {
-            resolve(JSON.parse(responseData.substring(0, newlineIdx)));
-          } catch {
-            resolve(null);
-          }
-        }
-      };
-
-      const timeout = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        socket.removeListener("data", onData);
-        resolve(null);
-      }, 5000);
-
-      socket.on("data", onData);
-
-      try {
-        socket.write(data, (err) => {
-          if (err) {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timeout);
-              socket.removeListener("data", onData);
-              resolve(null);
-            }
-          }
-        });
-      } catch {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeout);
-          socket.removeListener("data", onData);
-          resolve(null);
-        }
-      }
+        resolve,
+      });
+      this.processQueue();
     });
+  }
+
+  private processQueue(): void {
+    if (this.commandInFlight) return;
+    const next = this.commandQueue.shift();
+    if (!next) return;
+
+    const socket = this.controlSocket;
+    if (!socket || !socket.writable) {
+      next.resolve(null);
+      return;
+    }
+
+    this.commandInFlight = true;
+
+    const request = {
+      id: next.id,
+      protocolVersion: VIDEO_ENHANCER_PROTOCOL_VERSION,
+      sessionId: this.sessionId,
+      authToken: this.authToken,
+      command: next.command,
+      payload: next.payload,
+    };
+
+    const data = JSON.stringify(request) + "\n";
+
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.removeListener("data", this.controlDataHandler);
+      this.commandInFlight = false;
+      next.resolve(null);
+      this.processQueue();
+    }, 5000);
+
+    // Store resolver for shared data dispatcher
+    const pendingKey = next.id;
+    this.pendingCommands.set(pendingKey, {
+      resolve: next.resolve,
+      timeout,
+    });
+
+    try {
+      socket.write(data, (err) => {
+        if (err && !settled) {
+          settled = true;
+          clearTimeout(timeout);
+          this.pendingCommands.delete(pendingKey);
+          this.commandInFlight = false;
+          next.resolve(null);
+          this.processQueue();
+        }
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        socket.removeListener("data", this.controlDataHandler);
+        this.pendingCommands.delete(pendingKey);
+        this.commandInFlight = false;
+        next.resolve(null);
+        this.processQueue();
+      }
+    }
+  }
+
+  private pendingCommands = new Map<string, {
+    resolve: (result: Record<string, unknown> | null) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+
+  private controlDataHandler = (chunk: Buffer): void => {
+    this.responseBuffer += chunk.toString();
+    const newlineIdx = this.responseBuffer.indexOf("\n");
+    if (newlineIdx < 0) return;
+
+    const message = this.responseBuffer.substring(0, newlineIdx);
+    this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
+
+    try {
+      const response = JSON.parse(message);
+      const id = response.id as string | undefined;
+
+      if (id && this.pendingCommands.has(id)) {
+        const pending = this.pendingCommands.get(id)!;
+        clearTimeout(pending.timeout);
+        this.pendingCommands.delete(id);
+        this.commandInFlight = false;
+        pending.resolve(response);
+        this.processQueue();
+      } else {
+        // Unmatched response — may be a late reply or diagnostic
+      }
+    } catch {
+      // Malformed JSON — ignore
+    }
+  };
+
+  private sendCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    return this.enqueueCommand(command, payload);
   }
 
   // ─── Frame transport ────────────────────────────────────────────────
