@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  normalizeAccelerator,
   normalizeShortcutBinding,
   sendShortcutWithFallback,
   type ShortcutBinding,
@@ -18,6 +19,24 @@ describe("shortcut sender", () => {
       modifiers: ["alt", "shift"],
       key: "M",
     });
+  });
+
+  it("normalizes 'Win' to 'Super' in accelerator strings", () => {
+    expect(normalizeAccelerator("Win+Alt+S")).toBe("Super+Alt+S");
+    expect(normalizeAccelerator("Win+Shift+Q")).toBe("Super+Shift+Q");
+    expect(normalizeAccelerator("Control+Win+S")).toBe("Control+Super+S");
+  });
+
+  it("passes through valid accelerators unchanged", () => {
+    expect(normalizeAccelerator("Super+Alt+S")).toBe("Super+Alt+S");
+    expect(normalizeAccelerator("Ctrl+Shift+A")).toBe("Ctrl+Shift+A");
+  });
+
+  it("handles edge cases gracefully", () => {
+    expect(normalizeAccelerator("")).toBe("");
+    expect(normalizeAccelerator("Win")).toBe("Super");
+    expect(normalizeAccelerator("Windows")).toBe("Windows");
+    expect(normalizeAccelerator("window")).toBe("window");
   });
 
   it("uses the helper path when the helper succeeds", async () => {

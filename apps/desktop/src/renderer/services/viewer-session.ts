@@ -648,19 +648,39 @@ export class ViewerSession {
 
   /**
    * Final cleanup. The session cannot be restarted after this.
-   * Idempotent. Like stop(), the actual teardown is async — the
-   * _destructed flag is set immediately so any concurrent start()
-   * bails before creating a new ViewerClient.
+   * Idempotent. Returns a promise that resolves when the full
+   * teardown sequence (sendLeave, ViewerClient.shutdown, video
+   * element cleanup) has completed.
+   *
+   * Callers MUST await this before starting a new session, or
+   * the old session's async teardown can race the new session
+   * and blank the shared <video> element's srcObject after the
+   * new stream has been attached.
    */
-  destroy(): void {
-    if (this._destructed) return;
+  async destroy(): Promise<void> {
+    if (this._destructed) {
+      // Already destroyed — await any in-flight teardown so callers
+      // that hold a stale reference (e.g. effect cleanup) can await
+      // completion without re-entering.
+      await (this._teardownPromise ?? Promise.resolve());
+      return;
+    }
     this._destructed = true;
     this.clearPosterFrame();
-    void this.beginTeardown({ final: true });
+    await this.beginTeardown({ final: true });
   }
 
   /**
    * Begin a teardown, sharing the same promise across repeated calls.
+   *
+   * IMPORTANT: When a prior non-final teardown (from stop()/setError())
+   * is still in flight and a subsequent call requests final=true, this
+   * method does NOT restart the teardown — it awaits the existing
+   * promise. The non-final path omits the final cleanup steps (clearing
+   * callbacks, nulling videoElement). For the Exit → Watch race (the
+   * primary caller of this fix), destroy() is always called first, so
+   * _teardownPromise is null when final=true is requested. The existing-
+   * promise edge case is handled via the _destructed guard in destroy().
    *
    * @param options.final  when true, marks the session as fully
    *   destroyed (no further start()) and clears event handlers. When
@@ -720,7 +740,11 @@ export class ViewerSession {
           this.viewerClient = null;
         }
 
-        // 5) Clear video element after the underlying stream is gone
+        // 5) Clear video element after the underlying stream is gone.
+        //    This is the critical point where the old session's teardown
+        //    would blank the shared <video> DOM element. Because
+        //    destroy() now awaits this method, the new Watch session
+        //    cannot start until this completes.
         if (this.videoElement) {
           try {
             this.videoElement.pause();

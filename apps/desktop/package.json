@@ -40,14 +40,20 @@
     "cmdk": "^1.1.1",
     "electron-updater": "^6.3.0",
     "lucide-react": "^0.468.0",
-    "semver": "^7.6.0",
     "motion": "^11.15.0",
+    "recharts": "^2.15.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "semver": "^7.6.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^2.6.0",
     "zod": "^3.24.0",
     "zustand": "^5.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "react-is": "^19.0.0"
+    }
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
@@ -72,35 +78,14 @@
   "build": {
     "appId": "app.screenlink.desktop",
     "productName": "ScreenLink",
-    "directories": {
-      "output": "out"
-    },
-    "files": [
-      "dist/**/*",
-      "public/**/*"
-    ],
+    "directories": { "output": "out" },
+    "files": ["dist/**/*", "public/**/*"],
     "afterPack": "../../scripts/after-pack.cjs",
-    "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
-      "icon": "assets/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true
-    },
+    "win": { "target": ["nsis", "portable"], "icon": "assets/icon.png" },
+    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true },
     "extraResources": [
-      {
-        "from": "public/vendor",
-        "to": "vendor"
-      },
-      {
-        "from": "assets/tray-icon.png",
-        "to": "tray-icon.png"
-      }
+      { "from": "public/vendor", "to": "vendor" },
+      { "from": "assets/tray-icon.png", "to": "tray-icon.png" }
     ]
   }
 }

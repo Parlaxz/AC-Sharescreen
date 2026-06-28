@@ -125,7 +125,7 @@ app.whenReady().then(() => {
     () => mainWindow,
     {
       getQuickShareEnabled: () => settingsStore.get().quickShareShortcutEnabled ?? false,
-      getQuickShareAccelerator: () => settingsStore.get().quickShareShortcutAccelerator ?? "Alt+Shift+S",
+      getQuickShareAccelerator: () => settingsStore.get().quickShareShortcutAccelerator ?? "Super+Alt+S",
     },
   );
   quickShareShortcutManager.register();

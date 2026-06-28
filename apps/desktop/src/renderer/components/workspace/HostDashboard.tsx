@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+﻿import { useCallback, useMemo, useState, useEffect } from "react";
 import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,6 +33,8 @@ import { navigateToGroupOverview } from "@/services/group-navigation";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 import { useHostViewerDiagnostics, type ViewerRow } from "@/hooks/use-host-viewer-diagnostics";
 import { Separator } from "@/components/ui/separator";
+import { StreamMetricsService } from "@/services/stream-metrics-service";
+import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
 
 function formatLiveDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
@@ -67,7 +69,7 @@ function getConnectionClass(label: string): string {
   return "bg-text-muted";
 }
 
-function ViewerRowItem({ row }: { row: ViewerRow }) {
+function ViewerRowItem({ row, onBitrateClick }: { row: ViewerRow; onBitrateClick?: () => void }) {
   const statusDot = (() => {
     switch (row.state) {
       case "playing": return "bg-green-500";
@@ -99,7 +101,7 @@ function ViewerRowItem({ row }: { row: ViewerRow }) {
 
       {row.state === "paused" && (
         <div className="text-[11px] text-text-muted pl-4">
-          Control connection active · Media stopped
+          Control connection active Â· Media stopped
         </div>
       )}
 
@@ -114,9 +116,9 @@ function ViewerRowItem({ row }: { row: ViewerRow }) {
           <div className="text-[11px] text-text-secondary pl-4">
             {(row.sent.width || row.sent.height || row.sent.fps) ? (
               <>
-                Sent {row.sent.width}×{row.sent.height ?? "?"} {row.sent.fps ?? "?"} FPS
+                Sent {row.sent.width}Ã—{row.sent.height ?? "?"} {row.sent.fps ?? "?"} FPS
                 {(row.received.width || row.received.height || row.received.fps) ? (
-                  <> → Received {row.received.width}×{row.received.height ?? "?"} {row.received.fps ?? "?"} FPS</>
+                  <> â†’ Received {row.received.width}Ã—{row.received.height ?? "?"} {row.received.fps ?? "?"} FPS</>
                 ) : null}
               </>
             ) : (
@@ -141,8 +143,8 @@ function ViewerRowItem({ row }: { row: ViewerRow }) {
 
           {row.requested.bitrateKbps !== null && (
             <div className="text-[10px] text-text-muted pl-4">
-              Requested: {row.requested.width}×{row.requested.height ?? "?"} · {row.requested.fps} FPS · {row.requested.bitrateKbps} kbps
-              {row.requested.presetName ? ` · ${row.requested.presetName}` : null}
+              Requested: {row.requested.width}Ã—{row.requested.height ?? "?"} Â· {row.requested.fps} FPS Â· {row.requested.bitrateKbps} kbps
+              {row.requested.presetName ? ` Â· ${row.requested.presetName}` : null}
             </div>
           )}
         </>
@@ -192,7 +194,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const [sourcesLoading, setSourcesLoading] = useState(false);
   const [selectedSwitchSource, setSelectedSwitchSource] = useState<CaptureSourceDTO | null>(null);
   const [switchSourceError, setSwitchSourceError] = useState<string | null>(null);
-
+  const [bandwidthModalOpen, setBandwidthModalOpen] = useState(false);
   const runtime = getRuntime();
   const sdk = runtime
     ?.getStreamSessionManager()
@@ -201,6 +203,20 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     ?.getSDK() ?? null;
 
   const logicalStreamId = runtime?.getStreamSessionManager()?.currentLogicalStreamId ?? "";
+  const mediaSessionId = runtime?.getStreamSessionManager()?.currentMediaSessionId ?? null;
+
+  // Duration timer
+  useEffect(() => {
+    if (!mediaSessionId) return;
+    const interval = setInterval(() => {
+      const startedAt = StreamMetricsService.getInstance().getLiveStartTimeMs(mediaSessionId);
+      if (startedAt) {
+        const seconds = Math.floor((Date.now() - startedAt) / 1000);
+        useStore.getState().setSessionDuration(seconds);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [mediaSessionId]);
 
   const viewerBindings = useMemo(() => {
     return runtime
@@ -248,7 +264,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     setSwitchingSource(true);
 
     try {
-      // Get or acquire the runtime — it can be null after HMR or page transitions
+      // Get or acquire the runtime â€” it can be null after HMR or page transitions
       // that temporarily release the singleton. Try to re-acquire if needed.
       let runtime = getRuntime();
       if (!runtime) {
@@ -304,7 +320,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     }) ?? null;
 
     if (localStream && targetGroupId) {
-      // Set explicit watching target — ViewerWorkspace uses this as its
+      // Set explicit watching target â€” ViewerWorkspace uses this as its
       // source of truth for what stream to connect to (no heuristics).
       const target = {
         groupId: targetGroupId,
@@ -356,7 +372,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             </span>
             <span className="flex items-center gap-1">
               <Eye className="h-3 w-3" />
-              {viewerCount} {viewerCount === 1 ? "viewer" : "viewers"}
+              {viewerRows.length} {viewerRows.length === 1 ? "viewer" : "viewers"}
             </span>
           </div>
         </div>
@@ -388,16 +404,16 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Resolution</span>
               <span className="font-mono tabular-nums text-text-primary">
-                {captureWidth > 0 && captureHeight > 0 ? `${captureWidth}×${captureHeight}` : "—"}
+                {captureWidth > 0 && captureHeight > 0 ? `${captureWidth}Ã—${captureHeight}` : "â€”"}
               </span>
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Frame rate</span>
-              <span className="font-mono tabular-nums text-text-primary">{captureFps > 0 ? `${captureFps} fps` : "—"}</span>
+              <span className="font-mono tabular-nums text-text-primary">{captureFps > 0 ? `${captureFps} fps` : "â€”"}</span>
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Bitrate</span>
-              <span className="font-mono tabular-nums text-text-primary">{captureBitrate > 0 ? `${captureBitrate} kbps` : "—"}</span>
+              <span className="font-mono tabular-nums text-text-primary">{captureBitrate > 0 ? `${captureBitrate} kbps` : "â€”"}</span>
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Connection</span>
@@ -423,7 +439,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             ) : (
               <Monitor className="h-3.5 w-3.5" />
             )}
-            {isSwitchingSource ? "Switching…" : "Switch source"}
+            {isSwitchingSource ? "Switchingâ€¦" : "Switch source"}
           </Button>
           <Button variant="outline" size="sm" onClick={handlePreview}>
             <Eye className="h-3.5 w-3.5" />
@@ -471,7 +487,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             viewerRows.map((row, i) => (
               <div key={row.viewerDeviceId}>
                 {i > 0 && <Separator className="my-1.5" />}
-                <ViewerRowItem row={row} />
+                <ViewerRowItem row={row} onBitrateClick={() => setBandwidthModalOpen(true)} />
               </div>
             ))
           )}
@@ -585,7 +601,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
               {isSwitchingSource ? (
                 <>
                   <RefreshCw className="h-3.5 w-3.5 animate-spin mr-1" />
-                  Switching…
+                  Switchingâ€¦
                 </>
               ) : (
                 <>

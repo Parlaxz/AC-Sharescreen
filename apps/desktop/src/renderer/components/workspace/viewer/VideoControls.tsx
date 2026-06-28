@@ -130,6 +130,7 @@ interface VideoControlsProps {
   onToggleScreenLinkDeafen?: () => void;
   /** Current bandwidth in bits per second (for bandwidth display) */
   currentBandwidthBps?: number;
+  onBandwidthClick?: () => void;
   /** Total bytes received in this session (for bandwidth display) */
   totalBytesReceived?: number;
   /** Discord mute shortcut binding */
@@ -202,6 +203,7 @@ export function VideoControls({
   onToggleScreenLinkDeafen,
   maxVolumePercent = 200,
   currentBandwidthBps = 0,
+  onBandwidthClick,
   totalBytesReceived = 0,
   discordMuteBinding = { modifiers: ["alt"], key: "M" },
   discordDeafenBinding = { modifiers: ["alt"], key: "D" },
@@ -475,7 +477,7 @@ export function VideoControls({
           {currentBandwidthBps > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="text-[10px] text-white/50 font-mono px-1.5 cursor-default select-none tabular-nums">
+                <span className="text-[10px] text-white/50 font-mono px-1.5 cursor-pointer select-none tabular-nums" onClick={onBandwidthClick}>
                   {formatBandwidth(currentBandwidthBps)}
                 </span>
               </TooltipTrigger>

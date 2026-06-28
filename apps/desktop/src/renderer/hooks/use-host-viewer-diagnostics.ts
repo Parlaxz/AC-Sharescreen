@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+﻿import { useState, useEffect, useRef, useCallback } from "react";
 import type { QualityCoordinator } from "@/services/quality-coordinator";
 import type { ViewerQualityRequest } from "@screenlink/shared";
 import { pollStats } from "@screenlink/vdo-adapter";
 import type { StatsSnapshot, VDONinjaSDK } from "@screenlink/vdo-adapter";
+import { StreamMetricsService } from "@/services/stream-metrics-service";
 
-// ─── Types ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface ViewerStatusEvent {
   viewerDeviceId: string;
@@ -100,7 +101,7 @@ function isViewerStatusEvent(value: unknown): value is ViewerStatusEvent {
   );
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function computeHostStats(snapshot: StatsSnapshot): Omit<HostObservedViewerStats, "sentBitrateKbps"> {
   const outbound = snapshot.outbound as Record<string, unknown> | undefined;
@@ -140,11 +141,11 @@ function computeHostStats(snapshot: StatsSnapshot): Omit<HostObservedViewerStats
   };
 }
 
-// ─── Hook ───────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Hook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function useHostViewerDiagnostics(
   sdk: VDONinjaSDK | null,
-  /** Viewer bindings from ViewerMediaBinding — bridges viewerDeviceId ↔ mediaPeerUuid for host stats. */
+  /** Viewer bindings from ViewerMediaBinding â€” bridges viewerDeviceId â†” mediaPeerUuid for host stats. */
   viewerBindings: ViewerBinding[],
   qualityCoordinator: QualityCoordinator | null,
   groupId: string,
@@ -217,7 +218,7 @@ export function useHostViewerDiagnostics(
       const newRows: ViewerRow[] = [];
       const seen = new Set<string>();
 
-      // Build a peerUuid → viewerDeviceId map from bindings
+      // Build a peerUuid â†’ viewerDeviceId map from bindings
       const peerToViewer = new Map<string, string>();
       for (const b of bindingRef.current) {
         peerToViewer.set(b.mediaPeerUuid, b.viewerDeviceId);
@@ -274,7 +275,7 @@ export function useHostViewerDiagnostics(
         for (const [peerUuid] of hostStats) {
           const viewerDeviceId = peerToViewer.get(peerUuid) ?? `sdk:${peerUuid.slice(0, 8)}`;
           if (seen.has(viewerDeviceId)) {
-            // Already emitted above — augment with host stats
+            // Already emitted above â€” augment with host stats
             const existing = newRows.find((r) => r.viewerDeviceId === viewerDeviceId);
             if (existing) existing.sent = toSentStats(hostStats.get(peerUuid) ?? null);
             continue;
@@ -307,3 +308,4 @@ export function useHostViewerDiagnostics(
 
   return rows;
 }
+

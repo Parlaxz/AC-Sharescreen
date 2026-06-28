@@ -277,12 +277,10 @@ describe("ViewerImageProcessor — settings live update (uniform mapping)", () =
       "enabled",
       "scalingAlgorithm",
       "sharpeningStrength",
-      "chromaContribution",
-      "artifactClamp",
-      "textureNoiseSharpening",
-      "antiRinging",
-      "chromaCleanup",
-      "compressionSmoothing",
+      "noiseProtection",
+      "compressionCleanup",
+      "debanding",
+      "fsrBicubicBlend",
     ];
 
     for (const key of settingsKeys) {
@@ -291,7 +289,7 @@ describe("ViewerImageProcessor — settings live update (uniform mapping)", () =
         typeof defaultSettings[key] === "boolean"
           ? !(defaultSettings[key] as boolean)
           : key === "scalingAlgorithm"
-            ? "bilinear"
+            ? "bicubic"
             : 0.99;
       const patch = { [key]: newVal } as Partial<ViewerImageEnhancementSettings>;
       processor.updateSettings({ ...defaultSettings, ...patch });

@@ -258,6 +258,13 @@ function applyMigrations(raw: unknown): PersistedSettings {
     s.lastQuickSharePresetId = null;
   }
 
+  // Normalise "Win" → "Super" in saved Quick Share accelerator.
+  // KeyRecorder emits "Win" for the Windows key but Electron's
+  // globalShortcut only accepts "Super" / "Meta".
+  if (typeof s.quickShareShortcutAccelerator === "string") {
+    s.quickShareShortcutAccelerator = s.quickShareShortcutAccelerator.replace(/\bWin\b/g, "Super");
+  }
+
   return s as PersistedSettings;
 }
 
@@ -365,6 +372,11 @@ export class SettingsStore {
     }
     if (s.viewerMaxVolumePercent === undefined) {
       s.viewerMaxVolumePercent = 200;
+    }
+    // Normalise "Win" → "Super" in any stored Quick Share accelerator
+    // (catches values saved before the IPC-level normalisation was added).
+    if (typeof s.quickShareShortcutAccelerator === "string") {
+      s.quickShareShortcutAccelerator = s.quickShareShortcutAccelerator.replace(/\bWin\b/g, "Super");
     }
     return s;
   }

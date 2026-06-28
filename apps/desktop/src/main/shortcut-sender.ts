@@ -29,6 +29,19 @@ export function normalizeShortcutBinding(binding: ShortcutBinding): ShortcutBind
   };
 }
 
+/**
+ * Normalize an Electron accelerator string by replacing the user-facing
+ * "Win" modifier with the canonical "Super" that Electron expects.
+ *
+ * KeyRecorder displays the Windows key as "Win" but `globalShortcut.register()`
+ * only recognises "Super" (or "Meta"). This function bridges that gap.
+ *
+ * @example normalizeAccelerator("Win+Alt+S") → "Super+Alt+S"
+ */
+export function normalizeAccelerator(accel: string): string {
+  return accel.replace(/\bWin\b/g, "Super");
+}
+
 export async function sendShortcutWithFallback(
   binding: ShortcutBinding,
   deps: {

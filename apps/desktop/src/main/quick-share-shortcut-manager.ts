@@ -1,4 +1,5 @@
 import { globalShortcut, BrowserWindow } from "electron";
+import { normalizeAccelerator } from "./shortcut-sender.js";
 
 /**
  * QuickShareShortcutManager — Dedicated global shortcut for Quick Share.
@@ -65,7 +66,7 @@ export class QuickShareShortcutManager {
       return { success: false, error: "Quick share shortcut is disabled in settings" };
     }
 
-    const accel = this.configuredAccelerator;
+    const accel = normalizeAccelerator(this.configuredAccelerator);
     const ok = globalShortcut.register(accel, () => {
       const win = this.getWindow();
       if (win) {

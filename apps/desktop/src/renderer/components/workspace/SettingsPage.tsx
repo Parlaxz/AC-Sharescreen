@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 import { RefreshCw, AlertTriangle } from "lucide-react";
@@ -33,6 +33,7 @@ import {
 import { useIdentityStore } from "@/stores/identity-store";
 import { getRuntime } from "@/services/phase3-runtime";
 import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSection";
+import { StreamHistorySection } from "@/components/settings/StreamHistorySection";
 import type { PersistedSettings, QuickShareConfigDTO, ShortcutBinding } from "../../../preload/api-types.js";
 
 interface SettingsForm {
@@ -68,7 +69,7 @@ const DEFAULT_FORM: SettingsForm = {
   viewerBitrateSliderMaxKbps: 5000,
   defaultCodec: "vp9",
   quickShareEnabled: true,
-  quickShareAccelerator: "Alt+Shift+S",
+  quickShareAccelerator: "Super+Alt+S",
   discordMuteShortcut: "Alt+M",
   discordDeafenShortcut: "Alt+D",
   discordDeafenScreenLink: true,
@@ -198,6 +199,7 @@ function SwitchRow({
           />
         </motion.div>
       </AnimatePresence>
+      <StreamHistorySection />
     </div>
   );
 }
@@ -241,7 +243,7 @@ export function SettingsPage() {
   const validateForm = useCallback((): string | null => {
     const trimmedName = form.displayName.trim();
     if (trimmedName.length < 1 || trimmedName.length > 100) {
-      return "Display Name must be 1–100 characters";
+      return "Display Name must be 1â€“100 characters";
     }
     if (!isNonNegativeInteger(form.maxVideoBitrateKbps)) {
       return "Maximum bitrate must be a nonnegative integer";
@@ -333,9 +335,13 @@ export function SettingsPage() {
       };
 
       await saveSettings(mergedSettingsPartial);
+
+      // Normalise "Win" → "Super" before persisting so the accelerator
+      // always matches what Electron's globalShortcut expects.
+      const normalizedAccelerator = form.quickShareAccelerator.trim().replace(/\bWin\b/g, "Super");
       await saveQuickShareConfig({
         shortcutEnabled: form.quickShareEnabled,
-        shortcutAccelerator: form.quickShareAccelerator.trim(),
+        shortcutAccelerator: normalizedAccelerator,
       });
 
       const [verifiedSettings, verifiedQuickShare] = await Promise.all([
@@ -347,7 +353,7 @@ export function SettingsPage() {
       if (!formsEqual(verifiedForm, {
         ...form,
         displayName: trimmedDisplayName,
-        quickShareAccelerator: form.quickShareAccelerator.trim(),
+        quickShareAccelerator: normalizedAccelerator,
       })) {
         throw new Error("Saved settings could not be verified");
       }
@@ -375,9 +381,10 @@ export function SettingsPage() {
         <Skeleton className="h-48 w-full rounded-standard" />
         <Skeleton className="h-32 w-full rounded-standard" />
         <Skeleton className="h-32 w-full rounded-standard" />
-      </div>
-    );
-  }
+      <StreamHistorySection />
+    </div>
+  );
+}
 
   if (loadError) {
     return (
@@ -391,23 +398,15 @@ export function SettingsPage() {
             Retry
           </Button>
         </Alert>
-      </div>
-    );
-  }
+      <StreamHistorySection />
+    </div>
+  );
+}
 
   return (
-    <div className="h-full overflow-auto p-5 space-y-5">
-      <div className="flex items-center justify-between">
+    <div className="h-full flex flex-col">
+      <div className="flex-1 overflow-auto p-5 space-y-5">
         <h1 className="text-xl font-semibold text-text-primary">Settings</h1>
-        <Button
-          variant="default"
-          size="sm"
-          disabled={!isDirty || saving}
-          onClick={handleSave}
-        >
-          {saving ? "Saving…" : "Save settings"}
-        </Button>
-      </div>
 
       <Card>
         <CardHeader>
@@ -654,6 +653,41 @@ export function SettingsPage() {
           />
         </CardContent>
       </Card>
+      <StreamHistorySection />
+    </div>
+
+      {/* Sticky save bar — always visible at the bottom */}
+      <div
+        style={{
+          flexShrink: 0,
+          borderTop: "1px solid var(--color-border-subtle)",
+          background: "var(--color-surface-1)",
+          padding: "0.75rem 1.25rem",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "0.75rem",
+        }}
+      >
+        <span
+          style={{
+            fontSize: "0.8125rem",
+            color: isDirty ? "var(--color-text-secondary)" : "var(--color-text-muted)",
+            transition: "color 0.15s ease",
+          }}
+        >
+          {isDirty ? "Unsaved changes" : "All settings saved"}
+        </span>
+        <Button
+          variant="default"
+          size="default"
+          disabled={!isDirty || saving}
+          onClick={handleSave}
+        >
+          {saving ? "Saving\u2026" : "Save settings"}
+        </Button>
+      </div>
     </div>
   );
 }
+

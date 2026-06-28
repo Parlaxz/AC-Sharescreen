@@ -34,6 +34,8 @@ import { cn } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 import type { StreamAnnouncement } from "@/stores/main-store";
 import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
+import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
+import { StreamMetricsService } from "@/services/stream-metrics-service";
 import type { ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
 import {
@@ -303,6 +305,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Bandwidth tracking ──
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
+  const [bandwidthModalOpen, setBandwidthModalOpen] = useState(false);
   const bandwidthTrackerRef = useRef(createBandwidthTracker());
   const bandwidthPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -335,6 +338,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           bandwidthTrackerRef.current = next;
           setTotalBytesReceived(next.totalBytesReceived);
           setCurrentBandwidthBps(next.currentBytesPerSecond);
+          StreamMetricsService.getInstance().feedViewerBandwidth(next.currentBytesPerSecond, next.totalBytesReceived);
         }
       } catch {
         // best-effort
@@ -393,13 +397,26 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Callbacks ────────────────────────────────────────────────────
 
   const handleExit = useCallback(async () => {
-    // 1) Authoritative teardown: call destroy() (not stop+destroy).
-    //    destroy() handles all cleanup: sendLeave, cancel timers,
-    //    shutdown ViewerClient, clear video.srcObject, clear pause
-    //    state, and null callbacks.
-    if (sessionRef.current) {
-      sessionRef.current.destroy();
-      sessionRef.current = null;
+    // ── Critical ordering: destroy() MUST complete before any new
+    //    Watch attempt can begin ─────────────────────────────────
+    //
+    //    If destroy() is fire-and-forget, the old session's async
+    //    teardown (ViewerClient.shutdown → sdk.stopViewing →
+    //    sdk.disconnect) can still be in-flight when React state
+    //    transitions allow a rejoin.  Once the old teardown reaches
+    //    the video-element cleanup step it calls
+    //    videoElement.pause(); videoElement.srcObject = null;
+    //    on the shared DOM element, which blanks the new session's
+    //    stream, producing a persistent black screen.
+    //
+    //    Capturing sessionRef.current before the null-assignment
+    //    ensures we hold a reference to the exact session we mean
+    //    to destroy, even if the ref is cleared concurrently.
+    const session = sessionRef.current;
+    sessionRef.current = null;
+
+    if (session) {
+      await session.destroy();
     }
 
     // 2) Clear visual stale state that destroy() does not own
@@ -711,7 +728,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     // Normal mode: spec-safe [0, 1] range
     video.volume = Math.min(1, actualVolume);
     video.muted = isMuted;
-  }, [volume, isMuted]);
+  }, [volume, isMuted, sessionState]);
 
   // Tear down boost on unmount
   useEffect(() => {
@@ -1246,6 +1263,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             isScreenLinkDeafened={isScreenLinkDeafened}
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
+            onBandwidthClick={() => setBandwidthModalOpen(true)}
             totalBytesReceived={totalBytesReceived}
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
@@ -1686,6 +1704,7 @@ function VideoControlsOverlay({
   isScreenLinkDeafened?: boolean;
   onToggleScreenLinkDeafen?: () => void;
   currentBandwidthBps?: number;
+  onBandwidthClick?: () => void;
   totalBytesReceived?: number;
   discordMuteBinding?: ShortcutBinding;
   discordDeafenBinding?: ShortcutBinding;

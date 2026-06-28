@@ -1,4 +1,4 @@
-import { ipcMain, app, BrowserWindow, clipboard } from "electron";
+﻿import { ipcMain, app, BrowserWindow, clipboard } from "electron";
 import { enumerateSources, getSourceFingerprint } from "./capture-source-manager.js";
 import { setApprovedSource } from "./display-media-handler.js";
 import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.js";
@@ -15,6 +15,8 @@ import type { SecureStore } from "./secure-store.js";
 import type { TrayManager } from "./tray-manager.js";
 import type { GroupStore } from "./group-store.js";
 import type { QualityPresetStore } from "./quality-preset-store.js";
+import * as path from "node:path";
+import * as fs from "node:fs/promises";
 import {
   sendShortcutViaPowerShellSendInput,
   sendShortcutWithFallback,
@@ -35,7 +37,7 @@ export function clearCurrentVdoCredentials(): void {
   currentVdoPassword = "";
 }
 
-// ── Audio helper state (set by main process lifecycle) ──────────────────────
+// â”€â”€ Audio helper state (set by main process lifecycle) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let currentAudioHelper: AudioHelperManager | null = null;
 let currentAudioState: string = "disabled";
@@ -91,7 +93,7 @@ export function registerIpcHandlers(
   presetStore?: QualityPresetStore,
   onQuickShareConfigUpdated?: (enabled: boolean, accelerator: string) => void,
 ): void {
-  // ── VDO session credentials (for LAN testing) ─────────────────────────
+  // â”€â”€ VDO session credentials (for LAN testing) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("get-vdo-credentials", () => {
     return {
@@ -111,7 +113,7 @@ export function registerIpcHandlers(
     clearCurrentVdoCredentials();
   });
 
-  // ── Desktop capture sources ──────────────────────────────────────────────
+  // â”€â”€ Desktop capture sources â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("get-sources", async () => {
     try {
@@ -135,7 +137,7 @@ export function registerIpcHandlers(
     return getSourceFingerprint(source);
   });
 
-  // ── Settings persistence ─────────────────────────────────────────────────
+  // â”€â”€ Settings persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("get-settings", () => {
     return settings.get();
@@ -148,7 +150,7 @@ export function registerIpcHandlers(
     },
   );
 
-  // ── Secure storage (token encryption) ────────────────────────────────────
+  // â”€â”€ Secure storage (token encryption) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("encrypt-token", (_event, plaintext: string) => {
     const encrypted = secureStore.encrypt(plaintext);
@@ -160,13 +162,13 @@ export function registerIpcHandlers(
     return secureStore.decrypt(buf);
   });
 
-  // ── Window management ────────────────────────────────────────────────────
+  // â”€â”€ Window management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("minimize-to-tray", () => {
     window.hide();
   });
 
-  // ── Window controls (Stage 3.7B custom title bar) ─────────────────────────
+  // â”€â”€ Window controls (Stage 3.7B custom title bar) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("window:minimize", () => {
     window.minimize();
@@ -186,7 +188,7 @@ export function registerIpcHandlers(
     window.close();
   });
 
-  // ── Device identity ──────────────────────────────────────────────────────
+  // â”€â”€ Device identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("safe-storage-available", () => {
     return secureStore.isEncryptionAvailable();
@@ -196,12 +198,12 @@ export function registerIpcHandlers(
     return settings.get().deviceIdentity;
   });
 
-  // ── Clipboard ────────────────────────────────────────────────────
+  // â”€â”€ Clipboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   //
   // The renderer's `navigator.clipboard.writeText` is blocked in
   // many Electron contexts with "Write permission denied" because
   // the document must be focused and the user gesture policy is
-  // strict. Use the main-process clipboard module instead — it
+  // strict. Use the main-process clipboard module instead â€” it
   // always works inside the desktop app.
   ipcMain.handle("clipboard-write-text", (_event, text: string) => {
     if (typeof text !== "string") {
@@ -224,7 +226,7 @@ export function registerIpcHandlers(
     return settings.get().deviceIdentity;
   });
 
-  // ── Groups ──────────────────────────────────────────────────────────────
+  // â”€â”€ Groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   if (groupStore) {
     ipcMain.handle("list-groups", () => groupStore.list());
@@ -332,7 +334,7 @@ export function registerIpcHandlers(
     });
   }
 
-  // ── Quality presets ─────────────────────────────────────────────────────
+  // â”€â”€ Quality presets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   if (presetStore) {
     ipcMain.handle("list-quality-presets", () => presetStore.list());
@@ -363,13 +365,13 @@ export function registerIpcHandlers(
     );
   }
 
-  // ── Quick Share config ──────────────────────────────────────────────────
+  // â”€â”€ Quick Share config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("get-quick-share-config", () => {
     const s = settings.get();
     return {
       shortcutEnabled: s.quickShareShortcutEnabled ?? false,
-      shortcutAccelerator: s.quickShareShortcutAccelerator ?? "Alt+Shift+S",
+      shortcutAccelerator: s.quickShareShortcutAccelerator ?? "Super+Alt+S",
       lastGroupId: s.lastQuickShareGroupId ?? null,
       lastSourceKind: s.lastQuickShareSourceKind ?? null,
       lastPresetId: s.lastQuickSharePresetId ?? null,
@@ -381,7 +383,11 @@ export function registerIpcHandlers(
     (_event, partial: Record<string, unknown>) => {
       const mapped: Partial<Record<string, unknown>> = {};
       if ("shortcutEnabled" in partial) mapped.quickShareShortcutEnabled = partial.shortcutEnabled;
-      if ("shortcutAccelerator" in partial) mapped.quickShareShortcutAccelerator = partial.shortcutAccelerator;
+      if ("shortcutAccelerator" in partial) {
+        // Normalise "Win" → "Super" before persisting so the stored value
+        // is always a valid Electron accelerator.
+        mapped.quickShareShortcutAccelerator = String(partial.shortcutAccelerator).replace(/\bWin\b/g, "Super");
+      }
       if ("lastGroupId" in partial) mapped.lastQuickShareGroupId = partial.lastGroupId;
       if ("lastSourceKind" in partial) mapped.lastQuickShareSourceKind = partial.lastSourceKind;
       if ("lastPresetId" in partial) mapped.lastQuickSharePresetId = partial.lastPresetId;
@@ -394,7 +400,7 @@ export function registerIpcHandlers(
     },
   );
 
-  // ── Application info ─────────────────────────────────────────────────────
+  // â”€â”€ Application info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("get-app-info", () => {
     return {
@@ -405,13 +411,13 @@ export function registerIpcHandlers(
     };
   });
 
-  // ── Audio capabilities ────────────────────────────────────────────────────
+  // â”€â”€ Audio capabilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("get-audio-capabilities", async () => {
     return getAudioCapabilities();
   });
 
-  // ── Audio pipeline ─────────────────────────────────────────────────────
+  // â”€â”€ Audio pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("ensure-audio-helper", async () => {
     try {
@@ -575,7 +581,7 @@ export function registerIpcHandlers(
     }
   });
 
-  // ── Tray state updates ──────────────────────────────────────────────────
+  // â”€â”€ Tray state updates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.on("tray-set-sharing", (_event, sharing: boolean) => {
     trayManager.setSharing(sharing);
@@ -589,11 +595,41 @@ export function registerIpcHandlers(
     else trayManager.setState("idle");
   });
 
-  ipcMain.on("tray-select-preset", (_event, presetId: string) => {
+
+  // ── Stream history ────────────────────────────────────────────────────────
+
+  const STREAM_HISTORY_FILE = "stream-history.json";
+
+  ipcMain.handle("get-stream-history", async () => {
+    const filePath = path.join(app.getPath("userData"), STREAM_HISTORY_FILE);
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed.records) ? parsed.records : [];
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle("save-stream-history", async (_event, records: unknown[]) => {
+    const filePath = path.join(app.getPath("userData"), STREAM_HISTORY_FILE);
+    const data = JSON.stringify({ schemaVersion: 1, records }, null, 2);
+    try {
+      const tmpPath = filePath + ".tmp";
+      await fs.writeFile(tmpPath, data, "utf-8");
+      const backupPath = filePath + ".bak";
+      try { await fs.copyFile(filePath, backupPath); } catch { }
+      await fs.rename(tmpPath, filePath);
+    } catch {
+      await fs.writeFile(filePath, data, "utf-8");
+    }
+  });
+
+    ipcMain.on("tray-select-preset", (_event, presetId: string) => {
     window.webContents.send("select-preset", presetId);
   });
 
-  // ── Shortcut simulation (Discord mute/deafen) ──────────────────────────────
+  // â”€â”€ Shortcut simulation (Discord mute/deafen) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("send-shortcut", async (_event, binding: ShortcutBinding) => {
     try {
@@ -608,7 +644,7 @@ export function registerIpcHandlers(
     }
   });
 
-  // ── Fullscreen (native Electron) ──────────────────────────────────────────
+  // â”€â”€ Fullscreen (native Electron) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   ipcMain.handle("toggle-fullscreen", () => {
     const newState = !window.isFullScreen();
@@ -623,3 +659,4 @@ export function registerIpcHandlers(
     window.webContents.send("fullscreen-state-changed", false);
   });
 }
+

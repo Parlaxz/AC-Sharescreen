@@ -47,25 +47,21 @@ describe("ViewerSettingsPanel Image Enhancements tab", () => {
     // Test the enum definition layer rather than the rendered UI,
     // since the popover content requires complex DOM interaction
     expect(SCALING_ALGORITHMS).toContain("native");
-    expect(SCALING_ALGORITHMS).toContain("bilinear");
     expect(SCALING_ALGORITHMS).toContain("bicubic");
-    expect(SCALING_ALGORITHMS).toContain("lanczos");
     expect(SCALING_ALGORITHMS).toContain("fsr1-easu");
-    expect(SCALING_ALGORITHMS).toContain("nearest");
 
     expect(SCALING_ALGORITHM_LABELS.native).toBe("Native");
-    expect(SCALING_ALGORITHM_LABELS.bilinear).toBe("Bilinear");
-    expect(SCALING_ALGORITHM_LABELS.nearest).toBe("Nearest");
     expect(SCALING_ALGORITHM_LABELS.bicubic).toBe("Bicubic");
-    expect(SCALING_ALGORITHM_LABELS.lanczos).toBe("Lanczos");
     expect(SCALING_ALGORITHM_LABELS["fsr1-easu"]).toBe("FSR 1 EASU");
   });
 
   it("defaults have correct structure (no enhancedScaling, has scalingAlgorithm)", () => {
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.scalingAlgorithm).toBe("native");
     expect((VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as Record<string, unknown>).enhancedScaling).toBeUndefined();
-    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionSmoothing).toBeDefined();
-    expect((VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as Record<string, unknown>).deblocking).toBeUndefined();
+    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.noiseProtection).toBeDefined();
+    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionCleanup).toBeDefined();
+    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.debanding).toBeDefined();
+    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.fsrBicubicBlend).toBeDefined();
   });
 
   it("fires onEnhancementChange when settings prop changes via parent", () => {
@@ -82,7 +78,7 @@ describe("ViewerSettingsPanel Image Enhancements tab", () => {
     rerender(
       <ViewerSettingsPanel
         {...defaultProps}
-        enhancementSettings={{ ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS, scalingAlgorithm: "lanczos" }}
+        enhancementSettings={{ ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS, scalingAlgorithm: "bicubic" }}
         onEnhancementChange={onEnhancementChange}
       />,
     );

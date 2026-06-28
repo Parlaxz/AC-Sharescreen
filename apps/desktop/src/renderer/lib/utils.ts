@@ -1,4 +1,4 @@
-import { type ClassValue, clsx } from "clsx";
+﻿import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
 /**
@@ -12,6 +12,25 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
 
+
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const val = bytes / Math.pow(1024, i);
+  return `${val.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+export function formatDuration(seconds: number): string {
+  if (seconds < 0) return "0s";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 export function getInitials(name: string, maxParts = 2): string {
   if (!name || name.trim() == "") return "?";
   return name
@@ -22,3 +41,4 @@ export function getInitials(name: string, maxParts = 2): string {
     .join("")
     .toUpperCase() || "?";
 }
+

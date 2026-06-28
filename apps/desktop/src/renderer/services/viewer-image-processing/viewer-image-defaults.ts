@@ -6,17 +6,21 @@ import type { ViewerImageEnhancementSettings } from "./viewer-image-settings.js"
  * are corrupt.
  *
  * Conservative defaults: master disabled, native scaling, no enhancements.
+ * Settings tuned after visual testing:
+ *   - Sharpness 0.14: subtle spatial sharpening, zero is bypass
+ *   - Noise Protection 0.85: protects noise while sharpening coherent edges
+ *   - Compression Cleanup 0.20: mild edge-aware cleanup of block/color artifacts
+ *   - Debanding 0.10: subtle gradient smoothing, disabled by default
+ *   - FSR/Bicubic Blend 0.70: favours EASU when FSR is active
  */
 export const VIEWER_IMAGE_ENHANCEMENT_DEFAULTS: ViewerImageEnhancementSettings = {
   enabled: false,
   scalingAlgorithm: "native",
   sharpeningStrength: 0.14,
-  chromaContribution: 0.20,
-  artifactClamp: 0.55,
-  textureNoiseSharpening: 0.08,
-  antiRinging: 0.45,
-  chromaCleanup: 0.35,
-  compressionSmoothing: 0.25,
+  noiseProtection: 0.85,
+  compressionCleanup: 0.20,
+  debanding: 0.10,
+  fsrBicubicBlend: 0.70,
 };
 
 /**

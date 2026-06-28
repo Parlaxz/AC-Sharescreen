@@ -1,4 +1,4 @@
-import type { AudioMode, GroupSharedState, HybridTimestamp } from "@screenlink/shared";
+﻿import type { AudioMode, GroupSharedState, HybridTimestamp } from "@screenlink/shared";
 
 export type ShortcutBinding = {
   modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
@@ -42,6 +42,10 @@ export interface ScreenLinkAPI {
   setGroupNotifications: (groupId: string, enabled: boolean) => Promise<void>;
   leaveGroup: (groupId: string) => Promise<void>;
   getGroupConnectionConfig: (groupId: string) => Promise<GroupConnectionConfigDTO | null>;
+
+  // Stream history
+  getStreamHistory: () => Promise<unknown[]>;
+  saveStreamHistory: (records: unknown[]) => Promise<void>;
 
   // Quality presets
   listQualityPresets: () => Promise<unknown[]>;
@@ -110,7 +114,7 @@ export interface ScreenLinkAPI {
   updateQuickShareConfig: (partial: Partial<QuickShareConfigDTO>) => Promise<void>;
   onQuickShareOpen: (callback: () => void) => () => void;
 
-  // Tray-originated main→renderer events
+  // Tray-originated mainâ†’renderer events
   onOpenSourcePicker: (callback: () => void) => () => void;
   onStopSharing: (callback: () => void) => () => void;
   onOpenDiagnostics: (callback: () => void) => () => void;
@@ -127,15 +131,15 @@ export interface ScreenLinkAPI {
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 
-// ─── Quick Share types ───────────────────────────────────────────────────────
+// â”€â”€â”€ Quick Share types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ─── Group IPC response DTOs ───────────────────────────────────────────
+// â”€â”€â”€ Group IPC response DTOs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Record returned from createGroup / joinGroup / listGroups / getGroup IPC
  * handlers. Mirrors the main-process `LocalGroupRecord` from `group-store.ts`.
  *
- * `encryptedGroupSecret` is the safe-to-serialize ciphertext form — the
+ * `encryptedGroupSecret` is the safe-to-serialize ciphertext form â€” the
  * decrypted group secret is never exposed through this DTO.
  */
 export interface GroupRecordDTO {
@@ -170,7 +174,7 @@ export interface GroupConnectionConfigDTO {
   nodeId: string;
 }
 
-// ─── Quick Share types ─────────────────────────────────────────────────
+// â”€â”€â”€ Quick Share types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface QuickShareConfigDTO {
   shortcutEnabled: boolean;
@@ -180,7 +184,7 @@ export interface QuickShareConfigDTO {
   lastPresetId: string | null;
 }
 
-// ─── Update types ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Update types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type UpdatePhase =
   | "unsupported"
@@ -212,7 +216,7 @@ export interface UpdateStatusDTO {
   updaterSupported: boolean;
 }
 
-// ─── Existing types ────────────────────────────────────────────────────────
+// â”€â”€â”€ Existing types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export type AudioStateDTO =
   | "disabled"
@@ -407,3 +411,4 @@ export interface PipelineSnapshotWithDiagnostics {
   helperBinarySize?: number;
   helperBinaryMtime?: string;
 }
+

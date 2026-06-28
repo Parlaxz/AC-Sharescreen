@@ -21,27 +21,21 @@ describe("scaling algorithm enums", () => {
   it("includes all expected algorithms", () => {
     expect(SCALING_ALGORITHMS).toEqual([
       "native",
-      "bilinear",
-      "nearest",
       "bicubic",
-      "lanczos",
       "fsr1-easu",
     ]);
   });
 
   it("every algorithm has a label", () => {
-    for (const algo of SCALING_ALGORITHMS) {
-      expect(SCALING_ALGORITHM_LABELS[algo]).toBeTruthy();
-    }
+    expect(SCALING_ALGORITHM_LABELS["native"]).toBe("Native");
+    expect(SCALING_ALGORITHM_LABELS["bicubic"]).toBe("Bicubic");
+    expect(SCALING_ALGORITHM_LABELS["fsr1-easu"]).toBe("FSR 1 EASU");
   });
 
-  it("overshooting algorithms include bicubic, lanczos, fsr1-easu", () => {
+  it("overshooting algorithms include bicubic and fsr1-easu", () => {
     expect(OVERSHOOTING_ALGORITHMS.has("bicubic")).toBe(true);
-    expect(OVERSHOOTING_ALGORITHMS.has("lanczos")).toBe(true);
     expect(OVERSHOOTING_ALGORITHMS.has("fsr1-easu")).toBe(true);
     expect(OVERSHOOTING_ALGORITHMS.has("native")).toBe(false);
-    expect(OVERSHOOTING_ALGORITHMS.has("nearest")).toBe(false);
-    expect(OVERSHOOTING_ALGORITHMS.has("bilinear")).toBe(false);
   });
 });
 
@@ -50,7 +44,7 @@ describe("viewer-image-defaults", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
     expect(d.enabled).toBe(false);
     expect(d.scalingAlgorithm).toBe("native");
-    for (const key of ["sharpeningStrength", "chromaContribution", "artifactClamp", "textureNoiseSharpening", "antiRinging", "chromaCleanup", "compressionSmoothing"]) {
+    for (const key of ["sharpeningStrength", "noiseProtection", "compressionCleanup", "debanding", "fsrBicubicBlend"]) {
       const v = d[key as keyof ViewerImageEnhancementSettings] as number;
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1);
@@ -60,12 +54,10 @@ describe("viewer-image-defaults", () => {
   it("defaults match specification values", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
     expect(d.sharpeningStrength).toBeCloseTo(0.14);
-    expect(d.chromaContribution).toBeCloseTo(0.20);
-    expect(d.artifactClamp).toBeCloseTo(0.55);
-    expect(d.textureNoiseSharpening).toBeCloseTo(0.08);
-    expect(d.antiRinging).toBeCloseTo(0.45);
-    expect(d.chromaCleanup).toBeCloseTo(0.35);
-    expect(d.compressionSmoothing).toBeCloseTo(0.25);
+    expect(d.noiseProtection).toBeCloseTo(0.85);
+    expect(d.compressionCleanup).toBeCloseTo(0.20);
+    expect(d.debanding).toBeCloseTo(0.10);
+    expect(d.fsrBicubicBlend).toBeCloseTo(0.70);
   });
 
   it("control range has correct bounds", () => {
@@ -117,21 +109,21 @@ describe("validateSettings", () => {
   });
 
   it("clamps out-of-range numeric values", () => {
-    const result = validateSettings({ sharpeningStrength: 1.5, artifactClamp: -0.5 });
+    const result = validateSettings({ sharpeningStrength: 1.5, noiseProtection: -0.5 });
     expect(result.sharpeningStrength).toBe(1);
-    expect(result.artifactClamp).toBe(0);
+    expect(result.noiseProtection).toBe(0);
   });
 
   it("replaces NaN/Infinity numeric values with defaults", () => {
-    const result = validateSettings({ sharpeningStrength: NaN, compressionSmoothing: Infinity });
+    const result = validateSettings({ sharpeningStrength: NaN, noiseProtection: Infinity });
     expect(result.sharpeningStrength).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.sharpeningStrength);
-    expect(result.compressionSmoothing).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionSmoothing);
+    expect(result.noiseProtection).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.noiseProtection);
   });
 
   it("replaces non-numeric values with defaults", () => {
-    const result = validateSettings({ sharpeningStrength: "0.5", chromaContribution: true });
+    const result = validateSettings({ sharpeningStrength: "0.5", noiseProtection: true });
     expect(result.sharpeningStrength).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.sharpeningStrength);
-    expect(result.chromaContribution).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.chromaContribution);
+    expect(result.noiseProtection).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.noiseProtection);
   });
 
   it("replaces non-boolean boolean keys with defaults", () => {
@@ -162,29 +154,48 @@ describe("validateSettings", () => {
   });
 
   it("scalingAlgorithm takes priority over legacy enhancedScaling", () => {
-    const result = validateSettings({ enhancedScaling: true, scalingAlgorithm: "lanczos" });
-    expect(result.scalingAlgorithm).toBe("lanczos");
+    const result = validateSettings({ enhancedScaling: true, scalingAlgorithm: "bicubic" });
+    expect(result.scalingAlgorithm).toBe("bicubic");
   });
 
   it("accepts valid complete settings with new fields", () => {
     const valid: ViewerImageEnhancementSettings = {
       enabled: true,
-      scalingAlgorithm: "lanczos",
+      scalingAlgorithm: "bicubic",
       sharpeningStrength: 0.5,
-      chromaContribution: 0.3,
-      artifactClamp: 0.6,
-      textureNoiseSharpening: 0.1,
-      antiRinging: 0.4,
-      chromaCleanup: 0.2,
-      compressionSmoothing: 0.15,
+      noiseProtection: 0.3,
+      compressionCleanup: 0.6,
+      debanding: 0.1,
+      fsrBicubicBlend: 0.4,
     };
     expect(validateSettings(valid)).toEqual(valid);
   });
 
-  it("ignores old deblocking field name (no auto-migration)", () => {
-    // The field was renamed to compressionSmoothing; old deblocking is not auto-migrated
+  it("does not auto-migrate old deblocking field", () => {
     const result = validateSettings({ deblocking: 0.5, scalingAlgorithm: "native" });
-    expect(result.compressionSmoothing).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionSmoothing);
+    expect(result.compressionCleanup).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionCleanup);
+  });
+
+  it("migrates old textureNoiseSharpening to noiseProtection with inversion", () => {
+    const result = validateSettings({ textureNoiseSharpening: 0.3 });
+    // 1 - 0.3 = 0.7
+    expect(result.noiseProtection).toBeCloseTo(0.7);
+  });
+
+  it("migrates old chromaCleanup/compressionSmoothing to compressionCleanup", () => {
+    const result = validateSettings({ chromaCleanup: 0.5, compressionSmoothing: 0.3 });
+    // Max of 0.5 and 0.3 = 0.5
+    expect(result.compressionCleanup).toBeCloseTo(0.5);
+  });
+
+  it("handles both old fields migrated together", () => {
+    const result = validateSettings({
+      textureNoiseSharpening: 0.2,
+      chromaCleanup: 0.4,
+      compressionSmoothing: 0.6,
+    });
+    expect(result.noiseProtection).toBeCloseTo(0.8); // 1 - 0.2
+    expect(result.compressionCleanup).toBeCloseTo(0.6); // max(0.4, 0.6)
   });
 });
 
@@ -217,14 +228,14 @@ describe("localStorage persistence", () => {
     const settings: ViewerImageEnhancementSettings = {
       ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
       enabled: true,
-      scalingAlgorithm: "lanczos",
+      scalingAlgorithm: "bicubic",
       sharpeningStrength: 0.42,
     };
     saveImageEnhancementSettings(settings);
     const loaded = loadImageEnhancementSettings();
     expect(loaded.enabled).toBe(true);
     expect(loaded.sharpeningStrength).toBe(0.42);
-    expect(loaded.scalingAlgorithm).toBe("lanczos");
+    expect(loaded.scalingAlgorithm).toBe("bicubic");
   });
 
   it("loadImageEnhancementSettings returns defaults when stored data is corrupt", () => {

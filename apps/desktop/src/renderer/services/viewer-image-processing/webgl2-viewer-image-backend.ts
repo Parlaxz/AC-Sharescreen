@@ -3,11 +3,14 @@
  * WebGL2 rendering backend for the ScreenLink GPU image enhancement pipeline.
  *
  * Multi-pass pipeline:
- *   1. Upload pass  — copy video frame to source texture
- *   2. Cleanup pass — compression smoothing / chroma cleanup (optional, source res)
- *   3. Upscale pass — scaling algorithm (optional, render res)
- *   4. Sharpen pass — CAS sharpening (optional, render res)
- *   5. Final copy   — centered contained blit to canvas with letterbox clearing
+ *   1. Upload pass           — copy video frame to source texture
+ *   2. Compression Cleanup   — edge-aware luma/chroma cleanup (optional, source res)
+ *   3. Debanding             — spatial gradient banding reduction (optional, source res)
+ *   4a. Bicubic scaling      — Catmull-Rom 4x4 upsample (optional, render res)
+ *   4b. FSR 1 EASU scaling   — AMD EASU 12-tap upscaler (optional, render res)
+ *   5. FSR/Bicubic Blend     — blend both scaler outputs (optional, render res)
+ *   6. Sharpen pass          — CAS sharpening + noise protection (optional, render res)
+ *   7. Final copy            — centered contained blit to canvas with letterbox
  *
  * All GPU resources are reused across frames. No per-frame allocations.
  * No per-frame shader compilation or texture/FBO creation.
@@ -27,11 +30,11 @@ import {
 // Vite ?raw imports for shader source strings
 import fullscreenVert from "./shaders/fullscreen.vert.glsl?raw";
 import cleanupFrag from "./shaders/cleanup.frag.glsl?raw";
+import debandFrag from "./shaders/deband.frag.glsl?raw";
 import easuFrag from "./shaders/easu.frag.glsl?raw";
-import sharpenFrag from "./shaders/sharpen.frag.glsl?raw";
-import nearestFrag from "./shaders/nearest.frag.glsl?raw";
 import bicubicFrag from "./shaders/bicubic.frag.glsl?raw";
-import lanczosFrag from "./shaders/lanczos.frag.glsl?raw";
+import blendFrag from "./shaders/blend.frag.glsl?raw";
+import sharpenFrag from "./shaders/sharpen.frag.glsl?raw";
 
 // ─── Inline passthrough fragment shader for final blit ───────────────────────
 
@@ -178,10 +181,22 @@ export class WebGL2ViewerImageBackend {
   private cleanupFBO: WebGLFramebuffer | null = null;
   private lastCleanupWidth = 0;
   private lastCleanupHeight = 0;
+  private debandTexture: WebGLTexture | null = null;
+  private debandFBO: WebGLFramebuffer | null = null;
+  private lastDebandWidth = 0;
+  private lastDebandHeight = 0;
   private scaleTexture: WebGLTexture | null = null;
   private scaleFBO: WebGLFramebuffer | null = null;
   private lastScaleWidth = 0;
   private lastScaleHeight = 0;
+  private bicubicTexture: WebGLTexture | null = null;
+  private bicubicFBO: WebGLFramebuffer | null = null;
+  private lastBicubicWidth = 0;
+  private lastBicubicHeight = 0;
+  private blendTexture: WebGLTexture | null = null;
+  private blendFBO: WebGLFramebuffer | null = null;
+  private lastBlendWidth = 0;
+  private lastBlendHeight = 0;
   private outputTexture: WebGLTexture | null = null;
   private outputFBO: WebGLFramebuffer | null = null;
   private lastOutputWidth = 0;
@@ -190,19 +205,19 @@ export class WebGL2ViewerImageBackend {
   // Shader programs
   private fullscreenProgram: WebGLProgram | null = null;
   private cleanupProgram: WebGLProgram | null = null;
+  private debandProgram: WebGLProgram | null = null;
   private easuProgram: WebGLProgram | null = null;
-  private sharpenProgram: WebGLProgram | null = null;
-  private nearestProgram: WebGLProgram | null = null;
   private bicubicProgram: WebGLProgram | null = null;
-  private lanczosProgram: WebGLProgram | null = null;
+  private blendProgram: WebGLProgram | null = null;
+  private sharpenProgram: WebGLProgram | null = null;
 
   // Cached uniform locations
   private cleanupUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private debandUniforms: Record<string, WebGLUniformLocation | null> = {};
   private easuUniforms: Record<string, WebGLUniformLocation | null> = {};
-  private sharpenUniforms: Record<string, WebGLUniformLocation | null> = {};
-  private nearestUniforms: Record<string, WebGLUniformLocation | null> = {};
   private bicubicUniforms: Record<string, WebGLUniformLocation | null> = {};
-  private lanczosUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private blendUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private sharpenUniforms: Record<string, WebGLUniformLocation | null> = {};
   private fullscreenUniforms: Record<string, WebGLUniformLocation | null> = {};
 
   // Dimensions
@@ -220,12 +235,10 @@ export class WebGL2ViewerImageBackend {
     enabled: false,
     scalingAlgorithm: "native",
     sharpeningStrength: 0.14,
-    chromaContribution: 0.2,
-    artifactClamp: 0.55,
-    textureNoiseSharpening: 0.08,
-    antiRinging: 0.45,
-    chromaCleanup: 0.35,
-    compressionSmoothing: 0.25,
+    noiseProtection: 0.85,
+    compressionCleanup: 0.20,
+    debanding: 0.10,
+    fsrBicubicBlend: 0.70,
   };
 
   // Cached EASU constants (recomputed when dimensions change)
@@ -295,11 +308,11 @@ export class WebGL2ViewerImageBackend {
       // Compile all shader programs
       this.fullscreenProgram = createProgram(gl, fullscreenVert, PASSTHROUGH_FRAG_SRC);
       this.cleanupProgram = createProgram(gl, fullscreenVert, cleanupFrag);
+      this.debandProgram = createProgram(gl, fullscreenVert, debandFrag);
       this.easuProgram = createProgram(gl, fullscreenVert, easuFrag);
-      this.sharpenProgram = createProgram(gl, fullscreenVert, sharpenFrag);
-      this.nearestProgram = createProgram(gl, fullscreenVert, nearestFrag);
       this.bicubicProgram = createProgram(gl, fullscreenVert, bicubicFrag);
-      this.lanczosProgram = createProgram(gl, fullscreenVert, lanczosFrag);
+      this.blendProgram = createProgram(gl, fullscreenVert, blendFrag);
+      this.sharpenProgram = createProgram(gl, fullscreenVert, sharpenFrag);
 
       // Cache uniform locations
       this.cacheUniforms(gl);
@@ -473,16 +486,22 @@ export class WebGL2ViewerImageBackend {
 
       // --- Determine pipeline passes ---
       const algorithm = this.settings.scalingAlgorithm;
-      const needsCleanup =
-        this.settings.compressionSmoothing > 0 || this.settings.chromaCleanup > 0;
+      const needsCleanup = this.settings.compressionCleanup > 0;
+      const needsDeband = this.settings.debanding > 0;
       // Only upscale if render viewport is larger than source in at least one dimension
-      const needsUpscale = algorithm !== "native" && algorithm !== "bilinear" &&
-        this.renderWidth > 0 && this.renderHeight > 0 &&
+      const needsUpscale = this.renderWidth > 0 && this.renderHeight > 0 &&
         (this.renderWidth > this.inputWidth || this.renderHeight > this.inputHeight);
-      // Native/bilinear: use hardware texture sampling (no separate scaling pass needed)
-      const needsNativeDraw = algorithm === "native" || algorithm === "bilinear" || !needsUpscale;
+      const isNative = algorithm === "native" || !needsUpscale;
+      const needsEasu = algorithm === "fsr1-easu" && needsUpscale;
+      const needsBicubicScale = (algorithm === "bicubic" || algorithm === "fsr1-easu") && needsUpscale;
+      const blendFactor = algorithm === "fsr1-easu" ? this.settings.fsrBicubicBlend : 0;
+      const needsBicubicPass = needsBicubicScale && (algorithm === "bicubic" || blendFactor < 1.0);
+      const needsEasuPass = needsEasu && blendFactor > 0.001;
+      const needsBlend = needsEasu && needsUpscale && blendFactor > 0.001 && blendFactor < 0.999;
       const needsSharpen = this.settings.sharpeningStrength > 0;
-      const needsScalePass = needsUpscale && !needsNativeDraw;
+      // Native: use hardware texture sampling (no separate scaling pass needed)
+      const needsNativeDraw = isNative &&
+        (this.renderWidth !== this.inputWidth || this.renderHeight !== this.inputHeight);
 
       // --- Start GPU timer if available ---
       this.beginTimer(gl);
@@ -492,7 +511,7 @@ export class WebGL2ViewerImageBackend {
       let currentSourceW = this.inputWidth;
       let currentSourceH = this.inputHeight;
 
-      // --- Step 2: Cleanup pass (if needed, at source resolution) ---
+      // --- Step 2: Compression Cleanup pass (if needed, at source resolution) ---
       if (needsCleanup) {
         this.ensureCleanupResources(gl);
         if (this.cleanupFBO && this.cleanupTexture) {
@@ -503,12 +522,8 @@ export class WebGL2ViewerImageBackend {
           gl.bindTexture(gl.TEXTURE_2D, currentSource);
           gl.uniform1i(this.cleanupUniforms.u_sourceTexture, 0);
           gl.uniform1f(
-            this.cleanupUniforms.u_chromaCleanup,
-            this.settings.chromaCleanup,
-          );
-          gl.uniform1f(
-            this.cleanupUniforms.u_compressionSmoothing,
-            this.settings.compressionSmoothing,
+            this.cleanupUniforms.u_compressionCleanup,
+            this.settings.compressionCleanup,
           );
           gl.uniform2f(
             this.cleanupUniforms.u_texSize,
@@ -521,87 +536,143 @@ export class WebGL2ViewerImageBackend {
         }
       }
 
-      // --- Step 3: Scaling pass (if needed, to render resolution) ---
-      if (needsScalePass) {
+      // --- Step 3: Debanding pass (if needed, at source resolution) ---
+      if (needsDeband) {
+        this.ensureDebandResources(gl);
+        if (this.debandFBO && this.debandTexture) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.debandFBO);
+          gl.viewport(0, 0, currentSourceW, currentSourceH);
+          gl.useProgram(this.debandProgram);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, currentSource);
+          gl.uniform1i(this.debandUniforms.u_sourceTexture, 0);
+          gl.uniform1f(
+            this.debandUniforms.u_debandStrength,
+            this.settings.debanding,
+          );
+          gl.uniform2f(
+            this.debandUniforms.u_texSize,
+            currentSourceW,
+            currentSourceH,
+          );
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+          currentSource = this.debandTexture;
+        }
+      }
+
+      // --- Step 4: Scaling pass(es) (if needed, to render resolution) ---
+      // When FSR + bicubic blend is active, we may need two scale passes.
+      // When only bicubic or only EASU, a single pass suffices.
+
+      // 4a: Bicubic pass (if needed, for bicubic algorithm or as blend input)
+      if (needsBicubicPass) {
         this.ensureScaleResources(gl);
         if (this.scaleFBO && this.scaleTexture) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, this.scaleFBO);
           gl.viewport(0, 0, this.renderWidth, this.renderHeight);
-
-          // Select program based on algorithm
-          let program: WebGLProgram | null;
-          let uniforms: Record<string, WebGLUniformLocation | null>;
-          switch (algorithm) {
-            case "nearest":
-              program = this.nearestProgram;
-              uniforms = this.nearestUniforms;
-              break;
-            case "bicubic":
-              program = this.bicubicProgram;
-              uniforms = this.bicubicUniforms;
-              break;
-            case "lanczos":
-              program = this.lanczosProgram;
-              uniforms = this.lanczosUniforms;
-              break;
-            case "fsr1-easu":
-            default:
-              program = this.easuProgram;
-              uniforms = this.easuUniforms;
-              // Update EASU constants if dimensions changed
-              this.ensureEasuConstants(
-                currentSourceW, currentSourceH,
-                this.renderWidth, this.renderHeight,
-              );
-              break;
-          }
-
-          if (program) {
-            gl.useProgram(program);
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, currentSource);
-            gl.uniform1i(uniforms.u_sourceTexture, 0);
-            gl.uniform2f(
-              uniforms.u_sourceSize,
-              currentSourceW,
-              currentSourceH,
-            );
-            gl.uniform2f(
-              uniforms.u_outputSize,
-              this.renderWidth,
-              this.renderHeight,
-            );
-
-            // Upload EASU-specific constants
-            if (algorithm === "fsr1-easu") {
-              gl.uniform4fv(uniforms.u_easuCon0, this.easuConstants.subarray(0, 4));
-              gl.uniform4fv(uniforms.u_easuCon1, this.easuConstants.subarray(4, 8));
-              gl.uniform4fv(uniforms.u_easuCon2, this.easuConstants.subarray(8, 12));
-              gl.uniform4fv(uniforms.u_easuCon3, this.easuConstants.subarray(12, 16));
-            }
-
-            // For overshooting scalers, pass anti-ringing
-            if (algorithm === "bicubic" || algorithm === "lanczos" || algorithm === "fsr1-easu") {
-              gl.uniform1f(
-                uniforms.u_antiRinging,
-                this.settings.antiRinging,
-              );
-            }
-
-            gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-            currentSource = this.scaleTexture;
-            currentSourceW = this.renderWidth;
-            currentSourceH = this.renderHeight;
-          }
+          gl.useProgram(this.bicubicProgram);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, currentSource);
+          gl.uniform1i(this.bicubicUniforms.u_sourceTexture, 0);
+          gl.uniform2f(
+            this.bicubicUniforms.u_sourceSize,
+            currentSourceW,
+            currentSourceH,
+          );
+          gl.uniform2f(
+            this.bicubicUniforms.u_outputSize,
+            this.renderWidth,
+            this.renderHeight,
+          );
+          // Internal anti-ringing for bicubic: 0.35
+          gl.uniform1f(this.bicubicUniforms.u_antiRinging, 0.35);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
         }
       }
 
-      // --- Step 3b: If no scaling pass but we need to draw to render resolution (native/bilinear via hardware) ---
-      if (needsNativeDraw && this.renderWidth > 0 && this.renderHeight > 0 &&
-          (this.renderWidth !== this.inputWidth || this.renderHeight !== this.inputHeight)) {
-        // Need to use the output FBO (or just the blit) to render at render resolution
-        // We route through the scale FBO for consistency — render source to scale FBO with native filtering
+      // 4b: EASU pass (if needed, for FSR algorithm)
+      if (needsEasuPass) {
+        this.ensureEasuConstants(
+          currentSourceW, currentSourceH,
+          this.renderWidth, this.renderHeight,
+        );
+
+        // If we already did bicubic, route EASU to bicubic FBO (reuse),
+        // otherwise use scale FBO
+        if (needsBicubicPass) {
+          this.ensureBicubicResources(gl);
+        } else {
+          this.ensureScaleResources(gl);
+        }
+        const easuFBO = needsBicubicPass ? this.bicubicFBO : this.scaleFBO;
+        const easuTex = needsBicubicPass ? this.bicubicTexture : this.scaleTexture;
+
+        if (easuFBO && easuTex) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, easuFBO);
+          gl.viewport(0, 0, this.renderWidth, this.renderHeight);
+          gl.useProgram(this.easuProgram);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, currentSource);
+          gl.uniform1i(this.easuUniforms.u_sourceTexture, 0);
+          gl.uniform2f(
+            this.easuUniforms.u_sourceSize,
+            currentSourceW,
+            currentSourceH,
+          );
+          gl.uniform2f(
+            this.easuUniforms.u_outputSize,
+            this.renderWidth,
+            this.renderHeight,
+          );
+          gl.uniform4fv(this.easuUniforms.u_easuCon0, this.easuConstants.subarray(0, 4));
+          gl.uniform4fv(this.easuUniforms.u_easuCon1, this.easuConstants.subarray(4, 8));
+          gl.uniform4fv(this.easuUniforms.u_easuCon2, this.easuConstants.subarray(8, 12));
+          gl.uniform4fv(this.easuUniforms.u_easuCon3, this.easuConstants.subarray(12, 16));
+          // Internal anti-ringing for EASU: 0.25
+          gl.uniform1f(this.easuUniforms.u_antiRinging, 0.25);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        }
+      }
+
+      // 4c: Blend bicubic and EASU (if FSR blend active)
+      if (needsBlend) {
+        this.ensureBlendResources(gl);
+        if (this.blendFBO && this.blendTexture) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.blendFBO);
+          gl.viewport(0, 0, this.renderWidth, this.renderHeight);
+          gl.useProgram(this.blendProgram);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, this.scaleTexture); // bicubic output
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, this.bicubicTexture); // easu output
+          gl.uniform1i(this.blendUniforms.u_textureA, 0);
+          gl.uniform1i(this.blendUniforms.u_textureB, 1);
+          gl.uniform1f(this.blendUniforms.u_blendFactor, blendFactor);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+          currentSource = this.blendTexture;
+          currentSourceW = this.renderWidth;
+          currentSourceH = this.renderHeight;
+        }
+      } else if (needsEasuPass) {
+        // Pure EASU (no bicubic pass or blend) — scaleTexture was created above
+        if (this.scaleTexture) {
+          currentSource = this.scaleTexture;
+          currentSourceW = this.renderWidth;
+          currentSourceH = this.renderHeight;
+        }
+      } else if (needsBicubicPass) {
+        // Pure bicubic — scaleTexture was created above
+        if (this.scaleTexture) {
+          currentSource = this.scaleTexture;
+          currentSourceW = this.renderWidth;
+          currentSourceH = this.renderHeight;
+        }
+      }
+
+      // --- Step 4d: Native hardware draw (if no explicit scaling needed but dimensions differ) ---
+      if (needsNativeDraw) {
         this.ensureScaleResources(gl);
         if (this.scaleFBO && this.scaleTexture) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, this.scaleFBO);
@@ -610,17 +681,9 @@ export class WebGL2ViewerImageBackend {
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, currentSource);
           gl.uniform1i(this.fullscreenUniforms.u_sourceTexture, 0);
-
-          // Set texture filtering based on algorithm
-          gl.bindTexture(gl.TEXTURE_2D, currentSource);
-          if (algorithm === "nearest") {
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-          } else {
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-          }
-
+          // Hardware bilinear filtering
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
           gl.drawArrays(gl.TRIANGLES, 0, 3);
 
           currentSource = this.scaleTexture;
@@ -629,9 +692,8 @@ export class WebGL2ViewerImageBackend {
         }
       }
 
-      // --- Step 4: Sharpen pass (if needed, at render resolution) ---
+      // --- Step 5: Sharpen pass (if needed, at render resolution) ---
       if (needsSharpen && this.renderWidth > 0 && this.renderHeight > 0) {
-        // Ensure output FBO is sized to render dimensions
         this.ensureOutputResources(gl);
         if (this.outputFBO && this.outputTexture) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, this.outputFBO);
@@ -645,16 +707,8 @@ export class WebGL2ViewerImageBackend {
             this.settings.sharpeningStrength,
           );
           gl.uniform1f(
-            this.sharpenUniforms.u_chromaContribution,
-            this.settings.chromaContribution,
-          );
-          gl.uniform1f(
-            this.sharpenUniforms.u_artifactClamp,
-            this.settings.artifactClamp,
-          );
-          gl.uniform1f(
-            this.sharpenUniforms.u_textureNoiseSharpening,
-            this.settings.textureNoiseSharpening,
+            this.sharpenUniforms.u_noiseProtection,
+            this.settings.noiseProtection,
           );
           gl.uniform2f(
             this.sharpenUniforms.u_texSize,
@@ -681,14 +735,9 @@ export class WebGL2ViewerImageBackend {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, currentSource);
 
-      // Ensure linear filtering for the final blit texture (which is at render resolution)
-      // but may need point for nearest
-      if (algorithm === "nearest" && needsNativeDraw) {
-        // Already set above
-      } else {
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      }
+      // Linear filtering for the final blit
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
       gl.uniform1i(this.fullscreenUniforms.u_sourceTexture, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -756,7 +805,7 @@ export class WebGL2ViewerImageBackend {
       outputWidth: this.outputWidth,
       outputHeight: this.outputHeight,
       enhancedScalingActive:
-        isUpscaling && algorithm !== "native" && algorithm !== "bilinear",
+        isUpscaling && algorithm !== "native",
       lastGpuTimeMs: this.lastGpuTimeMs,
       contextLossCount: this.contextLossCount,
       backend: this.gl ? "webgl2" : "unavailable",
@@ -885,6 +934,72 @@ export class WebGL2ViewerImageBackend {
     this.outputFBO = createFramebuffer(gl, this.outputTexture);
   }
 
+  private ensureDebandResources(gl: WebGL2RenderingContext): void {
+    const w = this.inputWidth;
+    const h = this.inputHeight;
+    if (w <= 0 || h <= 0) return;
+    if (
+      this.debandTexture &&
+      this.debandFBO &&
+      w === this.lastDebandWidth &&
+      h === this.lastDebandHeight
+    ) {
+      return;
+    }
+
+    deleteTexture(gl, this.debandTexture);
+    deleteFramebuffer(gl, this.debandFBO);
+
+    this.lastDebandWidth = w;
+    this.lastDebandHeight = h;
+    this.debandTexture = createTexture(gl, w, h);
+    this.debandFBO = createFramebuffer(gl, this.debandTexture);
+  }
+
+  private ensureBicubicResources(gl: WebGL2RenderingContext): void {
+    const w = this.renderWidth;
+    const h = this.renderHeight;
+    if (w <= 0 || h <= 0) return;
+    if (
+      this.bicubicTexture &&
+      this.bicubicFBO &&
+      w === this.lastBicubicWidth &&
+      h === this.lastBicubicHeight
+    ) {
+      return;
+    }
+
+    deleteTexture(gl, this.bicubicTexture);
+    deleteFramebuffer(gl, this.bicubicFBO);
+
+    this.lastBicubicWidth = w;
+    this.lastBicubicHeight = h;
+    this.bicubicTexture = createTexture(gl, w, h);
+    this.bicubicFBO = createFramebuffer(gl, this.bicubicTexture);
+  }
+
+  private ensureBlendResources(gl: WebGL2RenderingContext): void {
+    const w = this.renderWidth;
+    const h = this.renderHeight;
+    if (w <= 0 || h <= 0) return;
+    if (
+      this.blendTexture &&
+      this.blendFBO &&
+      w === this.lastBlendWidth &&
+      h === this.lastBlendHeight
+    ) {
+      return;
+    }
+
+    deleteTexture(gl, this.blendTexture);
+    deleteFramebuffer(gl, this.blendFBO);
+
+    this.lastBlendWidth = w;
+    this.lastBlendHeight = h;
+    this.blendTexture = createTexture(gl, w, h);
+    this.blendFBO = createFramebuffer(gl, this.blendTexture);
+  }
+
   private allocateOutputFBO(gl: WebGL2RenderingContext): void {
     // Output FBO is now sized to render dimensions
     // We don't allocate here — ensureOutputResources handles it
@@ -926,15 +1041,25 @@ export class WebGL2ViewerImageBackend {
           this.cleanupProgram,
           "u_sourceTexture",
         ),
-        u_chromaCleanup: gl.getUniformLocation(
+        u_compressionCleanup: gl.getUniformLocation(
           this.cleanupProgram,
-          "u_chromaCleanup",
-        ),
-        u_compressionSmoothing: gl.getUniformLocation(
-          this.cleanupProgram,
-          "u_compressionSmoothing",
+          "u_compressionCleanup",
         ),
         u_texSize: gl.getUniformLocation(this.cleanupProgram, "u_texSize"),
+      };
+    }
+
+    if (this.debandProgram) {
+      this.debandUniforms = {
+        u_sourceTexture: gl.getUniformLocation(
+          this.debandProgram,
+          "u_sourceTexture",
+        ),
+        u_debandStrength: gl.getUniformLocation(
+          this.debandProgram,
+          "u_debandStrength",
+        ),
+        u_texSize: gl.getUniformLocation(this.debandProgram, "u_texSize"),
       };
     }
 
@@ -950,9 +1075,7 @@ export class WebGL2ViewerImageBackend {
       };
     };
 
-    this.nearestUniforms = cacheScalingUniforms(this.nearestProgram);
     this.bicubicUniforms = cacheScalingUniforms(this.bicubicProgram);
-    this.lanczosUniforms = cacheScalingUniforms(this.lanczosProgram);
 
     if (this.easuProgram) {
       this.easuUniforms = {
@@ -973,6 +1096,14 @@ export class WebGL2ViewerImageBackend {
       };
     }
 
+    if (this.blendProgram) {
+      this.blendUniforms = {
+        u_textureA: gl.getUniformLocation(this.blendProgram, "u_textureA"),
+        u_textureB: gl.getUniformLocation(this.blendProgram, "u_textureB"),
+        u_blendFactor: gl.getUniformLocation(this.blendProgram, "u_blendFactor"),
+      };
+    }
+
     if (this.sharpenProgram) {
       this.sharpenUniforms = {
         u_sourceTexture: gl.getUniformLocation(
@@ -983,17 +1114,9 @@ export class WebGL2ViewerImageBackend {
           this.sharpenProgram,
           "u_sharpeningStrength",
         ),
-        u_chromaContribution: gl.getUniformLocation(
+        u_noiseProtection: gl.getUniformLocation(
           this.sharpenProgram,
-          "u_chromaContribution",
-        ),
-        u_artifactClamp: gl.getUniformLocation(
-          this.sharpenProgram,
-          "u_artifactClamp",
-        ),
-        u_textureNoiseSharpening: gl.getUniformLocation(
-          this.sharpenProgram,
-          "u_textureNoiseSharpening",
+          "u_noiseProtection",
         ),
         u_texSize: gl.getUniformLocation(this.sharpenProgram, "u_texSize"),
       };
@@ -1078,21 +1201,33 @@ export class WebGL2ViewerImageBackend {
       this.cleanupFBO = null;
       this.lastCleanupWidth = 0;
       this.lastCleanupHeight = 0;
+      this.debandTexture = null;
+      this.debandFBO = null;
+      this.lastDebandWidth = 0;
+      this.lastDebandHeight = 0;
       this.scaleTexture = null;
       this.scaleFBO = null;
       this.lastScaleWidth = 0;
       this.lastScaleHeight = 0;
+      this.bicubicTexture = null;
+      this.bicubicFBO = null;
+      this.lastBicubicWidth = 0;
+      this.lastBicubicHeight = 0;
+      this.blendTexture = null;
+      this.blendFBO = null;
+      this.lastBlendWidth = 0;
+      this.lastBlendHeight = 0;
       this.outputTexture = null;
       this.outputFBO = null;
       this.lastOutputWidth = 0;
       this.lastOutputHeight = 0;
       this.fullscreenProgram = null;
       this.cleanupProgram = null;
+      this.debandProgram = null;
       this.easuProgram = null;
-      this.sharpenProgram = null;
-      this.nearestProgram = null;
       this.bicubicProgram = null;
-      this.lanczosProgram = null;
+      this.blendProgram = null;
+      this.sharpenProgram = null;
       this.vao = null;
       this.timerQueries = [];
       return;
@@ -1101,17 +1236,23 @@ export class WebGL2ViewerImageBackend {
     deleteTexture(gl, this.sourceTexture);
     deleteTexture(gl, this.cleanupTexture);
     deleteFramebuffer(gl, this.cleanupFBO);
+    deleteTexture(gl, this.debandTexture);
+    deleteFramebuffer(gl, this.debandFBO);
     deleteTexture(gl, this.scaleTexture);
     deleteFramebuffer(gl, this.scaleFBO);
+    deleteTexture(gl, this.bicubicTexture);
+    deleteFramebuffer(gl, this.bicubicFBO);
+    deleteTexture(gl, this.blendTexture);
+    deleteFramebuffer(gl, this.blendFBO);
     deleteTexture(gl, this.outputTexture);
     deleteFramebuffer(gl, this.outputFBO);
     deleteProgram(gl, this.fullscreenProgram);
     deleteProgram(gl, this.cleanupProgram);
+    deleteProgram(gl, this.debandProgram);
     deleteProgram(gl, this.easuProgram);
-    deleteProgram(gl, this.sharpenProgram);
-    deleteProgram(gl, this.nearestProgram);
     deleteProgram(gl, this.bicubicProgram);
-    deleteProgram(gl, this.lanczosProgram);
+    deleteProgram(gl, this.blendProgram);
+    deleteProgram(gl, this.sharpenProgram);
 
     if (this.vao) {
       gl.deleteVertexArray(this.vao);
@@ -1126,21 +1267,33 @@ export class WebGL2ViewerImageBackend {
     this.cleanupFBO = null;
     this.lastCleanupWidth = 0;
     this.lastCleanupHeight = 0;
+    this.debandTexture = null;
+    this.debandFBO = null;
+    this.lastDebandWidth = 0;
+    this.lastDebandHeight = 0;
     this.scaleTexture = null;
     this.scaleFBO = null;
     this.lastScaleWidth = 0;
     this.lastScaleHeight = 0;
+    this.bicubicTexture = null;
+    this.bicubicFBO = null;
+    this.lastBicubicWidth = 0;
+    this.lastBicubicHeight = 0;
+    this.blendTexture = null;
+    this.blendFBO = null;
+    this.lastBlendWidth = 0;
+    this.lastBlendHeight = 0;
     this.outputTexture = null;
     this.outputFBO = null;
     this.lastOutputWidth = 0;
     this.lastOutputHeight = 0;
     this.fullscreenProgram = null;
     this.cleanupProgram = null;
+    this.debandProgram = null;
     this.easuProgram = null;
-    this.sharpenProgram = null;
-    this.nearestProgram = null;
     this.bicubicProgram = null;
-    this.lanczosProgram = null;
+    this.blendProgram = null;
+    this.sharpenProgram = null;
     this.vao = null;
     this.timerQueries = [];
     this.activeTimerIndex = 0;

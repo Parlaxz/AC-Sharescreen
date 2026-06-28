@@ -1,4 +1,4 @@
-import type { Phase3Runtime } from "./phase3-runtime.js";
+﻿import type { Phase3Runtime } from "./phase3-runtime.js";
 import type { StreamAnnouncement } from "./active-stream-registry.js";
 import { PublisherManager } from "./publisher-manager.js";
 import { extractPeerUuid } from "./sdk-event-normalizer.js";
@@ -10,6 +10,7 @@ import {
 } from "@screenlink/shared";
 import { ProcessAudioController } from "../audio/ProcessAudioController.js";
 import type { SessionQualityOverride } from "./share-quality.js";
+import { StreamMetricsService } from "./stream-metrics-service.js";
 import {
   validateSessionQualityOverride,
   DEFAULT_VIDEO_BITRATE_KBPS,
@@ -23,10 +24,10 @@ import {
 
 /**
  * Stream session state machine:
- *   idle → starting → active → stopping → idle
- *   active → restarting → active
- *   any → failed → idle
- *   any → destroyed (terminal)
+ *   idle â†’ starting â†’ active â†’ stopping â†’ idle
+ *   active â†’ restarting â†’ active
+ *   any â†’ failed â†’ idle
+ *   any â†’ destroyed (terminal)
  */
 export type StreamSessionState =
   | "idle"
@@ -93,7 +94,7 @@ export class StreamSessionManager {
   private publisherManager: PublisherManager | null = null;
   private vdoConfig: VdoSessionConfig | null = null;
   private captureStream: MediaStream | null = null;
-  /** Gate 4.4 — actual capture dimensions read back from the track. */
+  /** Gate 4.4 â€” actual capture dimensions read back from the track. */
   private actualCaptureWidth: number = 0;
   private actualCaptureHeight: number = 0;
   private actualCaptureFps: number = 0;
@@ -164,8 +165,8 @@ export class StreamSessionManager {
    * Stage 13: Resolve the effective audio mode based on source kind and developer mode.
    *
    * Normal mode:
-   *   screen → "monitor" (Filtered Monitor Audio)
-   *   window → "application" (Application Audio)
+   *   screen â†’ "monitor" (Filtered Monitor Audio)
+   *   window â†’ "application" (Application Audio)
    *
    * Developer mode:
    *   Uses explicit override if set, otherwise falls back to source-derived.
@@ -207,7 +208,7 @@ export class StreamSessionManager {
   /**
    * Get the raw capture stream from getDisplayMedia.
    * Returns null when no stream is active. Used for self-viewing
-   * preview — the local viewer attaches this stream directly to a
+   * preview â€” the local viewer attaches this stream directly to a
    * <video> element instead of going through the VDO relay.
    */
   getCaptureStream(): MediaStream | null {
@@ -215,7 +216,7 @@ export class StreamSessionManager {
   }
 
   /**
-   * Gate 4.4 — read back the actual capture dimensions and FPS from
+   * Gate 4.4 â€” read back the actual capture dimensions and FPS from
    * the current video track. Returns zeros if no track is active.
    */
   getActualCaptureDimensions(): { width: number; height: number; fps: number } {
@@ -333,7 +334,7 @@ export class StreamSessionManager {
     this._isAudioDegraded = false;
     this._sessionQualityOverride = input.qualityOverride ?? null;
 
-    // ── Phase A: Critical media startup (any failure is fatal) ────────
+    // â”€â”€ Phase A: Critical media startup (any failure is fatal) â”€â”€â”€â”€â”€â”€â”€â”€
     try {
       // 0. Read group defaults from sync service (Stage 15)
       const syncState = this.runtime.getSyncService().getSyncState(input.groupId);
@@ -361,6 +362,18 @@ export class StreamSessionManager {
       const captureHeight =
         ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
+      // Notify metrics service
+      const qualityLabel = `${videoWidth}x${videoHeight}@${videoFps},${videoBitrate}kbps`;
+      StreamMetricsService.getInstance().onStreamStart(
+        this.mediaSessionId!,
+        this.logicalStreamId!,
+        this.groupId!,
+        this.groupId!,
+        null,
+        !!this._sessionQualityOverride,
+        qualityLabel,
+      );
+
 
       // 0. Generate VDO credentials
       const vdoStreamId = generateVdoStreamId();
@@ -430,11 +443,11 @@ export class StreamSessionManager {
       });
 
       // 3. Audio setup respecting user's explicit choice
-      // - audioMode === "none" → skip audio entirely (no degrade, user chose no audio)
-      // - audioMode === "monitor" | "application" → use that mode explicitly
-      // - audioMode omitted → source-derived mode (backward compat)
+      // - audioMode === "none" â†’ skip audio entirely (no degrade, user chose no audio)
+      // - audioMode === "monitor" | "application" â†’ use that mode explicitly
+      // - audioMode omitted â†’ source-derived mode (backward compat)
       if (input.audioMode === "none") {
-        // User explicitly chose no audio — skip setupSourceAudio entirely
+        // User explicitly chose no audio â€” skip setupSourceAudio entirely
       } else {
         try {
           await this.setupSourceAudio(
@@ -477,14 +490,14 @@ export class StreamSessionManager {
       registry.registerLocalStream(this.buildAnnouncement());
     } catch (err) {
       this._state = "failed";
-      // Clean up on failure — this tears down the publisher, stops capture,
+      // Clean up on failure â€” this tears down the publisher, stops capture,
       // and removes any partial registration.
       console.error("[stream-session] Phase A (media startup) failed:", err instanceof Error ? err.message : String(err));
       await this.cleanupPublisher();
       throw err;
     }
 
-    // ── Phase B: Control announcement (non-fatal) ─────────────────────
+    // â”€â”€ Phase B: Control announcement (non-fatal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Media is published and locally registered. A transient group-control
     // failure must not destroy the media stream.
     try {
@@ -515,11 +528,11 @@ export class StreamSessionManager {
       console.log(
         "[stream-session] stream.started",
         result === "sent" ? "sent" : "queued for later delivery",
-        "—",
+        "â€”",
         this.logicalStreamId,
       );
     } catch (err) {
-      // Phase B failure is non-fatal — the media stream remains active.
+      // Phase B failure is non-fatal â€” the media stream remains active.
       // The announcement was already queued by sendOrQueueStreamLifecycle
       // if the connection was unavailable.
       console.warn(
@@ -532,7 +545,7 @@ export class StreamSessionManager {
     this.startHeartbeat();
 
     this._state = "active";
-    console.log("[stream-session] stream active —", this.logicalStreamId);
+    console.log("[stream-session] stream active â€”", this.logicalStreamId);
   }
 
   /**
@@ -592,7 +605,7 @@ export class StreamSessionManager {
       //    re-wire the handler on the new track.
       this.publisherManager.detachTrackEnded();
 
-      // 3. Acquire new source — the display-media-handler intercepts this
+      // 3. Acquire new source â€” the display-media-handler intercepts this
       //    and returns the pre-approved source without showing a picker.
       newCaptureStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
@@ -633,7 +646,7 @@ export class StreamSessionManager {
         captureHeight: ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT,
         captureFps: ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS,
       }).catch(() => {
-        // Non-fatal — readback will report whatever the source produces
+        // Non-fatal â€” readback will report whatever the source produces
       });
 
       // Update local registry with new source metadata
@@ -649,7 +662,7 @@ export class StreamSessionManager {
         sourceKind: source.kind,
         sourceName: source.name,
       }).catch(() => {
-        // Non-fatal — the video switch is complete regardless
+        // Non-fatal â€” the video switch is complete regardless
       });
 
       // 5. Stop old capture tracks (the old track is no longer published)
@@ -701,7 +714,7 @@ export class StreamSessionManager {
    * Stop the current stream session.
    *
    * Full stop flow (Stage 4):
-   *   active/restarting → stopping
+   *   active/restarting â†’ stopping
    *   stop heartbeat
    *   remove local registry stream (immediate)
    *   clear pending lifecycle messages (so stale starts are not flushed)
@@ -776,10 +789,17 @@ export class StreamSessionManager {
       // Stop publication/capture
       await this.cleanupPublisher();
 
-      this.resetSessionState();
+      // Notify metrics service
+      if (this.mediaSessionId) {
+        StreamMetricsService.getInstance().onStreamStop(this.mediaSessionId);
+      }
+            this.resetSessionState();
       this._state = "idle";
-    } catch (err) {
-      this.resetSessionState();
+    } catch (err) {      // Notify metrics service
+      if (this.mediaSessionId) {
+        StreamMetricsService.getInstance().onStreamStop(this.mediaSessionId);
+      }
+            this.resetSessionState();
       this._state = "idle";
     }
   }
@@ -793,7 +813,7 @@ export class StreamSessionManager {
    * Two-phase design mirrors startStream: Phase A (media) is fatal,
    * Phase B (announcement) is non-fatal.
    *
-   * Transitions: active → restarting → active
+   * Transitions: active â†’ restarting â†’ active
    */
   async restartStream(): Promise<void> {
     if (this._state !== "active") return;
@@ -808,7 +828,7 @@ export class StreamSessionManager {
     this._state = "restarting";
     this.stopHeartbeat();
 
-    // ── Phase A: Critical media restart (any failure is fatal) ────────
+    // â”€â”€ Phase A: Critical media restart (any failure is fatal) â”€â”€â”€â”€â”€â”€â”€â”€
     let newMediaSessionId: string;
     try {
       // 1. Stop current publication and audio cleanly
@@ -896,6 +916,18 @@ export class StreamSessionManager {
       const captureHeight =
         ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
+      // Notify metrics service
+      const qualityLabel = `${videoWidth}x${videoHeight}@${videoFps},${videoBitrate}kbps`;
+      StreamMetricsService.getInstance().onStreamStart(
+        this.mediaSessionId!,
+        this.logicalStreamId!,
+        this.groupId!,
+        this.groupId!,
+        null,
+        !!this._sessionQualityOverride,
+        qualityLabel,
+      );
+
 
       // Bitrate readback: log the effective bitrate after precedence resolution
       // so we can verify a custom 300 Kbps override reaches the publisher.
@@ -961,7 +993,7 @@ export class StreamSessionManager {
       throw err;
     }
 
-    // ── Phase B: Control announcement (non-fatal) ─────────────────────
+    // â”€â”€ Phase B: Control announcement (non-fatal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try {
       const connManager = this.runtime.getConnectionManager();
       const lifecyclePayload: Record<string, unknown> = {
@@ -992,7 +1024,7 @@ export class StreamSessionManager {
       console.log(
         "[stream-session] stream.restarted",
         result === "sent" ? "sent" : "queued for later delivery",
-        "—",
+        "â€”",
         oldLogicalStreamId,
       );
     } catch (err) {
@@ -1008,7 +1040,7 @@ export class StreamSessionManager {
   }
 
   /**
-   * Destroy the session manager. Terminal state — no further operations allowed.
+   * Destroy the session manager. Terminal state â€” no further operations allowed.
    * Performs full stop propagation if the stream was active:
    * - broadcasts stream.stopped
    * - removes local registry entry
@@ -1081,15 +1113,15 @@ export class StreamSessionManager {
       s.setSharingGroupId(null);
       s.setIsSharing(false);
       s.setLocalShareState("idle");
-    } catch { /* best effort — store may be unavailable in test envs */ }
+    } catch { /* best effort â€” store may be unavailable in test envs */ }
   }
 
   /**
    * Setup source-derived audio based on source kind.
-   * screen → startFilteredMonitorAudio via IPC + PCM port → ProcessAudioController
-   * window → startApplicationAudio via IPC + PCM port → ProcessAudioController
+   * screen â†’ startFilteredMonitorAudio via IPC + PCM port â†’ ProcessAudioController
+   * window â†’ startApplicationAudio via IPC + PCM port â†’ ProcessAudioController
    *
-   * Full audio ownership pipeline (Gate 4.5 — production order):
+   * Full audio ownership pipeline (Gate 4.5 â€” production order):
    *   1) Ensure audio helper exists and is running (main process).
    *   2) Request the PCM MessagePort.
    *   3) Receive the MessagePort via the pcm:port window message.
@@ -1245,7 +1277,7 @@ export class StreamSessionManager {
     });
   }
 
-  // ── Private ──────────────────────────────────────────────────
+  // â”€â”€ Private â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Gate 4.4: Apply the requested capture constraints to a video
@@ -1258,7 +1290,7 @@ export class StreamSessionManager {
    * - When capabilities expose ranges, clamp requested values to
    *   the supported range before applying using ideal constraints.
    * - Unsupported constraints (applyConstraints rejects) are silently
-   *   dropped — the readback reflects whatever the source produced.
+   *   dropped â€” the readback reflects whatever the source produced.
    * - Always reads back actual track settings as the source of truth.
    */
   private async applyCaptureConstraints(
@@ -1360,8 +1392,9 @@ export class StreamSessionManager {
         appliedSettingsRevision: 0,
       });
     } catch {
-      // Heartbeat failures are non-fatal — the stream remains active
+      // Heartbeat failures are non-fatal â€” the stream remains active
       // and the next heartbeat will retry.
     }
   }
 }
+

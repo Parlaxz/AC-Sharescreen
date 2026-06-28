@@ -1,10 +1,10 @@
-import { contextBridge, ipcRenderer } from "electron";
+﻿import { contextBridge, ipcRenderer } from "electron";
 import type { ScreenLinkAPI } from "./api-types.js";
 
 const api: ScreenLinkAPI = {
   getSources: () => ipcRenderer.invoke("get-sources"),
 
-  // ── Window controls (Stage 3.7B) ──────────────────────────────────────────
+  // â”€â”€ Window controls (Stage 3.7B) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   windowControls: {
     minimize: () => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
@@ -39,6 +39,9 @@ const api: ScreenLinkAPI = {
   setGroupNotifications: (groupId, enabled) => ipcRenderer.invoke("set-group-notifications", groupId, enabled),
   leaveGroup: (groupId) => ipcRenderer.invoke("leave-group", groupId),
   getGroupConnectionConfig: (groupId) => ipcRenderer.invoke("get-group-connection-config", groupId),
+
+  getStreamHistory: () => ipcRenderer.invoke("get-stream-history"),
+  saveStreamHistory: (records) => ipcRenderer.invoke("save-stream-history", records),
 
   listQualityPresets: () => ipcRenderer.invoke("list-quality-presets"),
   getQualityPreset: (id) => ipcRenderer.invoke("get-quality-preset", id),
@@ -83,14 +86,14 @@ const api: ScreenLinkAPI = {
   getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
   getPipelineSnapshot: () => ipcRenderer.invoke("get-pipeline-snapshot"),
 
-  // ── Updates ─────────────────────────────────────────────────────────
+  // â”€â”€ Updates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   getUpdateStatus: () => ipcRenderer.invoke("updates:get-status"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),
   restartAndInstallUpdate: () => ipcRenderer.invoke("updates:install"),
   checkDownloadAndInstall: () => ipcRenderer.invoke("updates:full-update"),
 
-  // ── Quick Share ──────────────────────────────────────────────────
+  // â”€â”€ Quick Share â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   getQuickShareConfig: () => ipcRenderer.invoke("get-quick-share-config"),
   updateQuickShareConfig: (partial) => ipcRenderer.invoke("update-quick-share-config", partial),
   onQuickShareOpen: (callback) => {
@@ -99,7 +102,7 @@ const api: ScreenLinkAPI = {
     return () => { ipcRenderer.removeListener("quick-share:open", handler); };
   },
 
-  // ── Tray-originated main→renderer events ──────────────────────────
+  // â”€â”€ Tray-originated mainâ†’renderer events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   onOpenSourcePicker: (callback) => {
     const handler = () => callback();
     ipcRenderer.on("open-source-picker", handler);
@@ -137,3 +140,4 @@ ipcRenderer.on('pcm:port', (_event: Electron.IpcRendererEvent) => {
     window.postMessage({ type: 'pcm:port' }, '*', [port]);
   }
 });
+

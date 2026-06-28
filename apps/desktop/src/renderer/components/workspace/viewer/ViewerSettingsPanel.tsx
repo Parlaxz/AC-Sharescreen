@@ -18,7 +18,6 @@ import {
   type ScalingAlgorithm,
   SCALING_ALGORITHMS,
   SCALING_ALGORITHM_LABELS,
-  OVERSHOOTING_ALGORITHMS,
 } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   IMAGE_ENHANCEMENT_CONTROL_RANGE,
@@ -358,8 +357,7 @@ export function ViewerSettingsPanel({
 
   // ─── Algorithm helper ──────────────────────────────────────────────────
   const algorithm = enhancementSettings.scalingAlgorithm;
-  const isOvershooting = OVERSHOOTING_ALGORITHMS.has(algorithm);
-  const antiRingingDisabled = !enhancementSettings.enabled || !isOvershooting;
+  const isFsr = algorithm === "fsr1-easu";
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
@@ -594,57 +592,47 @@ export function ViewerSettingsPanel({
 
               <hr className="border-border-subtle" />
 
+              {/* Sharpness */}
               <EnhancementSliderControl
-                label="Sharpening Strength"
+                label="Sharpness"
                 value={enhancementSettings.sharpeningStrength}
                 disabled={!enhancementSettings.enabled}
                 onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
               />
+
+              {/* Noise Protection — replaces Texture/Noise Sharpening */}
               <EnhancementSliderControl
-                label="Chroma Contribution"
-                value={enhancementSettings.chromaContribution}
+                label="Noise Protection"
+                value={enhancementSettings.noiseProtection}
                 disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, chromaContribution: v })}
-              />
-              <EnhancementSliderControl
-                label="Artifact Clamp"
-                value={enhancementSettings.artifactClamp}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, artifactClamp: v })}
-              />
-              <EnhancementSliderControl
-                label="Texture/Noise Sharpening"
-                value={enhancementSettings.textureNoiseSharpening}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, textureNoiseSharpening: v })}
-              />
-              <EnhancementSliderControl
-                label="Chroma Cleanup"
-                value={enhancementSettings.chromaCleanup}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, chromaCleanup: v })}
-              />
-              <EnhancementSliderControl
-                label="Compression Smoothing"
-                value={enhancementSettings.compressionSmoothing}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionSmoothing: v })}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
               />
 
-              {/* Anti-ringing — only active for overshooting scalers */}
-              <div>
+              {/* Compression Cleanup — replaces Chroma Cleanup + Compression Smoothing */}
+              <EnhancementSliderControl
+                label="Compression Cleanup"
+                value={enhancementSettings.compressionCleanup}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
+              />
+
+              {/* Debanding — new */}
+              <EnhancementSliderControl
+                label="Debanding"
+                value={enhancementSettings.debanding}
+                disabled={!enhancementSettings.enabled}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
+              />
+
+              {/* FSR/Bicubic Blend — only when FSR 1 EASU is selected */}
+              {isFsr && (
                 <EnhancementSliderControl
-                  label="Anti-ringing"
-                  value={enhancementSettings.antiRinging}
-                  disabled={antiRingingDisabled}
-                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, antiRinging: v })}
+                  label="FSR/Bicubic Blend"
+                  value={enhancementSettings.fsrBicubicBlend}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, fsrBicubicBlend: v })}
                 />
-                {!isOvershooting && enhancementSettings.enabled && (
-                  <p className="text-[9px] text-text-muted mt-0.5">
-                    Only available for Bicubic, Lanczos, and FSR 1 EASU
-                  </p>
-                )}
-              </div>
+              )}
 
               {/* Reset button */}
               <div className="pt-1">

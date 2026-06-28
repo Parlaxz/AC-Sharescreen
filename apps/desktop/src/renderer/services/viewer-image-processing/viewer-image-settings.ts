@@ -4,34 +4,24 @@ import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "./viewer-image-defaults.js";
 
 export type ScalingAlgorithm =
   | "native"
-  | "nearest"
-  | "bilinear"
   | "bicubic"
-  | "lanczos"
   | "fsr1-easu";
 
 export const SCALING_ALGORITHMS: readonly ScalingAlgorithm[] = [
   "native",
-  "bilinear",
-  "nearest",
   "bicubic",
-  "lanczos",
   "fsr1-easu",
 ] as const;
 
 export const SCALING_ALGORITHM_LABELS: Record<ScalingAlgorithm, string> = {
   native: "Native",
-  bilinear: "Bilinear",
-  nearest: "Nearest",
   bicubic: "Bicubic",
-  lanczos: "Lanczos",
   "fsr1-easu": "FSR 1 EASU",
 };
 
 /** Algorithms that can produce overshoot/ringing artifacts */
 export const OVERSHOOTING_ALGORITHMS: ReadonlySet<ScalingAlgorithm> = new Set([
   "bicubic",
-  "lanczos",
   "fsr1-easu",
 ]);
 
@@ -40,22 +30,18 @@ export const OVERSHOOTING_ALGORITHMS: ReadonlySet<ScalingAlgorithm> = new Set([
 export interface ViewerImageEnhancementSettings {
   /** Master toggle — when false the enhancement pipeline is entirely disabled */
   enabled: boolean;
-  /** GPU scaling algorithm selector */
+  /** GPU scaling algorithm: native | bicubic | fsr1-easu */
   scalingAlgorithm: ScalingAlgorithm;
-  /** Sharpening filter strength (0–1) */
+  /** Sharpening filter strength (0–1). 0 = bypass */
   sharpeningStrength: number;
-  /** Chroma/luma separation contribution (0–1) */
-  chromaContribution: number;
-  /** Artifact clamping aggressiveness (0–1) */
-  artifactClamp: number;
-  /** Texture / noise-aware sharpening blend (0–1) */
-  textureNoiseSharpening: number;
-  /** Anti-ringing filter strength (0–1) */
-  antiRinging: number;
-  /** Chroma subpixel cleanup pass (0–1) */
-  chromaCleanup: number;
-  /** Compression smoothing (conservative deblocking/debanding, 0–1) */
-  compressionSmoothing: number;
+  /** Noise-aware sharpening mask (0–1). 0 = sharpen all detail, 1 = protect noise */
+  noiseProtection: number;
+  /** Edge-aware cleanup of compression artifacts (0–1). 0 = bypass */
+  compressionCleanup: number;
+  /** Spatial gradient debanding (0–1). 0 = bypass */
+  debanding: number;
+  /** Blend between bicubic and FSR EASU when FSR selected (0–1). Only used when scalingAlgorithm === "fsr1-easu" */
+  fsrBicubicBlend: number;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -74,10 +60,9 @@ export function clampValue(
   return Math.max(min, Math.min(max, value));
 }
 
-// ─── Validation ──────────────────────────────────────────────────────────────
+// ─── Legacy migration ─────────────────────────────────────────────────────────
 
-const NUMERIC_KEYS: ReadonlySet<string> = new Set([
-  "sharpeningStrength",
+const OLD_NUMERIC_KEYS: ReadonlySet<string> = new Set([
   "chromaContribution",
   "artifactClamp",
   "textureNoiseSharpening",
@@ -86,26 +71,67 @@ const NUMERIC_KEYS: ReadonlySet<string> = new Set([
   "compressionSmoothing",
 ]);
 
+/**
+ * Migrate legacy settings to the new simplified schema.
+ * Handles:
+ *   - enhancedScaling boolean → scalingAlgorithm
+ *   - textureNoiseSharpening → noiseProtection (inverted)
+ *   - chromaCleanup + compressionSmoothing → compressionCleanup
+ *   - Removes old fields (chromaContribution, artifactClamp, antiRinging)
+ */
+function migrateLegacySettings(
+  obj: Record<string, unknown>,
+): Record<string, unknown> {
+  const migrated = { ...obj };
+
+  // Enhanced scaling boolean → scalingAlgorithm
+  if ("enhancedScaling" in migrated && !("scalingAlgorithm" in migrated)) {
+    const legacy = migrated.enhancedScaling;
+    delete migrated.enhancedScaling;
+    migrated.scalingAlgorithm = legacy === true ? "fsr1-easu" : "native";
+  }
+
+  // textureNoiseSharpening → noiseProtection (invert: old 0 = edges only, new 1 = noise protection)
+  const oldTns = migrated.textureNoiseSharpening;
+  if (typeof oldTns === "number" && !("noiseProtection" in migrated)) {
+    const inverted = clampValue(1 - oldTns, 0, 1);
+    migrated.noiseProtection = Math.round(inverted * 100) / 100;
+  }
+
+  // chromaCleanup + compressionSmoothing → compressionCleanup
+  if (!("compressionCleanup" in migrated)) {
+    const hasChromaCleanup = "chromaCleanup" in migrated;
+    const hasCompressionSmoothing = "compressionSmoothing" in migrated;
+    if (hasChromaCleanup || hasCompressionSmoothing) {
+      const cc = typeof migrated.chromaCleanup === "number" ? migrated.chromaCleanup : 0;
+      const cs = typeof migrated.compressionSmoothing === "number" ? migrated.compressionSmoothing : 0;
+      migrated.compressionCleanup = clampValue(Math.max(cc, cs), 0, 1);
+    }
+  }
+
+  // Remove old fields that are no longer user-facing
+  for (const key of OLD_NUMERIC_KEYS) {
+    delete migrated[key];
+  }
+  delete migrated.enhancedScaling;
+  delete migrated.deblocking;
+
+  return migrated;
+}
+
+// ─── Validation ──────────────────────────────────────────────────────────────
+
+const NUMERIC_KEYS: ReadonlySet<string> = new Set([
+  "sharpeningStrength",
+  "noiseProtection",
+  "compressionCleanup",
+  "debanding",
+  "fsrBicubicBlend",
+]);
+
 const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   "enabled",
 ]);
-
-/**
- * Migrate legacy `enhancedScaling` boolean to `scalingAlgorithm`.
- * Returns an updated partial object with the old key removed.
- */
-function migrateLegacyEnhancedScaling(
-  obj: Record<string, unknown>,
-): Record<string, unknown> {
-  if ("enhancedScaling" in obj && !("scalingAlgorithm" in obj)) {
-    const legacy = obj.enhancedScaling;
-    const migrated = { ...obj };
-    delete migrated.enhancedScaling;
-    migrated.scalingAlgorithm = legacy === true ? "fsr1-easu" : "native";
-    return migrated;
-  }
-  return obj;
-}
 
 /**
  * Validate and sanitise an unknown value into a clean
@@ -116,7 +142,7 @@ function migrateLegacyEnhancedScaling(
  * - Out-of-range numeric → clamped to [0, 1]
  * - Non-numeric for numeric keys → defaults
  * - Non-boolean for boolean keys → defaults
- * - Legacy `enhancedScaling` boolean → migrated to `scalingAlgorithm`
+ * - Legacy fields auto-migrated
  */
 export function validateSettings(
   raw: unknown,
@@ -126,7 +152,7 @@ export function validateSettings(
       ? (raw as Record<string, unknown>)
       : {};
 
-  obj = migrateLegacyEnhancedScaling(obj);
+  obj = migrateLegacySettings(obj);
 
   const out: ViewerImageEnhancementSettings = { ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS };
 
@@ -138,16 +164,13 @@ export function validateSettings(
   for (const key of NUMERIC_KEYS) {
     const v = obj[key];
     if (typeof v === "number") {
-      out[key as keyof ViewerImageEnhancementSettings] = clampValue(
+      (out as unknown as Record<string, unknown>)[key] = clampValue(
         v,
         0,
         1,
-        VIEWER_IMAGE_ENHANCEMENT_DEFAULTS[
-          key as keyof ViewerImageEnhancementSettings
-        ] as number,
-      ) as never;
+        (VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as unknown as Record<string, unknown>)[key] as number,
+      );
     }
-    // else: keep default
   }
 
   for (const key of BOOLEAN_KEYS) {
@@ -155,7 +178,6 @@ export function validateSettings(
     if (typeof v === "boolean") {
       (out as unknown as Record<string, unknown>)[key] = v;
     }
-    // else: keep default
   }
 
   return out;

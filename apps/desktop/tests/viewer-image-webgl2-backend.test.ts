@@ -84,12 +84,10 @@ const allControls: ViewerImageEnhancementSettings = {
   enabled: true,
   scalingAlgorithm: "bicubic",
   sharpeningStrength: 0.77,
-  chromaContribution: 0.66,
-  artifactClamp: 0.55,
-  textureNoiseSharpening: 0.44,
-  antiRinging: 0.33,
-  chromaCleanup: 0.22,
-  compressionSmoothing: 0.11,
+  noiseProtection: 0.66,
+  compressionCleanup: 0.55,
+  debanding: 0.44,
+  fsrBicubicBlend: 0.33,
 };
 
 describe("WebGL2ViewerImageBackend resource tracking", () => {
@@ -216,27 +214,35 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     backend.fullscreenProgram = "fullscreen";
     backend.cleanupProgram = "cleanup";
     backend.sharpenProgram = "sharpen";
+    backend.debandProgram = "deband";
+    backend.blendProgram = "blend";
     // For scaling, set bicubic as the active program path
     backend.bicubicProgram = "bicubic";
     backend.cleanupUniforms = {
       u_sourceTexture: "cleanup.source",
-      u_chromaCleanup: "cleanup.chromaCleanup",
-      u_compressionSmoothing: "cleanup.compressionSmoothing",
+      u_compressionCleanup: "cleanup.compressionCleanup",
       u_texSize: "cleanup.texSize",
     };
     backend.bicubicUniforms = {
       u_sourceTexture: "scale.source",
       u_sourceSize: "scale.sourceSize",
       u_outputSize: "scale.outputSize",
-      u_antiRinging: "scale.antiRinging",
     };
     backend.sharpenUniforms = {
       u_sourceTexture: "sharpen.source",
       u_sharpeningStrength: "sharpen.sharpeningStrength",
-      u_chromaContribution: "sharpen.chromaContribution",
-      u_artifactClamp: "sharpen.artifactClamp",
-      u_textureNoiseSharpening: "sharpen.textureNoiseSharpening",
+      u_noiseProtection: "sharpen.noiseProtection",
       u_texSize: "sharpen.texSize",
+    };
+    backend.debandUniforms = {
+      u_sourceTexture: "deband.source",
+      u_debandStrength: "deband.debandStrength",
+      u_texSize: "deband.texSize",
+    };
+    backend.blendUniforms = {
+      u_textureA: "blend.textureA",
+      u_textureB: "blend.textureB",
+      u_blendFactor: "blend.blendFactor",
     };
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings(allControls);
@@ -246,13 +252,10 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     expect(result.success).toBe(true);
     expect(gl.uniformCalls).toEqual(
       expect.arrayContaining([
-        { location: "cleanup.chromaCleanup", value: 0.22 },
-        { location: "cleanup.compressionSmoothing", value: 0.11 },
-        { location: "scale.antiRinging", value: 0.33 },
+        { location: "cleanup.compressionCleanup", value: 0.55 },
         { location: "sharpen.sharpeningStrength", value: 0.77 },
-        { location: "sharpen.chromaContribution", value: 0.66 },
-        { location: "sharpen.artifactClamp", value: 0.55 },
-        { location: "sharpen.textureNoiseSharpening", value: 0.44 },
+        { location: "sharpen.noiseProtection", value: 0.66 },
+        { location: "deband.debandStrength", value: 0.44 },
       ]),
     );
   });
@@ -269,8 +272,7 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
       ...allControls,
       scalingAlgorithm: "native",
       sharpeningStrength: 0,
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
+      compressionCleanup: 0,
     });
 
     const result = backend.processFrame(createReadyVideo());
@@ -278,8 +280,7 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     expect(result.success).toBe(true);
     expect(gl.uniformCalls.map((call) => call.location)).not.toEqual(
       expect.arrayContaining([
-        "cleanup.chromaCleanup",
-        "cleanup.compressionSmoothing",
+        "cleanup.compressionCleanup",
         "sharpen.sharpeningStrength",
       ]),
     );
@@ -305,47 +306,6 @@ describe("WebGL2ViewerImageBackend timer queries", () => {
 });
 
 describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
-  it("routes to nearest program when algorithm is nearest", () => {
-    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
-    const gl = createFakeGl();
-    backend.gl = gl;
-    backend.outputWidth = 200;
-    backend.outputHeight = 100;
-    backend.fullscreenProgram = "fullscreen";
-    backend.nearestProgram = "nearestProg";
-    backend.bicubicProgram = "bicubicProg";
-    backend.lanczosProgram = "lanczosProg";
-    backend.easuProgram = "easuProg";
-    backend.nearestUniforms = {
-      u_sourceTexture: "scale.source",
-      u_sourceSize: "scale.sourceSize",
-      u_outputSize: "scale.outputSize",
-      u_antiRinging: "scale.antiRinging",
-    };
-    backend.easuUniforms = {
-      u_sourceTexture: "easu.source",
-      u_sourceSize: "easu.sourceSize",
-      u_outputSize: "easu.outputSize",
-      u_antiRinging: "easu.antiRinging",
-      u_easuCon0: null,
-      u_easuCon1: null,
-      u_easuCon2: null,
-      u_easuCon3: null,
-    };
-    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
-    backend.updateSettings({
-      ...allControls,
-      scalingAlgorithm: "nearest",
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
-      sharpeningStrength: 0,
-    });
-
-    const result = backend.processFrame(createReadyVideo(50, 25));
-    expect(result.success).toBe(true);
-    expect(gl.useProgram).toHaveBeenCalledWith("nearestProg");
-  });
-
   it("routes to bicubic program when algorithm is bicubic", () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
@@ -358,48 +318,18 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
       u_sourceTexture: "scale.source",
       u_sourceSize: "scale.sourceSize",
       u_outputSize: "scale.outputSize",
-      u_antiRinging: "scale.antiRinging",
     };
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
       scalingAlgorithm: "bicubic",
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
+      compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
     const result = backend.processFrame(createReadyVideo(50, 25));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("bicubicProg");
-  });
-
-  it("routes to lanczos program when algorithm is lanczos", () => {
-    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
-    const gl = createFakeGl();
-    backend.gl = gl;
-    backend.outputWidth = 200;
-    backend.outputHeight = 100;
-    backend.fullscreenProgram = "fullscreen";
-    backend.lanczosProgram = "lanczosProg";
-    backend.lanczosUniforms = {
-      u_sourceTexture: "scale.source",
-      u_sourceSize: "scale.sourceSize",
-      u_outputSize: "scale.outputSize",
-      u_antiRinging: "scale.antiRinging",
-    };
-    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
-    backend.updateSettings({
-      ...allControls,
-      scalingAlgorithm: "lanczos",
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
-      sharpeningStrength: 0,
-    });
-
-    const result = backend.processFrame(createReadyVideo(50, 25));
-    expect(result.success).toBe(true);
-    expect(gl.useProgram).toHaveBeenCalledWith("lanczosProg");
   });
 
   it("routes to EASU program and uploads official dimension constants", () => {
@@ -409,7 +339,20 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.outputWidth = 200;
     backend.outputHeight = 100;
     backend.fullscreenProgram = "fullscreen";
+    backend.bicubicProgram = "bicubicProg";
     backend.easuProgram = "easuProg";
+    // Bicubic uniforms - not used since blend=1, but kept for code path safety
+    backend.bicubicUniforms = {
+      u_sourceTexture: "scale.source",
+      u_sourceSize: "scale.sourceSize",
+      u_outputSize: "scale.outputSize",
+      u_antiRinging: "scale.antiRinging",
+    };
+    // Bicubic FBO/resources - not used since fsrBicubicBlend=1, but kept for safety
+    backend.lastBicubicWidth = 200;
+    backend.lastBicubicHeight = 100;
+    backend.bicubicTexture = "bicubicTex";
+    backend.bicubicFBO = "bicubicFbo";
     backend.easuUniforms = {
       u_sourceTexture: "easu.source",
       u_sourceSize: "easu.sourceSize",
@@ -424,9 +367,10 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.updateSettings({
       ...allControls,
       scalingAlgorithm: "fsr1-easu",
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
+      compressionCleanup: 0,
+      debanding: 0,
       sharpeningStrength: 0,
+      fsrBicubicBlend: 1.0,
     });
 
     const result = backend.processFrame(createReadyVideo(50, 25));
@@ -447,6 +391,59 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(byLocation.get("easu.con3")?.[2]).toBeCloseTo(0);
     expect(byLocation.get("easu.con3")?.[3]).toBeCloseTo(0);
   });
+
+  it("routes to deband program when debanding > 0", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 200;
+    backend.outputHeight = 100;
+    backend.fullscreenProgram = "fullscreen";
+    backend.debandProgram = "debandProg";
+    backend.debandUniforms = {
+      u_sourceTexture: "deband.source",
+      u_debandStrength: "deband.debandStrength",
+      u_texSize: "deband.texSize",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "native",
+      compressionCleanup: 0,
+      sharpeningStrength: 0,
+    });
+
+    const result = backend.processFrame(createReadyVideo(50, 25));
+    expect(result.success).toBe(true);
+    expect(gl.useProgram).toHaveBeenCalledWith("debandProg");
+  });
+
+  it("bypasses deband when debanding is 0", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 200;
+    backend.outputHeight = 100;
+    backend.fullscreenProgram = "fullscreen";
+    backend.debandProgram = "debandProg";
+    backend.debandUniforms = {
+      u_sourceTexture: "deband.source",
+      u_debandStrength: "deband.debandStrength",
+      u_texSize: "deband.texSize",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "native",
+      compressionCleanup: 0,
+      sharpeningStrength: 0,
+      debanding: 0,
+    });
+
+    const result = backend.processFrame(createReadyVideo(50, 25));
+    expect(result.success).toBe(true);
+    expect(gl.useProgram).not.toHaveBeenCalledWith("debandProg");
+  });
 });
 
 describe("WebGL2ViewerImageBackend getStats", () => {
@@ -455,11 +452,11 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     backend.gl = createFakeGl();
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "lanczos",
+      scalingAlgorithm: "bicubic",
     });
 
     const stats = backend.getStats();
-    expect(stats.scalingAlgorithm).toBe("lanczos");
+    expect(stats.scalingAlgorithm).toBe("bicubic");
     expect(stats.backend).toBe("webgl2");
   });
 });
@@ -484,8 +481,7 @@ describe("computeContainedRect", () => {
     backend.updateSettings({
       ...allControls,
       scalingAlgorithm: "native",
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
+      compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
@@ -511,8 +507,7 @@ describe("computeContainedRect", () => {
     backend.updateSettings({
       ...allControls,
       scalingAlgorithm: "native",
-      chromaCleanup: 0,
-      compressionSmoothing: 0,
+      compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
