@@ -684,6 +684,13 @@ export class StreamSessionManager {
         }
       } catch { /* best effort */ }
 
+      // RE-WIRE: restore the track-ended handler on the existing published track
+      // detachTrackEnded() was called before getDisplayMedia; without this
+      // re-wire, the old track ending naturally would never trigger stopStream.
+      if (this.publisherManager) {
+        this.publisherManager.reattachTrackEnded();
+      }
+
       throw err;
     } finally {
       this.isSwitchingSource = false;
