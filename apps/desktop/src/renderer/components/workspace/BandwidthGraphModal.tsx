@@ -74,7 +74,7 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
       }
     };
     refresh();
-    intervalRef.current = setInterval(refresh, 2000);
+    intervalRef.current = setInterval(refresh, 500);
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);

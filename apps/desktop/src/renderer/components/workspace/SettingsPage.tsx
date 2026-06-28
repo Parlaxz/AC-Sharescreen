@@ -199,7 +199,6 @@ function SwitchRow({
           />
         </motion.div>
       </AnimatePresence>
-      <StreamHistorySection />
     </div>
   );
 }
@@ -381,7 +380,6 @@ export function SettingsPage() {
         <Skeleton className="h-48 w-full rounded-standard" />
         <Skeleton className="h-32 w-full rounded-standard" />
         <Skeleton className="h-32 w-full rounded-standard" />
-      <StreamHistorySection />
     </div>
   );
 }
@@ -398,7 +396,6 @@ export function SettingsPage() {
             Retry
           </Button>
         </Alert>
-      <StreamHistorySection />
     </div>
   );
 }
