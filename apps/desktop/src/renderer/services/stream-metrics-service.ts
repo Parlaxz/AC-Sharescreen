@@ -132,6 +132,21 @@ interface ConnectionState {
   lastCodec: string | null;
   lastConnectionType: "direct" | "turn" | null;
 
+  // Combined quality snapshot (deliverable 1)
+  lastQuality: {
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    bitrateBps: number | null;
+  };
+  qualityDebounceCount: number;
+  qualityDebounceTarget: {
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    bitrateBps: number | null;
+  } | null;
+
   // Generation for peer replacement
   generation: number;
 }
@@ -329,6 +344,9 @@ export class StreamMetricsService {
       lastFps: null,
       lastCodec: null,
       lastConnectionType: null,
+      lastQuality: { width: null, height: null, fps: null, bitrateBps: null },
+      qualityDebounceCount: 0,
+      qualityDebounceTarget: null,
       generation: 0,
     };
 
@@ -966,21 +984,7 @@ export class StreamMetricsService {
     configuredBps: number | null,
     effectiveBps: number | null,
   ): void {
-    const res = width && height ? `${width}x${height}` : null;
-    if (res && res !== conn.lastResolution) {
-      if (conn.lastResolution !== null) {
-        this.addConnectionMarker(conn, "resolution", conn.lastResolution, res, `Resolution: ${res}`);
-      }
-      conn.lastResolution = res;
-    }
-
-    if (fps !== null && fps !== conn.lastFps) {
-      if (conn.lastFps !== null) {
-        this.addConnectionMarker(conn, "fps", String(conn.lastFps), String(fps), `FPS: ${fps}`);
-      }
-      conn.lastFps = fps;
-    }
-
+    // Codec and connection-type markers remain unchanged
     if (codec && codec !== conn.lastCodec) {
       if (conn.lastCodec !== null) {
         this.addConnectionMarker(conn, "codec", conn.lastCodec, codec, `Codec: ${codec}`);
@@ -994,6 +998,116 @@ export class StreamMetricsService {
           connectionType === "direct" ? "Connection: Direct" : "Connection: TURN relay");
       }
       conn.lastConnectionType = connectionType;
+    }
+
+    // ── Combined quality-change marker (Deliverable 1) ─────────────────
+
+    // Use effective bitrate if available, otherwise current computed rate
+    const bitrateBps = effectiveBps ?? configuredBps ?? conn.videoBitsPerSecond;
+    const candidate: { width: number | null; height: number | null; fps: number | null; bitrateBps: number | null } = {
+      width,
+      height,
+      fps,
+      bitrateBps: bitrateBps > 0 ? bitrateBps : null,
+    };
+
+    // First observation establishes baseline, no marker
+    const prev = conn.lastQuality;
+    if (prev.width === null && prev.height === null && prev.fps === null) {
+      conn.lastQuality = { ...candidate };
+      return;
+    }
+
+    // Check if any value changed
+    const resChanged = (candidate.width !== prev.width || candidate.height !== prev.height) &&
+      candidate.width !== null && candidate.height !== null;
+    const fpsChanged = candidate.fps !== null && prev.fps !== null && candidate.fps !== prev.fps;
+    const bitrateChanged = candidate.bitrateBps !== null && prev.bitrateBps !== null &&
+      Math.abs(candidate.bitrateBps - prev.bitrateBps) > 50000; // 50 kbps deadband
+
+    // No change: clear debounce and skip
+    if (!resChanged && !fpsChanged && !bitrateChanged) {
+      conn.qualityDebounceCount = 0;
+      conn.qualityDebounceTarget = null;
+      return;
+    }
+
+    // Determine what the target would be (resolution/fps must be stable for 2 observations)
+    const needDebounce = resChanged || fpsChanged;
+    const targetDebounceCount = 2;
+
+    if (needDebounce) {
+      // Check if this is consistent with previous pending debounce target
+      const dt = conn.qualityDebounceTarget;
+      if (dt &&
+        (resChanged ? (dt.width === candidate.width && dt.height === candidate.height) : true) &&
+        (fpsChanged ? (dt.fps === candidate.fps) : true)) {
+        conn.qualityDebounceCount++;
+      } else {
+        // New or changed target
+        conn.qualityDebounceTarget = {
+          width: candidate.width,
+          height: candidate.height,
+          fps: candidate.fps,
+          bitrateBps: candidate.bitrateBps,
+        };
+        conn.qualityDebounceCount = 1;
+      }
+
+      if (conn.qualityDebounceCount < targetDebounceCount) {
+        // Still debouncing — don't update lastQuality yet
+        return;
+      }
+    }
+
+    // Emit combined quality-change marker
+    const resLabel = candidate.width && candidate.height
+      ? `${candidate.width}\u00d7${candidate.height}` : "?";
+    const fpsLabel = candidate.fps !== null ? `\u2022 ${candidate.fps} FPS` : "";
+    const bpsLabel = candidate.bitrateBps !== null
+      ? `\u2022 ${(candidate.bitrateBps / 1_000_000).toFixed(1)} Mbps` : "";
+
+    const label = `${resLabel} ${fpsLabel} ${bpsLabel}`.trim();
+
+    const parts: string[] = [];
+    if (resChanged && prev.width !== null && prev.height !== null) {
+      parts.push(`Resolution: ${prev.width}\u00d7${prev.height} \u2192 ${candidate.width}\u00d7${candidate.height}`);
+    }
+    if (fpsChanged && prev.fps !== null) {
+      parts.push(`FPS: ${prev.fps} \u2192 ${candidate.fps}`);
+    }
+    if (bitrateChanged && prev.bitrateBps !== null) {
+      parts.push(`Bitrate: ${(prev.bitrateBps / 1_000_000).toFixed(1)} Mbps \u2192 ${(candidate.bitrateBps! / 1_000_000).toFixed(1)} Mbps`);
+    }
+
+    const detail = parts.join("\n") || null;
+
+    this.addConnectionMarker(conn, "quality", null, label, label);
+    // Store detail and quality snapshot in the last marker
+    if (conn.markers.length > 0) {
+      const last = conn.markers[conn.markers.length - 1];
+      if (last.type === "quality" && detail) {
+        (last as { detail: string | null }).detail = detail;
+      }
+    }
+
+    // Update tracking state
+    conn.lastQuality = {
+      width: candidate.width ?? prev.width,
+      height: candidate.height ?? prev.height,
+      fps: candidate.fps ?? prev.fps,
+      bitrateBps: candidate.bitrateBps ?? prev.bitrateBps,
+    };
+    conn.qualityDebounceCount = 0;
+    conn.qualityDebounceTarget = null;
+
+    // Update legacy fields for backward compat (codec/turn still use them)
+    const res = candidate.width && candidate.height ? `${candidate.width}x${candidate.height}` : null;
+    if (res && res !== conn.lastResolution) {
+      conn.lastResolution = res;
+    }
+    if (candidate.fps !== null && candidate.fps !== conn.lastFps) {
+      conn.lastFps = candidate.fps;
     }
   }
 

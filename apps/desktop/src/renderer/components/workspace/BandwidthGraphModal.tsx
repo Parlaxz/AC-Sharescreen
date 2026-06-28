@@ -263,6 +263,7 @@ function getMarkerColor(type: MarkerType): string {
     case "resolution":
     case "fps":
     case "codec":
+    case "quality":
       return "var(--color-warning)";
     case "turn":
     case "reconnect":
@@ -817,7 +818,9 @@ export function BandwidthGraphModal({
                         const clusterTooltip =
                           cluster.length > 1
                             ? cluster.map((m) => `\u2022 ${m.label}`).join("\n")
-                            : undefined;
+                            : first.detail
+                              ? `\u2022 ${first.label}\n${first.detail}`
+                              : undefined;
 
                         return (
                           <ReferenceLine
