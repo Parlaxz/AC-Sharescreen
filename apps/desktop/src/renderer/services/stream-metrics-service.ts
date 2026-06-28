@@ -1,36 +1,12 @@
-﻿/**
- * StreamMetricsService — renderer singleton that collects bandwidth telemetry,
- * manages session lifecycle, aggregates 1s samples into histogram buckets,
- * tracks EWMA, and persists completed stream history.
+/**
+ * StreamMetricsService — renderer singleton that owns bandwidth telemetry.
  *
- * ─── API layers ─────────────────────────────────────────────────────────────
- *   1. Core session lifecycle:  startHostSession / startViewerSession / finalizeSession
- *   2. Data feed:               feedHostBytes / feedViewerBytes
- *   3. State tracking:          setSessionState
- *   4. Markers:                 addMarker
- *   5. Subscription:            subscribe / getSnapshot  (useSyncExternalStore)
- *   6. Getters:                 getViewerRates / getActiveSessionIds / getActiveMediaSessionIds
- *   7. Persistence:             checkpointSession / getHistory
- *   8. Crash recovery:          recoverInterruptedSessions
- *
- * ─── Telemetry contract ─────────────────────────────────────────────────────
- *   - Rates stored internally as bits per second (TelemetrySample.mediaBitsPerSecond)
- *   - Cumulative totals in Bytes
- *   - Monotonic clock (performance.now()) for rate calculations
- *   - Date.now() for display timestamps
- *   - First feedHostBytes/feedViewerBytes establishes baseline (does NOT add to total)
- *
- * ─── Sampling architecture ──────────────────────────────────────────────────
- *   - One setInterval (1 second) shared across all active sessions
- *   - on each tick: sample all sessions, aggregate, persist every 10th tick
- *   - inFlight guard prevents overlapping async work
- *   - Timer starts when first session is created, stops when last is removed
- *
- * ─── Aggregation ────────────────────────────────────────────────────────────
- *   - Raw samples:  1s intervals, keep latest 300 (5 min)
- *   - Medium buckets:  5s aggregates, keep latest 360 (30 min)
- *   - Long buckets:   30s aggregates, keep latest 10 000 (~83 h)
- *   - EWMA: three-second time constant (α ≈ 0.283), only updated when "playing"
+ * Architecture:
+ *   - One service-level 1-second timer
+ *   - Each registered RTCPeerConnection is polled once per tick
+ *   - Independent video/audio/transport baselines per connection
+ *   - Schema v2 persistence with v1 migration
+ *   - Proper active-duration tracking and running peaks
  */
 
 import type {
@@ -40,10 +16,1278 @@ import type {
   AggregatedBucket,
   TelemetryMarker,
   MarkerType,
+  TelemetrySeriesSnapshot,
+  ConnectionTelemetrySnapshot,
+  ViewerReportedStatus,
+  PeerTelemetryObservation,
+  PersistenceRecordV2,
   ViewerRateEntry,
 } from "./bandwidth-telemetry-types.js";
 
-// ─── History record type ────────────────────────────────────────────────────
+// ─── Legacy history record (pre-migration) ─────────────────────────────────
+
+interface LegacyHistoryRecord {
+  historyId: string;
+  role: "host" | "viewer";
+  status: "active" | "completed" | "interrupted";
+  mediaSessionId?: string;
+  logicalStreamId?: string;
+  groupId?: string;
+  groupName?: string;
+  remoteDisplayName?: string | null;
+  startedAt: number;
+  lastCheckpointAt?: number;
+  stoppedAt?: number | null;
+  durationMs?: number;
+  totalBytes: number;
+  averageBytesPerSecond?: number;
+  bytesPerSecond?: number;
+  presetName?: string | null;
+  customQuality?: boolean;
+  samples?: Array<{ timestamp: number; bytesPerSecond: number; totalBytes: number }>;
+  markers?: Array<{ timestamp: number; category: string; from: string | null; to: string; label: string; id?: string }>;
+  interrupted?: boolean;
+  schemaVersion?: number;
+}
+
+// ─── Constants ─────────────────────────────────────────────────────────────
+
+const SAMPLE_INTERVAL_MS = 1000;
+const MAX_RAW_SAMPLES = 300;       // 5 minutes
+const MEDIUM_BUCKET_SIZE_MS = 5000;
+const MAX_MEDIUM_BUCKETS = 360;    // 30 minutes
+const LONG_BUCKET_SIZE_MS = 30000;
+const MAX_LONG_BUCKETS = 10000;    // ~83 hours
+const PERSIST_INTERVAL_TICKS = 10;
+const EWMA_ALPHA = 1 - Math.exp(-1 / 3);
+
+// ─── Baseline state per counter ────────────────────────────────────────────
+
+interface CounterBaseline {
+  initialized: boolean;
+  identity: {
+    reportId: string;
+    ssrc: number | null;
+    trackIdentifier: string | null;
+    mid: string | null;
+  };
+  previousCumulativeBytes: number;
+  previousMonotonicTimestamp: number;
+}
+
+// ─── Connection state ──────────────────────────────────────────────────────
+
+interface ConnectionState {
+  connectionId: string;
+  historyId: string;
+  viewerDeviceId: string | null;
+  displayName: string | null;
+  peerConnection: RTCPeerConnection;
+  direction: "inbound" | "outbound";
+  configuredVideoBitsPerSecond: number | null;
+  effectiveVideoBitsPerSecond: number | null;
+  receivedStatus: ViewerReportedStatus | null;
+
+  // Independent baselines
+  videoBaseline: CounterBaseline;
+  audioBaseline: CounterBaseline;
+  transportBaseline: CounterBaseline;
+
+  // Accumulation
+  totalVideoBytes: number;
+  totalAudioBytes: number;
+  totalTransportBytes: number;
+
+  // Current rate
+  videoBitsPerSecond: number;
+  audioBitsPerSecond: number;
+  transportBitsPerSecond: number;
+
+  // Peaks
+  peakBitsPerSecond: number;
+
+  // State tracking
+  state: TelemetryState;
+  pausedAtMonotonic: number | null;
+  totalPausedMs: number;
+
+  // Samples & aggregation
+  rawSamples: TelemetrySample[];
+  mediumBuckets: AggregatedBucket[];
+  longBuckets: AggregatedBucket[];
+  mediumBucketMeta: Map<number, number>; // bucketStart → lastCumulativeBytes
+  longBucketMeta: Map<number, number>;
+  ewmaValue: number;
+  ewmaInitialized: boolean;
+  ewmaLastRaw: number;
+  ewmaSeries: number[];
+
+  // Markers
+  markers: TelemetryMarker[];
+
+  // Metadata tracking for sampled-marker suppression
+  lastConfiguredBps: number | null;
+  lastEffectiveBps: number | null;
+  lastResolution: string | null;
+  lastFps: number | null;
+  lastCodec: string | null;
+  lastConnectionType: "direct" | "turn" | null;
+
+  // Generation for peer replacement
+  generation: number;
+}
+
+// ─── Session state ─────────────────────────────────────────────────────────
+
+interface SessionState {
+  historyId: string;
+  role: "host" | "viewer";
+  startedAt: number;
+  startedAtMonotonic: number;
+  connections: Map<string, ConnectionState>;
+  markers: TelemetryMarker[];
+  status: "active" | "completed" | "interrupted";
+  lastCheckpointAt: number;
+
+  // Aggregate series
+  peakBitsPerSecond: number;
+  totalBytes: number;
+  configuredBitsPerSecond: number | null;
+  effectiveBitsPerSecond: number | null;
+  state: TelemetryState;
+
+  // Snapshot cache
+  lastSnapshot: BandwidthSnapshot | null;
+}
+
+// ─── Service ────────────────────────────────────────────────────────────────
+
+export class StreamMetricsService {
+  private static instance: StreamMetricsService | null = null;
+  private sessions = new Map<string, SessionState>();
+  private connections = new Map<string, ConnectionState>(); // connectionId → ConnectionState
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private onHistoryChanged: (() => void) | null = null;
+  private finalizing = new Set<string>();
+  private tickInFlight = false;
+  private tickCounter = 0;
+  private subscribers = new Map<string, Set<() => void>>();
+  private pendingBaselines = new Set<string>(); // connectionIds needing forced rebaseline
+
+  static getInstance(): StreamMetricsService {
+    if (!StreamMetricsService.instance) {
+      StreamMetricsService.instance = new StreamMetricsService();
+    }
+    return StreamMetricsService.instance;
+  }
+
+  static setInstance(svc: StreamMetricsService | null): void {
+    StreamMetricsService.instance = svc;
+  }
+
+  private constructor() {}
+
+  setOnHistoryChanged(cb: (() => void) | null): void {
+    this.onHistoryChanged = cb;
+  }
+
+  // ─── Subscription ───────────────────────────────────────────────────────
+
+  subscribe(historyId: string, callback: () => void): () => void {
+    if (!this.subscribers.has(historyId)) {
+      this.subscribers.set(historyId, new Set());
+    }
+    this.subscribers.get(historyId)!.add(callback);
+    return () => { this.subscribers.get(historyId)?.delete(callback); };
+  }
+
+  getSnapshot(historyId: string): BandwidthSnapshot {
+    const state = this.sessions.get(historyId);
+    if (!state) return emptySnapshot(historyId);
+    if (!state.lastSnapshot) {
+      state.lastSnapshot = this.buildSnapshot(state);
+    }
+    return state.lastSnapshot;
+  }
+
+  // ─── Session lifecycle ─────────────────────────────────────────────────
+
+  startHostSession(
+    mediaSessionId: string,
+    logicalStreamId: string,
+    groupId: string,
+    groupName: string,
+  ): string {
+    const historyId = `history-${this.generateId()}`;
+    const now = Date.now();
+    const state: SessionState = {
+      historyId,
+      role: "host",
+      startedAt: now,
+      startedAtMonotonic: performance.now(),
+      connections: new Map(),
+      markers: [],
+      status: "active",
+      lastCheckpointAt: now,
+      peakBitsPerSecond: 0,
+      totalBytes: 0,
+      configuredBitsPerSecond: null,
+      effectiveBitsPerSecond: null,
+      state: "playing",
+      lastSnapshot: null,
+    };
+    this.sessions.set(historyId, state);
+    this.ensureTimer();
+    return historyId;
+  }
+
+  startViewerSession(
+    mediaSessionId: string,
+    logicalStreamId: string,
+    groupId: string,
+    groupName: string,
+  ): string {
+    const historyId = `history-${this.generateId()}`;
+    const now = Date.now();
+    const state: SessionState = {
+      historyId,
+      role: "viewer",
+      startedAt: now,
+      startedAtMonotonic: performance.now(),
+      connections: new Map(),
+      markers: [],
+      status: "active",
+      lastCheckpointAt: now,
+      peakBitsPerSecond: 0,
+      totalBytes: 0,
+      configuredBitsPerSecond: null,
+      effectiveBitsPerSecond: null,
+      state: "playing",
+      lastSnapshot: null,
+    };
+    this.sessions.set(historyId, state);
+    this.ensureTimer();
+    return historyId;
+  }
+
+  // ─── Connection registration ───────────────────────────────────────────
+
+  registerConnection(input: {
+    historyId: string;
+    connectionId: string;
+    viewerDeviceId: string | null;
+    displayName: string | null;
+    peerConnection: RTCPeerConnection;
+    direction: "inbound" | "outbound";
+    configuredVideoBitsPerSecond?: number | null;
+    effectiveVideoBitsPerSecond?: number | null;
+  }): () => void {
+    const state = this.sessions.get(input.historyId);
+    if (!state) return () => {};
+
+    const now = performance.now();
+    const conn: ConnectionState = {
+      connectionId: input.connectionId,
+      historyId: input.historyId,
+      viewerDeviceId: input.viewerDeviceId,
+      displayName: input.displayName,
+      peerConnection: input.peerConnection,
+      direction: input.direction,
+      configuredVideoBitsPerSecond: input.configuredVideoBitsPerSecond ?? null,
+      effectiveVideoBitsPerSecond: input.effectiveVideoBitsPerSecond ?? null,
+      receivedStatus: null,
+      videoBaseline: makeBaseline(),
+      audioBaseline: makeBaseline(),
+      transportBaseline: makeBaseline(),
+      totalVideoBytes: 0,
+      totalAudioBytes: 0,
+      totalTransportBytes: 0,
+      videoBitsPerSecond: 0,
+      audioBitsPerSecond: 0,
+      transportBitsPerSecond: 0,
+      peakBitsPerSecond: 0,
+      state: "playing",
+      pausedAtMonotonic: null,
+      totalPausedMs: 0,
+      rawSamples: [],
+      mediumBuckets: [],
+      longBuckets: [],
+      mediumBucketMeta: new Map(),
+      longBucketMeta: new Map(),
+      ewmaValue: 0,
+      ewmaInitialized: false,
+      ewmaLastRaw: 0,
+      ewmaSeries: [],
+      markers: [],
+      lastConfiguredBps: input.configuredVideoBitsPerSecond ?? null,
+      lastEffectiveBps: input.effectiveVideoBitsPerSecond ?? null,
+      lastResolution: null,
+      lastFps: null,
+      lastCodec: null,
+      lastConnectionType: null,
+      generation: 0,
+    };
+
+    state.connections.set(input.connectionId, conn);
+    this.connections.set(input.connectionId, conn);
+    this.ensureTimer();
+
+    return () => {
+      state.connections.delete(input.connectionId);
+      this.connections.delete(input.connectionId);
+    };
+  }
+
+  replaceConnectionPeer(
+    historyId: string,
+    connectionId: string,
+    peerConnection: RTCPeerConnection,
+  ): void {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return;
+    conn.peerConnection = peerConnection;
+    conn.generation++;
+    // Force rebaseline on next tick
+    this.pendingBaselines.add(connectionId);
+  }
+
+  updateViewerReportedStatus(
+    historyId: string,
+    connectionId: string,
+    status: ViewerReportedStatus,
+  ): void {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return;
+    conn.receivedStatus = status;
+  }
+
+  // ─── State control ─────────────────────────────────────────────────────
+
+  setSessionState(historyId: string, newState: TelemetryState): void {
+    const state = this.sessions.get(historyId);
+    if (!state) return;
+
+    const oldState = state.state;
+    if (oldState === newState) return;
+
+    state.state = newState;
+
+    // Update all connections
+    for (const conn of state.connections.values()) {
+      const connOldState = conn.state;
+      if (newState === "paused" && connOldState === "playing") {
+        conn.state = "paused";
+        conn.pausedAtMonotonic = performance.now();
+        this.addConnectionMarker(conn, "pause", null, "paused", "Session paused");
+      } else if (newState === "playing" && connOldState === "paused") {
+        if (conn.pausedAtMonotonic !== null) {
+          conn.totalPausedMs += performance.now() - conn.pausedAtMonotonic;
+          conn.pausedAtMonotonic = null;
+        }
+        conn.state = "playing";
+        this.addConnectionMarker(conn, "resume", null, "resumed", "Session resumed");
+      } else if (newState === "reconnecting") {
+        conn.state = "reconnecting";
+        this.addConnectionMarker(conn, "reconnect", null, "reconnecting", "Session reconnecting");
+        this.pendingBaselines.add(conn.connectionId);
+      } else {
+        conn.state = newState;
+      }
+    }
+
+    state.lastSnapshot = null;
+    this.notifySessionSubscribers(historyId);
+  }
+
+  // ─── Markers ───────────────────────────────────────────────────────────
+
+  addMarker(
+    historyId: string,
+    type: MarkerType,
+    from: string | null,
+    to: string,
+    label: string,
+    connectionId: string | null = null,
+    viewerDeviceId: string | null = null,
+  ): void {
+    const state = this.sessions.get(historyId);
+    if (!state) return;
+
+    const marker: TelemetryMarker = {
+      id: this.generateId(),
+      historyId,
+      connectionId,
+      viewerDeviceId,
+      timestampMs: Date.now(),
+      type,
+      label,
+      from,
+      to,
+      detail: from ? `${from} → ${to}` : to,
+    };
+
+    state.markers.push(marker);
+    state.lastSnapshot = null;
+    this.notifySessionSubscribers(historyId);
+  }
+
+  private addConnectionMarker(
+    conn: ConnectionState,
+    type: MarkerType,
+    from: string | null,
+    to: string,
+    label: string,
+  ): void {
+    // Duplicate suppression for sampled markers
+    if (this.shouldSuppressMarker(conn, type, to)) return;
+
+    const marker: TelemetryMarker = {
+      id: `${conn.connectionId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      historyId: conn.historyId,
+      connectionId: conn.connectionId,
+      viewerDeviceId: conn.viewerDeviceId,
+      timestampMs: Date.now(),
+      type,
+      label,
+      from,
+      to,
+      detail: from ? `${from} → ${to}` : to,
+    };
+
+    conn.markers.push(marker);
+
+    const state = this.sessions.get(conn.historyId);
+    if (state) {
+      state.markers.push(marker);
+      state.lastSnapshot = null;
+    }
+  }
+
+  private shouldSuppressMarker(conn: ConnectionState, type: MarkerType, to: string): boolean {
+    switch (type) {
+      case "bitrate": return conn.lastConfiguredBps?.toString() === to || conn.lastEffectiveBps?.toString() === to;
+      case "resolution": return conn.lastResolution === to;
+      case "fps": return conn.lastFps?.toString() === to;
+      case "codec": return conn.lastCodec === to;
+      case "turn": return conn.lastConnectionType === to;
+      default: return false;
+    }
+  }
+
+  // ─── Session finalization ──────────────────────────────────────────────
+
+  async finalizeSession(historyId: string): Promise<void> {
+    if (this.finalizing.has(historyId)) return;
+    const state = this.sessions.get(historyId);
+    if (!state) return;
+
+    this.finalizing.add(historyId);
+
+    try {
+      state.status = "completed";
+      state.lastCheckpointAt = Date.now();
+
+      await this.persistSession(state);
+
+      for (const conn of state.connections.values()) {
+        this.connections.delete(conn.connectionId);
+      }
+      this.sessions.delete(historyId);
+      this.notifySessionSubscribers(historyId);
+      this.notifyHistoryChanged();
+    } finally {
+      this.finalizing.delete(historyId);
+      this.stopTimerIfIdle();
+    }
+  }
+
+  // ─── Getters ───────────────────────────────────────────────────────────
+
+  getActiveSessionIds(): string[] {
+    return Array.from(this.sessions.keys());
+  }
+
+  getActiveMediaSessionIds(): string[] {
+    // No longer mediaSessionId-based — return session historyIds
+    return Array.from(this.sessions.keys());
+  }
+
+  findHistoryIdByMediaSessionId(_mediaSessionId: string): string | null {
+    return this.sessions.size > 0 ? this.sessions.keys().next().value ?? null : null;
+  }
+
+  getViewerRates(historyId: string): ViewerRateEntry[] {
+    const state = this.sessions.get(historyId);
+    if (!state || state.role !== "host") return [];
+    return Array.from(state.connections.values()).map((c) => ({
+      viewerDeviceId: c.viewerDeviceId ?? c.connectionId,
+      displayName: c.displayName ?? c.connectionId,
+      bitsPerSecond: c.videoBitsPerSecond + c.audioBitsPerSecond,
+      totalBytes: c.totalVideoBytes + c.totalAudioBytes,
+      rttMs: c.receivedStatus?.rttMs ?? null,
+      packetLossPercent: c.receivedStatus?.packetLossPercent ?? null,
+      width: c.receivedStatus?.width ?? null,
+      height: c.receivedStatus?.height ?? null,
+      framesPerSecond: c.receivedStatus?.framesPerSecond ?? null,
+      state: c.state,
+    }));
+  }
+
+  async getHistory(): Promise<StreamHistoryRecord[]> {
+    try {
+      const api = (window as unknown as { screenlink?: { getStreamHistory?: () => Promise<unknown[]> } }).screenlink;
+      if (!api?.getStreamHistory) return [];
+      const records = await api.getStreamHistory();
+      return records.map((r: unknown) => this.maybeMigrateRecord(r as LegacyHistoryRecord));
+    } catch {
+      return [];
+    }
+  }
+
+  // ─── Crash recovery ────────────────────────────────────────────────────
+
+  async recoverInterruptedSessions(): Promise<void> {
+    try {
+      const api = (window as unknown as {
+        screenlink?: {
+          getStreamHistory?: () => Promise<unknown[]>;
+          saveStreamHistory?: (r: unknown[]) => Promise<void>;
+        }
+      }).screenlink;
+      if (!api?.getStreamHistory) return;
+
+      const records = await api.getStreamHistory();
+      let changed = false;
+      for (let i = 0; i < records.length; i++) {
+        const r = records[i] as LegacyHistoryRecord;
+        if (r.status === "active") {
+          r.status = "interrupted";
+          r.interrupted = true;
+          r.stoppedAt = r.lastCheckpointAt ?? r.startedAt;
+          r.durationMs = (r.lastCheckpointAt ?? r.startedAt) - r.startedAt;
+          changed = true;
+        }
+      }
+      if (changed && api.saveStreamHistory) {
+        await api.saveStreamHistory(records);
+      }
+    } catch {
+      console.warn("[StreamMetricsService] Failed to recover interrupted sessions");
+    }
+  }
+
+  // ─── Timer ────────────────────────────────────────────────────────────
+
+  private ensureTimer(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => this.handleTick(), SAMPLE_INTERVAL_MS);
+  }
+
+  private stopTimerIfIdle(): void {
+    if (this.sessions.size === 0 && this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private handleTick(): void {
+    if (this.tickInFlight) return;
+    this.tickInFlight = true;
+
+    try {
+      this.tickCounter++;
+      const shouldPersist = this.tickCounter % PERSIST_INTERVAL_TICKS === 0;
+
+      // Poll each registered connection once
+      for (const [, conn] of this.connections) {
+        this.pollConnection(conn).catch(() => {});
+      }
+
+      // Build aggregate per session
+      for (const [, state] of this.sessions) {
+        this.buildSessionAggregate(state);
+        state.lastSnapshot = null;
+        if (shouldPersist) {
+          this.checkpointSession(state.historyId);
+        }
+      }
+
+      this.notifyAllSubscribers();
+      if (shouldPersist) this.notifyHistoryChanged();
+    } finally {
+      this.tickInFlight = false;
+    }
+  }
+
+  // ─── Per-connection getStats polling ───────────────────────────────────
+
+  private async pollConnection(conn: ConnectionState): Promise<void> {
+    if (conn.state !== "playing" && conn.state !== "reconnecting") return;
+
+    // Force baseline if pending
+    if (this.pendingBaselines.has(conn.connectionId)) {
+      this.resetBaselines(conn);
+      this.pendingBaselines.delete(conn.connectionId);
+    }
+
+    try {
+      const stats = await conn.peerConnection.getStats();
+      const now = Date.now();
+      const monoNow = performance.now();
+
+      let videoCumulative = 0;
+      let audioCumulative = 0;
+      let transportCumulative: number | null = null;
+      let videoSsrc: number | null = null;
+      let audioSsrc: number | null = null;
+      let width: number | null = null;
+      let height: number | null = null;
+      let framesPerSecond: number | null = null;
+      let droppedFrames: number | null = null;
+      let packetsReceived: number | null = null;
+      let packetsLost: number | null = null;
+      let packetLossPercent: number | null = null;
+      let rttMs: number | null = null;
+      let jitterMs: number | null = null;
+      let codec: string | null = null;
+      let connectionType: "direct" | "turn" | null = null;
+
+      const inboundRtp = conn.direction === "inbound" ? "inbound-rtp" : "outbound-rtp";
+      const outboundRtp = conn.direction === "inbound" ? "outbound-rtp" : "outbound-rtp";
+
+      for (const [, report] of stats) {
+        // RTP streams
+        if (report.type === inboundRtp || report.type === outboundRtp) {
+          const kind = report.kind;
+          const bytes = report.bytesReceived ?? report.bytesSent ?? 0;
+          const ssrc = report.ssrc ?? null;
+          const mid = report.mid ?? null;
+
+          if (kind === "video") {
+            videoCumulative = bytes;
+            videoSsrc = ssrc;
+            width = report.frameWidth ?? null;
+            height = report.frameHeight ?? null;
+            framesPerSecond = report.framesPerSecond ?? null;
+            droppedFrames = report.framesDropped ?? null;
+            packetsReceived = report.packetsReceived ?? null;
+            packetsLost = report.packetsLost ?? null;
+            codec = report.mimeType ?? null;
+          } else if (kind === "audio") {
+            audioCumulative = bytes;
+            audioSsrc = ssrc;
+            packetsReceived = report.packetsReceived ?? packetsReceived;
+            packetsLost = report.packetsLost ?? packetsLost;
+          }
+        }
+
+        // Candidate pair (transport)
+        if (report.type === "candidate-pair" && report.state === "succeeded") {
+          transportCumulative = report.bytesReceived ?? report.bytesSent ?? null;
+          rttMs = report.currentRoundTripTime ? report.currentRoundTripTime * 1000 : null;
+          connectionType = report.localCandidateType === "relay" || report.remoteCandidateType === "relay" ? "turn" : "direct";
+        }
+
+        // Remote-inbound (packet loss from receiver reports)
+        if (report.type === "remote-inbound-rtp") {
+          const lost = report.packetsLost ?? 0;
+          const total = (report.packetsLost ?? 0) + (report.packetsReceived ?? 0);
+          if (total > 0) packetLossPercent = Math.round((lost / total) * 100);
+          jitterMs = report.jitter ? report.jitter * 1000 : null;
+        }
+      }
+
+      // Process video counter
+      const videoRate = this.processCounter(conn, "video", videoCumulative, monoNow);
+
+      // Process audio counter
+      const audioRate = this.processCounter(conn, "audio", audioCumulative, monoNow);
+
+      // Process transport counter
+      let transportRate: number | null = null;
+      if (transportCumulative !== null) {
+        transportRate = this.processCounter(conn, "transport", transportCumulative, monoNow);
+      }
+
+      // Emit sampled markers
+      this.emitSampledMarkers(conn, width, height, framesPerSecond, codec, connectionType, null, null);
+
+      // Build sample
+      const totalRate = videoRate + audioRate;
+      conn.videoBitsPerSecond = videoRate;
+      conn.audioBitsPerSecond = audioRate;
+      conn.transportBitsPerSecond = transportRate ?? 0;
+
+      if (totalRate > conn.peakBitsPerSecond) {
+        conn.peakBitsPerSecond = totalRate;
+      }
+
+      // EWMA
+      if (conn.state === "playing" && totalRate > 0) {
+        if (!conn.ewmaInitialized) {
+          conn.ewmaValue = totalRate;
+          conn.ewmaLastRaw = totalRate;
+          conn.ewmaInitialized = true;
+        } else {
+          conn.ewmaValue = totalRate * EWMA_ALPHA + conn.ewmaValue * (1 - EWMA_ALPHA);
+          conn.ewmaLastRaw = totalRate;
+        }
+      }
+      conn.ewmaSeries.push(conn.ewmaValue);
+      if (conn.ewmaSeries.length > MAX_RAW_SAMPLES) {
+        conn.ewmaSeries = conn.ewmaSeries.slice(-MAX_RAW_SAMPLES);
+      }
+
+      const sample: TelemetrySample = {
+        timestampMs: now,
+        monotonicTimestampMs: monoNow,
+        intervalMs: SAMPLE_INTERVAL_MS,
+        mediaBitsPerSecond: totalRate,
+        transportBitsPerSecond: transportRate,
+        cumulativeMediaBytes: conn.totalVideoBytes + conn.totalAudioBytes,
+        cumulativeTransportBytes: transportCumulative ? conn.totalTransportBytes : null,
+        configuredVideoBitsPerSecond: conn.configuredVideoBitsPerSecond,
+        effectiveVideoBitsPerSecond: conn.effectiveVideoBitsPerSecond,
+        width,
+        height,
+        framesPerSecond,
+        packetLossPercent,
+        rttMs,
+        jitterMs,
+        codec,
+        connectionType,
+        state: conn.state,
+      };
+
+      conn.rawSamples.push(sample);
+      if (conn.rawSamples.length > MAX_RAW_SAMPLES) {
+        conn.rawSamples = conn.rawSamples.slice(-MAX_RAW_SAMPLES);
+      }
+
+      // Aggregate into buckets
+      this.aggregateSample(conn, sample);
+
+    } catch (err) {
+      console.warn("[StreamMetricsService] getStats failed:", err);
+    }
+  }
+
+  private processCounter(
+    conn: ConnectionState,
+    kind: "video" | "audio" | "transport",
+    cumulativeBytes: number,
+    monoNow: number,
+  ): number {
+    const baseline = kind === "video" ? conn.videoBaseline
+      : kind === "audio" ? conn.audioBaseline
+      : conn.transportBaseline;
+
+    if (!baseline.initialized) {
+      baseline.initialized = true;
+      baseline.previousCumulativeBytes = cumulativeBytes;
+      baseline.previousMonotonicTimestamp = monoNow;
+      return 0;
+    }
+
+    // Counter reset detection
+    if (cumulativeBytes < baseline.previousCumulativeBytes) {
+      baseline.previousCumulativeBytes = cumulativeBytes;
+      baseline.previousMonotonicTimestamp = monoNow;
+      return 0;
+    }
+
+    const deltaBytes = cumulativeBytes - baseline.previousCumulativeBytes;
+    const elapsedSeconds = (monoNow - baseline.previousMonotonicTimestamp) / 1000;
+
+    if (elapsedSeconds <= 0) return 0;
+
+    const bitsPerSecond = Math.round((deltaBytes * 8) / elapsedSeconds);
+
+    // Accumulate
+    if (kind === "video") conn.totalVideoBytes += deltaBytes;
+    else if (kind === "audio") conn.totalAudioBytes += deltaBytes;
+    else conn.totalTransportBytes += deltaBytes;
+
+    baseline.previousCumulativeBytes = cumulativeBytes;
+    baseline.previousMonotonicTimestamp = monoNow;
+
+    return bitsPerSecond;
+  }
+
+  private resetBaselines(conn: ConnectionState): void {
+    conn.videoBaseline = makeBaseline();
+    conn.audioBaseline = makeBaseline();
+    conn.transportBaseline = makeBaseline();
+  }
+
+  private emitSampledMarkers(
+    conn: ConnectionState,
+    width: number | null,
+    height: number | null,
+    fps: number | null,
+    codec: string | null,
+    connectionType: "direct" | "turn" | null,
+    configuredBps: number | null,
+    effectiveBps: number | null,
+  ): void {
+    const res = width && height ? `${width}x${height}` : null;
+    if (res && res !== conn.lastResolution) {
+      if (conn.lastResolution !== null) {
+        this.addConnectionMarker(conn, "resolution", conn.lastResolution, res, `Resolution: ${res}`);
+      }
+      conn.lastResolution = res;
+    }
+
+    if (fps !== null && fps !== conn.lastFps) {
+      if (conn.lastFps !== null) {
+        this.addConnectionMarker(conn, "fps", String(conn.lastFps), String(fps), `FPS: ${fps}`);
+      }
+      conn.lastFps = fps;
+    }
+
+    if (codec && codec !== conn.lastCodec) {
+      if (conn.lastCodec !== null) {
+        this.addConnectionMarker(conn, "codec", conn.lastCodec, codec, `Codec: ${codec}`);
+      }
+      conn.lastCodec = codec;
+    }
+
+    if (connectionType && connectionType !== conn.lastConnectionType) {
+      if (conn.lastConnectionType !== null) {
+        this.addConnectionMarker(conn, "turn", conn.lastConnectionType, connectionType,
+          connectionType === "direct" ? "Connection: Direct" : "Connection: TURN relay");
+      }
+      conn.lastConnectionType = connectionType;
+    }
+  }
+
+  // ─── Bucket aggregation ───────────────────────────────────────────────
+
+  private aggregateSample(conn: ConnectionState, sample: TelemetrySample): void {
+    this.aggregateInto(conn, "medium", sample, MEDIUM_BUCKET_SIZE_MS, MAX_MEDIUM_BUCKETS);
+    this.aggregateInto(conn, "long", sample, LONG_BUCKET_SIZE_MS, MAX_LONG_BUCKETS);
+  }
+
+  private aggregateInto(
+    conn: ConnectionState,
+    tier: "medium" | "long",
+    sample: TelemetrySample,
+    bucketSize: number,
+    maxBuckets: number,
+  ): void {
+    const buckets = tier === "medium" ? conn.mediumBuckets : conn.longBuckets;
+    const meta = tier === "medium" ? conn.mediumBucketMeta : conn.longBucketMeta;
+    const bucketStart = Math.floor(sample.monotonicTimestampMs / bucketSize) * bucketSize;
+
+    const prevBytes = meta.get(bucketStart)
+      ?? (buckets.length > 0 ? meta.get(buckets[buckets.length - 1].startTimestampMs) ?? 0 : 0);
+
+    const deltaBytes = Math.max(0, sample.cumulativeMediaBytes - prevBytes);
+
+    const existingBucket = buckets.length > 0 && buckets[buckets.length - 1].startTimestampMs === bucketStart
+      ? buckets[buckets.length - 1]
+      : null;
+
+    if (existingBucket) {
+      existingBucket.byteDelta += deltaBytes;
+      existingBucket.endTimestampMs = sample.monotonicTimestampMs;
+      existingBucket.intervalMs = existingBucket.endTimestampMs - existingBucket.startTimestampMs;
+      existingBucket.maxBitsPerSecond = Math.max(existingBucket.maxBitsPerSecond, sample.mediaBitsPerSecond);
+      existingBucket.minBitsPerSecond = Math.min(existingBucket.minBitsPerSecond, sample.mediaBitsPerSecond);
+      existingBucket.weightedAverageBitsPerSecond = existingBucket.intervalMs > 0
+        ? Math.round((existingBucket.byteDelta * 8000) / existingBucket.intervalMs)
+        : sample.mediaBitsPerSecond;
+      existingBucket.width = sample.width ?? existingBucket.width;
+      existingBucket.height = sample.height ?? existingBucket.height;
+      existingBucket.framesPerSecond = sample.framesPerSecond ?? existingBucket.framesPerSecond;
+      existingBucket.state = sample.state;
+      existingBucket.codec = sample.codec ?? existingBucket.codec;
+      existingBucket.connectionType = sample.connectionType ?? existingBucket.connectionType;
+    } else {
+      const newBucket: AggregatedBucket = {
+        startTimestampMs: bucketStart,
+        endTimestampMs: sample.monotonicTimestampMs,
+        intervalMs: sample.monotonicTimestampMs - bucketStart,
+        minBitsPerSecond: sample.mediaBitsPerSecond,
+        maxBitsPerSecond: sample.mediaBitsPerSecond,
+        weightedAverageBitsPerSecond: sample.mediaBitsPerSecond,
+        byteDelta: deltaBytes,
+        width: sample.width,
+        height: sample.height,
+        framesPerSecond: sample.framesPerSecond,
+        state: sample.state,
+        codec: sample.codec,
+        connectionType: sample.connectionType,
+      };
+      buckets.push(newBucket);
+      meta.set(bucketStart, sample.cumulativeMediaBytes);
+
+      while (buckets.length > maxBuckets) {
+        const removed = buckets.shift()!;
+        meta.delete(removed.startTimestampMs);
+      }
+    }
+  }
+
+  // ─── Session aggregate ────────────────────────────────────────────────
+
+  private buildSessionAggregate(state: SessionState): void {
+    let totalBytes = 0;
+    let peakBitsPerSecond = 0;
+
+    for (const conn of state.connections.values()) {
+      totalBytes += conn.totalVideoBytes + conn.totalAudioBytes;
+      if (conn.peakBitsPerSecond > peakBitsPerSecond) {
+        peakBitsPerSecond = conn.peakBitsPerSecond;
+      }
+    }
+
+    state.totalBytes = totalBytes;
+    state.peakBitsPerSecond = peakBitsPerSecond;
+  }
+
+  // ─── Snapshot building ────────────────────────────────────────────────
+
+  private buildSnapshot(state: SessionState): BandwidthSnapshot {
+    // Build aggregate series from all connections
+    const allRawSamples: TelemetrySample[] = [];
+    const allMediumBuckets: AggregatedBucket[] = [];
+    const allLongBuckets: AggregatedBucket[] = [];
+    const allMarkers: TelemetryMarker[] = [...state.markers];
+    const allConnections: ConnectionTelemetrySnapshot[] = [];
+
+    for (const conn of state.connections.values()) {
+      allRawSamples.push(...conn.rawSamples);
+      allMediumBuckets.push(...conn.mediumBuckets);
+      allLongBuckets.push(...conn.longBuckets);
+      allMarkers.push(...conn.markers);
+
+      const connActiveMs = this.computeActiveDuration(conn);
+      const totalObservedBits = (conn.totalVideoBytes + conn.totalAudioBytes) * 8;
+
+      const connSnapshot: ConnectionTelemetrySnapshot = {
+        connectionId: conn.connectionId,
+        viewerDeviceId: conn.viewerDeviceId,
+        displayName: conn.displayName,
+        receivedStatus: conn.receivedStatus,
+        rawSamples: Object.freeze([...conn.rawSamples]),
+        mediumBuckets: Object.freeze(this.epochAdjust(conn, conn.mediumBuckets)),
+        longBuckets: Object.freeze(this.epochAdjust(conn, conn.longBuckets)),
+        markers: Object.freeze([...conn.markers]),
+        currentBitsPerSecond: conn.videoBitsPerSecond + conn.audioBitsPerSecond,
+        averageBitsPerSecond: connActiveMs > 0
+          ? Math.round(totalObservedBits / (connActiveMs / 1000))
+          : 0,
+        peakBitsPerSecond: conn.peakBitsPerSecond,
+        totalBytes: conn.totalVideoBytes + conn.totalAudioBytes,
+        durationMs: this.computeDuration(conn),
+        activeDurationMs: connActiveMs,
+        configuredBitsPerSecond: conn.configuredVideoBitsPerSecond,
+        effectiveBitsPerSecond: conn.effectiveVideoBitsPerSecond,
+        state: conn.state,
+      };
+      allConnections.push(Object.freeze(connSnapshot));
+    }
+
+    // Sort samples by timestamp
+    allRawSamples.sort((a, b) => a.monotonicTimestampMs - b.monotonicTimestampMs);
+    allMarkers.sort((a, b) => a.timestampMs - b.timestampMs);
+
+    const activeDurationMs = this.computeSessionActiveDuration(state);
+    const totalObservedBits = state.totalBytes * 8;
+    const latestSample = allRawSamples[allRawSamples.length - 1];
+
+    const aggregate: TelemetrySeriesSnapshot = {
+      rawSamples: Object.freeze(allRawSamples),
+      mediumBuckets: Object.freeze(this.epochAdjustSession(state, allMediumBuckets)),
+      longBuckets: Object.freeze(this.epochAdjustSession(state, allLongBuckets)),
+      markers: Object.freeze(allMarkers),
+      currentBitsPerSecond: latestSample?.mediaBitsPerSecond ?? 0,
+      averageBitsPerSecond: activeDurationMs > 0
+        ? Math.round(totalObservedBits / (activeDurationMs / 1000))
+        : 0,
+      peakBitsPerSecond: state.peakBitsPerSecond,
+      totalBytes: state.totalBytes,
+      durationMs: performance.now() - state.startedAtMonotonic,
+      activeDurationMs,
+      configuredBitsPerSecond: state.configuredBitsPerSecond,
+      effectiveBitsPerSecond: state.effectiveBitsPerSecond,
+      state: state.state,
+    };
+
+    return Object.freeze({
+      historyId: state.historyId,
+      role: state.role,
+      aggregate,
+      connections: Object.freeze(allConnections),
+    });
+  }
+
+  private computeDuration(conn: ConnectionState): number {
+    return performance.now() - conn.rawSamples[0]?.monotonicTimestampMs ?? performance.now();
+  }
+
+  private computeActiveDuration(conn: ConnectionState): number {
+    const total = this.computeDuration(conn);
+    let pauseAdjust = conn.totalPausedMs;
+    if (conn.pausedAtMonotonic !== null) {
+      pauseAdjust += performance.now() - conn.pausedAtMonotonic;
+    }
+    return Math.max(0, total - pauseAdjust);
+  }
+
+  private computeSessionActiveDuration(state: SessionState): number {
+    const total = performance.now() - state.startedAtMonotonic;
+    let maxPause = 0;
+    for (const conn of state.connections.values()) {
+      let pause = conn.totalPausedMs;
+      if (conn.pausedAtMonotonic !== null) {
+        pause += performance.now() - conn.pausedAtMonotonic;
+      }
+      if (pause > maxPause) maxPause = pause;
+    }
+    return Math.max(0, total - maxPause);
+  }
+
+  private epochAdjust(conn: ConnectionState, buckets: AggregatedBucket[]): AggregatedBucket[] {
+    if (buckets.length === 0) return [];
+    const firstSample = conn.rawSamples[0];
+    if (!firstSample) return buckets;
+    const offset = firstSample.timestampMs - firstSample.monotonicTimestampMs;
+    return buckets.map((b) => ({
+      ...b,
+      startTimestampMs: b.startTimestampMs + offset,
+      endTimestampMs: b.endTimestampMs + offset,
+    }));
+  }
+
+  private epochAdjustSession(state: SessionState, buckets: AggregatedBucket[]): AggregatedBucket[] {
+    if (buckets.length === 0) return [];
+    const offset = state.startedAt - state.startedAtMonotonic;
+    return buckets.map((b) => ({
+      ...b,
+      startTimestampMs: b.startTimestampMs + offset,
+      endTimestampMs: b.endTimestampMs + offset,
+    }));
+  }
+
+  // ─── Checkpoint ───────────────────────────────────────────────────────
+
+  checkpointSession(historyId: string): void {
+    const state = this.sessions.get(historyId);
+    if (!state) return;
+    state.lastCheckpointAt = Date.now();
+    this.checkpointPersistence(state);
+  }
+
+  private checkpointPersistence(state: SessionState): void {
+    this.persistSession(state).catch(() => {});
+  }
+
+  // ─── Persistence (schema v2) ──────────────────────────────────────────
+
+  private async persistSession(state: SessionState): Promise<void> {
+    const snapshot = this.buildSnapshot(state);
+
+    const record: PersistenceRecordV2 = {
+      schemaVersion: 2,
+      historyId: state.historyId,
+      role: state.role,
+      startedAt: state.startedAt,
+      stoppedAt: state.status === "active" ? null : Date.now(),
+      durationMs: snapshot.aggregate.durationMs,
+      activeDurationMs: snapshot.aggregate.activeDurationMs,
+      totalBytes: state.totalBytes,
+      peakBitsPerSecond: state.peakBitsPerSecond,
+      configuredBitsPerSecond: snapshot.aggregate.configuredBitsPerSecond,
+      effectiveBitsPerSecond: snapshot.aggregate.effectiveBitsPerSecond,
+      rawSamples: [...snapshot.aggregate.rawSamples],
+      mediumBuckets: [...snapshot.aggregate.mediumBuckets],
+      longBuckets: [...snapshot.aggregate.longBuckets],
+      connections: snapshot.connections.map((c) => ({ ...c })),
+      markers: [...snapshot.aggregate.markers],
+      status: state.status,
+    };
+
+    await this.upsertRecord(record);
+  }
+
+  private async upsertRecord(record: PersistenceRecordV2): Promise<void> {
+    try {
+      const api = (
+        window as unknown as {
+          screenlink?: {
+            upsertStreamHistory?: (record: unknown) => Promise<void>;
+            getStreamHistory?: () => Promise<unknown[]>;
+            saveStreamHistory?: (r: unknown[]) => Promise<void>;
+          };
+        }
+      ).screenlink;
+
+      if (api?.upsertStreamHistory) {
+        await api.upsertStreamHistory(record);
+      } else if (api?.getStreamHistory && api?.saveStreamHistory) {
+        const existing = await api.getStreamHistory();
+        const idx = existing.findIndex(
+          (r: unknown) => (r as Record<string, unknown>).historyId === record.historyId
+        );
+        if (idx >= 0) existing[idx] = record;
+        else existing.push(record);
+        await api.saveStreamHistory(existing);
+      }
+    } catch {
+      console.warn("[StreamMetricsService] Failed to upsert history record");
+    }
+  }
+
+  // ─── Schema migration ─────────────────────────────────────────────────
+
+  private maybeMigrateRecord(legacy: LegacyHistoryRecord): StreamHistoryRecord {
+    if (legacy.schemaVersion === 2) {
+      return this.v2ToRecord(legacy as unknown as PersistenceRecordV2);
+    }
+
+    // V1 → V2 migration
+    const record: StreamHistoryRecord = {
+      historyId: legacy.historyId,
+      role: legacy.role,
+      status: (legacy.status ?? "completed") as StreamHistoryRecord["status"],
+      mediaSessionId: legacy.mediaSessionId ?? "",
+      logicalStreamId: legacy.logicalStreamId ?? "",
+      groupId: legacy.groupId ?? "",
+      groupName: legacy.groupName ?? "",
+      remoteDisplayName: legacy.remoteDisplayName ?? null,
+      startedAt: legacy.startedAt,
+      lastCheckpointAt: legacy.lastCheckpointAt ?? legacy.startedAt,
+      stoppedAt: legacy.stoppedAt ?? null,
+      durationMs: legacy.durationMs ?? 0,
+      totalBytes: legacy.totalBytes,
+      averageBytesPerSecond: legacy.averageBytesPerSecond
+        ? legacy.averageBytesPerSecond * 8 // bytes/s → bits/s
+        : legacy.bytesPerSecond
+          ? legacy.bytesPerSecond * 8
+          : 0,
+      presetName: legacy.presetName ?? null,
+      customQuality: legacy.customQuality ?? false,
+      samples: (legacy.samples ?? []).map((s) => ({
+        timestamp: s.timestamp,
+        bytesPerSecond: s.bytesPerSecond,
+        totalBytes: s.totalBytes,
+      })),
+      markers: (legacy.markers ?? []).map((m) => ({
+        timestamp: m.timestamp,
+        category: m.category,
+        from: m.from,
+        to: m.to,
+        label: m.label,
+      })),
+      interrupted: legacy.interrupted ?? false,
+    };
+
+    return record;
+  }
+
+  private v2ToRecord(_v2: PersistenceRecordV2): StreamHistoryRecord {
+    // V2 records can be stored directly, but for API compatibility return a StreamHistoryRecord
+    return {
+      historyId: _v2.historyId,
+      role: _v2.role,
+      status: _v2.status,
+      mediaSessionId: _v2.mediaSessionId ?? "",
+      logicalStreamId: "",
+      groupId: _v2.groupId ?? "",
+      groupName: _v2.groupName ?? "",
+      remoteDisplayName: null,
+      startedAt: _v2.startedAt,
+      lastCheckpointAt: _v2.startedAt,
+      stoppedAt: _v2.stoppedAt,
+      durationMs: _v2.durationMs,
+      totalBytes: _v2.totalBytes,
+      averageBytesPerSecond: _v2.activeDurationMs > 0
+        ? Math.round((_v2.totalBytes * 8000) / _v2.activeDurationMs)
+        : 0,
+      presetName: null,
+      customQuality: false,
+      samples: [],
+      markers: _v2.markers.map((m) => ({
+        timestamp: m.timestampMs,
+        category: m.type,
+        from: m.from,
+        to: m.to,
+        label: m.label,
+      })),
+      interrupted: _v2.status === "interrupted",
+    };
+  }
+
+  // ─── Subscriber notification ──────────────────────────────────────────
+
+  private notifySessionSubscribers(historyId: string): void {
+    const cbs = this.subscribers.get(historyId);
+    if (cbs) {
+      for (const cb of cbs) {
+        try { cb(); } catch { /* swallow */ }
+      }
+    }
+  }
+
+  private notifyAllSubscribers(): void {
+    for (const [historyId] of this.subscribers) {
+      if (this.sessions.has(historyId)) {
+        this.notifySessionSubscribers(historyId);
+      }
+    }
+  }
+
+  private notifyHistoryChanged(): void {
+    this.onHistoryChanged?.();
+  }
+
+  // ─── ID generation ────────────────────────────────────────────────────
+
+  private generateId(): string {
+    if (typeof globalThis !== "undefined" && typeof globalThis.crypto?.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+  }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function makeBaseline(): CounterBaseline {
+  return {
+    initialized: false,
+    identity: { reportId: "", ssrc: null, trackIdentifier: null, mid: null },
+    previousCumulativeBytes: 0,
+    previousMonotonicTimestamp: 0,
+  };
+}
+
+function emptySnapshot(historyId: string): BandwidthSnapshot {
+  return Object.freeze({
+    historyId,
+    role: "viewer" as const,
+    aggregate: Object.freeze({
+      rawSamples: Object.freeze([]),
+      mediumBuckets: Object.freeze([]),
+      longBuckets: Object.freeze([]),
+      markers: Object.freeze([]),
+      currentBitsPerSecond: 0,
+      averageBitsPerSecond: 0,
+      peakBitsPerSecond: 0,
+      totalBytes: 0,
+      durationMs: 0,
+      activeDurationMs: 0,
+      configuredBitsPerSecond: null,
+      effectiveBitsPerSecond: null,
+      state: "paused" as TelemetryState,
+    }),
+    connections: Object.freeze([]),
+  });
+}
+
+// ─── StreamHistoryRecord (API compatibility) ────────────────────────────────
 
 export interface StreamHistoryRecord {
   historyId: string;
@@ -65,980 +1309,4 @@ export interface StreamHistoryRecord {
   samples: Array<{ timestamp: number; bytesPerSecond: number; totalBytes: number }>;
   markers: Array<{ timestamp: number; category: string; from: string | null; to: string; label: string }>;
   interrupted: boolean;
-}
-
-// ─── Constants ──────────────────────────────────────────────────────────────
-
-/** Timer fires every 1 second */
-const SAMPLE_INTERVAL_MS = 1000;
-
-/** Maximum raw samples kept in memory (5 min at 1s) */
-const MAX_RAW_SAMPLES = 300;
-
-/** Medium bucket size (5 seconds) */
-const MEDIUM_BUCKET_SIZE_MS = 5000;
-
-/** Maximum medium buckets (30 min) */
-const MAX_MEDIUM_BUCKETS = 360;
-
-/** Long bucket size (30 seconds) */
-const LONG_BUCKET_SIZE_MS = 30000;
-
-/** Maximum long buckets (~83 hours) */
-const MAX_LONG_BUCKETS = 10000;
-
-/** Persistence checkpoint every 10 ticks (10 seconds) */
-const PERSIST_INTERVAL_TICKS = 10;
-
-/** Three-second EWMA alpha */
-const EWMA_ALPHA = 1 - Math.exp(-1 / 3); // ≈ 0.283
-
-// ─── Internal EWMA helpers ──────────────────────────────────────────────────
-
-interface EwmaInternal {
-  value: number;
-  lastRaw: number;
-  initialized: boolean;
-  alpha: number;
-}
-
-function createEwma(): EwmaInternal {
-  return { value: 0, lastRaw: 0, initialized: false, alpha: EWMA_ALPHA };
-}
-
-function updateEwma(ewma: EwmaInternal, rawBitsPerSecond: number): number {
-  if (!ewma.initialized) {
-    ewma.value = rawBitsPerSecond;
-    ewma.lastRaw = rawBitsPerSecond;
-    ewma.initialized = true;
-    return ewma.value;
-  }
-  ewma.value = rawBitsPerSecond * ewma.alpha + ewma.value * (1 - ewma.alpha);
-  ewma.lastRaw = rawBitsPerSecond;
-  return ewma.value;
-}
-
-// ─── Internal bucket tracking metadata ──────────────────────────────────────
-
-interface BucketMeta {
-  lastCumulativeBytes: number;
-}
-
-// ─── Internal session state ─────────────────────────────────────────────────
-
-interface InternalSessionState {
-  // Identity
-  historyId: string;
-  role: "host" | "viewer";
-  mediaSessionId: string;
-  logicalStreamId: string;
-  groupId: string;
-  groupName: string;
-  remoteDisplayName: string | null;
-
-  // Timing
-  startedAt: number;          // Date.now()
-  startedAtMonotonic: number; // performance.now()
-
-  // Quality
-  presetName: string | null;
-  customQuality: boolean;
-
-  // Baseline
-  hasBaseline: boolean;
-
-  // Byte tracking
-  totalBytes: number;
-  lastBytes: number;
-  lastMonotonicTimestampMs: number;
-  lastSsrc: number | null;
-
-  // Current rate (bits per second)
-  lastBitsPerSecond: number;
-
-  // EWMA
-  ewma: EwmaInternal;
-  ewmaSeries: number[];
-
-  // Samples
-    rawSamples: TelemetrySample[];
-
-    // Buckets
-  mediumBuckets: AggregatedBucket[];
-  longBuckets: AggregatedBucket[];
-
-  // Bucket tracking metadata (keyed by bucket start timestamp)
-  mediumBucketMeta: Map<number, BucketMeta>;
-  longBucketMeta: Map<number, BucketMeta>;
-
-  // State
-  state: TelemetryState;
-  pausedAt: number | null;   // performance.now() when paused started
-  totalPausedMs: number;
-
-  // Markers
-  markers: TelemetryMarker[];
-
-  // Viewer rates (host only)
-  viewerRates: Map<string, ViewerRateEntry>;
-
-  // Snapshot cache
-  lastSnapshot: BandwidthSnapshot | null;
-
-  // Status for persistence
-  status: "active" | "completed" | "interrupted";
-  lastCheckpointAt: number;
-}
-
-// ─── Service ────────────────────────────────────────────────────────────────
-
-export class StreamMetricsService {
-  private static instance: StreamMetricsService | null = null;
-  private sessions = new Map<string, InternalSessionState>();
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private onHistoryChanged: (() => void) | null = null;
-  private finalizing = new Set<string>();
-  private finalizePromises = new Map<string, Promise<void>>();
-
-  // In-flight guard for timer tick
-  private tickInFlight = false;
-
-  // Tick counter for persistence frequency
-  private tickCounter = 0;
-
-  // Subscribers keyed by historyId
-  private subscribers = new Map<string, Set<() => void>>();
-
-  // ─── Singleton ──────────────────────────────────────────────────────────
-
-  static getInstance(): StreamMetricsService {
-    if (!StreamMetricsService.instance) {
-      StreamMetricsService.instance = new StreamMetricsService();
-    }
-    return StreamMetricsService.instance;
-  }
-
-  static setInstance(svc: StreamMetricsService | null): void {
-    StreamMetricsService.instance = svc;
-  }
-
-  private constructor() {}
-
-  setOnHistoryChanged(cb: (() => void) | null): void {
-    this.onHistoryChanged = cb;
-  }
-
-  // ─── Subscription (useSyncExternalStore) ────────────────────────────────
-
-  /**
-   * Subscribe to snapshot changes for a given historyId.
-   * Returns an unsubscribe function.
-   */
-  subscribe(historyId: string, callback: () => void): () => void {
-    if (!this.subscribers.has(historyId)) {
-      this.subscribers.set(historyId, new Set());
-    }
-    this.subscribers.get(historyId)!.add(callback);
-    return () => {
-      this.subscribers.get(historyId)?.delete(callback);
-    };
-  }
-
-  /**
-   * Get the current immutable BandwidthSnapshot for a historyId.
-   * Returns a frozen/cached reference — safe for useSyncExternalStore.
-   */
-  getSnapshot(historyId: string): BandwidthSnapshot {
-    const state = this.sessions.get(historyId);
-    if (!state) {
-      return emptySnapshot(historyId);
-    }
-    if (!state.lastSnapshot) {
-      state.lastSnapshot = this.buildSnapshot(state);
-    }
-    return state.lastSnapshot;
-  }
-
-  // ─── Session lifecycle ──────────────────────────────────────────────────
-
-  /** @returns historyId */
-  startHostSession(
-    mediaSessionId: string,
-    logicalStreamId: string,
-    groupId: string,
-    groupName: string,
-    presetName: string | null,
-    customQuality: boolean,
-    initialQualityLabel: string | null,
-  ): string {
-    const historyId = this.generateId();
-    const now = Date.now();
-    const monoNow = performance.now();
-    const state = this.makeState(historyId, "host", mediaSessionId, logicalStreamId, groupId, groupName, null, now, monoNow, presetName, customQuality);
-
-    // Add initial quality marker if provided
-    if (initialQualityLabel) {
-      const markerId = this.generateId();
-      state.markers.push({
-        id: markerId,
-        timestampMs: now,
-        type: "other",
-        label: initialQualityLabel,
-        detail: null,
-      });
-    }
-
-    this.sessions.set(historyId, state);
-    this.upsertRecord(this.buildRecord(state)).catch(() => {});
-    this.ensureTimer();
-    return historyId;
-  }
-
-  /** @returns historyId */
-  startViewerSession(
-    mediaSessionId: string,
-    logicalStreamId: string,
-    groupId: string,
-    groupName: string,
-    remoteDisplayName: string | null,
-  ): string {
-    const historyId = this.generateId();
-    const now = Date.now();
-    const monoNow = performance.now();
-    const state = this.makeState(historyId, "viewer", mediaSessionId, logicalStreamId, groupId, groupName, remoteDisplayName, now, monoNow, null, false);
-
-    this.sessions.set(historyId, state);
-    this.upsertRecord(this.buildRecord(state)).catch(() => {});
-    this.ensureTimer();
-    return historyId;
-  }
-
-  private makeState(
-    historyId: string,
-    role: "host" | "viewer",
-    mediaSessionId: string,
-    logicalStreamId: string,
-    groupId: string,
-    groupName: string,
-    remoteDisplayName: string | null,
-    startedAt: number,
-    startedAtMonotonic: number,
-    presetName: string | null,
-    customQuality: boolean,
-  ): InternalSessionState {
-    return {
-      historyId,
-      role,
-      mediaSessionId,
-      logicalStreamId,
-      groupId,
-      groupName,
-      remoteDisplayName,
-      startedAt,
-      startedAtMonotonic,
-      presetName,
-      customQuality,
-      hasBaseline: false,
-      totalBytes: 0,
-      lastBytes: 0,
-      lastMonotonicTimestampMs: startedAtMonotonic,
-      lastSsrc: null,
-      lastBitsPerSecond: 0,
-      ewma: createEwma(),
-      ewmaSeries: [],
-      rawSamples: [],
-      mediumBuckets: [],
-      longBuckets: [],
-      mediumBucketMeta: new Map(),
-      longBucketMeta: new Map(),
-      state: "playing",
-      pausedAt: null,
-      totalPausedMs: 0,
-      markers: [],
-      viewerRates: new Map(),
-      lastSnapshot: null,
-      status: "active",
-      lastCheckpointAt: startedAt,
-    };
-  }
-
-  // ─── Data feed ──────────────────────────────────────────────────────────
-
-  /**
-   * Feed cumulative host outbound bytes.
-   * First call establishes baseline (does NOT add to total).
-   *
-   * @param timestamp - monotonic timestamp (performance.now()-based)
-   * @param ssrc      - optional SSRC for counter-identity tracking
-   */
-  feedHostBytes(historyId: string, cumulativeBytes: number, timestamp: number, ssrc?: number | null): void {
-    this.feedBytes(historyId, cumulativeBytes, timestamp, "host", ssrc);
-  }
-
-  /**
-   * Feed cumulative viewer download bytes.
-   * First call establishes baseline (does NOT add to total).
-   *
-   * @param timestamp - monotonic timestamp (performance.now()-based)
-   * @param ssrc      - optional SSRC for counter-identity tracking
-   */
-  feedViewerBytes(historyId: string, cumulativeBytes: number, timestamp: number, ssrc?: number | null): void {
-    this.feedBytes(historyId, cumulativeBytes, timestamp, "viewer", ssrc);
-  }
-
-  private feedBytes(
-    historyId: string,
-    cumulativeBytes: number,
-    timestamp: number,
-    expectedRole: "host" | "viewer",
-    ssrc?: number | null,
-  ): void {
-    const state = this.sessions.get(historyId);
-    if (!state) return;
-    if (state.role !== expectedRole) return;
-
-    // ── First-sample baseline ──
-    if (!state.hasBaseline) {
-      state.lastBytes = cumulativeBytes;
-      state.lastMonotonicTimestampMs = timestamp;
-      if (ssrc !== undefined) state.lastSsrc = ssrc;
-      state.hasBaseline = true;
-      return;
-    }
-
-    // ── SSRC change detection ──
-    if (ssrc !== undefined && ssrc !== null && state.lastSsrc !== null && ssrc !== state.lastSsrc) {
-      // SSRC changed — establish new baseline without spike
-      state.lastBytes = cumulativeBytes;
-      state.lastMonotonicTimestampMs = timestamp;
-      state.lastSsrc = ssrc;
-      return;
-    }
-
-    // ── Counter reset detection (decrement) ──
-    if (cumulativeBytes < state.lastBytes) {
-      // Counter reset — new baseline, total NOT decremented
-      state.lastBytes = cumulativeBytes;
-      state.lastMonotonicTimestampMs = timestamp;
-      if (ssrc !== undefined) state.lastSsrc = ssrc;
-      return;
-    }
-
-    // ── Normal delta computation ──
-    const deltaBytes = cumulativeBytes - state.lastBytes;
-    const elapsedSeconds = (timestamp - state.lastMonotonicTimestampMs) / 1000;
-
-    if (elapsedSeconds > 0 && deltaBytes >= 0) {
-      const bitsPerSecond = Math.round((deltaBytes * 8) / elapsedSeconds);
-      state.lastBitsPerSecond = bitsPerSecond;
-      state.totalBytes += deltaBytes;
-    }
-
-    state.lastBytes = cumulativeBytes;
-    state.lastMonotonicTimestampMs = timestamp;
-    if (ssrc !== undefined) state.lastSsrc = ssrc;
-
-    // Invalidate snapshot cache since totals changed
-    state.lastSnapshot = null;
-  }
-
-  // ─── Session state tracking ─────────────────────────────────────────────
-
-  /**
-   * Set the session playback state.
-   * Affects EWMA updates (only when "playing") and session average (excludes paused time).
-   */
-  setSessionState(historyId: string, newState: TelemetryState): void {
-    const state = this.sessions.get(historyId);
-    if (!state || state.state === newState) return;
-
-    const oldState = state.state;
-    state.state = newState;
-
-    // Track pause time exclusion
-    if (oldState === "playing" && newState === "paused") {
-      state.pausedAt = performance.now();
-    } else if (oldState === "paused" && newState === "playing") {
-      if (state.pausedAt !== null) {
-        state.totalPausedMs += performance.now() - state.pausedAt;
-        state.pausedAt = null;
-      }
-    }
-
-    // Auto-marker for state transitions
-    if (oldState === "playing" && newState === "paused") {
-      this.addMarker(historyId, "pause", oldState, newState, "Session paused");
-    } else if (oldState === "paused" && newState === "playing") {
-      this.addMarker(historyId, "resume", oldState, newState, "Session resumed");
-    } else if (newState === "reconnecting") {
-      this.addMarker(historyId, "reconnect", oldState, newState, "Session reconnecting");
-    } else {
-      this.addMarker(historyId, "other", oldState, newState, `${oldState} → ${newState}`);
-    }
-
-    // addMarker already invalidates snapshot cache + notifies subscribers.
-    // Still need to notify history change listeners.
-    this.notifyHistoryChanged();
-  }
-
-  // ─── Markers ────────────────────────────────────────────────────────────
-
-  /**
-   * Add a marker to the session.
-   * Accepts MarkerType (superset of legacy category strings).
-   */
-  addMarker(
-    historyId: string,
-    type: MarkerType,
-    from: string | null,
-    to: string,
-    label: string,
-  ): void {
-    const state = this.sessions.get(historyId);
-    if (!state) return;
-
-    const now = Date.now();
-    const markerId = this.generateId();
-    state.markers.push({
-      id: markerId,
-      timestampMs: now,
-      type,
-      label,
-      detail: from ? `${from} → ${to}` : to,
-    });
-
-    state.lastSnapshot = null;
-    this.notifySessionSubscribers(historyId);
-  }
-
-  // ─── Checkpoint (persistence & backward compat) ─────────────────────────
-
-  /**
-   * Persist a checkpoint snapshot for the session.
-   * Called internally every 10th timer tick.
-   */
-  checkpointSession(historyId: string): void {
-    const state = this.sessions.get(historyId);
-    if (!state) return;
-
-    state.lastCheckpointAt = Date.now();
-
-    this.upsertRecord(this.buildRecord(state)).catch(() => {});
-    state.lastSnapshot = null;
-    this.notifySessionSubscribers(historyId);
-  }
-
-  // ─── Finalize ───────────────────────────────────────────────────────────
-
-  async finalizeSession(historyId: string): Promise<void> {
-    if (this.finalizing.has(historyId)) {
-      const existing = this.finalizePromises.get(historyId);
-      if (existing) return existing;
-    }
-
-    const state = this.sessions.get(historyId);
-    if (!state) return;
-
-    this.finalizing.add(historyId);
-
-    const promise = (async () => {
-      try {
-        state.lastCheckpointAt = Date.now();
-
-        const now = Date.now();
-        const durationMs = now - state.startedAt;
-        const record: StreamHistoryRecord = {
-          historyId: state.historyId,
-          role: state.role,
-          status: "completed",
-          mediaSessionId: state.mediaSessionId,
-          logicalStreamId: state.logicalStreamId,
-          groupId: state.groupId,
-          groupName: state.groupName,
-          remoteDisplayName: state.remoteDisplayName,
-          startedAt: state.startedAt,
-          lastCheckpointAt: now,
-          stoppedAt: now,
-          durationMs,
-          totalBytes: state.totalBytes,
-          averageBytesPerSecond: durationMs > 0 ? Math.round((state.totalBytes * 1000) / durationMs) : 0,
-          presetName: state.presetName,
-          customQuality: state.customQuality,
-          samples: state.rawSamples.map(s => ({
-            timestamp: s.timestampMs,
-            bytesPerSecond: Math.round(s.mediaBitsPerSecond / 8),
-            totalBytes: s.cumulativeMediaBytes,
-          })),
-          markers: state.markers.map(m => ({
-            timestamp: m.timestampMs,
-            category: m.type,
-            from: m.detail ? m.detail.split(' → ')[0] : null,
-            to: m.detail ? m.detail.split(' → ')[1] || m.label : m.label,
-            label: m.label,
-          })),
-          interrupted: false,
-        };
-
-        await this.upsertRecord(record);
-        this.sessions.delete(historyId);
-        state.lastSnapshot = null;
-        this.notifySessionSubscribers(historyId);
-      } finally {
-        this.finalizing.delete(historyId);
-        this.finalizePromises.delete(historyId);
-        this.stopTimerIfIdle();
-      }
-    })();
-
-    this.finalizePromises.set(historyId, promise);
-    return promise;
-  }
-
-  // ─── Public getters ─────────────────────────────────────────────────────
-
-  getActiveSessionIds(): string[] {
-    return Array.from(this.sessions.keys());
-  }
-
-  getActiveMediaSessionIds(): string[] {
-    const ids = new Set<string>();
-    for (const state of this.sessions.values()) {
-      ids.add(state.mediaSessionId);
-    }
-    return Array.from(ids);
-  }
-
-  /**
-   * Find the historyId for a given mediaSessionId.
-   * Useful for mapping from mediaSessionId-based APIs to historyId-based subscriptions.
-   */
-  findHistoryIdByMediaSessionId(mediaSessionId: string): string | null {
-    for (const [historyId, state] of this.sessions) {
-      if (state.mediaSessionId === mediaSessionId) {
-        return historyId;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Get per-viewer rate entries for a host session.
-   */
-  getViewerRates(historyId: string): ViewerRateEntry[] {
-    const state = this.sessions.get(historyId);
-    if (!state || state.role !== "host") return [];
-    return Array.from(state.viewerRates.values());
-  }
-
-  // ─── History ────────────────────────────────────────────────────────────
-
-  async getHistory(): Promise<StreamHistoryRecord[]> {
-    try {
-      const api = (window as unknown as { screenlink?: { getStreamHistory?: () => Promise<StreamHistoryRecord[]> } }).screenlink;
-      if (!api?.getStreamHistory) return [];
-      return await api.getStreamHistory();
-    } catch {
-      return [];
-    }
-  }
-
-  // ─── Crash recovery ─────────────────────────────────────────────────────
-
-  async recoverInterruptedSessions(): Promise<void> {
-    try {
-      const api = (window as unknown as {
-        screenlink?: {
-          getStreamHistory?: () => Promise<StreamHistoryRecord[]>;
-          saveStreamHistory?: (r: StreamHistoryRecord[]) => Promise<void>;
-        }
-      }).screenlink;
-      if (!api?.getStreamHistory) return;
-
-      const records = await api.getStreamHistory();
-      let changed = false;
-      for (const r of records) {
-        if (r.status === "active") {
-          r.status = "interrupted";
-          r.interrupted = true;
-          r.stoppedAt = r.lastCheckpointAt;
-          r.durationMs = r.lastCheckpointAt - r.startedAt;
-          changed = true;
-        }
-      }
-      if (changed && api.saveStreamHistory) {
-        await api.saveStreamHistory(records);
-      }
-    } catch {
-      console.warn("[StreamMetricsService] Failed to recover interrupted sessions");
-    }
-  }
-
-  // ─── Timer ──────────────────────────────────────────────────────────────
-
-  private ensureTimer(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => this.handleTick(), SAMPLE_INTERVAL_MS);
-  }
-
-  private stopTimerIfIdle(): void {
-    if (this.sessions.size === 0 && this.timer !== null) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-  }
-
-  /**
-   * Timer tick: sample all active sessions, aggregate buckets, persist periodically.
-   * Guarded by inFlight to prevent overlapping async work.
-   */
-  private handleTick(): void {
-    if (this.tickInFlight) return;
-    this.tickInFlight = true;
-
-    try {
-      this.tickCounter++;
-      const shouldPersist = this.tickCounter % PERSIST_INTERVAL_TICKS === 0;
-
-      for (const state of this.sessions.values()) {
-        this.collectSample(state);
-        if (shouldPersist) {
-          this.checkpointSession(state.historyId);
-        }
-      }
-
-      this.notifyAllSubscribers();
-      this.notifyHistoryChanged();
-    } finally {
-      this.tickInFlight = false;
-    }
-  }
-
-  /**
-   * Collect a TelemetrySample from current session state.
-   * Updates raw samples, EWMA, and aggregated buckets.
-   */
-  private collectSample(state: InternalSessionState): void {
-    const now = Date.now();
-    const monoNow = performance.now();
-
-    const prevSample = state.rawSamples.length > 0
-      ? state.rawSamples[state.rawSamples.length - 1]
-      : null;
-
-    const intervalMs = prevSample ? monoNow - prevSample.monotonicTimestampMs : SAMPLE_INTERVAL_MS;
-
-    // Build the TelemetrySample
-    const sample: TelemetrySample = {
-      timestampMs: now,
-      monotonicTimestampMs: monoNow,
-      intervalMs: Math.round(intervalMs),
-      videoBitsPerSecond: null,
-      audioBitsPerSecond: null,
-      mediaBitsPerSecond: state.lastBitsPerSecond,
-      transportBitsPerSecond: null,
-      cumulativeVideoBytes: 0,
-      cumulativeAudioBytes: 0,
-      cumulativeMediaBytes: state.totalBytes,
-      cumulativeTransportBytes: null,
-      configuredVideoBitsPerSecond: null,
-      effectiveVideoBitsPerSecond: null,
-      width: null,
-      height: null,
-      framesPerSecond: null,
-      packetLossPercent: null,
-      rttMs: null,
-      jitterMs: null,
-      state: state.state,
-      ssrc: state.lastSsrc,
-    };
-
-    state.rawSamples.push(sample);
-    if (state.rawSamples.length > MAX_RAW_SAMPLES) {
-      state.rawSamples = state.rawSamples.slice(-MAX_RAW_SAMPLES);
-    }
-
-    // ── EWMA ──
-    if (state.state === "playing" && state.lastBitsPerSecond > 0) {
-      updateEwma(state.ewma, state.lastBitsPerSecond);
-    }
-    state.ewmaSeries.push(state.ewma.value);
-    if (state.ewmaSeries.length > MAX_RAW_SAMPLES) {
-      state.ewmaSeries = state.ewmaSeries.slice(-MAX_RAW_SAMPLES);
-    }
-
-    // ── Aggregate into buckets ──
-    this.aggregateIntoSample(state.mediumBuckets, state.mediumBucketMeta, sample, MEDIUM_BUCKET_SIZE_MS, MAX_MEDIUM_BUCKETS);
-    this.aggregateIntoSample(state.longBuckets, state.longBucketMeta, sample, LONG_BUCKET_SIZE_MS, MAX_LONG_BUCKETS);
-
-    state.lastSnapshot = null;
-  }
-
-  /**
-   * Aggregate a single sample into a time-bucketed list.
-   */
-  private aggregateIntoSample(
-    buckets: AggregatedBucket[],
-    meta: Map<number, BucketMeta>,
-    sample: TelemetrySample,
-    bucketSize: number,
-    maxBuckets: number,
-  ): void {
-    const bucketStart = Math.floor(sample.monotonicTimestampMs / bucketSize) * bucketSize;
-
-    // Compute delta bytes — carry forward previous bucket's last position
-    const bucketMeta = meta.get(bucketStart);
-    const prevLastBytes = bucketMeta
-      ? bucketMeta.lastCumulativeBytes
-      : buckets.length > 0
-        ? (meta.get(buckets[buckets.length - 1].startTimestampMs)?.lastCumulativeBytes ?? 0)
-        : 0;
-
-    const deltaBytes = Math.max(0, sample.cumulativeMediaBytes - prevLastBytes);
-
-    const existingBucket = buckets.length > 0 && buckets[buckets.length - 1].startTimestampMs === bucketStart
-      ? buckets[buckets.length - 1]
-      : null;
-
-    if (existingBucket) {
-      // Update existing bucket — accumulate deltas
-      const count = existingBucket.sampleCount;
-      existingBucket.bucketTotalBytes += deltaBytes;
-      existingBucket.sampleCount++;
-      // Use the larger of the monotonic end-time or the existing boundary
-      existingBucket.endTimestampMs = Math.max(existingBucket.endTimestampMs, sample.monotonicTimestampMs);
-
-      // Compute weighted average from actual byte delta and total elapsed
-      const elapsedMs = existingBucket.endTimestampMs - existingBucket.startTimestampMs;
-      existingBucket.weightedAverageBitsPerSecond =
-        elapsedMs > 0 ? Math.round((existingBucket.bucketTotalBytes * 8000) / elapsedMs) : sample.mediaBitsPerSecond;
-
-      existingBucket.maxBitsPerSecond = Math.max(existingBucket.maxBitsPerSecond, sample.mediaBitsPerSecond);
-      existingBucket.minBitsPerSecond = Math.min(existingBucket.minBitsPerSecond, sample.mediaBitsPerSecond);
-      existingBucket.width = sample.width ?? existingBucket.width;
-      existingBucket.height = sample.height ?? existingBucket.height;
-      existingBucket.framesPerSecond = sample.framesPerSecond ?? existingBucket.framesPerSecond;
-      existingBucket.state = sample.state;
-
-      // Update meta for next sample
-      if (bucketMeta) {
-        bucketMeta.lastCumulativeBytes = sample.cumulativeMediaBytes;
-      }
-    } else {
-      // Create new bucket (finalize previous if needed)
-      const newBucket: AggregatedBucket = {
-        startTimestampMs: bucketStart,
-        endTimestampMs: bucketStart + bucketSize,
-        minBitsPerSecond: sample.mediaBitsPerSecond,
-        maxBitsPerSecond: sample.mediaBitsPerSecond,
-        weightedAverageBitsPerSecond: sample.mediaBitsPerSecond,
-        bucketTotalBytes: deltaBytes,
-        sampleCount: 1,
-        width: sample.width,
-        height: sample.height,
-        framesPerSecond: sample.framesPerSecond,
-        state: sample.state,
-      };
-
-      buckets.push(newBucket);
-      meta.set(bucketStart, { lastCumulativeBytes: sample.cumulativeMediaBytes });
-
-      // Trim old buckets
-      while (buckets.length > maxBuckets) {
-        const removed = buckets.shift()!;
-        meta.delete(removed.startTimestampMs);
-      }
-    }
-  }
-
-  // ─── Bucket timestamp correction ─────────────────────────────────────
-
-  /**
-   * Convert monotonic bucket timestamps to epoch timestamps by applying
-   * the monotonic→epoch offset from session start.
-   */
-  private epochAdjustBuckets(
-    state: InternalSessionState,
-    buckets: AggregatedBucket[],
-  ): AggregatedBucket[] {
-    if (buckets.length === 0) return [];
-    const offset = state.startedAt - state.startedAtMonotonic;
-    return buckets.map((b) => ({
-      ...b,
-      startTimestampMs: b.startTimestampMs + offset,
-      endTimestampMs: b.endTimestampMs + offset,
-    }));
-  }
-
-  // ─── Snapshot building ──────────────────────────────────────────────────
-
-  private buildSnapshot(state: InternalSessionState): BandwidthSnapshot {
-    const now = Date.now();
-    const monoNow = performance.now();
-    const durationMs = monoNow - state.startedAtMonotonic;
-    const activeDurationMs = Math.max(0, durationMs - state.totalPausedMs);
-    const totalObservedBits = state.totalBytes * 8;
-
-    // Peak rate from raw samples
-    let peakBitsPerSecond = 0;
-    for (const s of state.rawSamples) {
-      if (s.mediaBitsPerSecond > peakBitsPerSecond) {
-        peakBitsPerSecond = s.mediaBitsPerSecond;
-      }
-    }
-
-    const latestSample = state.rawSamples[state.rawSamples.length - 1];
-    const currentBitsPerSecond = latestSample?.mediaBitsPerSecond ?? state.lastBitsPerSecond;
-
-    const averageBitsPerSecond = activeDurationMs > 0
-      ? Math.round(totalObservedBits / (activeDurationMs / 1000))
-      : 0;
-
-    // Per-viewer rates (host only)
-    const viewerRates: ViewerRateEntry[] = [];
-    if (state.role === "host") {
-      for (const entry of state.viewerRates.values()) {
-        viewerRates.push({ ...entry });
-      }
-    }
-
-    return Object.freeze({
-      rawSamples: Object.freeze([...state.rawSamples]),
-      mediumBuckets: Object.freeze(this.epochAdjustBuckets(state, state.mediumBuckets)),
-      longBuckets: Object.freeze(this.epochAdjustBuckets(state, state.longBuckets)),
-      ewmaSeries: Object.freeze([...state.ewmaSeries]),
-      currentBitsPerSecond,
-      averageBitsPerSecond,
-      peakBitsPerSecond,
-      totalBytes: state.totalBytes,
-      durationMs,
-      activeDurationMs,
-      configuredBitsPerSecond: null,
-      effectiveBitsPerSecond: null,
-      state: state.state,
-      historyId: state.historyId,
-      role: state.role as "host" | "viewer",
-      viewerRates: Object.freeze(viewerRates),
-      markers: Object.freeze([...state.markers]),
-    });
-  }
-
-  // ─── Subscriber notification ────────────────────────────────────────────
-
-  private notifySessionSubscribers(historyId: string): void {
-    const cbs = this.subscribers.get(historyId);
-    if (cbs) {
-      for (const cb of cbs) {
-        try { cb(); } catch { /* swallow subscriber errors */ }
-      }
-    }
-  }
-
-  private notifyAllSubscribers(): void {
-    for (const [historyId] of this.subscribers) {
-      if (this.sessions.has(historyId)) {
-        this.notifySessionSubscribers(historyId);
-      }
-    }
-  }
-
-  private notifyHistoryChanged(): void {
-    this.onHistoryChanged?.();
-  }
-
-  // ─── Persistence ────────────────────────────────────────────────────────
-
-  private buildRecord(state: InternalSessionState): StreamHistoryRecord {
-    const now = Date.now();
-    const durationMs = now - state.startedAt;
-    return {
-      historyId: state.historyId,
-      role: state.role,
-      status: state.status,
-      mediaSessionId: state.mediaSessionId,
-      logicalStreamId: state.logicalStreamId,
-      groupId: state.groupId,
-      groupName: state.groupName,
-      remoteDisplayName: state.remoteDisplayName,
-      startedAt: state.startedAt,
-      lastCheckpointAt: now,
-      stoppedAt: null,
-      durationMs,
-      totalBytes: state.totalBytes,
-      averageBytesPerSecond: durationMs > 0 ? Math.round((state.totalBytes * 1000) / durationMs) : 0,
-      presetName: state.presetName,
-      customQuality: state.customQuality,
-      samples: state.rawSamples.map(s => ({
-        timestamp: s.timestampMs,
-        bytesPerSecond: Math.round(s.mediaBitsPerSecond / 8),
-        totalBytes: s.cumulativeMediaBytes,
-      })),
-      markers: state.markers.map(m => ({
-        timestamp: m.timestampMs,
-        category: m.type,
-        from: m.detail ? m.detail.split(' → ')[0] : null,
-        to: m.detail ? m.detail.split(' → ')[1] || m.label : m.label,
-        label: m.label,
-      })),
-      interrupted: false,
-    };
-  }
-
-  private async upsertRecord(record: StreamHistoryRecord): Promise<void> {
-    try {
-      const api = (
-        window as unknown as {
-          screenlink?: {
-            upsertStreamHistory?: (record: unknown) => Promise<void>;
-            getStreamHistory?: () => Promise<StreamHistoryRecord[]>;
-            saveStreamHistory?: (r: StreamHistoryRecord[]) => Promise<void>;
-          };
-        }
-      ).screenlink;
-
-      if (api?.upsertStreamHistory) {
-        await api.upsertStreamHistory(record);
-      } else if (api?.getStreamHistory && api?.saveStreamHistory) {
-        const existing = await api.getStreamHistory();
-        const idx = existing.findIndex((r: StreamHistoryRecord) => r.historyId === record.historyId);
-        if (idx >= 0) existing[idx] = record;
-        else existing.push(record);
-        await api.saveStreamHistory(existing);
-      }
-    } catch {
-      console.warn("[StreamMetricsService] Failed to upsert history record");
-    }
-  }
-
-  // ─── ID generation ──────────────────────────────────────────────────────
-
-  private generateId(): string {
-    if (typeof globalThis !== "undefined" && typeof globalThis.crypto?.randomUUID === "function") {
-      return globalThis.crypto.randomUUID();
-    }
-    return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-  }
-}
-
-// ─── Empty snapshot factory ────────────────────────────────────────────────
-
-function emptySnapshot(historyId: string): BandwidthSnapshot {
-  return Object.freeze({
-    rawSamples: Object.freeze([]),
-    mediumBuckets: Object.freeze([]),
-    longBuckets: Object.freeze([]),
-    ewmaSeries: Object.freeze([]),
-    currentBitsPerSecond: 0,
-    averageBitsPerSecond: 0,
-    peakBitsPerSecond: 0,
-    totalBytes: 0,
-    durationMs: 0,
-    activeDurationMs: 0,
-    configuredBitsPerSecond: null,
-    effectiveBitsPerSecond: null,
-    state: "paused" as TelemetryState,
-    historyId,
-    role: "viewer" as const,
-    viewerRates: Object.freeze([]),
-    markers: Object.freeze([]),
-  });
 }

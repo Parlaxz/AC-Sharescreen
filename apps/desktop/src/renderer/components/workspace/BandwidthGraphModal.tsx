@@ -60,23 +60,24 @@ const TIME_RANGES = [
 ] as const;
 
 const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
-  rawSamples: Object.freeze([]),
-  mediumBuckets: Object.freeze([]),
-  longBuckets: Object.freeze([]),
-  ewmaSeries: Object.freeze([]),
-  currentBitsPerSecond: 0,
-  averageBitsPerSecond: 0,
-  peakBitsPerSecond: 0,
-  totalBytes: 0,
-  durationMs: 0,
-  activeDurationMs: 0,
-  configuredBitsPerSecond: null,
-  effectiveBitsPerSecond: null,
-  state: "paused" as TelemetryState,
   historyId: "",
   role: "viewer" as const,
-  viewerRates: Object.freeze([]),
-  markers: Object.freeze([]),
+  aggregate: Object.freeze({
+    rawSamples: Object.freeze([]),
+    mediumBuckets: Object.freeze([]),
+    longBuckets: Object.freeze([]),
+    markers: Object.freeze([]),
+    currentBitsPerSecond: 0,
+    averageBitsPerSecond: 0,
+    peakBitsPerSecond: 0,
+    totalBytes: 0,
+    durationMs: 0,
+    activeDurationMs: 0,
+    configuredBitsPerSecond: null,
+    effectiveBitsPerSecond: null,
+    state: "paused" as TelemetryState,
+  }),
+  connections: Object.freeze([]),
 });
 
 // ─── Props ──────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ function resolveHistoryId(
 // ─── 30-second average from medium buckets ──────────────────────────────────
 
 function compute30sAverage(snapshot: BandwidthSnapshot): number {
-  const buckets = snapshot.mediumBuckets;
+  const buckets = snapshot.aggregate.mediumBuckets;
   if (buckets.length === 0) return 0;
 
   // Last 6 medium buckets ≈ 30 seconds (5s each)
@@ -154,7 +155,7 @@ function getChartData(
   rangeMs: number,
   showRaw: boolean,
 ): ChartDataPoint[] {
-  const { rawSamples, mediumBuckets, longBuckets, ewmaSeries } = snapshot;
+  const { rawSamples, mediumBuckets, longBuckets } = snapshot.aggregate;
 
   if (
     rawSamples.length === 0 &&
@@ -214,7 +215,7 @@ function getChartData(
 function getConnectionHealthData(
   snapshot: BandwidthSnapshot,
 ): HealthDataPoint[] {
-  const { rawSamples } = snapshot;
+  const { rawSamples } = snapshot.aggregate;
   if (rawSamples.length === 0) return [];
 
   const baseTime = rawSamples[0].timestampMs;
@@ -501,8 +502,8 @@ export function BandwidthGraphModal({
   const avg30s = useMemo(() => compute30sAverage(snapshot), [snapshot]);
   const hourlyEstimate = useMemo(
     () =>
-      estimateHourlyBytes(snapshot.totalBytes, snapshot.activeDurationMs),
-    [snapshot.totalBytes, snapshot.activeDurationMs],
+      estimateHourlyBytes(snapshot.aggregate.totalBytes, snapshot.aggregate.activeDurationMs),
+    [snapshot.aggregate.totalBytes, snapshot.aggregate.activeDurationMs],
   );
 
   // Chart data
@@ -518,44 +519,44 @@ export function BandwidthGraphModal({
 
   // Markers
   const markerClusters = useMemo(
-    () => clusterMarkers(snapshot.markers),
-    [snapshot.markers],
+    () => clusterMarkers(snapshot.aggregate.markers),
+    [snapshot.aggregate.markers],
   );
 
   // Only show markers when raw samples are available (correct wall-clock alignment)
   const visibleMarkers = useMemo(() => {
-    if (snapshot.rawSamples.length === 0) return [];
+    if (snapshot.aggregate.rawSamples.length === 0) return [];
     const now = Date.now();
     const cutoff = timeRange === Infinity ? 0 : now - timeRange;
     return markerClusters.filter((cluster) =>
       cluster.some((m) => m.timestampMs >= cutoff),
     );
-  }, [markerClusters, timeRange, snapshot.rawSamples.length]);
+  }, [markerClusters, timeRange, snapshot.aggregate.rawSamples.length]);
 
   // Base wall-clock time for marker X-axis placement
   const baseTime = useMemo(() => {
-    if (snapshot.rawSamples.length > 0)
-      return snapshot.rawSamples[0].timestampMs;
+    if (snapshot.aggregate.rawSamples.length > 0)
+      return snapshot.aggregate.rawSamples[0].timestampMs;
     return Date.now();
-  }, [snapshot.rawSamples]);
+  }, [snapshot.aggregate.rawSamples]);
 
   // Viewer selector items (host mode)
   const viewerOptions = useMemo(() => {
-    if (role !== "host" || snapshot.viewerRates.length === 0) return [];
+    if (role !== "host" || snapshot.connections.length === 0) return [];
     return [
       { value: "__all__", label: "All Viewers" },
-      ...snapshot.viewerRates.map((v) => ({
-        value: v.viewerDeviceId,
-        label: v.displayName,
+      ...snapshot.connections.map((v) => ({
+        value: v.viewerDeviceId ?? v.connectionId,
+        label: v.displayName ?? v.connectionId,
       })),
     ];
-  }, [role, snapshot.viewerRates]);
+  }, [role, snapshot.connections]);
 
   // Determine if we have any data
   const hasData =
-    snapshot.rawSamples.length > 0 ||
-    snapshot.mediumBuckets.length > 0 ||
-    snapshot.longBuckets.length > 0;
+    snapshot.aggregate.rawSamples.length > 0 ||
+    snapshot.aggregate.mediumBuckets.length > 0 ||
+    snapshot.aggregate.longBuckets.length > 0;
 
   const content = (
     <Fragment>

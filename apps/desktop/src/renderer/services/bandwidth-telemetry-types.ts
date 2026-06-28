@@ -4,61 +4,78 @@
  * Canonical types for ScreenLink bandwidth telemetry.
  *
  * CONTRACT:
- *   - All rate fields use bitsPerSecond (not bps, which is ambiguous).
- *   - All cumulative fields use Bytes (not KB, MB).
- *   - Monotonic clock (performance.now()) drives rate calculations.
- *   - Date.now() used only for wall-clock display timestamps.
+ *   - All rate fields use bitsPerSecond.
+ *   - All cumulative fields use bytes.
+ *   - All chart timestamps are epoch milliseconds.
+ *   - All interval calculations use monotonic milliseconds.
  *   - Unavailable values are null, never 0 (0 means measured zero).
- *   - Inbound RTP media bytes are not exact ISP-billed usage.
  */
 
-// ─── Sample ─────────────────────────────────────────────────────────────────
+// ─── Counter identity ──────────────────────────────────────────────────────
+
+export interface CounterIdentity {
+  reportId: string;
+  ssrc: number | null;
+  trackIdentifier: string | null;
+  mid: string | null;
+}
+
+// ─── Media counter observation ─────────────────────────────────────────────
+
+export interface MediaCounterObservation {
+  identity: CounterIdentity;
+  cumulativeBytes: number;
+}
+
+// ─── Peer telemetry observation ────────────────────────────────────────────
 
 export type TelemetryState = "playing" | "paused" | "reconnecting";
 
-export interface TelemetrySample {
-  /** Wall-clock time for display (Date.now()) */
+export interface PeerTelemetryObservation {
   timestampMs: number;
-  /** Monotonic time for rate calculations (performance.now()) */
   monotonicTimestampMs: number;
-  /** Real elapsed wall-clock since previous sample */
-  intervalMs: number;
-
-  /** Media-level bitrates (RTP payload) */
-  videoBitsPerSecond: number | null;
-  audioBitsPerSecond: number | null;
-  /** Sum of videoBitsPerSecond + audioBitsPerSecond */
-  mediaBitsPerSecond: number;
-  /** Transport-level estimate (candidate-pair), or null */
-  transportBitsPerSecond: number | null;
-
-  /** Cumulative RTP byte counters */
-  cumulativeVideoBytes: number;
-  cumulativeAudioBytes: number;
-  cumulativeMediaBytes: number;
-  /** Transport-level cumulative bytes, or null */
-  cumulativeTransportBytes: number | null;
-
-  /** Configured encoder target, or null */
+  video: MediaCounterObservation | null;
+  audio: MediaCounterObservation | null;
+  transportCumulativeBytes: number | null;
   configuredVideoBitsPerSecond: number | null;
-  /** Effective sender-side limit (encoder + constraints), or null */
   effectiveVideoBitsPerSecond: number | null;
-
-  /** Video resolution / FPS */
   width: number | null;
   height: number | null;
   framesPerSecond: number | null;
-
-  /** Connection quality */
+  decodedFramesPerSecond: number | null;
+  droppedFrames: number | null;
+  freezeCount: number | null;
+  packetsReceived: number | null;
+  packetsLost: number | null;
   packetLossPercent: number | null;
   rttMs: number | null;
   jitterMs: number | null;
-
-  /** Session state at sample time */
+  codec: string | null;
+  connectionType: "direct" | "turn" | null;
   state: TelemetryState;
+}
 
-  /** SSRC for counter-identity tracking (optional) */
-  ssrc: number | null;
+// ─── Telemetry sample (raw, 1s) ────────────────────────────────────────────
+
+export interface TelemetrySample {
+  timestampMs: number;
+  monotonicTimestampMs: number;
+  intervalMs: number;
+  mediaBitsPerSecond: number;
+  transportBitsPerSecond: number | null;
+  cumulativeMediaBytes: number;
+  cumulativeTransportBytes: number | null;
+  configuredVideoBitsPerSecond: number | null;
+  effectiveVideoBitsPerSecond: number | null;
+  width: number | null;
+  height: number | null;
+  framesPerSecond: number | null;
+  packetLossPercent: number | null;
+  rttMs: number | null;
+  jitterMs: number | null;
+  codec: string | null;
+  connectionType: "direct" | "turn" | null;
+  state: TelemetryState;
 }
 
 // ─── Aggregated bucket ──────────────────────────────────────────────────────
@@ -66,60 +83,31 @@ export interface TelemetrySample {
 export interface AggregatedBucket {
   startTimestampMs: number;
   endTimestampMs: number;
+  intervalMs: number;
   minBitsPerSecond: number;
   maxBitsPerSecond: number;
-  /** Byte-accurate weighted average = totalBytes * 8000 / totalElapsedMs */
   weightedAverageBitsPerSecond: number;
-  /** Cumulative bytes observed in this bucket */
-  bucketTotalBytes: number;
-  /** Number of raw samples collapsed into this bucket */
-  sampleCount: number;
-  /** Latest metadata from the period (for tooltip) */
+  byteDelta: number;
   width: number | null;
   height: number | null;
   framesPerSecond: number | null;
   state: TelemetryState;
+  codec: string | null;
+  connectionType: "direct" | "turn" | null;
 }
 
-// ─── Snapshot (for React subscriptions) ──────────────────────────────────────
-
-export interface BandwidthSnapshot {
-  /** Immutable recent raw samples (1s intervals, latest 5 min) */
-  rawSamples: readonly TelemetrySample[];
-  /** 5-second aggregates for latest 30 min */
-  mediumBuckets: readonly AggregatedBucket[];
-  /** 30-second aggregates for full session */
-  longBuckets: readonly AggregatedBucket[];
-  /** Three-second EWMA series (one per raw sample, starts after 3 samples) */
-  ewmaSeries: readonly number[];
-
-  /** Summary values */
-  currentBitsPerSecond: number;
-  averageBitsPerSecond: number;
-  peakBitsPerSecond: number;
-  totalBytes: number;
-  durationMs: number;
-  activeDurationMs: number;
-  configuredBitsPerSecond: number | null;
-  effectiveBitsPerSecond: number | null;
-  state: TelemetryState;
-
-  /** Session metadata */
-  historyId: string;
-  role: "host" | "viewer";
-
-  /** Latest per-viewer rates (host only) */
-  viewerRates: readonly ViewerRateEntry[];
-
-  /** Markers */
-  markers: readonly TelemetryMarker[];
-}
+// ─── Markers ────────────────────────────────────────────────────────────────
 
 export interface TelemetryMarker {
   id: string;
+  historyId: string;
+  connectionId: string | null;
+  viewerDeviceId: string | null;
   timestampMs: number;
   type: MarkerType;
   label: string;
+  from: string | null;
+  to: string;
   detail: string | null;
 }
 
@@ -134,10 +122,71 @@ export type MarkerType =
   | "resume"
   | "reconnect"
   | "source-switch"
+  | "stream-switch"
   | "viewer-join"
   | "viewer-leave"
   | "enhancement"
+  | "quality"
+  | "fallback"
   | "other";
+
+// ─── Telemetry series snapshot ──────────────────────────────────────────────
+
+export interface TelemetrySeriesSnapshot {
+  rawSamples: readonly TelemetrySample[];
+  mediumBuckets: readonly AggregatedBucket[];
+  longBuckets: readonly AggregatedBucket[];
+  markers: readonly TelemetryMarker[];
+  currentBitsPerSecond: number;
+  averageBitsPerSecond: number;
+  peakBitsPerSecond: number;
+  totalBytes: number;
+  durationMs: number;
+  activeDurationMs: number;
+  configuredBitsPerSecond: number | null;
+  effectiveBitsPerSecond: number | null;
+  state: TelemetryState;
+}
+
+// ─── Viewer reported status ─────────────────────────────────────────────────
+
+export interface ViewerReportedStatus {
+  videoBitsPerSecond: number | null;
+  audioBitsPerSecond: number | null;
+  width: number | null;
+  height: number | null;
+  framesPerSecond: number | null;
+  decodedFramesPerSecond: number | null;
+  droppedFrames: number | null;
+  packetsReceived: number | null;
+  packetsLost: number | null;
+  packetLossPercent: number | null;
+  rttMs: number | null;
+  jitterMs: number | null;
+  codec: string | null;
+  connectionType: "direct" | "turn" | null;
+  state: TelemetryState;
+}
+
+// ─── Connection telemetry snapshot ──────────────────────────────────────────
+
+export interface ConnectionTelemetrySnapshot extends TelemetrySeriesSnapshot {
+  connectionId: string;
+  viewerDeviceId: string | null;
+  displayName: string | null;
+  receivedStatus: ViewerReportedStatus | null;
+}
+
+// ─── Bandwidth snapshot (root) ──────────────────────────────────────────────
+
+export interface BandwidthSnapshot {
+  historyId: string;
+  role: "host" | "viewer";
+  aggregate: TelemetrySeriesSnapshot;
+  connections: readonly ConnectionTelemetrySnapshot[];
+}
+
+// ─── Viewer rate entry (for viewer selector) ────────────────────────────────
 
 export interface ViewerRateEntry {
   viewerDeviceId: string;
@@ -152,20 +201,36 @@ export interface ViewerRateEntry {
   state: TelemetryState;
 }
 
+// ─── Persistence record (schema v2) ─────────────────────────────────────────
+
+export interface PersistenceRecordV2 {
+  schemaVersion: 2;
+  historyId: string;
+  role: "host" | "viewer";
+  startedAt: number;
+  stoppedAt: number | null;
+  durationMs: number;
+  activeDurationMs: number;
+  totalBytes: number;
+  peakBitsPerSecond: number;
+  configuredBitsPerSecond: number | null;
+  effectiveBitsPerSecond: number | null;
+  rawSamples: TelemetrySample[];
+  mediumBuckets: AggregatedBucket[];
+  longBuckets: AggregatedBucket[];
+  connections: ConnectionTelemetrySnapshot[];
+  markers: TelemetryMarker[];
+  status: "active" | "completed" | "interrupted";
+  groupId?: string;
+  groupName?: string;
+  mediaSessionId?: string;
+}
+
 // ─── Subscription ───────────────────────────────────────────────────────────
 
 export type SnapshotSubscriber = (snapshot: BandwidthSnapshot) => void;
 
 // ─── EWMA ───────────────────────────────────────────────────────────────────
-
-export interface EwmaState {
-  /** The smoothed value (bits per second) */
-  value: number;
-  /** Last raw sample value used for update */
-  lastRaw: number;
-  /** Whether the EWMA has been initialized */
-  initialized: boolean;
-}
 
 export function createEwma(alpha: number): { value: number; lastRaw: number; initialized: boolean; alpha: number } {
   return { value: 0, lastRaw: 0, initialized: false, alpha };
@@ -188,22 +253,12 @@ export function updateEwma(
 
 // ─── Formatting helpers ─────────────────────────────────────────────────────
 
-/**
- * Format a bitrate for display.
- * kbps below 1 Mbps, Mbps at or above 1 Mbps.
- */
 export function fmtBitRate(bitsPerSecond: number): string {
   if (bitsPerSecond <= 0) return "0 kbps";
-  if (bitsPerSecond < 1_000_000) {
-    return Math.round(bitsPerSecond / 1000) + " kbps";
-  }
+  if (bitsPerSecond < 1_000_000) return Math.round(bitsPerSecond / 1000) + " kbps";
   return (bitsPerSecond / 1_000_000).toFixed(1) + " Mbps";
 }
 
-/**
- * Format a byte rate for display.
- * B/s, KB/s, or MB/s.
- */
 export function fmtByteRate(bytesPerSecond: number): string {
   if (bytesPerSecond <= 0) return "0 B/s";
   if (bytesPerSecond < 1024) return Math.round(bytesPerSecond) + " B/s";
@@ -213,10 +268,6 @@ export function fmtByteRate(bytesPerSecond: number): string {
   return mb.toFixed(1) + " MB/s";
 }
 
-/**
- * Format cumulative bytes for display.
- * KB, MB, or GB.
- */
 export function fmtCumulativeBytes(bytes: number): string {
   if (bytes <= 0) return "0 KB";
   const kb = bytes / 1024;
@@ -227,9 +278,6 @@ export function fmtCumulativeBytes(bytes: number): string {
   return gb.toFixed(1) + " GB";
 }
 
-/**
- * Estimate hourly usage from totalBytes and activeDurationMs.
- */
 export function estimateHourlyBytes(totalBytes: number, activeDurationMs: number): number {
   if (activeDurationMs <= 0 || totalBytes <= 0) return 0;
   const hours = activeDurationMs / 3_600_000;
