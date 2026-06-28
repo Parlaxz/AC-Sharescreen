@@ -29,6 +29,7 @@ import { cn } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 import { getRuntime } from "@/services/phase3-runtime";
 import { stopShare } from "@/services/share-coordinator";
+import { navigateToGroupOverview } from "@/services/group-navigation";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 import { useHostViewerDiagnostics, type ViewerRow } from "@/hooks/use-host-viewer-diagnostics";
 import { Separator } from "@/components/ui/separator";
@@ -222,8 +223,6 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const connectionClass = getConnectionClass(connectionLabel);
   const liveDuration = useMemo(() => formatLiveDuration(sessionDuration), [sessionDuration]);
 
-  const navigate = useStore((s) => s.navigate);
-
   const openSourcePicker = useCallback(async () => {
     setSwitchSourceOpen(true);
     setSelectedSwitchSource(null);
@@ -285,8 +284,8 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const handleStopSharing = useCallback(async () => {
     setStopConfirmOpen(false);
     await stopShare();
-    navigate("overview");
-  }, [navigate]);
+    navigateToGroupOverview();
+  }, []);
 
   const handlePreview = useCallback(() => {
     const s = useStore.getState();

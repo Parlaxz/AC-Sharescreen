@@ -12,7 +12,6 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
 
-
 export function getInitials(name: string, maxParts = 2): string {
   if (!name || name.trim() == "") return "?";
   return name

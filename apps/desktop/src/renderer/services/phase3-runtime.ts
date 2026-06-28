@@ -46,6 +46,14 @@ export class Phase3Runtime {
   /** Host quality limits loaded from persisted settings. Default allows requests. */
   private _hostQualityLimits: HostQualityLimits = createDefaultHostQualityLimits();
 
+  /** Minimum interval between manual refreshes per group (milliseconds). */
+  static REFRESH_COOLDOWN_MS = 3000;
+
+  /** Last refresh timestamp per group (for cooldown). */
+  private refreshCooldowns = new Map<string, number>();
+  /** In-flight refresh promise per group (for deduplication). */
+  private refreshInFlight = new Map<string, Promise<void>>();
+
   /**
    * Tracks which member device IDs have already produced a "joined"
    * notification per group. Prevents duplicate joined notifications
@@ -439,19 +447,54 @@ export class Phase3Runtime {
   /**
    * Manually request a full group sync for the given group.
    * Triggers anti-entropy for group state (name, members, quality)
-   * and requests stream state from all connected peers.
+   * and requests state from all connected peers.
    * Useful when the UI appears stale and the user wants to refresh.
+   *
+   * Rate-limited per group: calls within REFRESH_COOLDOWN_MS are
+   * deduplicated (returns in-flight promise) or suppressed if no
+   * refresh is in-flight.
+   *
+   * Non-async so we can return the in-flight promise reference for
+   * deduplication (async functions always create a new outer promise).
    */
-  async requestGroupSync(groupId: string): Promise<void> {
+  requestGroupSync(groupId: string): Promise<void> | void {
+    if (this.destroyed) return;
+
+    // In-flight deduplication: return the active promise if one exists
+    const inFlight = this.refreshInFlight.get(groupId);
+    if (inFlight) return inFlight;
+
+    // Cooldown: skip if the last refresh was too recent
+    const now = Date.now();
+    const last = this.refreshCooldowns.get(groupId) ?? 0;
+    if (now - last < Phase3Runtime.REFRESH_COOLDOWN_MS) return;
+
+    const promise = this.doRequestGroupSync(groupId).finally(() => {
+      this.refreshCooldowns.set(groupId, Date.now());
+      this.refreshInFlight.delete(groupId);
+    });
+    this.refreshInFlight.set(groupId, promise);
+    return promise;
+  }
+
+  /**
+   * Execute the actual refresh work (not rate-limited).
+   * Broadcasts anti-entropy summary and actively requests
+   * group + stream state from all connected peers.
+   */
+  private async doRequestGroupSync(groupId: string): Promise<void> {
     if (this.destroyed) return;
 
     // 1) Trigger group state anti-entropy (name/member/quality sync)
     await this.syncService.requestSync(groupId);
 
-    // 2) Request stream state from all connected peers
+    // 2) Actively request state from all connected peers.
+    //    Sends both group.state.request (explicit peer state push)
+    //    and stream.state.request (active stream discovery).
     const conn = this.connManager.getConnection(groupId);
     if (conn && conn.state === "connected") {
       for (const peerUuid of conn.connectedPeers) {
+        void conn.sendToPeer(peerUuid, { type: "group.state.request" }).catch(() => {});
         void conn.sendToPeer(peerUuid, { type: "stream.state.request" }).catch(() => {});
       }
     }

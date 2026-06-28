@@ -65,6 +65,7 @@ import {
   type SessionQualityOverride,
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
+import { getRuntime } from "@/services/phase3-runtime";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 import {
   QualityEditorFields,
@@ -498,6 +499,16 @@ export function ShareSetup() {
       const message =
         err instanceof Error ? err.message : "Unknown error";
       toast.error(`Sharing failed: ${message}`);
+      setOpenShareSetup(false);
+      // Fire-and-forget refresh so the group overview or host dashboard
+      // shows up-to-date state when the user returns to it.
+      const refreshGroupId = useStore.getState().selectedGroupId;
+      if (refreshGroupId) {
+        const runtime = getRuntime();
+        if (runtime) {
+          void runtime.requestGroupSync(refreshGroupId);
+        }
+      }
     } finally {
       setStartingShare(false);
     }

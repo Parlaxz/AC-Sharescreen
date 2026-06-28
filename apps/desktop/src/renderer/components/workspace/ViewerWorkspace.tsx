@@ -46,6 +46,7 @@ import {
 } from "./viewer/viewer-quality-helpers.js";
 import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
+import { navigateToGroupOverview } from "@/services/group-navigation";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
 import type { ProcessorState, ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
 import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
@@ -439,9 +440,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
     }
 
-    // 6) Navigate back to group overview
-    navigate("overview");
-  }, [setIsViewing, setViewStatus, isFullscreen, navigate]);
+    // 6) Navigate back to group overview with refresh
+    navigateToGroupOverview();
+  }, [setIsViewing, setViewStatus, isFullscreen]);
 
   const handleToggleFullscreen = useCallback(async () => {
     const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean>; onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void } }).screenlink;
@@ -1091,9 +1092,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           // Auto-navigate to overview after short delay
           if (endTimer) clearTimeout(endTimer);
           endTimer = setTimeout(() => {
-            const s = useStore.getState();
-            s.setIsViewing(false);
-            s.navigate("overview");
+            useStore.getState().setIsViewing(false);
+            navigateToGroupOverview();
           }, 4000);
           return;
         }
@@ -1109,11 +1109,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         }
         setViewStatus("ended");
 
-        if (endTimer) clearTimeout(endTimer);
+          if (endTimer) clearTimeout(endTimer);
         endTimer = setTimeout(() => {
-          const s = useStore.getState();
-          s.setIsViewing(false);
-          s.navigate("overview");
+          useStore.getState().setIsViewing(false);
+          navigateToGroupOverview();
         }, 4000);
       }
     });
