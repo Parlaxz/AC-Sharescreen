@@ -84,11 +84,12 @@ const allControls: ViewerImageEnhancementSettings = {
   enabled: true,
   scalingAlgorithm: "bicubic",
   fsrTargetScale: "auto",
+  fsrFinalScaler: "bicubic",
   sharpeningStrength: 0.77,
   noiseProtection: 0.66,
   compressionCleanup: 0.55,
   debanding: 0.44,
-  _schemaVersion: 2,
+  _schemaVersion: 3,
 };
 
 describe("WebGL2ViewerImageBackend resource tracking", () => {
@@ -667,6 +668,376 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(gl.useProgram).not.toHaveBeenCalledWith("bicubicProg");
     expect(gl.useProgram).not.toHaveBeenCalledWith("easuProg");
   });
+
+  // ─── Lanczos routing ──────────────────────────────────────────────
+
+  it("Lanczos algorithm: uses lanczosProgram for scaling", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.lanczosProgram = "lanczosProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.lanczosUniforms = {
+      u_sourceTexture: "lanczos.source",
+      u_sourceSize: "lanczos.sourceSize",
+      u_outputSize: "lanczos.outputSize",
+      u_antiRinging: "lanczos.antiRinging",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "lanczos",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+    expect(gl.useProgram).toHaveBeenCalledWith("lanczosProg");
+    expect(gl.useProgram).not.toHaveBeenCalledWith("bicubicProg");
+  });
+
+  it("Lanczos anti-ringing is set to 0.4", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.lanczosProgram = "lanczosProg";
+    backend.lanczosUniforms = {
+      u_sourceTexture: "lanczos.source",
+      u_sourceSize: "lanczos.sourceSize",
+      u_outputSize: "lanczos.outputSize",
+      u_antiRinging: "lanczos.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "lanczos",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+    });
+
+    backend.processFrame(createReadyVideo(640, 360));
+    expect(gl.uniform1f).toHaveBeenCalledWith("lanczos.antiRinging", 0.4);
+  });
+
+  // ─── FSR final scaler routing ─────────────────────────────────────
+
+  it("FSR with fsrFinalScaler lanczos uses lanczosProgram for final pass", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.lanczosProgram = "lanczosProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.lanczosUniforms = {
+      u_sourceTexture: "lanczos.source",
+      u_sourceSize: "lanczos.sourceSize",
+      u_outputSize: "lanczos.outputSize",
+      u_antiRinging: "lanczos.antiRinging",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.lastEasuTargetWidth = 1280;
+    backend.lastEasuTargetHeight = 720;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+    backend.lastScaleWidth = 1920;
+    backend.lastScaleHeight = 1080;
+    backend.scaleTexture = "scaleTex";
+    backend.scaleFBO = "scaleFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      fsrFinalScaler: "lanczos",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+      fsrTargetScale: "auto",
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+    expect(gl.useProgram).toHaveBeenCalledWith("lanczosProg");
+    const bicubicCalls = gl.useProgram.mock.calls.filter(
+      (call: string[]) => call[0] === "bicubicProg"
+    );
+    expect(bicubicCalls.length).toBe(0);
+  });
+
+  it("FSR with fsrFinalScaler bicubic uses bicubicProgram for final pass", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.lanczosProgram = "lanczosProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.lanczosUniforms = {
+      u_sourceTexture: "lanczos.source",
+      u_sourceSize: "lanczos.sourceSize",
+      u_outputSize: "lanczos.outputSize",
+      u_antiRinging: "lanczos.antiRinging",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.lastEasuTargetWidth = 1280;
+    backend.lastEasuTargetHeight = 720;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+    backend.lastScaleWidth = 1920;
+    backend.lastScaleHeight = 1080;
+    backend.scaleTexture = "scaleTex";
+    backend.scaleFBO = "scaleFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      fsrFinalScaler: "bicubic",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+      fsrTargetScale: "auto",
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+    expect(gl.useProgram).toHaveBeenCalledWith("bicubicProg");
+    const lanczosCalls = gl.useProgram.mock.calls.filter(
+      (call: string[]) => call[0] === "lanczosProg"
+    );
+    expect(lanczosCalls.length).toBe(0);
+  });
+
+  // ─── RCAS / sharpen routing ───────────────────────────────────────
+
+  it("FSR uses RCAS instead of custom sharpen", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.rcasProgram = "rcasProg";
+    backend.sharpenProgram = "sharpenProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.rcasUniforms = {
+      u_sourceTexture: "rcas.source",
+      u_sharpness: "rcas.sharpness",
+      u_texSize: "rcas.texSize",
+    };
+    backend.sharpenUniforms = {
+      u_sourceTexture: "sharpen.source",
+      u_sharpeningStrength: "sharpen.sharpeningStrength",
+      u_noiseProtection: "sharpen.noiseProtection",
+      u_texSize: "sharpen.texSize",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.lastEasuTargetWidth = 1920;
+    backend.lastEasuTargetHeight = 1080;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      fsrTargetScale: "display",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0.77, // non-zero → needs sharpening
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+    // RCAS should be called
+    expect(gl.useProgram).toHaveBeenCalledWith("rcasProg");
+    // Custom sharpen should NOT be called
+    expect(gl.useProgram).not.toHaveBeenCalledWith("sharpenProg");
+  });
+
+  it("Non-FSR uses custom sharpen, not RCAS", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.rcasProgram = "rcasProg";
+    backend.sharpenProgram = "sharpenProg";
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.rcasUniforms = {
+      u_sourceTexture: "rcas.source",
+      u_sharpness: "rcas.sharpness",
+      u_texSize: "rcas.texSize",
+    };
+    backend.sharpenUniforms = {
+      u_sourceTexture: "sharpen.source",
+      u_sharpeningStrength: "sharpen.sharpeningStrength",
+      u_noiseProtection: "sharpen.noiseProtection",
+      u_texSize: "sharpen.texSize",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "bicubic",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0.77,
+    });
+
+    const result = backend.processFrame(createReadyVideo(640, 360));
+    expect(result.success).toBe(true);
+    // Custom sharpen should be called
+    expect(gl.useProgram).toHaveBeenCalledWith("sharpenProg");
+    // RCAS should NOT be called for non-FSR
+    expect(gl.useProgram).not.toHaveBeenCalledWith("rcasProg");
+  });
+
+  it("No double sharpening: RCAS and custom sharpen never both active", () => {
+    // Test FSR path — RCAS should be called, not sharpen
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.rcasProgram = "rcasProg";
+    backend.sharpenProgram = "sharpenProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.rcasUniforms = {
+      u_sourceTexture: "rcas.source",
+      u_sharpness: "rcas.sharpness",
+      u_texSize: "rcas.texSize",
+    };
+    backend.sharpenUniforms = {
+      u_sourceTexture: "sharpen.source",
+      u_sharpeningStrength: "sharpen.sharpeningStrength",
+      u_noiseProtection: "sharpen.noiseProtection",
+      u_texSize: "sharpen.texSize",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.lastEasuTargetWidth = 1920;
+    backend.lastEasuTargetHeight = 1080;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      fsrTargetScale: "display",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0.77,
+    });
+
+    backend.processFrame(createReadyVideo(640, 360));
+
+    const sharpenCalls = gl.useProgram.mock.calls.filter(
+      (call: string[]) => call[0] === "sharpenProg"
+    ).length;
+    const rcasCalls = gl.useProgram.mock.calls.filter(
+      (call: string[]) => call[0] === "rcasProg"
+    ).length;
+
+    // Either RCAS or sharpen should be called, but not both
+    expect(sharpenCalls === 0 || rcasCalls === 0).toBe(true);
+    // RCAS should be the one called for FSR
+    expect(rcasCalls).toBeGreaterThan(0);
+    expect(sharpenCalls).toBe(0);
+  });
 });
 
 describe("WebGL2ViewerImageBackend getStats", () => {
@@ -707,6 +1078,79 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     expect(stats.easuTargetWidth).toBe(1280);
     expect(stats.easuTargetHeight).toBe(720);
     expect(stats.finalBicubicActive).toBe(true);
+  });
+
+  it("includes new stats fields: fsrFinalScaler, rcasActive, activePasses", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.easuProgram = "easuProg";
+    backend.bicubicProgram = "bicubicProg";
+    backend.easuUniforms = {
+      u_sourceTexture: "easu.source",
+      u_sourceSize: "easu.sourceSize",
+      u_outputSize: "easu.outputSize",
+      u_antiRinging: "easu.antiRinging",
+      u_easuCon0: "easu.con0",
+      u_easuCon1: "easu.con1",
+      u_easuCon2: "easu.con2",
+      u_easuCon3: "easu.con3",
+    };
+    backend.bicubicUniforms = {
+      u_sourceTexture: "bicubic.source",
+      u_sourceSize: "bicubic.sourceSize",
+      u_outputSize: "bicubic.outputSize",
+      u_antiRinging: "bicubic.antiRinging",
+    };
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.lastEasuTargetWidth = 1280;
+    backend.lastEasuTargetHeight = 720;
+    backend.easuTexture = "easuTex";
+    backend.easuFBO = "easuFbo";
+
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "fsr1-easu",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0.5,  // Sharpening active
+      fsrTargetScale: "auto",
+      fsrFinalScaler: "bicubic",
+    });
+
+    backend.processFrame(createReadyVideo(640, 360));
+
+    const stats = backend.getStats();
+    expect(stats.fsrFinalScaler).toBe("bicubic");
+    expect(stats.rcasActive).toBe(true);
+    expect(stats.activePasses.length).toBeGreaterThan(0);
+    expect(stats.activePasses).toEqual(
+      expect.arrayContaining(["RCAS"])
+    );
+  });
+
+  it("fsrFinalScaler is null when algorithm is not FSR", () => {
+    const backend = new WebGL2ViewerImageBackend() as BackendInternals;
+    const gl = createFakeGl();
+    backend.gl = gl;
+    backend.outputWidth = 1920;
+    backend.outputHeight = 1080;
+    backend.fullscreenProgram = "fullscreen";
+    backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
+    backend.updateSettings({
+      ...allControls,
+      scalingAlgorithm: "bicubic",
+      compressionCleanup: 0,
+      debanding: 0,
+      sharpeningStrength: 0,
+    });
+
+    backend.processFrame(createReadyVideo(640, 360));
+    const stats = backend.getStats();
+    expect(stats.fsrFinalScaler).toBeNull();
   });
 });
 

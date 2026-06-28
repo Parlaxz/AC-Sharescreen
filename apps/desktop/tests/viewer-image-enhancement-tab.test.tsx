@@ -48,11 +48,13 @@ describe("ViewerSettingsPanel Image Enhancements tab", () => {
     // since the popover content requires complex DOM interaction
     expect(SCALING_ALGORITHMS).toContain("native");
     expect(SCALING_ALGORITHMS).toContain("bicubic");
+    expect(SCALING_ALGORITHMS).toContain("lanczos");
     expect(SCALING_ALGORITHMS).toContain("fsr1-easu");
 
-    expect(SCALING_ALGORITHM_LABELS.native).toBe("Native");
+    expect(SCALING_ALGORITHM_LABELS.native).toBe("Native / Bilinear");
     expect(SCALING_ALGORITHM_LABELS.bicubic).toBe("Bicubic");
-    expect(SCALING_ALGORITHM_LABELS["fsr1-easu"]).toBe("FSR 1 EASU");
+    expect(SCALING_ALGORITHM_LABELS.lanczos).toBe("Lanczos 3");
+    expect(SCALING_ALGORITHM_LABELS["fsr1-easu"]).toBe("FSR 1");
   });
 
   it("defaults have correct structure (no enhancedScaling, no fsrBicubicBlend)", () => {

@@ -145,11 +145,13 @@ function computeHostStats(snapshot: StatsSnapshot): Omit<HostObservedViewerStats
 
 export function useHostViewerDiagnostics(
   sdk: VDONinjaSDK | null,
-  /** Viewer bindings from ViewerMediaBinding â€” bridges viewerDeviceId â†” mediaPeerUuid for host stats. */
+  /** Viewer bindings from ViewerMediaBinding — bridges viewerDeviceId ↔ mediaPeerUuid for host stats. */
   viewerBindings: ViewerBinding[],
   qualityCoordinator: QualityCoordinator | null,
   groupId: string,
   logicalStreamId: string,
+  /** mediaSessionId for feeding host outbound bytes to StreamMetricsService */
+  mediaSessionId?: string | null,
 ): ViewerRow[] {
   const [rows, setRows] = useState<ViewerRow[]>([]);
   const statusMapRef = useRef<Map<string, ViewerStatusEvent>>(new Map());
@@ -175,6 +177,7 @@ export function useHostViewerDiagnostics(
 
     const newBytes = new Map<string, { lastBytes: number; lastTime: number }>();
     const newStats = new Map<string, HostObservedViewerStats>();
+    let totalCumulativeBytes = 0;
 
     for (const [uuid, group] of sdk.connections) {
       const pc = group.publisher?.pc;
@@ -197,14 +200,21 @@ export function useHostViewerDiagnostics(
         }
         newBytes.set(uuid, { lastBytes: bytesSent, lastTime: Date.now() });
         newStats.set(uuid, { ...base, sentBitrateKbps });
+        totalCumulativeBytes += bytesSent;
       } catch {
         // Best effort
       }
     }
 
     bytesRef.current = newBytes;
+
+    // Feed cumulative host outbound bytes to metrics service
+    if (mediaSessionId && totalCumulativeBytes > 0) {
+      StreamMetricsService.getInstance().onHostStats(mediaSessionId, totalCumulativeBytes, Date.now());
+    }
+
     return newStats;
-  }, [sdk]);
+  }, [sdk, mediaSessionId]);
 
   // Merge all data sources every poll cycle
   useEffect(() => {

@@ -85,6 +85,9 @@ class MockWebGL2Backend {
       easuTargetWidth: 0,
       easuTargetHeight: 0,
       finalBicubicActive: false,
+      fsrFinalScaler: null,
+      rcasActive: false,
+      activePasses: [],
     };
   }
 

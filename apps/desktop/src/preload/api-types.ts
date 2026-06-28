@@ -46,6 +46,8 @@ export interface ScreenLinkAPI {
   // Stream history
   getStreamHistory: () => Promise<unknown[]>;
   saveStreamHistory: (records: unknown[]) => Promise<void>;
+  upsertStreamHistory: (record: unknown) => Promise<void>;
+  deleteStreamHistory: (historyId: string) => Promise<void>;
 
   // Quality presets
   listQualityPresets: () => Promise<unknown[]>;

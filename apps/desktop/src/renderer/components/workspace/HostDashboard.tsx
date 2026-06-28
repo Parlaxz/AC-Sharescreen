@@ -232,6 +232,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     runtime?.getQualityCoordinator() ?? null,
     selectedGroupId ?? "",
     logicalStreamId,
+    mediaSessionId,
   );
 
   const group = selectedGroupId ? groupsById[selectedGroupId] : null;
@@ -613,6 +614,14 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Bandwidth graph modal */}
+      <BandwidthGraphModal
+        open={bandwidthModalOpen}
+        onOpenChange={setBandwidthModalOpen}
+        mediaSessionId={mediaSessionId}
+        viewerMode={false}
+      />
     </div>
   );
 }

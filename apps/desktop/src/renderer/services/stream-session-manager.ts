@@ -791,15 +791,15 @@ export class StreamSessionManager {
 
       // Notify metrics service
       if (this.mediaSessionId) {
+        // onStreamStop is called once in the try block. If cleanupPublisher
+        // throws, the catch block still resets state but does NOT call
+        // onStreamStop again — the finalization already happened.
         StreamMetricsService.getInstance().onStreamStop(this.mediaSessionId);
       }
-            this.resetSessionState();
+      this.resetSessionState();
       this._state = "idle";
-    } catch (err) {      // Notify metrics service
-      if (this.mediaSessionId) {
-        StreamMetricsService.getInstance().onStreamStop(this.mediaSessionId);
-      }
-            this.resetSessionState();
+    } catch (err) {
+      this.resetSessionState();
       this._state = "idle";
     }
   }

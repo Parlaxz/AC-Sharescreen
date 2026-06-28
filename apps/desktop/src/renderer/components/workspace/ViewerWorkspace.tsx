@@ -35,6 +35,7 @@ import { useStore } from "@/stores/main-store";
 import type { StreamAnnouncement } from "@/stores/main-store";
 import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
+import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
 import type { ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
 import {
@@ -192,6 +193,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const toggleFocusMode = useStore((s) => s.toggleFocusMode);
   const navigate = useStore((s) => s.navigate);
   const selectedGroupId = useStore((s) => s.selectedGroupId);
+  const groupsById = useStore((s) => s.groupsById);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
   const watchingTarget = useStore((s) => s.watchingTarget);
@@ -234,6 +236,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [lastQualityAccepted, setLastQualityAccepted] = useState<boolean | undefined>(undefined);
   /** Track whether any popover panel is open to keep controls visible */
   const [panelsOpen, setPanelsOpen] = useState(false);
+  /** Bandwidth graph dialog */
+  const [bandwidthGraphOpen, setBandwidthGraphOpen] = useState(false);
+  /** Viewer history ID for StreamMetricsService session */
+  const [viewerHistoryId, setViewerHistoryId] = useState<string | null>(null);
+  const viewerHistoryIdRef = useRef<string | null>(null);
 
   // ── Pause state ─────────────────────────────────────────────────────
   const [streamPauseState, setStreamPauseState] = useState<ViewerPauseState>("playing");
@@ -319,7 +326,28 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         clearInterval(bandwidthPollRef.current);
         bandwidthPollRef.current = null;
       }
+      // Finalize viewer session if active
+      if (viewerHistoryIdRef.current) {
+        const id = viewerHistoryIdRef.current;
+        viewerHistoryIdRef.current = null;
+        setViewerHistoryId(null);
+        StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
+      }
       return;
+    }
+
+    // Start viewer session if not already started
+    if (!viewerHistoryIdRef.current && watchingTarget) {
+      const groupName = selectedGroupId ? (groupsById[selectedGroupId]?.name ?? "") : "";
+      const historyId = StreamMetricsService.getInstance().startViewerSession(
+        watchingTarget.mediaSessionId,
+        watchingTarget.logicalStreamId,
+        selectedGroupId ?? "",
+        groupName,
+        watchingTarget.hostName,
+      );
+      viewerHistoryIdRef.current = historyId;
+      setViewerHistoryId(historyId);
     }
 
     const poll = async () => {
@@ -338,6 +366,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           bandwidthTrackerRef.current = next;
           setTotalBytesReceived(next.totalBytesReceived);
           setCurrentBandwidthBps(next.currentBytesPerSecond);
+
+          // Feed viewer bytes into StreamMetricsService
+          if (viewerHistoryIdRef.current) {
+            StreamMetricsService.getInstance().feedViewerBytes(
+              viewerHistoryIdRef.current,
+              totalNow,
+              Date.now(),
+            );
+          }
         }
       } catch {
         // best-effort
@@ -353,7 +390,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         bandwidthPollRef.current = null;
       }
     };
-  }, [sessionState]);
+  }, [sessionState, watchingTarget, selectedGroupId, groupsById]);
 
   // Video element ref — shared with ViewerSession
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -429,7 +466,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     setCurrentStreamId(null);
     setCurrentBandwidthBps(0);
     setTotalBytesReceived(0);
+    setBandwidthGraphOpen(false);
     bandwidthTrackerRef.current = createBandwidthTracker();
+
+    // Finalize viewer session if active
+    if (viewerHistoryIdRef.current) {
+      const id = viewerHistoryIdRef.current;
+      viewerHistoryIdRef.current = null;
+      setViewerHistoryId(null);
+      StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
+    }
 
     // 3) Clear the video element srcObject defensively (the
     //    session's copy was already cleared, but React's ref
@@ -494,6 +540,22 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setViewStatus("connecting");
     }
   }, [setViewStatus]);
+
+  // ── Bandwidth graph click ───────────────────────────────────────
+  const bandwidthPrevPanelsOpenRef = useRef(false);
+
+  const handleBandwidthClick = useCallback(() => {
+    bandwidthPrevPanelsOpenRef.current = panelsOpen;
+    setPanelsOpen(true);
+    setBandwidthGraphOpen(true);
+  }, [panelsOpen]);
+
+  // Restore panels open state when bandwidth graph closes
+  useEffect(() => {
+    if (!bandwidthGraphOpen) {
+      setPanelsOpen(bandwidthPrevPanelsOpenRef.current);
+    }
+  }, [bandwidthGraphOpen]);
 
   // ── Pause/resume callbacks (single owner of toggle) ──────────────
   const handlePauseStream = useCallback(async () => {
@@ -1119,6 +1181,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           sessionRef.current.destroy();
           sessionRef.current = null;
           setViewStatus("ended");
+          setBandwidthGraphOpen(false);
+
+          // Finalize viewer session
+          if (viewerHistoryIdRef.current) {
+            const id = viewerHistoryIdRef.current;
+            viewerHistoryIdRef.current = null;
+            setViewerHistoryId(null);
+            StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
+          }
 
           // Auto-navigate to overview after short delay
           if (endTimer) clearTimeout(endTimer);
@@ -1139,6 +1210,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           sessionRef.current = null;
         }
         setViewStatus("ended");
+        setBandwidthGraphOpen(false);
+
+        // Finalize viewer session
+        if (viewerHistoryIdRef.current) {
+          const id = viewerHistoryIdRef.current;
+          viewerHistoryIdRef.current = null;
+          setViewerHistoryId(null);
+          StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
+        }
 
           if (endTimer) clearTimeout(endTimer);
         endTimer = setTimeout(() => {
@@ -1282,6 +1362,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
             maxVolumePercent={maxVolumePercent}
+            onBandwidthClick={handleBandwidthClick}
           />
         </motion.div>
       </ViewerShell>
@@ -1359,6 +1440,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
             maxVolumePercent={maxVolumePercent}
+            onBandwidthClick={handleBandwidthClick}
           />
         </motion.div>
       </ViewerShell>
@@ -1610,8 +1692,18 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onEnhancementChange={handleEnhancementChange}
             onEnhancementReset={handleEnhancementReset}
             enhancementStats={enhancementStats}
+            onBandwidthClick={handleBandwidthClick}
           />
         </div>
+
+        {/* Bandwidth graph modal */}
+        <BandwidthGraphModal
+          open={bandwidthGraphOpen}
+          onOpenChange={setBandwidthGraphOpen}
+          mediaSessionId={watchedSessionId}
+          viewerMode={true}
+          viewerHistoryId={viewerHistoryId}
+        />
       </motion.div>
     </ViewerShell>
   );
@@ -1686,6 +1778,7 @@ function VideoControlsOverlay({
   onEnhancementChange,
   onEnhancementReset,
   enhancementStats,
+  onBandwidthClick,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
@@ -1734,6 +1827,7 @@ function VideoControlsOverlay({
     enhancedScalingActive: boolean;
     backend: string;
   } | null;
+  onBandwidthClick?: () => void;
 }) {
   return (
     <VideoControls
@@ -1775,6 +1869,7 @@ function VideoControlsOverlay({
       onEnhancementChange={onEnhancementChange}
       onEnhancementReset={onEnhancementReset}
       enhancementStats={enhancementStats}
+      onBandwidthClick={onBandwidthClick}
     />
   );
 }

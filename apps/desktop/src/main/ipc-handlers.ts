@@ -600,12 +600,45 @@ export function registerIpcHandlers(
 
   const STREAM_HISTORY_FILE = "stream-history.json";
 
+  /**
+   * Read stream history, performing crash recovery on active records.
+   * Any record with status "active" is converted to "interrupted" on read,
+   * and the corrected file is written back atomically.
+   */
   ipcMain.handle("get-stream-history", async () => {
     const filePath = path.join(app.getPath("userData"), STREAM_HISTORY_FILE);
     try {
       const raw = await fs.readFile(filePath, "utf-8");
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed.records) ? parsed.records : [];
+      const records: any[] = Array.isArray(parsed.records) ? parsed.records : [];
+
+      // Crash recovery: convert any active records to interrupted
+      let changed = false;
+      for (const r of records) {
+        if (r && typeof r === "object" && r.status === "active") {
+          r.status = "interrupted";
+          r.interrupted = true;
+          r.stoppedAt = r.lastCheckpointAt ?? r.stoppedAt ?? Date.now();
+          r.durationMs = (r.stoppedAt) - (r.startedAt ?? r.stoppedAt);
+          changed = true;
+        }
+      }
+
+      // Write back if changed (atomic write with temp file)
+      if (changed && records.length > 0) {
+        const data = JSON.stringify({ schemaVersion: 2, records }, null, 2);
+        const tmpPath = filePath + ".tmp";
+        try {
+          await fs.writeFile(tmpPath, data, "utf-8");
+          const backupPath = filePath + ".bak";
+          try { await fs.copyFile(filePath, backupPath); } catch { }
+          await fs.rename(tmpPath, filePath);
+        } catch (writeErr) {
+          console.error("Failed to write recovered history:", writeErr);
+        }
+      }
+
+      return records;
     } catch {
       return [];
     }
@@ -613,7 +646,7 @@ export function registerIpcHandlers(
 
   ipcMain.handle("save-stream-history", async (_event, records: unknown[]) => {
     const filePath = path.join(app.getPath("userData"), STREAM_HISTORY_FILE);
-    const data = JSON.stringify({ schemaVersion: 1, records }, null, 2);
+    const data = JSON.stringify({ schemaVersion: 2, records }, null, 2);
     try {
       const tmpPath = filePath + ".tmp";
       await fs.writeFile(tmpPath, data, "utf-8");
@@ -622,6 +655,85 @@ export function registerIpcHandlers(
       await fs.rename(tmpPath, filePath);
     } catch {
       await fs.writeFile(filePath, data, "utf-8");
+    }
+  });
+
+  /**
+   * Upsert a single stream history record by historyId.
+   * Replaces if exists, appends if new. Deduplicates as safety net.
+   * Atomic write via temp + rename.
+   */
+  ipcMain.handle("upsert-stream-history", async (_event, record: unknown) => {
+    const filePath = path.join(app.getPath("userData"), STREAM_HISTORY_FILE);
+    try {
+      let records: any[] = [];
+      try {
+        const raw = await fs.readFile(filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.records)) records = parsed.records;
+      } catch {
+        // file doesn't exist yet — start fresh
+      }
+
+      // Validate record has historyId
+      if (!record || typeof record !== "object" || !("historyId" in (record as any))) return;
+
+      // Find and replace, or append
+      const idx = records.findIndex(r => r && typeof r === "object" && r.historyId === (record as any).historyId);
+      if (idx >= 0) records[idx] = record;
+      else records.push(record);
+
+      // Deduplicate by historyId (safety net)
+      const seen = new Set<string>();
+      records = records.filter(r => {
+        if (!r || typeof r !== "object") return false;
+        const id = r.historyId;
+        if (!id || typeof id !== "string" || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+
+      const data = JSON.stringify({ schemaVersion: 2, records }, null, 2);
+      const tmpPath = filePath + ".tmp";
+      await fs.writeFile(tmpPath, data, "utf-8");
+      try { await fs.copyFile(filePath, filePath + ".bak"); } catch { }
+      await fs.rename(tmpPath, filePath);
+    } catch (err) {
+      console.error("Failed to upsert stream history:", err);
+    }
+  });
+
+  /**
+   * Delete a single stream history record by historyId.
+   * Atomic write via temp + rename.
+   */
+  ipcMain.handle("delete-stream-history", async (_event, historyId: string) => {
+    const filePath = path.join(app.getPath("userData"), STREAM_HISTORY_FILE);
+    try {
+      let records: any[] = [];
+      try {
+        const raw = await fs.readFile(filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed.records)) records = parsed.records;
+      } catch {
+        return; // no file, nothing to delete
+      }
+
+      const filtered = records.filter(r => {
+        if (!r || typeof r !== "object") return false;
+        return r.historyId !== historyId;
+      });
+
+      // Only write if something was actually removed
+      if (filtered.length !== records.length) {
+        const data = JSON.stringify({ schemaVersion: 2, records: filtered }, null, 2);
+        const tmpPath = filePath + ".tmp";
+        await fs.writeFile(tmpPath, data, "utf-8");
+        try { await fs.copyFile(filePath, filePath + ".bak"); } catch { }
+        await fs.rename(tmpPath, filePath);
+      }
+    } catch (err) {
+      console.error("Failed to delete stream history:", err);
     }
   });
 

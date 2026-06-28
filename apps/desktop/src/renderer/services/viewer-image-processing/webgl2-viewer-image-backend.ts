@@ -25,7 +25,7 @@
  * No per-frame shader compilation or texture/FBO creation.
  */
 
-import type { ViewerImageEnhancementSettings, ScalingAlgorithm, FsrTargetScale } from "./viewer-image-settings";
+import type { ViewerImageEnhancementSettings, ScalingAlgorithm, FsrTargetScale, FsrFinalScaler, EasuTargetResult } from "./viewer-image-settings";
 import {
   createShader,
   createProgram,
@@ -43,7 +43,9 @@ import cleanupFrag from "./shaders/cleanup.frag.glsl?raw";
 import debandFrag from "./shaders/deband.frag.glsl?raw";
 import easuFrag from "./shaders/easu.frag.glsl?raw";
 import bicubicFrag from "./shaders/bicubic.frag.glsl?raw";
+import lanczosFrag from "./shaders/lanczos.frag.glsl?raw";
 import sharpenFrag from "./shaders/sharpen.frag.glsl?raw";
+import rcasFrag from "./shaders/rcas.frag.glsl?raw";
 
 // ─── Inline passthrough fragment shader for final blit ───────────────────────
 
@@ -84,6 +86,9 @@ export interface BackendStats {
   easuTargetWidth: number;
   easuTargetHeight: number;
   finalBicubicActive: boolean;
+  fsrFinalScaler: FsrFinalScaler | null;
+  rcasActive: boolean;
+  activePasses: string[];
 }
 
 interface DisjointTimerQueryWebGL2 {
@@ -217,14 +222,18 @@ export class WebGL2ViewerImageBackend {
   private debandProgram: WebGLProgram | null = null;
   private easuProgram: WebGLProgram | null = null;
   private bicubicProgram: WebGLProgram | null = null;
+  private lanczosProgram: WebGLProgram | null = null;
   private sharpenProgram: WebGLProgram | null = null;
+  private rcasProgram: WebGLProgram | null = null;
 
   // Cached uniform locations
   private cleanupUniforms: Record<string, WebGLUniformLocation | null> = {};
   private debandUniforms: Record<string, WebGLUniformLocation | null> = {};
   private easuUniforms: Record<string, WebGLUniformLocation | null> = {};
   private bicubicUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private lanczosUniforms: Record<string, WebGLUniformLocation | null> = {};
   private sharpenUniforms: Record<string, WebGLUniformLocation | null> = {};
+  private rcasUniforms: Record<string, WebGLUniformLocation | null> = {};
   private fullscreenUniforms: Record<string, WebGLUniformLocation | null> = {};
 
   // Dimensions
@@ -242,11 +251,12 @@ export class WebGL2ViewerImageBackend {
     enabled: false,
     scalingAlgorithm: "native",
     fsrTargetScale: "auto",
+    fsrFinalScaler: "bicubic",
     sharpeningStrength: 0.25,
     noiseProtection: 0.0,
     compressionCleanup: 0.0,
     debanding: 0.0,
-    _schemaVersion: 2,
+    _schemaVersion: 3,
   };
 
   // Cached EASU constants (recomputed when dimensions change)
@@ -327,7 +337,9 @@ export class WebGL2ViewerImageBackend {
       this.debandProgram = createProgram(gl, fullscreenVert, debandFrag);
       this.easuProgram = createProgram(gl, fullscreenVert, easuFrag);
       this.bicubicProgram = createProgram(gl, fullscreenVert, bicubicFrag);
+      this.lanczosProgram = createProgram(gl, fullscreenVert, lanczosFrag);
       this.sharpenProgram = createProgram(gl, fullscreenVert, sharpenFrag);
+      this.rcasProgram = createProgram(gl, fullscreenVert, rcasFrag);
 
       // Cache uniform locations
       this.cacheUniforms(gl);
@@ -509,10 +521,12 @@ export class WebGL2ViewerImageBackend {
         (this.renderWidth > this.inputWidth || this.renderHeight > this.inputHeight);
       const isFsr = algorithm === "fsr1-easu" && needsUpscale;
       const isBicubic = algorithm === "bicubic" && needsUpscale;
+      const isLanczos = algorithm === "lanczos" && needsUpscale;
       const isNative = algorithm === "native" || !needsUpscale;
+      const fsrFinalScaler: FsrFinalScaler | null = isFsr ? this.settings.fsrFinalScaler : null;
 
       // --- Compute EASU target if FSR is active ---
-      let easuTarget: { easuW: number; easuH: number; needsBicubic: boolean } | null = null;
+      let easuTarget: EasuTargetResult | null = null;
       if (isFsr) {
         easuTarget = this.computeCachedEasuTarget(
           this.inputWidth,
@@ -523,10 +537,13 @@ export class WebGL2ViewerImageBackend {
         );
       }
       const needsEasu = isFsr && easuTarget !== null;
-      const needsBicubicFinal = isBicubic || (isFsr && easuTarget !== null && easuTarget.needsBicubic);
+      const needsFinalScaler = isBicubic || isLanczos || (isFsr && easuTarget !== null && easuTarget.needsFinalScaler);
       // Native draw: when algorithm is native and source dims differ from render dims
       const needsNativeDraw = isNative &&
         (this.renderWidth !== this.inputWidth || this.renderHeight !== this.inputHeight);
+      // RCAS replaces custom sharpen when FSR is active; custom sharpen only for non-FSR
+      const needsRcas = isFsr && needsSharpen;
+      const needsCustomSharpen = !isFsr && needsSharpen;
 
       // --- Start GPU timer if available ---
       this.beginTimer(gl);
@@ -601,28 +618,37 @@ export class WebGL2ViewerImageBackend {
         }
       }
 
-      // --- Step 3b: Bicubic scaling (if algorithm is Bicubic, or if FSR needs final stretch) ---
-      if (needsBicubicFinal) {
+      // --- Step 3b: Final scaler (bicubic or lanczos) ---
+      // Applies when:
+      //   - algorithm is "bicubic" (scales source → display)
+      //   - algorithm is "lanczos" (scales source → display)
+      //   - FSR EASU target < display resolution (final stretch)
+      if (needsFinalScaler) {
+        // Determine which scaler to use
+        const useLanczos = isLanczos || (isFsr && fsrFinalScaler === "lanczos");
+        const scalerProgram = useLanczos ? this.lanczosProgram : this.bicubicProgram;
+        const scalerUniforms = useLanczos ? this.lanczosUniforms : this.bicubicUniforms;
+        const antiRinging = useLanczos ? 0.4 : 0.35;
+
         this.ensureScaleResources(gl);
-        if (this.scaleFBO && this.scaleTexture) {
+        if (this.scaleFBO && this.scaleTexture && scalerProgram) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, this.scaleFBO);
           gl.viewport(0, 0, this.renderWidth, this.renderHeight);
-          gl.useProgram(this.bicubicProgram);
+          gl.useProgram(scalerProgram);
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, currentSource);
-          gl.uniform1i(this.bicubicUniforms.u_sourceTexture, 0);
+          gl.uniform1i(scalerUniforms.u_sourceTexture, 0);
           gl.uniform2f(
-            this.bicubicUniforms.u_sourceSize,
+            scalerUniforms.u_sourceSize,
             currentSourceW,
             currentSourceH,
           );
           gl.uniform2f(
-            this.bicubicUniforms.u_outputSize,
+            scalerUniforms.u_outputSize,
             this.renderWidth,
             this.renderHeight,
           );
-          // Internal anti-ringing for bicubic: 0.35
-          gl.uniform1f(this.bicubicUniforms.u_antiRinging, 0.35);
+          gl.uniform1f(scalerUniforms.u_antiRinging, antiRinging);
           gl.drawArrays(gl.TRIANGLES, 0, 3);
 
           currentSource = this.scaleTexture;
@@ -652,8 +678,33 @@ export class WebGL2ViewerImageBackend {
         }
       }
 
-      // --- Step 4: Sharpen pass (if needed, at display resolution) ---
-      if (needsSharpen && this.renderWidth > 0 && this.renderHeight > 0) {
+      // --- Step 4a: RCAS sharpening (FSR path, at display resolution) ---
+      if (needsRcas && this.renderWidth > 0 && this.renderHeight > 0) {
+        this.ensureOutputResources(gl);
+        if (this.outputFBO && this.outputTexture) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, this.outputFBO);
+          gl.viewport(0, 0, this.renderWidth, this.renderHeight);
+          gl.useProgram(this.rcasProgram);
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, currentSource);
+          gl.uniform1i(this.rcasUniforms.u_sourceTexture, 0);
+          gl.uniform1f(
+            this.rcasUniforms.u_sharpness,
+            this.settings.sharpeningStrength,
+          );
+          gl.uniform2f(
+            this.rcasUniforms.u_texSize,
+            currentSourceW,
+            currentSourceH,
+          );
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+          currentSource = this.outputTexture;
+        }
+      }
+
+      // --- Step 4b: Custom sharpen pass (non-FSR path, at display resolution) ---
+      if (needsCustomSharpen && this.renderWidth > 0 && this.renderHeight > 0) {
         this.ensureOutputResources(gl);
         if (this.outputFBO && this.outputTexture) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, this.outputFBO);
@@ -786,11 +837,21 @@ export class WebGL2ViewerImageBackend {
       (this.renderWidth > this.inputWidth ||
         this.renderHeight > this.inputHeight);
     const algorithm = this.settings.scalingAlgorithm;
+    const needsSharpen = this.settings.sharpeningStrength > 0;
+    const needsCleanup = this.settings.compressionCleanup > 0;
+    const needsDeband = this.settings.debanding > 0;
+    const needsUpscale = isUpscaling;
+
+    const isFsr = algorithm === "fsr1-easu" && needsUpscale;
+    const isBicubic = algorithm === "bicubic" && needsUpscale;
+    const isLanczos = algorithm === "lanczos" && needsUpscale;
+    const fsrFinalScaler: FsrFinalScaler | null = isFsr ? this.settings.fsrFinalScaler : null;
 
     // Compute current EASU target dimensions for stats
     let easuTargetWidth = 0;
     let easuTargetHeight = 0;
-    let finalBicubicActive = false;
+    let finalScalerActive = false;
+    let needsEasuForStats = false;
 
     if (algorithm === "fsr1-easu" && isUpscaling) {
       const target = this.computeCachedEasuTarget(
@@ -803,12 +864,43 @@ export class WebGL2ViewerImageBackend {
       if (target) {
         easuTargetWidth = target.easuW;
         easuTargetHeight = target.easuH;
-        finalBicubicActive = target.needsBicubic;
+        finalScalerActive = target.needsFinalScaler;
+        needsEasuForStats = true;
       }
-    } else if (algorithm === "bicubic" && isUpscaling) {
-      // Bicubic always scales source → display directly
-      finalBicubicActive = true;
+    } else if (isBicubic || isLanczos) {
+      // Standalone bicubic/lanczos always scales source → display directly
+      finalScalerActive = true;
     }
+
+    const needsRcas = isFsr && needsSharpen;
+    const needsCustomSharpen = !isFsr && needsSharpen;
+
+    // Determine the scaler name for the final scaler pass
+    let finalScalerName = "Bicubic";
+    if (isLanczos) {
+      finalScalerName = "Lanczos";
+    } else if (isBicubic) {
+      finalScalerName = "Bicubic";
+    } else if (isFsr && fsrFinalScaler === "lanczos") {
+      finalScalerName = "Lanczos";
+    } else if (isFsr) {
+      finalScalerName = "Bicubic";
+    }
+
+    // Build active passes chain
+    const passes: string[] = [];
+    if (needsCleanup) passes.push("Cleanup");
+    if (needsEasuForStats) {
+      passes.push(`EASU ${this.inputWidth}×${this.inputHeight}→${easuTargetWidth}×${easuTargetHeight}`);
+    }
+    if (finalScalerActive) {
+      const scalerSourceW = easuTargetWidth > 0 ? easuTargetWidth : this.inputWidth;
+      const scalerSourceH = easuTargetHeight > 0 ? easuTargetHeight : this.inputHeight;
+      passes.push(`${finalScalerName} ${scalerSourceW}×${scalerSourceH}→${this.renderWidth}×${this.renderHeight}`);
+    }
+    if (needsRcas) passes.push("RCAS");
+    if (needsCustomSharpen) passes.push("Sharpen");
+    if (needsDeband) passes.push("Deband");
 
     return {
       inputWidth: this.inputWidth,
@@ -823,7 +915,10 @@ export class WebGL2ViewerImageBackend {
       scalingAlgorithm: algorithm,
       easuTargetWidth,
       easuTargetHeight,
-      finalBicubicActive,
+      finalBicubicActive: finalScalerActive,
+      fsrFinalScaler,
+      rcasActive: needsRcas,
+      activePasses: passes,
     };
   }
 
@@ -1010,7 +1105,7 @@ export class WebGL2ViewerImageBackend {
     finalW: number,
     finalH: number,
     scale: FsrTargetScale,
-  ): { easuW: number; easuH: number; needsBicubic: boolean } | null {
+  ): EasuTargetResult | null {
     if (
       sourceW === this.lastEasuTargetSourceW &&
       sourceH === this.lastEasuTargetSourceH &&
@@ -1100,6 +1195,7 @@ export class WebGL2ViewerImageBackend {
     };
 
     this.bicubicUniforms = cacheScalingUniforms(this.bicubicProgram);
+    this.lanczosUniforms = cacheScalingUniforms(this.lanczosProgram);
 
     if (this.easuProgram) {
       this.easuUniforms = {
@@ -1135,6 +1231,17 @@ export class WebGL2ViewerImageBackend {
           "u_noiseProtection",
         ),
         u_texSize: gl.getUniformLocation(this.sharpenProgram, "u_texSize"),
+      };
+    }
+
+    if (this.rcasProgram) {
+      this.rcasUniforms = {
+        u_sourceTexture: gl.getUniformLocation(
+          this.rcasProgram,
+          "u_sourceTexture",
+        ),
+        u_sharpness: gl.getUniformLocation(this.rcasProgram, "u_sharpness"),
+        u_texSize: gl.getUniformLocation(this.rcasProgram, "u_texSize"),
       };
     }
 
@@ -1238,7 +1345,9 @@ export class WebGL2ViewerImageBackend {
       this.debandProgram = null;
       this.easuProgram = null;
       this.bicubicProgram = null;
+      this.lanczosProgram = null;
       this.sharpenProgram = null;
+      this.rcasProgram = null;
       this.vao = null;
       this.timerQueries = [];
       return;
@@ -1260,7 +1369,9 @@ export class WebGL2ViewerImageBackend {
     deleteProgram(gl, this.debandProgram);
     deleteProgram(gl, this.easuProgram);
     deleteProgram(gl, this.bicubicProgram);
+    deleteProgram(gl, this.lanczosProgram);
     deleteProgram(gl, this.sharpenProgram);
+    deleteProgram(gl, this.rcasProgram);
 
     if (this.vao) {
       gl.deleteVertexArray(this.vao);
@@ -1296,7 +1407,9 @@ export class WebGL2ViewerImageBackend {
     this.debandProgram = null;
     this.easuProgram = null;
     this.bicubicProgram = null;
+    this.lanczosProgram = null;
     this.sharpenProgram = null;
+    this.rcasProgram = null;
     this.vao = null;
     this.timerQueries = [];
     this.activeTimerIndex = 0;

@@ -5,7 +5,7 @@
  */
 
 import { WebGL2ViewerImageBackend } from "./webgl2-viewer-image-backend";
-import type { ViewerImageEnhancementSettings, ScalingAlgorithm } from "./viewer-image-settings";
+import type { ViewerImageEnhancementSettings, ScalingAlgorithm, FsrFinalScaler } from "./viewer-image-settings";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,9 @@ export interface ProcessorStats {
   easuTargetWidth: number;
   easuTargetHeight: number;
   finalBicubicActive: boolean;
+  fsrFinalScaler: FsrFinalScaler | null;
+  rcasActive: boolean;
+  activePasses: string[];
 }
 
 // ─── Processor ───────────────────────────────────────────────────────────────
@@ -184,6 +187,9 @@ export class ViewerImageProcessor {
       easuTargetWidth: backendStats?.easuTargetWidth ?? 0,
       easuTargetHeight: backendStats?.easuTargetHeight ?? 0,
       finalBicubicActive: backendStats?.finalBicubicActive ?? false,
+      fsrFinalScaler: backendStats?.fsrFinalScaler ?? null,
+      rcasActive: backendStats?.rcasActive ?? false,
+      activePasses: backendStats?.activePasses ?? [],
     };
   }
 

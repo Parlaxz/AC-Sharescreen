@@ -42,6 +42,8 @@ const api: ScreenLinkAPI = {
 
   getStreamHistory: () => ipcRenderer.invoke("get-stream-history"),
   saveStreamHistory: (records) => ipcRenderer.invoke("save-stream-history", records),
+  upsertStreamHistory: (record) => ipcRenderer.invoke("upsert-stream-history", record),
+  deleteStreamHistory: (historyId) => ipcRenderer.invoke("delete-stream-history", historyId),
 
   listQualityPresets: () => ipcRenderer.invoke("list-quality-presets"),
   getQualityPreset: (id) => ipcRenderer.invoke("get-quality-preset", id),

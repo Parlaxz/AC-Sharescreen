@@ -5,25 +5,43 @@ import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "./viewer-image-defaults.js";
 export type ScalingAlgorithm =
   | "native"
   | "bicubic"
+  | "lanczos"
   | "fsr1-easu";
 
 export const SCALING_ALGORITHMS: readonly ScalingAlgorithm[] = [
   "native",
   "bicubic",
+  "lanczos",
   "fsr1-easu",
 ] as const;
 
 export const SCALING_ALGORITHM_LABELS: Record<ScalingAlgorithm, string> = {
-  native: "Native",
+  native: "Native / Bilinear",
   bicubic: "Bicubic",
-  "fsr1-easu": "FSR 1 EASU",
+  lanczos: "Lanczos 3",
+  "fsr1-easu": "FSR 1",
 };
 
 /** Algorithms that can produce overshoot/ringing artifacts */
 export const OVERSHOOTING_ALGORITHMS: ReadonlySet<ScalingAlgorithm> = new Set([
   "bicubic",
+  "lanczos",
   "fsr1-easu",
 ]);
+
+// ─── FSR Final Scaler (used when EASU target < display resolution) ────────────
+
+export type FsrFinalScaler = "bicubic" | "lanczos";
+
+export const FSR_FINAL_SCALERS: readonly FsrFinalScaler[] = [
+  "bicubic",
+  "lanczos",
+] as const;
+
+export const FSR_FINAL_SCALER_LABELS: Record<FsrFinalScaler, string> = {
+  bicubic: "Bicubic",
+  lanczos: "Lanczos 3",
+};
 
 // ─── FSR Target Scale ───────────────────────────────────────────────────────
 
@@ -48,12 +66,27 @@ export const FSR_TARGET_SCALE_LABELS: Record<FsrTargetScale, string> = {
 };
 
 /**
+ * Parse an HTML <select> string value into a proper FsrTargetScale.
+ * HTML selects always emit strings, so numeric values like "1.5" must
+ * be converted to the number 1.5 to match the FsrTargetScale union.
+ */
+export function parseFsrTargetScale(value: string): FsrTargetScale {
+  if (value === "auto" || value === "display") return value;
+  const parsed = Number(value);
+  if (parsed === 1.25 || parsed === 1.5 || parsed === 1.75 || parsed === 2) {
+    return parsed;
+  }
+  return "auto";
+}
+
+/**
  * Result of computing the EASU intermediate target dimensions.
  */
 export interface EasuTargetResult {
   easuW: number;
   easuH: number;
-  needsBicubic: boolean;
+  /** true when a final scaler pass is needed (EASU target < display) */
+  needsFinalScaler: boolean;
   targetScale: FsrTargetScale;
   scaleValue: number;
 }
@@ -78,26 +111,41 @@ export function computeEasuTarget(
   const fh = Math.max(1, finalH);
 
   if (scale === "display") {
-    // EASU targets the display dimensions directly; no bicubic final stretch needed.
+    // EASU targets the display dimensions directly; no final scaler needed.
     return {
       easuW: fw,
       easuH: fh,
-      needsBicubic: false,
+      needsFinalScaler: false,
       targetScale: "display",
       scaleValue: Math.max(fw / sw, fh / sh),
     };
   }
 
-  let scaleValue: number;
   if (scale === "auto") {
-    // Auto caps at 2.0× source
-    scaleValue = 2.0;
-  } else {
-    // Numeric scale (1.25, 1.5, 1.75, 2)
-    scaleValue = scale;
+    // Auto: if display scale <= 2×, target display directly.
+    // If display scale > 2×, use EASU to 2× source, then final scaler for the rest.
+    const displayScale = Math.max(fw / sw, fh / sh);
+    if (displayScale <= 2.0) {
+      return {
+        easuW: fw,
+        easuH: fh,
+        needsFinalScaler: false,
+        targetScale: "auto",
+        scaleValue: displayScale,
+      };
+    }
+    // displayScale > 2×: EASU to 2× source, final scaler handles the rest
+    const scaleValue = 2.0;
+    const proposedW = sw * scaleValue;
+    const proposedH = sh * scaleValue;
+    const easuW = Math.min(fw, Math.ceil(proposedW));
+    const easuH = Math.min(fh, Math.ceil(proposedH));
+    const needsFinalScaler = easuW < fw || easuH < fh;
+    return { easuW, easuH, needsFinalScaler, targetScale: "auto", scaleValue };
   }
 
-  // Compute proposed dimensions
+  // Numeric scale (1.25, 1.5, 1.75, 2)
+  const scaleValue = scale;
   const proposedW = sw * scaleValue;
   const proposedH = sh * scaleValue;
 
@@ -105,13 +153,13 @@ export function computeEasuTarget(
   const easuW = Math.min(fw, Math.ceil(proposedW));
   const easuH = Math.min(fh, Math.ceil(proposedH));
 
-  // If EASU target doesn't reach display dimensions, a final bicubic stretch is needed
-  const needsBicubic = easuW < fw || easuH < fh;
+  // If EASU target doesn't reach display dimensions, a final scaler pass is needed
+  const needsFinalScaler = easuW < fw || easuH < fh;
 
   return {
     easuW,
     easuH,
-    needsBicubic,
+    needsFinalScaler,
     targetScale: scale,
     scaleValue,
   };
@@ -122,11 +170,13 @@ export function computeEasuTarget(
 export interface ViewerImageEnhancementSettings {
   /** Master toggle — when false the enhancement pipeline is entirely disabled */
   enabled: boolean;
-  /** GPU scaling algorithm: native | bicubic | fsr1-easu */
+  /** GPU scaling algorithm: native | bicubic | lanczos | fsr1-easu */
   scalingAlgorithm: ScalingAlgorithm;
   /** FSR EASU target scale when scalingAlgorithm is fsr1-easu */
   fsrTargetScale: FsrTargetScale;
-  /** Sharpening filter strength (0–1). 0 = bypass */
+  /** Final scaler used after EASU when EASU target < display resolution */
+  fsrFinalScaler: FsrFinalScaler;
+  /** Sharpening filter strength (0–1). 0 = bypass. For FSR, maps to RCAS sharpness. */
   sharpeningStrength: number;
   /** Noise-aware sharpening mask (0–1). 0 = sharpen all detail, 1 = protect noise */
   noiseProtection: number;
@@ -216,6 +266,12 @@ function migrateLegacySettings(
     migrated._schemaVersion = 2;
   }
 
+  // Schema version 3 migration: add fsrFinalScaler, rename fsr1-easu label semantics
+  if (currentSchema < 3) {
+    if (!migrated.fsrFinalScaler) migrated.fsrFinalScaler = "bicubic";
+    migrated._schemaVersion = 3;
+  }
+
   // Remove old fields that are no longer user-facing
   for (const key of OLD_NUMERIC_KEYS) {
     delete migrated[key];
@@ -267,9 +323,18 @@ export function validateSettings(
     out.scalingAlgorithm = obj.scalingAlgorithm as ScalingAlgorithm;
   }
 
-  // Validate fsrTargetScale
-  if (FSR_TARGET_SCALES.includes(obj.fsrTargetScale as FsrTargetScale)) {
-    out.fsrTargetScale = obj.fsrTargetScale as FsrTargetScale;
+  // Validate fsrTargetScale — handle string-ified numeric values from localStorage
+  const rawFsrTarget = obj.fsrTargetScale;
+  if (typeof rawFsrTarget === "string") {
+    const parsed = parseFsrTargetScale(rawFsrTarget);
+    out.fsrTargetScale = parsed;
+  } else if (FSR_TARGET_SCALES.includes(rawFsrTarget as FsrTargetScale)) {
+    out.fsrTargetScale = rawFsrTarget as FsrTargetScale;
+  }
+
+  // Validate fsrFinalScaler
+  if (typeof obj.fsrFinalScaler === "string" && FSR_FINAL_SCALERS.includes(obj.fsrFinalScaler as FsrFinalScaler)) {
+    out.fsrFinalScaler = obj.fsrFinalScaler as FsrFinalScaler;
   }
 
   for (const key of NUMERIC_KEYS) {
@@ -292,7 +357,7 @@ export function validateSettings(
   }
 
   // Ensure _schemaVersion
-  out._schemaVersion = 2;
+  out._schemaVersion = 3;
 
   return out;
 }

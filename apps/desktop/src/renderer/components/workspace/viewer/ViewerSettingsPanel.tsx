@@ -17,10 +17,14 @@ import {
   type ViewerImageEnhancementSettings,
   type ScalingAlgorithm,
   type FsrTargetScale,
+  type FsrFinalScaler,
+  parseFsrTargetScale,
   SCALING_ALGORITHMS,
   SCALING_ALGORITHM_LABELS,
   FSR_TARGET_SCALES,
   FSR_TARGET_SCALE_LABELS,
+  FSR_FINAL_SCALERS,
+  FSR_FINAL_SCALER_LABELS,
 } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   IMAGE_ENHANCEMENT_CONTROL_RANGE,
@@ -104,6 +108,9 @@ interface ViewerSettingsPanelProps {
     easuTargetWidth?: number;
     easuTargetHeight?: number;
     finalBicubicActive?: boolean;
+    fsrFinalScaler?: FsrFinalScaler | null;
+    rcasActive?: boolean;
+    activePasses?: string[];
   } | null;
   children: React.ReactNode;
 }
@@ -642,7 +649,7 @@ export function ViewerSettingsPanel({
                     onChange={(e) =>
                       onEnhancementChange({
                         ...enhancementSettings,
-                        fsrTargetScale: e.target.value as FsrTargetScale,
+                        fsrTargetScale: parseFsrTargetScale(e.target.value),
                       })
                     }
                     disabled={!enhancementSettings.enabled}
@@ -651,6 +658,33 @@ export function ViewerSettingsPanel({
                     {FSR_TARGET_SCALES.map((s) => (
                       <option key={s} value={s}>
                         {FSR_TARGET_SCALE_LABELS[s]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* FSR Final Scaler — only when FSR is selected */}
+              {isFsr && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Final Scaler</span>
+                  </div>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                    value={enhancementSettings.fsrFinalScaler}
+                    onChange={(e) =>
+                      onEnhancementChange({
+                        ...enhancementSettings,
+                        fsrFinalScaler: e.target.value as FsrFinalScaler,
+                      })
+                    }
+                    disabled={!enhancementSettings.enabled}
+                    aria-label="FSR Final Scaler"
+                  >
+                    {FSR_FINAL_SCALERS.map((s) => (
+                      <option key={s} value={s}>
+                        {FSR_FINAL_SCALER_LABELS[s]}
                       </option>
                     ))}
                   </select>
@@ -694,7 +728,35 @@ export function ViewerSettingsPanel({
                       <>
                         <span className="text-text-muted">Final Scaling</span>
                         <span className="text-text-secondary font-mono text-right">
-                          {enhancementStats.finalBicubicActive ? "Bicubic" : enhancementStats.easuTargetWidth ? "EASU only" : "Native"}
+                          {enhancementStats.finalBicubicActive
+                            ? (enhancementStats.fsrFinalScaler
+                              ? FSR_FINAL_SCALER_LABELS[enhancementStats.fsrFinalScaler]
+                              : (enhancementStats.scalingAlgorithm === "lanczos" ? "Lanczos 3" : "Bicubic"))
+                            : enhancementStats.easuTargetWidth ? "EASU only" : "Native"}
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.fsrFinalScaler != null && (
+                      <>
+                        <span className="text-text-muted">FSR Final Scaler</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {FSR_FINAL_SCALER_LABELS[enhancementStats.fsrFinalScaler] ?? enhancementStats.fsrFinalScaler}
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.rcasActive != null && (
+                      <>
+                        <span className="text-text-muted">RCAS</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.rcasActive ? "Active" : "—"}
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.activePasses && enhancementStats.activePasses.length > 0 && (
+                      <>
+                        <span className="text-text-muted">Passes</span>
+                        <span className="text-text-secondary font-mono text-right text-[10px]">
+                          {enhancementStats.activePasses.join(" → ")}
                         </span>
                       </>
                     )}

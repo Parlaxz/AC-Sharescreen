@@ -8,8 +8,8 @@ import {
 } from "@/components/ui/dialog";
 import {
   StreamMetricsService,
-  type BandwidthSample,
-  type SettingMarker,
+  type StreamHistorySample,
+  type StreamSettingMarker,
 } from "@/services/stream-metrics-service";
 import { formatBytes, formatDuration } from "@/lib/utils";
 
@@ -18,21 +18,28 @@ interface BandwidthGraphModalProps {
   onOpenChange: (open: boolean) => void;
   mediaSessionId: string | null;
   viewerMode?: boolean;
+  viewerHistoryId?: string | null;
 }
 
-function fmtKBps(bps: number): string {
-  if (bps >= 1_000_000) return (bps / 1_000_000).toFixed(1) + " Mbps";
-  if (bps >= 1_000) return (bps / 1_000).toFixed(0) + " kbps";
-  return bps + " bps";
+/** Format bytes per second as KB/s or MB/s */
+function fmtByteRate(bytesPerSecond: number): string {
+  if (bytesPerSecond <= 0) return "0 KB/s";
+  const kbps = bytesPerSecond / 1024;
+  if (kbps >= 1000) return (kbps / 1024).toFixed(1) + " MB/s";
+  return kbps.toFixed(0) + " KB/s";
 }
 
-export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewerMode }: BandwidthGraphModalProps) {
-  const [samples, setSamples] = useState<BandwidthSample[]>([]);
-  const [markers, setMarkers] = useState<SettingMarker[]>([]);
+/** Convert bytes to KB/s for graphing (Y-axis in KB/s) */
+function bytesToKBs(bytesPerSecond: number): number {
+  return bytesPerSecond / 1024;
+}
+
+export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewerMode, viewerHistoryId }: BandwidthGraphModalProps) {
+  const [samples, setSamples] = useState<StreamHistorySample[]>([]);
+  const [markers, setMarkers] = useState<StreamSettingMarker[]>([]);
   const [duration, setDuration] = useState(0);
-  const [hostTotal, setHostTotal] = useState(0);
-  const [avgBpsState, setAvgBpsState] = useState(0);
-  const [viewerSamples, setViewerSamples] = useState<Array<{ timestamp: number; bps: number }>>([]);
+  const [totalBytes, setTotalBytes] = useState(0);
+  const [currentBps, setCurrentBps] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -40,16 +47,30 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
 
     const svc = StreamMetricsService.getInstance();
     const refresh = () => {
-      if (viewerMode) {
-        setAvgBpsState(svc.getViewerBps());
-        setHostTotal(svc.getViewerTotalBytes());
-        setViewerSamples(svc.getViewerSamples());
+      if (viewerMode && viewerHistoryId) {
+        setSamples(svc.getLiveSamples(viewerHistoryId));
+        setMarkers(svc.getLiveMarkers(viewerHistoryId));
+        setDuration(svc.getLiveDuration(viewerHistoryId));
+        setTotalBytes(svc.getLiveTotalBytes(viewerHistoryId));
+        setCurrentBps(svc.getLiveCurrentBytesPerSecond(viewerHistoryId));
+      } else if (viewerMode) {
+        // Fall back to deprecated viewer tracker when no historyId
+        setCurrentBps(svc.getViewerBps());
+        setTotalBytes(svc.getViewerTotalBytes());
+        const oldSamples = svc.getViewerSamples();
+        setSamples(oldSamples.map((s) => ({
+          timestamp: s.timestamp,
+          bytesPerSecond: s.bps,
+          totalBytes: 0,
+        })));
+        setMarkers([]);
+        setDuration(0);
       } else if (mediaSessionId) {
         setSamples(svc.getLiveSamples(mediaSessionId));
         setMarkers(svc.getLiveMarkers(mediaSessionId));
         setDuration(svc.getLiveDuration(mediaSessionId));
-        setHostTotal(svc.getLiveHostTotal(mediaSessionId));
-        setAvgBpsState(svc.getLiveCurrentBps(mediaSessionId));
+        setTotalBytes(svc.getLiveHostTotal(mediaSessionId));
+        setCurrentBps(svc.getLiveCurrentBps(mediaSessionId));
       }
     };
     refresh();
@@ -58,57 +79,24 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [open, mediaSessionId, viewerMode]);
+  }, [open, mediaSessionId, viewerMode, viewerHistoryId]);
 
-  // Viewer mode: show download graph
-  if (viewerMode) {
-    const chartData = viewerSamples.map(function(s) {
-      return { time: new Date(s.timestamp).toLocaleTimeString(), kbps: (s.bps || 0) / 1000 };
-    });
-    const avgBpsCalc = viewerSamples.length > 0
-      ? Math.round(viewerSamples.reduce(function(a, b) { return a + b.bps; }, 0) / viewerSamples.length)
-      : 0;
+  // Empty state: no samples yet
+  const hasSamples = samples.length > 0;
+  const avgBps = hasSamples
+    ? Math.round(samples.reduce((a, b) => a + b.bytesPerSecond, 0) / samples.length)
+    : 0;
 
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Bandwidth</DialogTitle>
-          </DialogHeader>
-          <div className="grid grid-cols-3 gap-4 text-sm">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Current speed</div>
-              <div className="font-mono tabular-nums">{fmtKBps(avgBpsState)}</div>
-            </div>
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Average</div>
-              <div className="font-mono tabular-nums">{fmtKBps(avgBpsCalc)}</div>
-            </div>
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Total received</div>
-              <div className="font-mono tabular-nums">{formatBytes(hostTotal)}</div>
-            </div>
-          </div>
-          <div className="h-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-                <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" />
-                <YAxis tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" label={{ value: "KB/s", angle: -90, position: "insideLeft", style: { fontSize: 11 } }} />
-                <Tooltip contentStyle={{ fontSize: 12 }} />
-                <Area type="monotone" dataKey="kbps" name="Download" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} isAnimationActive={false} dot={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </DialogContent>
-      </Dialog>
-    );
-  }
+  // Viewer mode / Host mode share the same overall structure
+  const isViewer = !!viewerMode;
+  const chartLabel = isViewer ? "Download" : "Host Upload";
+  const chartColor = isViewer ? "#22c55e" : "#3b82f6";
 
-  // Host mode: show upload graph
-  const hostChartData = samples.map(function(s) {
-    return { time: new Date(s.timestamp).toLocaleTimeString(), hostKbps: s.hostUploadBps / 1000 };
-  });
+  // Build chart data from samples
+  const chartData = samples.map((s) => ({
+    time: new Date(s.timestamp).toLocaleTimeString(),
+    rateKBs: bytesToKBs(s.bytesPerSecond || 0),
+  }));
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -119,33 +107,69 @@ export function BandwidthGraphModal({ open, onOpenChange, mediaSessionId, viewer
 
         <div className="grid grid-cols-3 gap-4 text-sm">
           <div>
-            <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Duration</div>
-            <div className="font-mono tabular-nums">{formatDuration(Math.floor(duration / 1000))}</div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">
+              {isViewer ? "Current speed" : "Duration"}
+            </div>
+            <div className="font-mono tabular-nums">
+              {isViewer ? fmtByteRate(currentBps) : formatDuration(Math.floor(duration / 1000))}
+            </div>
           </div>
           <div>
-            <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Average bitrate</div>
-            <div className="font-mono tabular-nums">{fmtKBps(avgBpsState)}</div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">
+              {isViewer ? "Average" : "Average bitrate"}
+            </div>
+            <div className="font-mono tabular-nums">{fmtByteRate(avgBps)}</div>
           </div>
           <div>
-            <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">Total uploaded</div>
-            <div className="font-mono tabular-nums">{formatBytes(hostTotal)}</div>
+            <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5">
+              {isViewer ? "Total received" : "Total uploaded"}
+            </div>
+            <div className="font-mono tabular-nums">{formatBytes(totalBytes)}</div>
           </div>
         </div>
 
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={hostChartData} margin={{ top: 20, right: 20, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
-              <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" />
-              <YAxis tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" label={{ value: "kbps", angle: -90, position: "insideLeft", style: { fontSize: 11 } }} />
-              <Tooltip contentStyle={{ fontSize: 12 }} formatter={(value: number) => [value.toFixed(0) + " kbps"]} />
-              <Area type="monotone" dataKey="hostKbps" name="Host Upload" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.1} isAnimationActive={false} dot={false} />
-              {markers.map((m, i) => (
-                <ReferenceLine key={i} x={new Date(m.timestamp).toLocaleTimeString()} stroke="var(--color-warning)" strokeDasharray="4 4" label={<Label value={m.label} position="top" style={{ fontSize: 10, fill: "var(--color-warning)" }} />} />
-              ))}
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
+        {!hasSamples ? (
+          <div className="h-48 flex items-center justify-center text-sm text-text-muted">
+            Waiting for bandwidth samples...
+          </div>
+        ) : (
+          <div className={isViewer ? "h-48" : "h-64"}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData} margin={{ top: isViewer ? 5 : 20, right: 20, left: 10, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="var(--color-text-muted)" />
+                <YAxis
+                  tick={{ fontSize: 11 }}
+                  stroke="var(--color-text-muted)"
+                  label={{ value: "KB/s", angle: -90, position: "insideLeft", style: { fontSize: 11 } }}
+                />
+                <Tooltip
+                  contentStyle={{ fontSize: 12 }}
+                  formatter={(value: number) => [value.toFixed(1) + " KB/s"]}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="rateKBs"
+                  name={chartLabel}
+                  stroke={chartColor}
+                  fill={chartColor}
+                  fillOpacity={0.1}
+                  isAnimationActive={false}
+                  dot={false}
+                />
+                {markers.map((m, i) => (
+                  <ReferenceLine
+                    key={i}
+                    x={new Date(m.timestamp).toLocaleTimeString()}
+                    stroke="var(--color-warning)"
+                    strokeDasharray="4 4"
+                    label={<Label value={m.label} position="top" style={{ fontSize: 10, fill: "var(--color-warning)" }} />}
+                  />
+                ))}
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

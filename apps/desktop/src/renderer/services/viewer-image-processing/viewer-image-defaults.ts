@@ -13,11 +13,12 @@ export const VIEWER_IMAGE_ENHANCEMENT_DEFAULTS: ViewerImageEnhancementSettings =
   enabled: false,
   scalingAlgorithm: "native",
   fsrTargetScale: "auto",
+  fsrFinalScaler: "bicubic",
   sharpeningStrength: 0.25,
   noiseProtection: 0.0,
   compressionCleanup: 0.0,
   debanding: 0.0,
-  _schemaVersion: 2,
+  _schemaVersion: 3,
 };
 
 /**
