@@ -135,27 +135,28 @@ function resolveHistoryId(
 
 // ─── 30-second average from medium buckets ──────────────────────────────────
 
-function compute30sAverage(snapshot: BandwidthSnapshot): number {
-  const buckets = snapshot.aggregate.mediumBuckets;
+function compute30sAverage(series: { mediumBuckets: readonly AggregatedBucket[] }): number {
+  const buckets = series.mediumBuckets;
   if (buckets.length === 0) return 0;
-
   // Last 6 medium buckets ≈ 30 seconds (5s each)
   const last = buckets.slice(-6);
-  const sum = last.reduce(
-    (a, b) => a + b.weightedAverageBitsPerSecond,
-    0,
-  );
-  return Math.round(sum / last.length);
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (const b of last) {
+    totalWeight += b.intervalMs;
+    weightedSum += b.weightedAverageBitsPerSecond * b.intervalMs;
+  }
+  return totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
 }
 
 // ─── Chart data preparation ─────────────────────────────────────────────────
 
 function getChartData(
-  snapshot: BandwidthSnapshot,
+  series: { rawSamples: readonly TelemetrySample[]; mediumBuckets: readonly AggregatedBucket[]; longBuckets: readonly AggregatedBucket[] },
   rangeMs: number,
   showRaw: boolean,
 ): ChartDataPoint[] {
-  const { rawSamples, mediumBuckets, longBuckets } = snapshot.aggregate;
+  const { rawSamples, mediumBuckets, longBuckets } = series;
 
   if (
     rawSamples.length === 0 &&
@@ -213,18 +214,22 @@ function getChartData(
 }
 
 function getConnectionHealthData(
-  snapshot: BandwidthSnapshot,
+  series: { rawSamples: readonly TelemetrySample[] },
+  rangeMs: number,
 ): HealthDataPoint[] {
-  const { rawSamples } = snapshot.aggregate;
-  if (rawSamples.length === 0) return [];
-
-  return rawSamples.map((s) => ({
-    time: s.timestampMs,
-    packetLoss: s.packetLossPercent,
-    rtt: s.rttMs,
-    jitter: s.jitterMs,
-    state: s.state,
-  }));
+  const samples = series.rawSamples;
+  if (samples.length === 0) return [];
+  const now = Date.now();
+  const cutoff = rangeMs === Infinity ? 0 : now - rangeMs;
+  return samples
+    .filter((s) => s.timestampMs >= cutoff)
+    .map((s) => ({
+      time: s.timestampMs,
+      packetLoss: s.packetLossPercent,
+      rtt: s.rttMs,
+      jitter: s.jitterMs,
+      state: s.state,
+    }));
 }
 
 // ─── Marker clustering ──────────────────────────────────────────────────────
@@ -498,47 +503,65 @@ export function BandwidthGraphModal({
   const [showRaw, setShowRaw] = useState(false);
   const [selectedViewer, setSelectedViewer] = useState<string>("__all__");
 
+  // Resolve which series to use based on selected viewer
+  const selectedSeries = useMemo((): typeof snapshot.aggregate => {
+    if (selectedViewer === "__all__" || snapshot.connections.length === 0) {
+      return snapshot.aggregate;
+    }
+    const conn = snapshot.connections.find(
+      (c) => (c.viewerDeviceId ?? c.connectionId) === selectedViewer
+    );
+    if (!conn) return snapshot.aggregate;
+    return {
+      rawSamples: conn.rawSamples,
+      mediumBuckets: conn.mediumBuckets,
+      longBuckets: conn.longBuckets,
+      markers: conn.markers,
+      currentBitsPerSecond: conn.currentBitsPerSecond,
+      averageBitsPerSecond: conn.averageBitsPerSecond,
+      peakBitsPerSecond: conn.peakBitsPerSecond,
+      totalBytes: conn.totalBytes,
+      durationMs: conn.durationMs,
+      activeDurationMs: conn.activeDurationMs,
+      configuredBitsPerSecond: conn.configuredBitsPerSecond,
+      effectiveBitsPerSecond: conn.effectiveBitsPerSecond,
+      state: conn.state,
+    } as typeof snapshot.aggregate;
+  }, [selectedViewer, snapshot]);
+
   // Compute summary values
-  const avg30s = useMemo(() => compute30sAverage(snapshot), [snapshot]);
+  const avg30s = useMemo(() => compute30sAverage(selectedSeries), [selectedSeries]);
   const hourlyEstimate = useMemo(
     () =>
-      estimateHourlyBytes(snapshot.aggregate.totalBytes, snapshot.aggregate.activeDurationMs),
-    [snapshot.aggregate.totalBytes, snapshot.aggregate.activeDurationMs],
+      estimateHourlyBytes(selectedSeries.totalBytes, selectedSeries.activeDurationMs),
+    [selectedSeries.totalBytes, selectedSeries.activeDurationMs],
   );
 
   // Chart data
   const chartData = useMemo(
-    () => getChartData(snapshot, timeRange, showRaw),
-    [snapshot, timeRange, showRaw],
+    () => getChartData(selectedSeries, timeRange, showRaw),
+    [selectedSeries, timeRange, showRaw],
   );
 
   const healthData = useMemo(
-    () => getConnectionHealthData(snapshot),
-    [snapshot],
+    () => getConnectionHealthData(selectedSeries, timeRange),
+    [selectedSeries, timeRange],
   );
 
   // Markers
   const markerClusters = useMemo(
-    () => clusterMarkers(snapshot.aggregate.markers),
-    [snapshot.aggregate.markers],
+    () => clusterMarkers(selectedSeries.markers),
+    [selectedSeries.markers],
   );
 
-  // Only show markers when raw samples are available (correct wall-clock alignment)
+  // Only show markers within the selected time range
   const visibleMarkers = useMemo(() => {
-    if (snapshot.aggregate.rawSamples.length === 0) return [];
     const now = Date.now();
     const cutoff = timeRange === Infinity ? 0 : now - timeRange;
     return markerClusters.filter((cluster) =>
       cluster.some((m) => m.timestampMs >= cutoff),
     );
-  }, [markerClusters, timeRange, snapshot.aggregate.rawSamples.length]);
-
-  // Base wall-clock time for marker X-axis placement
-  const baseTime = useMemo(() => {
-    if (snapshot.aggregate.rawSamples.length > 0)
-      return snapshot.aggregate.rawSamples[0].timestampMs;
-    return Date.now();
-  }, [snapshot.aggregate.rawSamples]);
+  }, [markerClusters, timeRange]);
 
   // Viewer selector items (host mode)
   const viewerOptions = useMemo(() => {
@@ -554,9 +577,9 @@ export function BandwidthGraphModal({
 
   // Determine if we have any data
   const hasData =
-    snapshot.aggregate.rawSamples.length > 0 ||
-    snapshot.aggregate.mediumBuckets.length > 0 ||
-    snapshot.aggregate.longBuckets.length > 0;
+    selectedSeries.rawSamples.length > 0 ||
+    selectedSeries.mediumBuckets.length > 0 ||
+    selectedSeries.longBuckets.length > 0;
 
   const content = (
     <Fragment>
@@ -569,16 +592,16 @@ export function BandwidthGraphModal({
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4 text-sm">
           <SummaryItem
             label="Current"
-            value={fmtBitRate(snapshot.aggregate.currentBitsPerSecond)}
+            value={fmtBitRate(selectedSeries.currentBitsPerSecond)}
           />
           <SummaryItem label="30s Avg" value={fmtBitRate(avg30s)} />
           <SummaryItem
             label="Peak"
-            value={fmtBitRate(snapshot.aggregate.peakBitsPerSecond)}
+            value={fmtBitRate(selectedSeries.peakBitsPerSecond)}
           />
           <SummaryItem
             label="Total"
-            value={fmtCumulativeBytes(snapshot.aggregate.totalBytes)}
+            value={fmtCumulativeBytes(selectedSeries.totalBytes)}
           />
           <SummaryItem
             label="Est/hr"
@@ -591,14 +614,14 @@ export function BandwidthGraphModal({
           <SummaryItem label="Duration">
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="font-mono tabular-nums">
-                {fmtDuration(snapshot.aggregate.durationMs)}
+                {fmtDuration(selectedSeries.durationMs)}
               </span>
-              {snapshot.aggregate.state === "paused" && (
+              {selectedSeries.state === "paused" && (
                 <Badge variant="warning" className="text-[10px] px-1.5 py-0">
                   paused
                 </Badge>
               )}
-              {snapshot.aggregate.state === "reconnecting" && (
+              {selectedSeries.state === "reconnecting" && (
                 <Badge
                   variant="destructive"
                   className="text-[10px] px-1.5 py-0"
@@ -627,7 +650,7 @@ export function BandwidthGraphModal({
           </div>
 
           {chartData.length > 0 &&
-            snapshot.aggregate.rawSamples.length > 0 &&
+            selectedSeries.rawSamples.length > 0 &&
             timeRange <= 300_000 && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -763,15 +786,15 @@ export function BandwidthGraphModal({
                       )}
 
                       {/* Target reference line */}
-                      {snapshot.aggregate.configuredBitsPerSecond != null &&
-                        snapshot.aggregate.configuredBitsPerSecond > 0 && (
+                      {selectedSeries.configuredBitsPerSecond != null &&
+                        selectedSeries.configuredBitsPerSecond > 0 && (
                           <ReferenceLine
-                            y={snapshot.aggregate.configuredBitsPerSecond}
+                            y={selectedSeries.configuredBitsPerSecond}
                             stroke="var(--color-warning)"
                             strokeDasharray="6 3"
                             label={
                               <Label
-                                value={`Target: ${fmtBitRate(snapshot.aggregate.configuredBitsPerSecond)}`}
+                                value={`Target: ${fmtBitRate(selectedSeries.configuredBitsPerSecond)}`}
                                 position="right"
                                 style={{
                                   fontSize: 10,
@@ -785,13 +808,16 @@ export function BandwidthGraphModal({
                       {/* Marker reference lines */}
                       {visibleMarkers.map((cluster) => {
                         const first = cluster[0];
-                        const markerTime =
-                          (first.timestampMs - baseTime) / 1000;
+                        const markerTime = first.timestampMs;
                         const label =
                           cluster.length === 1
                             ? first.label
                             : `${first.label} +${cluster.length - 1}`;
                         const color = getMarkerColor(first.type);
+                        const clusterTooltip =
+                          cluster.length > 1
+                            ? cluster.map((m) => `\u2022 ${m.label}`).join("\n")
+                            : undefined;
 
                         return (
                           <ReferenceLine
@@ -809,6 +835,10 @@ export function BandwidthGraphModal({
                                 }}
                               />
                             }
+                            {...(clusterTooltip ? {
+                              ifOverflow: "extendDomain",
+                              // tooltip shown via title-like label for now
+                            } : {})}
                           />
                         );
                       })}
@@ -926,17 +956,17 @@ export function BandwidthGraphModal({
                 <span className="text-xs text-text-muted">Status:</span>
                 <Badge
                   variant={
-                    snapshot.aggregate.state === "playing"
+                    selectedSeries.state === "playing"
                       ? "success"
-                      : snapshot.aggregate.state === "paused"
+                      : selectedSeries.state === "paused"
                         ? "warning"
                         : "destructive"
                   }
                   className="text-xs"
                 >
-                  {snapshot.aggregate.state === "playing"
+                  {selectedSeries.state === "playing"
                     ? "Connected"
-                    : snapshot.aggregate.state === "paused"
+                    : selectedSeries.state === "paused"
                       ? "Paused"
                       : "Reconnecting"}
                 </Badge>
@@ -948,7 +978,7 @@ export function BandwidthGraphModal({
     </Fragment>
   );
 
-  if (contentOnly) {
+  if (!contentOnly) {
     return (
       <TooltipProvider>
         <div className="w-[950px] p-4">{content}</div>
@@ -958,11 +988,7 @@ export function BandwidthGraphModal({
 
   return (
     <TooltipProvider>
-      <Popover open={open} onOpenChange={onOpenChange}>
-        <PopoverContent side="top" align="center" className="w-[950px] p-4">
-          {content}
-        </PopoverContent>
-      </Popover>
+      <div className="w-[950px] p-4">{content}</div>
     </TooltipProvider>
   );
 }
