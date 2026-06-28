@@ -2,7 +2,10 @@
 import { enumerateSources, getSourceFingerprint } from "./capture-source-manager.js";
 import { setApprovedSource } from "./display-media-handler.js";
 import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.js";
+import { probeNvidiaVsrCapability } from "./nvidia-capability-service.js";
 import { AudioHelperManager } from "./AudioHelperManager.js";
+import { VideoHelperManager } from "./VideoHelperManager.js";
+import type { VideoEnhancerConfig } from "./VideoHelperManager.js";
 import {
   generateVdoStreamId,
   generateVdoPassword,
@@ -82,6 +85,17 @@ async function ensureAudioHelper(): Promise<AudioHelperManager> {
   setCurrentAudioState("connecting-transport");
 
   return helper;
+}
+
+// ── Video helper state (singleton manager) ──
+
+let videoHelperManager: VideoHelperManager | null = null;
+
+function ensureVideoHelperManager(): VideoHelperManager {
+  if (!videoHelperManager) {
+    videoHelperManager = new VideoHelperManager();
+  }
+  return videoHelperManager;
 }
 
 export function registerIpcHandlers(
@@ -409,6 +423,12 @@ export function registerIpcHandlers(
       chromeVersion: process.versions.chrome,
       nodeVersion: process.versions.node,
     };
+  });
+
+  // â”€â”€ NVIDIA RTX VSR capability â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  ipcMain.handle("nvidia:probe-capability", async () => {
+    return await probeNvidiaVsrCapability();
   });
 
   // â”€â”€ Audio capabilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

@@ -36,6 +36,14 @@ import {
   deleteFramebuffer,
 } from "./webgl2-resources";
 import { computeEasuTarget } from "./viewer-image-settings";
+import type {
+  ViewerImageBackend,
+  BackendKind,
+  BackendInitResult,
+  FrameProcessResult,
+  FrameMetadata,
+  BackendStats,
+} from "./viewer-image-backend";
 
 // Vite ?raw imports for shader source strings
 import fullscreenVert from "./shaders/fullscreen.vert.glsl?raw";
@@ -58,38 +66,11 @@ void main() {
   fragColor = texture(u_sourceTexture, v_texCoord);
 }`;
 
+// ─── Re-export interface types for backward compatibility ─────────────────────
+
+export type { BackendInitResult, FrameProcessResult, BackendStats } from "./viewer-image-backend";
+
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface BackendInitResult {
-  success: boolean;
-  reason?: string;
-}
-
-export interface FrameProcessResult {
-  success: boolean;
-  gpuTimeMs?: number;
-  /** true when the frame was skipped due to transient conditions (e.g. video not ready yet).
-   *  Callers should NOT treat this as a permanent failure or trigger fallback. */
-  transient?: boolean;
-}
-
-export interface BackendStats {
-  inputWidth: number;
-  inputHeight: number;
-  outputWidth: number;
-  outputHeight: number;
-  enhancedScalingActive: boolean;
-  lastGpuTimeMs: number | null;
-  contextLossCount: number;
-  backend: "webgl2" | "unavailable";
-  scalingAlgorithm: ScalingAlgorithm;
-  easuTargetWidth: number;
-  easuTargetHeight: number;
-  finalBicubicActive: boolean;
-  fsrFinalScaler: FsrFinalScaler | null;
-  rcasActive: boolean;
-  activePasses: string[];
-}
 
 interface DisjointTimerQueryWebGL2 {
   TIME_ELAPSED_EXT: number;
@@ -184,13 +165,19 @@ function computeEasuConstants(
 
 // ─── Backend ─────────────────────────────────────────────────────────────────
 
-export class WebGL2ViewerImageBackend {
+export class WebGL2ViewerImageBackend implements ViewerImageBackend {
+  readonly kind: BackendKind = "webgl2";
+
   // Core GL state
   private gl: WebGL2RenderingContext | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private vao: WebGLVertexArrayObject | null = null;
   private contextLossCount = 0;
   private initialized = false;
+
+  // Frame tracking
+  private _framesProcessed = 0;
+  private _backpressureDrops = 0;
 
   // Texture / FBO resources
   private sourceTexture: WebGLTexture | null = null;
@@ -249,14 +236,21 @@ export class WebGL2ViewerImageBackend {
   // Settings
   private settings: ViewerImageEnhancementSettings = {
     enabled: false,
-    scalingAlgorithm: "native",
+    processingBackend: "webgl2",
+    webglScalingAlgorithm: "native",
     fsrTargetScale: "auto",
     fsrFinalScaler: "bicubic",
+    nvidiaMode: "vsr",
+    nvidiaQuality: "high",
+    nvidiaOutput: "display",
+    customOutputWidth: null,
+    customOutputHeight: null,
+    maintainAspectRatio: true,
     sharpeningStrength: 0.25,
     noiseProtection: 0.0,
     compressionCleanup: 0.0,
     debanding: 0.0,
-    _schemaVersion: 3,
+    _schemaVersion: 4,
   };
 
   // Cached EASU constants (recomputed when dimensions change)
@@ -299,8 +293,11 @@ export class WebGL2ViewerImageBackend {
 
   // ─── Initialisation ────────────────────────────────────────────────────
 
-  initialize(canvas: HTMLCanvasElement): BackendInitResult {
+  async initialize(canvas?: HTMLCanvasElement): Promise<BackendInitResult> {
     try {
+      if (!canvas) {
+        return { success: false, reason: "WebGL2 backend requires a canvas element" };
+      }
       this.canvas = canvas;
 
       const gl = canvas.getContext("webgl2", {
@@ -321,6 +318,10 @@ export class WebGL2ViewerImageBackend {
       }
 
       this.gl = gl;
+
+      // Reset frame counters on initialisation
+      this._framesProcessed = 0;
+      this._backpressureDrops = 0;
 
       // Create VAO for fullscreen tri (no vertex buffers — uses gl_VertexID)
       const vao = gl.createVertexArray();
@@ -450,7 +451,7 @@ export class WebGL2ViewerImageBackend {
 
   // ─── Frame processing ──────────────────────────────────────────────────
 
-  processFrame(videoElement: HTMLVideoElement): FrameProcessResult {
+  async processFrame(videoElement: HTMLVideoElement, _metadata?: FrameMetadata): Promise<FrameProcessResult> {
     const gl = this.gl;
     if (!gl) {
       return { success: false };
@@ -512,7 +513,7 @@ export class WebGL2ViewerImageBackend {
       );
 
       // --- Determine pipeline passes ---
-      const algorithm = this.settings.scalingAlgorithm;
+      const algorithm = this.settings.webglScalingAlgorithm;
       const needsCleanup = this.settings.compressionCleanup > 0;
       const needsDeband = this.settings.debanding > 0;
       const needsSharpen = this.settings.sharpeningStrength > 0;
@@ -795,6 +796,8 @@ export class WebGL2ViewerImageBackend {
       const elapsed = performance.now() - startTime;
       this.lastCpuTimeMs = elapsed;
 
+      this._framesProcessed++;
+
       return {
         success: true,
         gpuTimeMs: this.lastGpuTimeMs ?? elapsed,
@@ -836,7 +839,7 @@ export class WebGL2ViewerImageBackend {
     const isUpscaling = hasInput &&
       (this.renderWidth > this.inputWidth ||
         this.renderHeight > this.inputHeight);
-    const algorithm = this.settings.scalingAlgorithm;
+    const algorithm = this.settings.webglScalingAlgorithm;
     const needsSharpen = this.settings.sharpeningStrength > 0;
     const needsCleanup = this.settings.compressionCleanup > 0;
     const needsDeband = this.settings.debanding > 0;
@@ -910,15 +913,16 @@ export class WebGL2ViewerImageBackend {
       enhancedScalingActive:
         isUpscaling && algorithm !== "native",
       lastGpuTimeMs: this.lastGpuTimeMs,
-      contextLossCount: this.contextLossCount,
       backend: this.gl ? "webgl2" : "unavailable",
+      framesProcessed: this._framesProcessed,
+      activePasses: passes,
+      backpressureDrops: this._backpressureDrops,
       scalingAlgorithm: algorithm,
       easuTargetWidth,
       easuTargetHeight,
       finalBicubicActive: finalScalerActive,
       fsrFinalScaler,
       rcasActive: needsRcas,
-      activePasses: passes,
     };
   }
 
@@ -937,7 +941,7 @@ export class WebGL2ViewerImageBackend {
 
   // ─── Cleanup ───────────────────────────────────────────────────────────
 
-  destroy(): void {
+  async destroy(): Promise<void> {
     if (this._onContextLost && this.canvas) {
       this.canvas.removeEventListener(
         "webglcontextlost",

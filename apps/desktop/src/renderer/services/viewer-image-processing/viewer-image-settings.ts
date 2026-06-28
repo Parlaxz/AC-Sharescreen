@@ -22,6 +22,11 @@ export const SCALING_ALGORITHM_LABELS: Record<ScalingAlgorithm, string> = {
   "fsr1-easu": "FSR 1",
 };
 
+/** WebGL-specific alias for SCALING_ALGORITHMS */
+export const WEBGL_SCALING_ALGORITHMS = SCALING_ALGORITHMS;
+/** WebGL-specific alias for SCALING_ALGORITHM_LABELS */
+export const WEBGL_SCALING_ALGORITHM_LABELS = SCALING_ALGORITHM_LABELS;
+
 /** Algorithms that can produce overshoot/ringing artifacts */
 export const OVERSHOOTING_ALGORITHMS: ReadonlySet<ScalingAlgorithm> = new Set([
   "bicubic",
@@ -165,25 +170,118 @@ export function computeEasuTarget(
   };
 }
 
+// ─── Processing backend enum ─────────────────────────────────────────────────
+
+export type ProcessingBackend = "auto" | "webgl2" | "nvidia-vsr";
+
+export const PROCESSING_BACKENDS: readonly ProcessingBackend[] = [
+  "auto",
+  "webgl2",
+  "nvidia-vsr",
+] as const;
+
+export const PROCESSING_BACKEND_LABELS: Record<ProcessingBackend, string> = {
+  auto: "Automatic",
+  webgl2: "WebGL 2",
+  "nvidia-vsr": "NVIDIA RTX Video",
+};
+
+// ─── NVIDIA VSR settings ─────────────────────────────────────────────────────
+
+export type NvidiaProcessingMode = "vsr" | "high-bitrate" | "denoise" | "deblur";
+
+export const NVIDIA_PROCESSING_MODES: readonly NvidiaProcessingMode[] = [
+  "vsr",
+  "high-bitrate",
+  "denoise",
+  "deblur",
+] as const;
+
+export type NvidiaQuality = "low" | "medium" | "high" | "ultra";
+
+export const NVIDIA_QUALITIES: readonly NvidiaQuality[] = [
+  "low",
+  "medium",
+  "high",
+  "ultra",
+] as const;
+
+export type NvidiaOutput = "display" | "integer-scale" | "custom";
+
+export const NVIDIA_OUTPUTS: readonly NvidiaOutput[] = [
+  "display",
+  "integer-scale",
+  "custom",
+] as const;
+
+export const NVIDIA_PROCESSING_MODE_LABELS: Record<NvidiaProcessingMode, string> = {
+  vsr: "VSR",
+  "high-bitrate": "High Bitrate",
+  denoise: "Denoise",
+  deblur: "Deblur",
+};
+
+export const NVIDIA_QUALITY_LABELS: Record<NvidiaQuality, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  ultra: "Ultra",
+};
+
+export const NVIDIA_OUTPUT_LABELS: Record<NvidiaOutput, string> = {
+  display: "Display Resolution",
+  "integer-scale": "Integer Scale",
+  custom: "Custom",
+};
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface ViewerImageEnhancementSettings {
   /** Master toggle — when false the enhancement pipeline is entirely disabled */
   enabled: boolean;
-  /** GPU scaling algorithm: native | bicubic | lanczos | fsr1-easu */
-  scalingAlgorithm: ScalingAlgorithm;
-  /** FSR EASU target scale when scalingAlgorithm is fsr1-easu */
+
+  /** Backend selection: auto | webgl2 | nvidia-vsr */
+  processingBackend: ProcessingBackend;
+
+  /** WebGL scaling algorithm (renamed from scalingAlgorithm in v3→v4) */
+  webglScalingAlgorithm: ScalingAlgorithm;
+
+  /** FSR EASU target scale when webglScalingAlgorithm is fsr1-easu */
   fsrTargetScale: FsrTargetScale;
+
   /** Final scaler used after EASU when EASU target < display resolution */
   fsrFinalScaler: FsrFinalScaler;
+
+  /** NVIDIA processing mode */
+  nvidiaMode: NvidiaProcessingMode;
+
+  /** NVIDIA quality level */
+  nvidiaQuality: NvidiaQuality;
+
+  /** NVIDIA output mode */
+  nvidiaOutput: NvidiaOutput;
+
+  /** Custom output width (when nvidiaOutput is "custom") */
+  customOutputWidth: number | null;
+
+  /** Custom output height (when nvidiaOutput is "custom") */
+  customOutputHeight: number | null;
+
+  /** Maintain source aspect ratio for custom output */
+  maintainAspectRatio: boolean;
+
   /** Sharpening filter strength (0–1). 0 = bypass. For FSR, maps to RCAS sharpness. */
   sharpeningStrength: number;
+
   /** Noise-aware sharpening mask (0–1). 0 = sharpen all detail, 1 = protect noise */
   noiseProtection: number;
+
   /** Edge-aware cleanup of compression artifacts (0–1). 0 = bypass */
   compressionCleanup: number;
+
   /** Spatial gradient debanding (0–1). 0 = bypass */
   debanding: number;
+
   /** Schema version for migration tracking (optional, set by validateSettings) */
   _schemaVersion?: number;
 }
@@ -272,12 +370,37 @@ function migrateLegacySettings(
     migrated._schemaVersion = 3;
   }
 
+  // ─── Schema v4 migration: rename scalingAlgorithm, add backend + nvidia fields ──
+  if (currentSchema < 4) {
+    // Rename scalingAlgorithm → webglScalingAlgorithm (keep old value if present)
+    if ("scalingAlgorithm" in migrated && !("webglScalingAlgorithm" in migrated)) {
+      migrated.webglScalingAlgorithm = migrated.scalingAlgorithm;
+    }
+    delete migrated.scalingAlgorithm;
+
+    // Existing users stay on webgl2 (not auto)
+    if (!("processingBackend" in migrated)) {
+      migrated.processingBackend = "webgl2";
+    }
+
+    // Add NVIDIA default fields if absent
+    if (!("nvidiaMode" in migrated)) migrated.nvidiaMode = "vsr";
+    if (!("nvidiaQuality" in migrated)) migrated.nvidiaQuality = "high";
+    if (!("nvidiaOutput" in migrated)) migrated.nvidiaOutput = "display";
+    if (!("customOutputWidth" in migrated)) migrated.customOutputWidth = null;
+    if (!("customOutputHeight" in migrated)) migrated.customOutputHeight = null;
+    if (!("maintainAspectRatio" in migrated)) migrated.maintainAspectRatio = true;
+
+    migrated._schemaVersion = 4;
+  }
+
   // Remove old fields that are no longer user-facing
   for (const key of OLD_NUMERIC_KEYS) {
     delete migrated[key];
   }
   delete migrated.enhancedScaling;
   delete migrated.deblocking;
+  delete migrated.scalingAlgorithm; // v4: rename → webglScalingAlgorithm
 
   return migrated;
 }
@@ -291,8 +414,14 @@ const NUMERIC_KEYS: ReadonlySet<string> = new Set([
   "debanding",
 ]);
 
+const NULLABLE_NUMERIC_KEYS: ReadonlySet<string> = new Set([
+  "customOutputWidth",
+  "customOutputHeight",
+]);
+
 const BOOLEAN_KEYS: ReadonlySet<string> = new Set([
   "enabled",
+  "maintainAspectRatio",
 ]);
 
 /**
@@ -318,9 +447,18 @@ export function validateSettings(
 
   const out: ViewerImageEnhancementSettings = { ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS };
 
-  // Validate scalingAlgorithm
-  if (typeof obj.scalingAlgorithm === "string" && SCALING_ALGORITHMS.includes(obj.scalingAlgorithm as ScalingAlgorithm)) {
-    out.scalingAlgorithm = obj.scalingAlgorithm as ScalingAlgorithm;
+  // Backward compat: if old `scalingAlgorithm` is present but `webglScalingAlgorithm`
+  // is not, copy the value.  This handles callers that haven't migrated yet.
+  const rawWebglAlgo = obj.webglScalingAlgorithm ?? obj.scalingAlgorithm;
+
+  // Validate processingBackend
+  if (typeof obj.processingBackend === "string" && PROCESSING_BACKENDS.includes(obj.processingBackend as ProcessingBackend)) {
+    out.processingBackend = obj.processingBackend as ProcessingBackend;
+  }
+
+  // Validate webglScalingAlgorithm
+  if (typeof rawWebglAlgo === "string" && SCALING_ALGORITHMS.includes(rawWebglAlgo as ScalingAlgorithm)) {
+    out.webglScalingAlgorithm = rawWebglAlgo as ScalingAlgorithm;
   }
 
   // Validate fsrTargetScale — handle string-ified numeric values from localStorage
@@ -337,6 +475,17 @@ export function validateSettings(
     out.fsrFinalScaler = obj.fsrFinalScaler as FsrFinalScaler;
   }
 
+  // Validate NVIDIA fields
+  if (typeof obj.nvidiaMode === "string" && NVIDIA_PROCESSING_MODES.includes(obj.nvidiaMode as NvidiaProcessingMode)) {
+    out.nvidiaMode = obj.nvidiaMode as NvidiaProcessingMode;
+  }
+  if (typeof obj.nvidiaQuality === "string" && NVIDIA_QUALITIES.includes(obj.nvidiaQuality as NvidiaQuality)) {
+    out.nvidiaQuality = obj.nvidiaQuality as NvidiaQuality;
+  }
+  if (typeof obj.nvidiaOutput === "string" && NVIDIA_OUTPUTS.includes(obj.nvidiaOutput as NvidiaOutput)) {
+    out.nvidiaOutput = obj.nvidiaOutput as NvidiaOutput;
+  }
+
   for (const key of NUMERIC_KEYS) {
     const v = obj[key];
     if (typeof v === "number") {
@@ -349,6 +498,17 @@ export function validateSettings(
     }
   }
 
+  // Nullable numeric keys: accept number or null
+  for (const key of NULLABLE_NUMERIC_KEYS) {
+    const v = obj[key];
+    if (v === null || v === undefined) {
+      (out as unknown as Record<string, unknown>)[key] = null;
+    } else if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+      (out as unknown as Record<string, unknown>)[key] = Math.floor(v);
+    }
+    // else keep default (null)
+  }
+
   for (const key of BOOLEAN_KEYS) {
     const v = obj[key];
     if (typeof v === "boolean") {
@@ -357,7 +517,7 @@ export function validateSettings(
   }
 
   // Ensure _schemaVersion
-  out._schemaVersion = 3;
+  out._schemaVersion = 4;
 
   return out;
 }

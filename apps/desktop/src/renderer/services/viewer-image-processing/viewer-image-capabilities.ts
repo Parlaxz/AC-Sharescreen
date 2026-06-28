@@ -8,9 +8,46 @@ export interface ImageProcessingCapabilities {
   webgl2Extensions: string[];
   requestVideoFrameCallbackAvailable: boolean;
   extDisjointTimerQueryAvailable: boolean;
+  /** Whether NVIDIA RTX VSR is available (Windows x64 with RTX GPU) */
+  nvidiaVsrAvailable: boolean;
+  /** Human-readable reason when NVIDIA VSR is unavailable */
+  nvidiaVsrReason?: string;
+  /** GPU adapter name when detectable */
+  adapterName?: string;
 }
 
 let cachedCapabilities: ImageProcessingCapabilities | null = null;
+
+/**
+ * Augment the cached capabilities with NVIDIA RTX VSR availability
+ * probed from the main process via IPC.
+ *
+ * This is an async augmentation — the IPC round-trip happens after
+ * the synchronous capability detection. The result is merged into
+ * the cached capabilities object so subsequent factory calls see it.
+ *
+ * Safe to call even if IPC is unavailable (no-op in that case).
+ */
+export async function augmentWithNvidiaCapability(): Promise<void> {
+  try {
+    const api = (globalThis as Record<string, unknown>).screenlink as
+      | { probeNvidiaVsrCapability?: () => Promise<{ available: boolean; reason: string; adapterName?: string }> }
+      | undefined;
+    if (!api?.probeNvidiaVsrCapability) return;
+
+    const result = await api.probeNvidiaVsrCapability();
+
+    if (cachedCapabilities) {
+      cachedCapabilities.nvidiaVsrAvailable = result.available;
+      cachedCapabilities.nvidiaVsrReason = result.reason;
+      if (result.adapterName) {
+        cachedCapabilities.adapterName = result.adapterName;
+      }
+    }
+  } catch {
+    // IPC unavailable — NVIDIA VSR stays at default (false)
+  }
+}
 
 /**
  * Detects the image processing capabilities of the current browser environment.
@@ -49,6 +86,8 @@ function probeCapabilities(): ImageProcessingCapabilities {
       requestVideoFrameCallbackAvailable:
         typeof HTMLVideoElement.prototype.requestVideoFrameCallback === "function",
       extDisjointTimerQueryAvailable: false,
+      nvidiaVsrAvailable: false,
+      nvidiaVsrReason: "WebGL2 unavailable on this device",
     };
   }
 
@@ -63,6 +102,9 @@ function probeCapabilities(): ImageProcessingCapabilities {
   const loseContextExt = gl.getExtension("WEBGL_lose_context");
   loseContextExt?.loseContext();
 
+  // Attempt to get GPU adapter name for NVIDIA VSR detection hint
+  let adapterName: string | undefined;
+
   return {
     backend: "webgl2",
     webgl2Available: true,
@@ -72,5 +114,12 @@ function probeCapabilities(): ImageProcessingCapabilities {
     requestVideoFrameCallbackAvailable:
       typeof HTMLVideoElement.prototype.requestVideoFrameCallback === "function",
     extDisjointTimerQueryAvailable: extDisjointTimerQuery,
+    // NVIDIA VSR detection will be enhanced in Phase 4 via IPC/GPU adapter query
+    nvidiaVsrAvailable: false,
+    nvidiaVsrReason:
+      "NVIDIA VSR detection requires native IPC probe (Phase 4)",
+    adapterName,
   };
 }
+
+

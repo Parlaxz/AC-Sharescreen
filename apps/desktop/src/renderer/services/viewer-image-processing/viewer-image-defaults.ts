@@ -7,18 +7,26 @@ import type { ViewerImageEnhancementSettings } from "./viewer-image-settings.js"
  *
  * Conservative defaults: master disabled, native scaling, no enhancements.
  * All optional effects default to zero (bypass).
- * Schema version 2: added fsrTargetScale, removed fsrBicubicBlend.
+ * Schema version 4: added processingBackend, webglScalingAlgorithm,
+ * NVIDIA VSR controls, custom output settings.
  */
 export const VIEWER_IMAGE_ENHANCEMENT_DEFAULTS: ViewerImageEnhancementSettings = {
   enabled: false,
-  scalingAlgorithm: "native",
+  processingBackend: "webgl2",
+  webglScalingAlgorithm: "native",
   fsrTargetScale: "auto",
   fsrFinalScaler: "bicubic",
+  nvidiaMode: "vsr",
+  nvidiaQuality: "high",
+  nvidiaOutput: "display",
+  customOutputWidth: null,
+  customOutputHeight: null,
+  maintainAspectRatio: true,
   sharpeningStrength: 0.25,
   noiseProtection: 0.0,
   compressionCleanup: 0.0,
   debanding: 0.0,
-  _schemaVersion: 3,
+  _schemaVersion: 4,
 };
 
 /**

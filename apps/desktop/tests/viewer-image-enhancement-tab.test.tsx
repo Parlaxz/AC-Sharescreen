@@ -58,7 +58,7 @@ describe("ViewerSettingsPanel Image Enhancements tab", () => {
   });
 
   it("defaults have correct structure (no enhancedScaling, no fsrBicubicBlend)", () => {
-    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.scalingAlgorithm).toBe("native");
+    expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.webglScalingAlgorithm).toBe("native");
     expect((VIEWER_IMAGE_ENHANCEMENT_DEFAULTS as Record<string, unknown>).enhancedScaling).toBeUndefined();
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.noiseProtection).toBeDefined();
     expect(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionCleanup).toBeDefined();

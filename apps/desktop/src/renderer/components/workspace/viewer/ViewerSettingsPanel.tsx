@@ -18,9 +18,23 @@ import {
   type ScalingAlgorithm,
   type FsrTargetScale,
   type FsrFinalScaler,
+  type ProcessingBackend,
+  type NvidiaProcessingMode,
+  type NvidiaQuality,
+  type NvidiaOutput,
   parseFsrTargetScale,
   SCALING_ALGORITHMS,
   SCALING_ALGORITHM_LABELS,
+  PROCESSING_BACKENDS,
+  PROCESSING_BACKEND_LABELS,
+  WEBGL_SCALING_ALGORITHMS,
+  WEBGL_SCALING_ALGORITHM_LABELS,
+  NVIDIA_PROCESSING_MODES,
+  NVIDIA_PROCESSING_MODE_LABELS,
+  NVIDIA_QUALITIES,
+  NVIDIA_QUALITY_LABELS,
+  NVIDIA_OUTPUTS,
+  NVIDIA_OUTPUT_LABELS,
   FSR_TARGET_SCALES,
   FSR_TARGET_SCALE_LABELS,
   FSR_FINAL_SCALERS,
@@ -95,6 +109,10 @@ interface ViewerSettingsPanelProps {
   onEnhancementChange?: (settings: ViewerImageEnhancementSettings) => void;
   /** Called when the user clicks Reset to Defaults in the enhancements tab */
   onEnhancementReset?: () => void;
+  /** Effective backend after auto-detection (shown when different from selected) */
+  effectiveBackend?: string;
+  /** Fallback reason if the requested backend couldn't be used */
+  fallbackReason?: string;
   /** Processing statistics (shown when enhancements enabled) */
   enhancementStats?: {
     inputWidth: number;
@@ -111,6 +129,8 @@ interface ViewerSettingsPanelProps {
     fsrFinalScaler?: FsrFinalScaler | null;
     rcasActive?: boolean;
     activePasses?: string[];
+    backpressureDrops?: number;
+    generation?: number;
   } | null;
   children: React.ReactNode;
 }
@@ -229,6 +249,8 @@ export function ViewerSettingsPanel({
   enhancementSettings = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
   onEnhancementChange = () => {},
   onEnhancementReset = () => {},
+  effectiveBackend,
+  fallbackReason,
   enhancementStats = null,
   children,
 }: ViewerSettingsPanelProps) {
@@ -369,7 +391,7 @@ export function ViewerSettingsPanel({
   const isCustom = requestState === null;
 
   // ─── Algorithm helper ──────────────────────────────────────────────────
-  const algorithm = enhancementSettings.scalingAlgorithm;
+  const algorithm = enhancementSettings.webglScalingAlgorithm ?? "native";
   const isFsr = algorithm === "fsr1-easu";
 
   return (
@@ -578,22 +600,55 @@ export function ViewerSettingsPanel({
                 />
               </div>
 
-              {/* Scaling Algorithm Dropdown */}
+              {/* Processing Backend selection */}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] text-text-muted uppercase tracking-wide">Scaling Algorithm</span>
+                  <span className="text-[10px] text-text-muted uppercase tracking-wide">Processing Backend</span>
                 </div>
                 <select
                   className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                  value={enhancementSettings.scalingAlgorithm}
+                  value={enhancementSettings.processingBackend ?? "webgl2"}
                   onChange={(e) =>
                     onEnhancementChange({
                       ...enhancementSettings,
-                      scalingAlgorithm: e.target.value as ScalingAlgorithm,
+                      processingBackend: e.target.value as ProcessingBackend,
                     })
                   }
                   disabled={!enhancementSettings.enabled}
-                  aria-label="Scaling Algorithm"
+                  aria-label="Processing Backend"
+                >
+                  {PROCESSING_BACKENDS.map((backend) => (
+                    <option key={backend} value={backend}>
+                      {PROCESSING_BACKEND_LABELS[backend]}
+                    </option>
+                  ))}
+                </select>
+                {fallbackReason && (
+                  <p className="text-[10px] text-amber-500 mt-1">{fallbackReason}</p>
+                )}
+                {effectiveBackend && effectiveBackend !== enhancementSettings.processingBackend && (
+                  <p className="text-[10px] text-text-muted mt-0.5">
+                    Active: {effectiveBackend}
+                  </p>
+                )}
+              </div>
+
+              {/* WebGL Scaler Dropdown */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-text-muted uppercase tracking-wide">WebGL Scaler</span>
+                </div>
+                <select
+                  className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                  value={enhancementSettings.webglScalingAlgorithm ?? "native"}
+                  onChange={(e) =>
+                    onEnhancementChange({
+                      ...enhancementSettings,
+                      webglScalingAlgorithm: e.target.value as ScalingAlgorithm,
+                    })
+                  }
+                  disabled={!enhancementSettings.enabled}
+                  aria-label="WebGL Scaler"
                 >
                   {SCALING_ALGORITHMS.map((algo) => (
                     <option key={algo} value={algo}>
@@ -691,6 +746,58 @@ export function ViewerSettingsPanel({
                 </div>
               )}
 
+              {/* NVIDIA RTX Video Settings - shown when relevant */}
+              {(enhancementSettings.processingBackend === "nvidia-vsr" || enhancementSettings.processingBackend === "auto") && (
+                <>
+                  <hr className="border-border-subtle" />
+                  <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
+                  <div className="space-y-2">
+                    {/* Mode */}
+                    <div>
+                      <span className="text-[10px] text-text-muted">Mode</span>
+                      <select
+                        className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
+                        value={enhancementSettings.nvidiaMode}
+                        onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaMode: e.target.value as NvidiaProcessingMode })}
+                        disabled={!enhancementSettings.enabled}
+                      >
+                        {NVIDIA_PROCESSING_MODES.map((mode) => (
+                          <option key={mode} value={mode}>{mode}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {/* Quality */}
+                    <div>
+                      <span className="text-[10px] text-text-muted">Quality</span>
+                      <select
+                        className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
+                        value={enhancementSettings.nvidiaQuality}
+                        onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaQuality: e.target.value as NvidiaQuality })}
+                        disabled={!enhancementSettings.enabled}
+                      >
+                        {NVIDIA_QUALITIES.map((q) => (
+                          <option key={q} value={q}>{q}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {/* Output mode */}
+                    <div>
+                      <span className="text-[10px] text-text-muted">Output</span>
+                      <select
+                        className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2 mt-1"
+                        value={enhancementSettings.nvidiaOutput}
+                        onChange={(e) => onEnhancementChange({ ...enhancementSettings, nvidiaOutput: e.target.value as NvidiaOutput })}
+                        disabled={!enhancementSettings.enabled}
+                      >
+                        {NVIDIA_OUTPUTS.map((o) => (
+                          <option key={o} value={o}>{o}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </>
+              )}
+
               {/* Reset button */}
               <div className="pt-1">
                 <Button
@@ -764,6 +871,22 @@ export function ViewerSettingsPanel({
                     <span className="text-text-secondary font-mono text-right">
                       {enhancementStats.backend}
                     </span>
+                    {enhancementStats.backpressureDrops != null && (
+                      <>
+                        <span className="text-text-muted">Backpressure Drops</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.backpressureDrops}
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.generation != null && (
+                      <>
+                        <span className="text-text-muted">Generation</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.generation}
+                        </span>
+                      </>
+                    )}
                     <span className="text-text-muted">GPU Time</span>
                     <span className="text-text-secondary font-mono text-right">
                       {enhancementStats.processingTimeMs != null

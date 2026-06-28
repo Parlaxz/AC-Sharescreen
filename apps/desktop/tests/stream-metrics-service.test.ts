@@ -139,12 +139,12 @@ describe("StreamMetricsService", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
 
       svc.feedHostBytes(historyId, 1000, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(1000);
+      expect(svc.getLiveTotalBytes(historyId)).toBe(0);    // first feed is baseline only
       expect(svc.getLiveCurrentBytesPerSecond(historyId)).toBe(0); // cannot compute rate with single point
 
       // Feed again with delta of 2000 over 1 second
       svc.feedHostBytes(historyId, 3000, 2000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(3000);
+      expect(svc.getLiveTotalBytes(historyId)).toBe(2000); // 3000 - 1000 = 2000 delta
       expect(svc.getLiveCurrentBytesPerSecond(historyId)).toBe(2000); // 2000 bytes / 1 sec = 2000 B/s
     });
 
@@ -152,10 +152,14 @@ describe("StreamMetricsService", () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
 
       svc.feedHostBytes(historyId, 5000, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(5000);
+      expect(svc.getLiveTotalBytes(historyId)).toBe(0);   // first feed is baseline only
+
+      // Second feed establishes first real delta
+      svc.feedHostBytes(historyId, 10000, 2000);
+      expect(svc.getLiveTotalBytes(historyId)).toBe(5000); // 10000 - 5000 = 5000 delta
 
       // Counter reset - new value is lower, should set baseline without negative delta
-      svc.feedHostBytes(historyId, 100, 2000);
+      svc.feedHostBytes(historyId, 100, 3000);
       expect(svc.getLiveTotalBytes(historyId)).toBe(5000); // total unchanged (no negative delta)
     });
 
@@ -180,10 +184,10 @@ describe("StreamMetricsService", () => {
       const historyId = svc.startViewerSession("ms1", "ls1", "g1", "G1", "Remote");
 
       svc.feedViewerBytes(historyId, 500, 1000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(500);
+      expect(svc.getLiveTotalBytes(historyId)).toBe(0);   // first feed is baseline only
 
       svc.feedViewerBytes(historyId, 1500, 2000);
-      expect(svc.getLiveTotalBytes(historyId)).toBe(1500);
+      expect(svc.getLiveTotalBytes(historyId)).toBe(1000); // 1500 - 500 = 1000 delta
     });
   });
 
@@ -225,7 +229,7 @@ describe("StreamMetricsService", () => {
       const record = mock.upsertStreamHistory.mock.calls[0][0] as StreamHistoryRecord;
       expect(record.samples.length).toBe(1);
       expect(record.samples[0].bytesPerSecond).toBe(5000); // 5000 B/s from delta
-      expect(record.samples[0].totalBytes).toBe(10000);
+      expect(record.samples[0].totalBytes).toBe(5000); // 5000 delta bytes added on second feed
     });
 
     it("samples contain bytesPerSecond (bytes, not bits)", () => {
@@ -303,7 +307,8 @@ describe("StreamMetricsService", () => {
 
     it("sets status to completed, stoppedAt, and averageBytesPerSecond", async () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
-      svc.feedHostBytes(historyId, 10000, 5000);
+      svc.feedHostBytes(historyId, 0, 0);      // baseline
+      svc.feedHostBytes(historyId, 10000, 5000); // delta = 10000, totalBytes = 10000
 
       // Advance time so durationMs > 0
       await advanceTime(100);
@@ -372,7 +377,7 @@ describe("StreamMetricsService", () => {
       svc.onHostStats("ms1", 10000, 2000);
 
       const sessionIds = svc.getActiveSessionIds();
-      expect(svc.getLiveTotalBytes(sessionIds[0])).toBe(10000);
+      expect(svc.getLiveTotalBytes(sessionIds[0])).toBe(5000); // second feed delta = 5000
     });
 
     it("getLiveCurrentBps returns bits/s (backward compat)", () => {
@@ -591,7 +596,7 @@ describe("StreamMetricsService", () => {
     it("getLiveHostTotal returns totalBytes for host session", () => {
       svc.startHostSession("ms1", "ls1", "g1", "G1", null, false, null);
       svc.onHostStats("ms1", 5000, 1000);
-      expect(svc.getLiveHostTotal("ms1")).toBe(5000);
+      expect(svc.getLiveHostTotal("ms1")).toBe(0); // first feed is baseline only
     });
   });
 

@@ -110,7 +110,7 @@ describe("viewer-image-defaults", () => {
   it("all default values are within valid range", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
     expect(d.enabled).toBe(false);
-    expect(d.scalingAlgorithm).toBe("native");
+    expect(d.webglScalingAlgorithm).toBe("native");
     for (const key of ["sharpeningStrength", "noiseProtection", "compressionCleanup", "debanding"]) {
       const v = d[key as keyof ViewerImageEnhancementSettings] as number;
       expect(v).toBeGreaterThanOrEqual(0);
@@ -118,7 +118,7 @@ describe("viewer-image-defaults", () => {
     }
   });
 
-  it("defaults match specification values (schema v3)", () => {
+  it("defaults match specification values (schema v4)", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
     expect(d.sharpeningStrength).toBeCloseTo(0.25);
     expect(d.noiseProtection).toBeCloseTo(0.00);
@@ -126,7 +126,15 @@ describe("viewer-image-defaults", () => {
     expect(d.debanding).toBeCloseTo(0.00);
     expect(d.fsrTargetScale).toBe("auto");
     expect(d.fsrFinalScaler).toBe("bicubic");
-    expect(d._schemaVersion).toBe(3);
+    expect(d.processingBackend).toBe("webgl2");
+    expect(d.webglScalingAlgorithm).toBe("native");
+    expect(d.nvidiaMode).toBe("vsr");
+    expect(d.nvidiaQuality).toBe("high");
+    expect(d.nvidiaOutput).toBe("display");
+    expect(d.customOutputWidth).toBeNull();
+    expect(d.customOutputHeight).toBeNull();
+    expect(d.maintainAspectRatio).toBe(true);
+    expect(d._schemaVersion).toBe(4);
   });
 
   it("does not include fsrBicubicBlend", () => {
@@ -178,7 +186,7 @@ describe("validateSettings", () => {
   it("fills missing keys from defaults", () => {
     const result = validateSettings({ enabled: true });
     expect(result.enabled).toBe(true);
-    expect(result.scalingAlgorithm).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.scalingAlgorithm);
+    expect(result.webglScalingAlgorithm).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.webglScalingAlgorithm);
     expect(result.sharpeningStrength).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.sharpeningStrength);
   });
 
@@ -205,44 +213,51 @@ describe("validateSettings", () => {
     expect(result.enabled).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.enabled);
   });
 
-  it("accepts valid scalingAlgorithm values", () => {
+  it("accepts valid webglScalingAlgorithm values", () => {
     for (const algo of SCALING_ALGORITHMS) {
       const result = validateSettings({ scalingAlgorithm: algo });
-      expect(result.scalingAlgorithm).toBe(algo);
+      expect(result.webglScalingAlgorithm).toBe(algo);
     }
   });
 
-  it("rejects invalid scalingAlgorithm, defaults to native", () => {
+  it("rejects invalid webglScalingAlgorithm, defaults to native", () => {
     const result = validateSettings({ scalingAlgorithm: "magic" });
-    expect(result.scalingAlgorithm).toBe("native");
+    expect(result.webglScalingAlgorithm).toBe("native");
   });
 
   it("migrates legacy enhancedScaling=true to fsr1-easu", () => {
     const result = validateSettings({ enhancedScaling: true });
-    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.webglScalingAlgorithm).toBe("fsr1-easu");
   });
 
   it("migrates legacy enhancedScaling=false to native", () => {
     const result = validateSettings({ enhancedScaling: false });
-    expect(result.scalingAlgorithm).toBe("native");
+    expect(result.webglScalingAlgorithm).toBe("native");
   });
 
   it("scalingAlgorithm takes priority over legacy enhancedScaling", () => {
     const result = validateSettings({ enhancedScaling: true, scalingAlgorithm: "bicubic" });
-    expect(result.scalingAlgorithm).toBe("bicubic");
+    expect(result.webglScalingAlgorithm).toBe("bicubic");
   });
 
   it("accepts valid complete settings with new fields (no fsrBicubicBlend)", () => {
     const valid: ViewerImageEnhancementSettings = {
       enabled: true,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
       fsrTargetScale: "auto",
       fsrFinalScaler: "bicubic",
       sharpeningStrength: 0.5,
       noiseProtection: 0.3,
       compressionCleanup: 0.6,
       debanding: 0.1,
-      _schemaVersion: 3,
+      processingBackend: "webgl2",
+      nvidiaMode: "vsr",
+      nvidiaQuality: "high",
+      nvidiaOutput: "display",
+      customOutputWidth: null,
+      customOutputHeight: null,
+      maintainAspectRatio: true,
+      _schemaVersion: 4,
     };
     expect(validateSettings(valid)).toEqual(valid);
   });
@@ -256,17 +271,17 @@ describe("validateSettings", () => {
     const result = validateSettings({ textureNoiseSharpening: 0.3 });
     // 1 - 0.3 = 0.7, but then v2 migration forces optional effects to 0
     expect(result.noiseProtection).toBeCloseTo(0.0);
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
-  it("migrates old chromaCleanup/compressionSmoothing to compressionCleanup (but v2 migration zeros optional effects)", () => {
+  it("migrates old chromaCleanup", () => {
     const result = validateSettings({ chromaCleanup: 0.5, compressionSmoothing: 0.3 });
     // Max of 0.5 and 0.3 = 0.5, but v2 migration forces to 0
     expect(result.compressionCleanup).toBeCloseTo(0.0);
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
-  it("handles both old fields migrated together (but v2 migration zeros optional effects)", () => {
+  it("handles both old fields migrated together", () => {
     const result = validateSettings({
       textureNoiseSharpening: 0.2,
       chromaCleanup: 0.4,
@@ -274,7 +289,7 @@ describe("validateSettings", () => {
     });
     expect(result.noiseProtection).toBeCloseTo(0.0);
     expect(result.compressionCleanup).toBeCloseTo(0.0);
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
   // ─── fsrTargetScale validation ─────────────────────────────────────────
@@ -305,11 +320,11 @@ describe("validateSettings", () => {
     expect(result.noiseProtection).toBeCloseTo(0.00);
     expect(result.compressionCleanup).toBeCloseTo(0.00);
     expect(result.debanding).toBeCloseTo(0.00);
-    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.webglScalingAlgorithm).toBe("fsr1-easu");
     expect(result.sharpeningStrength).toBeCloseTo(0.20);
     expect(result.fsrTargetScale).toBe("auto");
     expect(result.fsrFinalScaler).toBe("bicubic");
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
   it("_schemaVersion=1 forces optional effects to zero", () => {
@@ -324,9 +339,9 @@ describe("validateSettings", () => {
     expect(result.noiseProtection).toBeCloseTo(0.00);
     expect(result.compressionCleanup).toBeCloseTo(0.00);
     expect(result.debanding).toBeCloseTo(0.00);
-    expect(result.scalingAlgorithm).toBe("bicubic");
+    expect(result.webglScalingAlgorithm).toBe("bicubic");
     expect(result.sharpeningStrength).toBeCloseTo(0.20);
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
   it("new schema (v2) preserves user values, migrates to v3", () => {
@@ -343,10 +358,10 @@ describe("validateSettings", () => {
     expect(result.compressionCleanup).toBeCloseTo(0.20);
     expect(result.debanding).toBeCloseTo(0.10);
     expect(result.sharpeningStrength).toBeCloseTo(0.20);
-    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.webglScalingAlgorithm).toBe("fsr1-easu");
     expect(result.fsrTargetScale).toBe("auto");
     expect(result.fsrFinalScaler).toBe("bicubic");
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
   it("fsrBicubicBlend is deleted on input", () => {
@@ -383,6 +398,7 @@ describe("validateSettings", () => {
   it("defaults fsrFinalScaler to bicubic when missing", () => {
     const result = validateSettings({ scalingAlgorithm: "fsr1-easu" });
     expect(result.fsrFinalScaler).toBe("bicubic");
+    expect(result.webglScalingAlgorithm).toBe("fsr1-easu");
   });
 
   // ─── Schema v3 migration ───────────────────────────────────────────
@@ -390,13 +406,14 @@ describe("validateSettings", () => {
   it("schema v2 → v3 adds fsrFinalScaler default", () => {
     const result = validateSettings({ _schemaVersion: 2, scalingAlgorithm: "fsr1-easu" });
     expect(result.fsrFinalScaler).toBe("bicubic");
-    expect(result._schemaVersion).toBe(3);
+    expect(result.webglScalingAlgorithm).toBe("fsr1-easu");
+    expect(result._schemaVersion).toBe(4);
   });
 
   it("schema v2 → v3 preserves explicit fsrFinalScaler", () => {
     const result = validateSettings({ _schemaVersion: 2, fsrFinalScaler: "lanczos" });
     expect(result.fsrFinalScaler).toBe("lanczos");
-    expect(result._schemaVersion).toBe(3);
+    expect(result._schemaVersion).toBe(4);
   });
 
   // ─── Numeric target scale persistence ──────────────────────────────
@@ -463,14 +480,14 @@ describe("localStorage persistence", () => {
     const settings: ViewerImageEnhancementSettings = {
       ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
       enabled: true,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
       sharpeningStrength: 0.42,
     };
     saveImageEnhancementSettings(settings);
     const loaded = loadImageEnhancementSettings();
     expect(loaded.enabled).toBe(true);
     expect(loaded.sharpeningStrength).toBe(0.42);
-    expect(loaded.scalingAlgorithm).toBe("bicubic");
+    expect(loaded.webglScalingAlgorithm).toBe("bicubic");
   });
 
   it("loadImageEnhancementSettings returns defaults when stored data is corrupt", () => {
@@ -515,7 +532,7 @@ describe("localStorage persistence", () => {
       sharpeningStrength: 0.5,
     });
     const result = loadImageEnhancementSettings();
-    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.webglScalingAlgorithm).toBe("fsr1-easu");
     expect(result.enabled).toBe(true);
     expect(result.sharpeningStrength).toBe(0.5);
   });

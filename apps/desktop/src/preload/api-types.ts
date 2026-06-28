@@ -88,6 +88,14 @@ export interface ScreenLinkAPI {
     close: () => Promise<void>;
   };
 
+  // NVIDIA RTX VSR capability detection
+  probeNvidiaVsrCapability: () => Promise<{
+    available: boolean;
+    reason: string;
+    adapterName?: string;
+    driverVersion?: string;
+  }>;
+
   // Audio capabilities
   getAudioCapabilities: () => Promise<{
     success: boolean;
@@ -123,6 +131,13 @@ export interface ScreenLinkAPI {
 
   // Discord shortcut simulation
   sendShortcut: (binding: ShortcutBinding) => Promise<{ success: boolean; error?: string }>;
+
+  // Video helper
+  videoHelperStart: (config: Record<string, unknown>) => Promise<boolean>;
+  videoHelperStop: (shutdown?: boolean) => Promise<void>;
+  videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: number[], inputWidth: number, inputHeight: number) => Promise<boolean>;
+  videoHelperFlush: () => Promise<boolean>;
+  videoHelperGetState: () => Promise<string>;
 
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;

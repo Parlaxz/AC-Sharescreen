@@ -318,7 +318,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // Poll WebRTC stats for bandwidth
   useEffect(() => {
-    if (!sessionRef.current || sessionState !== "watching") {
+    // Session ended or errored: full reset
+    if (!sessionRef.current || sessionState === "ended" || sessionState === "error") {
       setCurrentBandwidthBps(0);
       setTotalBytesReceived(0);
       bandwidthTrackerRef.current = createBandwidthTracker();
@@ -332,6 +333,18 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         viewerHistoryIdRef.current = null;
         setViewerHistoryId(null);
         StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
+      }
+      return;
+    }
+
+    // Paused or reconnecting: keep tracker alive, don't poll
+    if (sessionState === "paused" || sessionState === "reconnecting") {
+      setCurrentBandwidthBps(0);
+      // DON'T reset tracker - keep bytes total alive
+      bandwidthTrackerRef.current = { ...bandwidthTrackerRef.current, paused: true };
+      if (bandwidthPollRef.current) {
+        clearInterval(bandwidthPollRef.current);
+        bandwidthPollRef.current = null;
       }
       return;
     }
@@ -358,21 +371,24 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           const videoBytes = diag.inboundVideo.bytesReceived ?? 0;
           const audioBytes = diag.inboundAudio.bytesReceived ?? 0;
           const totalNow = videoBytes + audioBytes;
+          const ssrc = diag.inboundVideo.ssrc ?? null;
           const next = updateBandwidthTracker(
             bandwidthTrackerRef.current,
             totalNow,
             performance.now(),
+            ssrc,
           );
           bandwidthTrackerRef.current = next;
-          setTotalBytesReceived(next.totalBytesReceived);
-          setCurrentBandwidthBps(next.currentBytesPerSecond);
+          setTotalBytesReceived(next.totalBytes);
+          setCurrentBandwidthBps(next.currentBitsPerSecond);
 
           // Feed viewer bytes into StreamMetricsService
           if (viewerHistoryIdRef.current) {
             StreamMetricsService.getInstance().feedViewerBytes(
               viewerHistoryIdRef.current,
               totalNow,
-              Date.now(),
+              performance.now(),
+              ssrc,
             );
           }
         }

@@ -82,14 +82,21 @@ function createReadyVideo(width = 100, height = 50): HTMLVideoElement {
 
 const allControls: ViewerImageEnhancementSettings = {
   enabled: true,
-  scalingAlgorithm: "bicubic",
+  processingBackend: "webgl2",
+  webglScalingAlgorithm: "bicubic",
   fsrTargetScale: "auto",
   fsrFinalScaler: "bicubic",
+  nvidiaMode: "vsr",
+  nvidiaQuality: "high",
+  nvidiaOutput: "display",
+  customOutputWidth: null,
+  customOutputHeight: null,
+  maintainAspectRatio: true,
   sharpeningStrength: 0.77,
   noiseProtection: 0.66,
   compressionCleanup: 0.55,
   debanding: 0.44,
-  _schemaVersion: 3,
+  _schemaVersion: 4,
 };
 
 describe("WebGL2ViewerImageBackend resource tracking", () => {
@@ -206,16 +213,16 @@ describe("WebGL2ViewerImageBackend output dimension tracking", () => {
 });
 
 describe("WebGL2ViewerImageBackend frame behavior", () => {
-  it("marks zero-size startup frames as transient", () => {
+  it("marks zero-size startup frames as transient", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     backend.gl = createFakeGl();
 
-    const result = backend.processFrame(createReadyVideo(0, 0));
+    const result = await backend.processFrame(createReadyVideo(0, 0));
 
     expect(result).toMatchObject({ success: false, transient: true });
   });
 
-  it("maps every exposed control to its expected live uniform", () => {
+  it("maps every exposed control to its expected live uniform", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -251,7 +258,7 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings(allControls);
 
-    const result = backend.processFrame(createReadyVideo());
+    const result = await backend.processFrame(createReadyVideo());
 
     expect(result.success).toBe(true);
     expect(gl.uniformCalls).toEqual(
@@ -264,7 +271,7 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     );
   });
 
-  it("zero optional effects skip cleanup, upscale, and sharpen effect passes", () => {
+  it("zero optional effects skip cleanup, upscale, and sharpen effect passes", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -274,12 +281,12 @@ describe("WebGL2ViewerImageBackend frame behavior", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "native",
+      webglScalingAlgorithm: "native",
       sharpeningStrength: 0,
       compressionCleanup: 0,
     });
 
-    const result = backend.processFrame(createReadyVideo());
+    const result = await backend.processFrame(createReadyVideo());
 
     expect(result.success).toBe(true);
     expect(gl.uniformCalls.map((call) => call.location)).not.toEqual(
@@ -310,7 +317,7 @@ describe("WebGL2ViewerImageBackend timer queries", () => {
 });
 
 describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
-  it("routes to bicubic program when algorithm is bicubic", () => {
+  it("routes to bicubic program when algorithm is bicubic", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -326,17 +333,17 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
       compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
-    const result = backend.processFrame(createReadyVideo(50, 25));
+    const result = await backend.processFrame(createReadyVideo(50, 25));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("bicubicProg");
   });
 
-  it("routes to EASU program and uploads official dimension constants", () => {
+  it("routes to EASU program and uploads official dimension constants", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -363,7 +370,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
@@ -371,7 +378,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
       // With display scale, source(50,25) → easuTarget(200,100) directly
     });
 
-    const result = backend.processFrame(createReadyVideo(50, 25));
+    const result = await backend.processFrame(createReadyVideo(50, 25));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("easuProg");
     const byLocation = new Map(gl.uniformCalls.map((call) => [call.location, call.value as number[]]));
@@ -390,7 +397,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(byLocation.get("easu.con3")?.[3]).toBeCloseTo(0);
   });
 
-  it("routes to deband program when debanding > 0", () => {
+  it("routes to deband program when debanding > 0", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -406,17 +413,17 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "native",
+      webglScalingAlgorithm: "native",
       compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
-    const result = backend.processFrame(createReadyVideo(50, 25));
+    const result = await backend.processFrame(createReadyVideo(50, 25));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("debandProg");
   });
 
-  it("bypasses deband when debanding is 0", () => {
+  it("bypasses deband when debanding is 0", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -432,20 +439,20 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "native",
+      webglScalingAlgorithm: "native",
       compressionCleanup: 0,
       sharpeningStrength: 0,
       debanding: 0,
     });
 
-    const result = backend.processFrame(createReadyVideo(50, 25));
+    const result = await backend.processFrame(createReadyVideo(50, 25));
     expect(result.success).toBe(true);
     expect(gl.useProgram).not.toHaveBeenCalledWith("debandProg");
   });
 
   // ─── New pipeline routing tests ─────────────────────────────────────
 
-  it("FSR 360p→1080p with auto: EASU to 1280×720, then bicubic to 1920×1080", () => {
+  it("FSR 360p→1080p with auto: EASU to 1280×720, then bicubic to 1920×1080", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -483,14 +490,14 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
       fsrTargetScale: "auto",
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
 
     // EASU should be called with the intermediate target viewport
@@ -506,7 +513,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(bicubicViewportCalls.length).toBeGreaterThanOrEqual(1);
   });
 
-  it("FSR 720p→1080p with auto: EASU to 1920×1080 directly, no bicubic", () => {
+  it("FSR 720p→1080p with auto: EASU to 1920×1080 directly, no bicubic", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -540,14 +547,14 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
       fsrTargetScale: "auto",
     });
 
-    const result = backend.processFrame(createReadyVideo(1280, 720));
+    const result = await backend.processFrame(createReadyVideo(1280, 720));
     expect(result.success).toBe(true);
 
     // EASU should be called, bicubic should NOT (since needsBicubic=false)
@@ -558,7 +565,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(bicubicCalls.length).toBe(0);
   });
 
-  it("FSR 360p→1080p with display: EASU to full display, no bicubic", () => {
+  it("FSR 360p→1080p with display: EASU to full display, no bicubic", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -592,14 +599,14 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
       fsrTargetScale: "display",
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
 
     // EASU should be called, bicubic should NOT
@@ -610,7 +617,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(bicubicCalls.length).toBe(0);
   });
 
-  it("Bicubic algorithm: bicubic source→display, no EASU", () => {
+  it("Bicubic algorithm: bicubic source→display, no EASU", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -629,20 +636,20 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
 
     expect(gl.useProgram).toHaveBeenCalledWith("bicubicProg");
     expect(gl.useProgram).not.toHaveBeenCalledWith("easuProg");
   });
 
-  it("Native algorithm: no scaling pass, just direct draw", () => {
+  it("Native algorithm: no scaling pass, just direct draw", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -655,14 +662,14 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "native",
+      webglScalingAlgorithm: "native",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
     });
 
     // Source same size as output → no scaling needed
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
 
     expect(gl.useProgram).not.toHaveBeenCalledWith("bicubicProg");
@@ -671,7 +678,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
   // ─── Lanczos routing ──────────────────────────────────────────────
 
-  it("Lanczos algorithm: uses lanczosProgram for scaling", () => {
+  it("Lanczos algorithm: uses lanczosProgram for scaling", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -696,19 +703,19 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "lanczos",
+      webglScalingAlgorithm: "lanczos",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("lanczosProg");
     expect(gl.useProgram).not.toHaveBeenCalledWith("bicubicProg");
   });
 
-  it("Lanczos anti-ringing is set to 0.4", () => {
+  it("Lanczos anti-ringing is set to 0.4", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -726,19 +733,19 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "lanczos",
+      webglScalingAlgorithm: "lanczos",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
     });
 
-    backend.processFrame(createReadyVideo(640, 360));
+    await backend.processFrame(createReadyVideo(640, 360));
     expect(gl.uniform1f).toHaveBeenCalledWith("lanczos.antiRinging", 0.4);
   });
 
   // ─── FSR final scaler routing ─────────────────────────────────────
 
-  it("FSR with fsrFinalScaler lanczos uses lanczosProgram for final pass", () => {
+  it("FSR with fsrFinalScaler lanczos uses lanczosProgram for final pass", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -782,7 +789,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       fsrFinalScaler: "lanczos",
       compressionCleanup: 0,
       debanding: 0,
@@ -790,7 +797,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
       fsrTargetScale: "auto",
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("lanczosProg");
     const bicubicCalls = gl.useProgram.mock.calls.filter(
@@ -799,7 +806,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(bicubicCalls.length).toBe(0);
   });
 
-  it("FSR with fsrFinalScaler bicubic uses bicubicProgram for final pass", () => {
+  it("FSR with fsrFinalScaler bicubic uses bicubicProgram for final pass", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -843,7 +850,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       fsrFinalScaler: "bicubic",
       compressionCleanup: 0,
       debanding: 0,
@@ -851,7 +858,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
       fsrTargetScale: "auto",
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
     expect(gl.useProgram).toHaveBeenCalledWith("bicubicProg");
     const lanczosCalls = gl.useProgram.mock.calls.filter(
@@ -862,7 +869,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
   // ─── RCAS / sharpen routing ───────────────────────────────────────
 
-  it("FSR uses RCAS instead of custom sharpen", () => {
+  it("FSR uses RCAS instead of custom sharpen", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -908,14 +915,14 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       fsrTargetScale: "display",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0.77, // non-zero → needs sharpening
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
     // RCAS should be called
     expect(gl.useProgram).toHaveBeenCalledWith("rcasProg");
@@ -923,7 +930,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(gl.useProgram).not.toHaveBeenCalledWith("sharpenProg");
   });
 
-  it("Non-FSR uses custom sharpen, not RCAS", () => {
+  it("Non-FSR uses custom sharpen, not RCAS", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -955,13 +962,13 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0.77,
     });
 
-    const result = backend.processFrame(createReadyVideo(640, 360));
+    const result = await backend.processFrame(createReadyVideo(640, 360));
     expect(result.success).toBe(true);
     // Custom sharpen should be called
     expect(gl.useProgram).toHaveBeenCalledWith("sharpenProg");
@@ -969,7 +976,7 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
     expect(gl.useProgram).not.toHaveBeenCalledWith("rcasProg");
   });
 
-  it("No double sharpening: RCAS and custom sharpen never both active", () => {
+  it("No double sharpening: RCAS and custom sharpen never both active", async () => {
     // Test FSR path — RCAS should be called, not sharpen
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
@@ -1016,14 +1023,14 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       fsrTargetScale: "display",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0.77,
     });
 
-    backend.processFrame(createReadyVideo(640, 360));
+    await backend.processFrame(createReadyVideo(640, 360));
 
     const sharpenCalls = gl.useProgram.mock.calls.filter(
       (call: string[]) => call[0] === "sharpenProg"
@@ -1041,12 +1048,12 @@ describe("WebGL2ViewerImageBackend scaling algorithm routing", () => {
 });
 
 describe("WebGL2ViewerImageBackend getStats", () => {
-  it("includes scalingAlgorithm in stats", () => {
+  it("includes scalingAlgorithm in stats", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     backend.gl = createFakeGl();
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
     });
 
     const stats = backend.getStats();
@@ -1054,7 +1061,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     expect(stats.backend).toBe("webgl2");
   });
 
-  it("includes easuTargetWidth/easuTargetHeight and finalBicubicActive", () => {
+  it("includes easuTargetWidth/easuTargetHeight and finalBicubicActive", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -1064,7 +1071,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
@@ -1072,7 +1079,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     });
 
     // Process a 360p frame to populate render dimensions
-    backend.processFrame(createReadyVideo(640, 360));
+    await backend.processFrame(createReadyVideo(640, 360));
 
     const stats = backend.getStats();
     expect(stats.easuTargetWidth).toBe(1280);
@@ -1080,7 +1087,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     expect(stats.finalBicubicActive).toBe(true);
   });
 
-  it("includes new stats fields: fsrFinalScaler, rcasActive, activePasses", () => {
+  it("includes new stats fields: fsrFinalScaler, rcasActive, activePasses", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -1113,7 +1120,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
 
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "fsr1-easu",
+      webglScalingAlgorithm: "fsr1-easu",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0.5,  // Sharpening active
@@ -1121,7 +1128,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
       fsrFinalScaler: "bicubic",
     });
 
-    backend.processFrame(createReadyVideo(640, 360));
+    await backend.processFrame(createReadyVideo(640, 360));
 
     const stats = backend.getStats();
     expect(stats.fsrFinalScaler).toBe("bicubic");
@@ -1132,7 +1139,7 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     );
   });
 
-  it("fsrFinalScaler is null when algorithm is not FSR", () => {
+  it("fsrFinalScaler is null when algorithm is not FSR", async () => {
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
     const gl = createFakeGl();
     backend.gl = gl;
@@ -1142,20 +1149,20 @@ describe("WebGL2ViewerImageBackend getStats", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "bicubic",
+      webglScalingAlgorithm: "bicubic",
       compressionCleanup: 0,
       debanding: 0,
       sharpeningStrength: 0,
     });
 
-    backend.processFrame(createReadyVideo(640, 360));
+    await backend.processFrame(createReadyVideo(640, 360));
     const stats = backend.getStats();
     expect(stats.fsrFinalScaler).toBeNull();
   });
 });
 
 describe("computeContainedRect", () => {
-  it("produces a centered rect for wider source", () => {
+  it("produces a centered rect for wider source", async () => {
     // Source is wider (16:9), output is square (1:1)
     // Source: 160x90, Output: 200x200
     // renderW = 200 (width-constrained), renderH = 200 * 90/160 = 112.5 -> 112
@@ -1173,12 +1180,12 @@ describe("computeContainedRect", () => {
     backend.fullscreenUniforms = { u_sourceTexture: "fullscreen.source" };
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "native",
+      webglScalingAlgorithm: "native",
       compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
-    backend.processFrame(createReadyVideo(160, 90));
+    await backend.processFrame(createReadyVideo(160, 90));
 
     // Render rect should be width-constrained: W=200, H=200*90/160=112
     expect(backend.renderWidth).toBe(200);
@@ -1187,7 +1194,7 @@ describe("computeContainedRect", () => {
     expect(backend.renderY).toBe(44);
   });
 
-  it("produces a centered rect for taller source", () => {
+  it("produces a centered rect for taller source", async () => {
     // Source is taller (9:16), output is landscape (16:9)
     // Source: 90x160, Output: 320x180
     const backend = new WebGL2ViewerImageBackend() as BackendInternals;
@@ -1199,12 +1206,12 @@ describe("computeContainedRect", () => {
     backend.outputHeight = 180;
     backend.updateSettings({
       ...allControls,
-      scalingAlgorithm: "native",
+      webglScalingAlgorithm: "native",
       compressionCleanup: 0,
       sharpeningStrength: 0,
     });
 
-    backend.processFrame(createReadyVideo(90, 160));
+    await backend.processFrame(createReadyVideo(90, 160));
 
     // Height-constrained: H=180, W=180*90/160=101
     expect(backend.renderWidth).toBe(101);

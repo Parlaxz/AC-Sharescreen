@@ -36,6 +36,8 @@ export interface ViewerDiagnosticsSnapshot {
     framesDropped: number | null;
     /** freezeCount from inbound-rtp stats */
     freezeCount: number | null;
+    /** SSRC of the primary video inbound RTP stream */
+    ssrc: number | null;
   };
   inboundAudio: {
     bitrateBps: number;
@@ -82,6 +84,8 @@ export type ViewerSessionState =
   | "accepted"
   | "connecting-media"
   | "watching"
+  | "paused"
+  | "reconnecting"
   | "ended"
   | "error";
 
@@ -838,6 +842,7 @@ export class ViewerSession {
         framesPerSecond: null,
         framesDropped: null,
         freezeCount: null,
+        ssrc: null,
       },
       inboundAudio: {
         bitrateBps: 0,
@@ -907,6 +912,7 @@ export class ViewerSession {
 
           if (kind === "video") {
             aggregatedVideoBytes += bytes;
+            snapshot.inboundVideo.ssrc = (report as any).ssrc ?? null;
             snapshot.inboundVideo.packetsReceived = packets;
             snapshot.inboundVideo.packetsLost = lost;
             snapshot.inboundVideo.jitter = jitter;

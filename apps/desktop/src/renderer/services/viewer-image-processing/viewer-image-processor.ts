@@ -4,7 +4,7 @@
  * enhancement pipeline. Bridges the raw WebGL2 backend with React lifecycle.
  */
 
-import { WebGL2ViewerImageBackend } from "./webgl2-viewer-image-backend";
+import type { ViewerImageBackend, BackendKind } from "./viewer-image-backend";
 import type { ViewerImageEnhancementSettings, ScalingAlgorithm, FsrFinalScaler } from "./viewer-image-settings";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ export interface ProcessorStats {
   outputHeight: number;
   processingTimeMs: number | null;
   enhancedScalingActive: boolean;
-  backend: string;
+  backend: BackendKind;
   framesProcessed: number;
   scalingAlgorithm: ScalingAlgorithm;
   easuTargetWidth: number;
@@ -39,12 +39,14 @@ export interface ProcessorStats {
   fsrFinalScaler: FsrFinalScaler | null;
   rcasActive: boolean;
   activePasses: string[];
+  backpressureDrops: number;
+  generation: number;
 }
 
 // ─── Processor ───────────────────────────────────────────────────────────────
 
 export class ViewerImageProcessor {
-  private backend: WebGL2ViewerImageBackend;
+  private backend: ViewerImageBackend;
   private canvas: HTMLCanvasElement;
   private videoElement: HTMLVideoElement;
   private state: ProcessorState = "idle";
@@ -58,23 +60,50 @@ export class ViewerImageProcessor {
   private rafLastTime = -1;
   private lastMediaTime = -1;
 
+  // Async backpressure
+  private frameInFlight = false;
+  private pendingFrame = false;
+
+  // Generation tracking
+  private generation = 0;
+  private frameSequence = 0;
+
   // Stats
   private framesProcessed = 0;
   private lastStatsTime = 0;
 
-  constructor(canvas: HTMLCanvasElement, videoElement: HTMLVideoElement) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    videoElement: HTMLVideoElement,
+    backend: ViewerImageBackend,
+  ) {
     this.canvas = canvas;
     this.videoElement = videoElement;
-    this.backend = new WebGL2ViewerImageBackend();
+    this.backend = backend;
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────
 
   /**
    * Start processing with the given settings.
-   * Initialises the WebGL2 backend and begins the render loop.
+   * Initialises the backend and begins the render loop.
+   *
+   * Note: initialisation is internally async. Errors are reported through
+   * the onError callback.
    */
   start(settings: ViewerImageEnhancementSettings): void {
+    this.startAsync(settings).catch((err) => {
+      this.emitError(
+        err instanceof Error
+          ? err.message
+          : "Backend initialization failed",
+      );
+    });
+  }
+
+  private async startAsync(
+    settings: ViewerImageEnhancementSettings,
+  ): Promise<void> {
     if (this.state === "destroyed") {
       this.emitError("Cannot start a destroyed processor");
       return;
@@ -86,12 +115,18 @@ export class ViewerImageProcessor {
     this.lastMediaTime = -1;
     this.rafLastTime = -1;
 
-    const result = this.backend.initialize(this.canvas);
+    // Bump generation and reset frame sequencing
+    this.generation++;
+    this.frameSequence = 0;
+    this.frameInFlight = false;
+    this.pendingFrame = false;
+
+    const result = await this.backend.initialize(this.canvas);
     if (!result.success) {
       this.state = "error";
       this.callbacks.onStateChange?.("error");
       this.callbacks.onError?.(
-        result.reason ?? "WebGL2 backend initialization failed",
+        result.reason ?? "Backend initialization failed",
       );
       return;
     }
@@ -104,6 +139,29 @@ export class ViewerImageProcessor {
     this.state = "running";
     this.callbacks.onStateChange?.("running");
     this.scheduleFrame();
+  }
+
+  /**
+   * Swap the active backend at runtime.
+   * Destroys the old backend and initialises the new one with current settings.
+   */
+  setBackend(backend: ViewerImageBackend): void {
+    const wasRunning = this.state === "running";
+    if (wasRunning) {
+      this.cancelFrame();
+    }
+
+    // Destroy old backend (fire-and-forget)
+    this.backend.destroy().catch(() => {});
+    this.backend = backend;
+    this.frameInFlight = false;
+    this.pendingFrame = false;
+    this.generation++;
+    this.frameSequence = 0;
+
+    if (wasRunning && this.settings) {
+      this.start(this.settings);
+    }
   }
 
   /**
@@ -172,7 +230,11 @@ export class ViewerImageProcessor {
   }
 
   getStats(): ProcessorStats {
-    const backendStats = this.state === "running" ? this.backend.getStats() : null;
+    const backendStats =
+      this.state === "running" ? this.backend.getStats() : null;
+
+    const algorithm =
+      this.settings?.webglScalingAlgorithm ?? "native";
 
     return {
       inputWidth: backendStats?.inputWidth ?? 0,
@@ -183,13 +245,15 @@ export class ViewerImageProcessor {
       enhancedScalingActive: backendStats?.enhancedScalingActive ?? false,
       backend: backendStats?.backend ?? "unavailable",
       framesProcessed: this.framesProcessed,
-      scalingAlgorithm: backendStats?.scalingAlgorithm ?? "native",
+      scalingAlgorithm: algorithm,
       easuTargetWidth: backendStats?.easuTargetWidth ?? 0,
       easuTargetHeight: backendStats?.easuTargetHeight ?? 0,
       finalBicubicActive: backendStats?.finalBicubicActive ?? false,
       fsrFinalScaler: backendStats?.fsrFinalScaler ?? null,
       rcasActive: backendStats?.rcasActive ?? false,
       activePasses: backendStats?.activePasses ?? [],
+      backpressureDrops: backendStats?.backpressureDrops ?? 0,
+      generation: this.generation,
     };
   }
 
@@ -247,8 +311,14 @@ export class ViewerImageProcessor {
     }
     this.lastMediaTime = metadata.mediaTime;
 
-    this.processCurrentFrame();
-    this.scheduleFrame();
+    // Backpressure: if a frame is currently being processed async, mark
+    // the newest available frame as pending and drop this invocation.
+    if (this.frameInFlight) {
+      this.pendingFrame = true;
+      return;
+    }
+
+    this.beginFrameProcessing();
   };
 
   private onRafFrame = (): void => {
@@ -264,19 +334,51 @@ export class ViewerImageProcessor {
     }
     this.rafLastTime = currentTime;
 
-    this.processCurrentFrame();
+    // Backpressure: if a frame is currently being processed async, mark
+    // the newest available frame as pending and drop this invocation.
+    if (this.frameInFlight) {
+      this.pendingFrame = true;
+      this.rafHandle = requestAnimationFrame(this.onRafFrame);
+      return;
+    }
+
+    this.beginFrameProcessing();
     this.rafHandle = requestAnimationFrame(this.onRafFrame);
   };
 
-  // ─── Frame processing ──────────────────────────────────────────────────
+  // ─── Async frame processing ────────────────────────────────────────────
 
-  private processCurrentFrame(): void {
-    const result = this.backend.processFrame(this.videoElement);
+  private beginFrameProcessing(): void {
+    this.frameInFlight = true;
+    this.processCurrentFrameAsync().finally(() => {
+      this.frameInFlight = false;
+      if (this.pendingFrame) {
+        // Another frame arrived while we were busy — process the latest
+        this.pendingFrame = false;
+        this.beginFrameProcessing();
+      } else if (this.state === "running") {
+        this.scheduleFrame();
+      }
+    });
+  }
 
-    // Transient frames (video not ready yet) — skip silently, continue loop
-    if (result.transient) {
-      return;
-    }
+  private async processCurrentFrameAsync(): Promise<void> {
+    const seq = ++this.frameSequence;
+    const gen = this.generation;
+
+    const result = await this.backend.processFrame(this.videoElement, {
+      generation: gen,
+      frameSequence: seq,
+    });
+
+    // Ignore results from stale generations (backend swap or restart)
+    if (gen !== this.generation) return;
+
+    // Transient frames (video not ready yet) — skip silently
+    if (result.transient) return;
+
+    // Backpressure drops from the backend — skip
+    if (result.backpressureDrop) return;
 
     this.framesProcessed++;
 
@@ -301,6 +403,17 @@ export class ViewerImageProcessor {
       this.lastStatsTime = now;
       this.callbacks.onStatsUpdate?.(this.getStats());
     }
+  }
+
+  // ─── Legacy sync wrapper (deprecated, for backward-compat testing) ──────
+
+  /**
+   * @deprecated Synchronous fire-and-forget wrapper. Only kept for existing
+   *             test patterns that call processCurrentFrame() directly.
+   *             New code should use the async pipeline via beginFrameProcessing.
+   */
+  private processCurrentFrame(): void {
+    this.processCurrentFrameAsync().catch(() => {});
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────

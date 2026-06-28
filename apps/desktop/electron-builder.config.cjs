@@ -57,6 +57,10 @@ const config = {
       from: "../../native/audio-helper/build/Release/screenlink-audio-helper.exe",
       to: "screenlink-audio-helper.exe",
     },
+    {
+      from: "../../native/video-enhancer/build/Release/screenlink-video-enhancer.exe",
+      to: "screenlink-video-enhancer.exe",
+    },
   ],
   // Do not rebuild native modules unless specifically verified
   npmRebuild: false,

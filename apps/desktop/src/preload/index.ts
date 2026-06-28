@@ -66,6 +66,7 @@ const api: ScreenLinkAPI = {
 
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
   getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
+  probeNvidiaVsrCapability: () => ipcRenderer.invoke("nvidia:probe-capability"),
 
   /**
    * Write text to the OS clipboard via the main process. Bypasses
@@ -122,6 +123,14 @@ const api: ScreenLinkAPI = {
     ipcRenderer.on("open-diagnostics", handler);
     return () => { ipcRenderer.removeListener("open-diagnostics", handler); };
   },
+
+  // Video helper
+  videoHelperStart: (config) => ipcRenderer.invoke("video-helper:start", config),
+  videoHelperStop: (shutdown) => ipcRenderer.invoke("video-helper:stop", shutdown),
+  videoHelperSubmitFrame: (generation, frameSequence, frameData, inputWidth, inputHeight) =>
+    ipcRenderer.invoke("video-helper:submit-frame", generation, frameSequence, frameData, inputWidth, inputHeight),
+  videoHelperFlush: () => ipcRenderer.invoke("video-helper:flush"),
+  videoHelperGetState: () => ipcRenderer.invoke("video-helper:get-state"),
 
   // Discord shortcut simulation
   sendShortcut: (binding) => ipcRenderer.invoke("send-shortcut", binding),

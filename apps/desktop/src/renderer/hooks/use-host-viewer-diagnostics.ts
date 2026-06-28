@@ -210,7 +210,7 @@ export function useHostViewerDiagnostics(
 
     // Feed cumulative host outbound bytes to metrics service
     if (mediaSessionId && totalCumulativeBytes > 0) {
-      StreamMetricsService.getInstance().onHostStats(mediaSessionId, totalCumulativeBytes, Date.now());
+      StreamMetricsService.getInstance().onHostStats(mediaSessionId, totalCumulativeBytes, performance.now());
     }
 
     return newStats;

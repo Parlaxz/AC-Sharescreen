@@ -19,6 +19,8 @@ describe("viewer-image-capabilities", () => {
     expect(caps.webgl2MaxTextureSize).toBe(0);
     expect(caps.webgl2MaxRenderbufferSize).toBe(0);
     expect(caps.extDisjointTimerQueryAvailable).toBe(false);
+    expect(caps.nvidiaVsrAvailable).toBe(false);
+    expect(caps.nvidiaVsrReason).toBeDefined();
   });
 
   it("detects requestVideoFrameCallback availability in node environment", () => {
