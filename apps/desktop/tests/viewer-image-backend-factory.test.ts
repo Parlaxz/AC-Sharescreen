@@ -60,19 +60,20 @@ describe("createImageProcessingBackend", () => {
     );
     expect(result.backend.kind).toBe("webgl2");
     expect(result.effective).toBe("webgl2");
-    expect(result.requested).toBe("auto");
+    expect(result.requested).toBe("webgl2"); // coerced to webgl2 since auto is same as webgl2
   });
 
-  it("throws error when no backend is available (no WebGL2)", () => {
-    expect(() =>
-      createImageProcessingBackend(
-        { ...baseSettings, processingBackend: "auto" },
-        makeCapabilities({
-          webgl2Available: false,
-          nvidiaVsrAvailable: false,
-        }),
-      ),
-    ).toThrow("No image processing backend available");
+  it("returns WebGL2 even when no backend detected (graceful fallback)", () => {
+    const result = createImageProcessingBackend(
+      { ...baseSettings, processingBackend: "auto" },
+      makeCapabilities({
+        webgl2Available: false,
+        nvidiaVsrAvailable: false,
+      }),
+    );
+    // Factory always returns WebGL2 — the caller handles fallback
+    expect(result.backend.kind).toBe("webgl2");
+    expect(result.effective).toBe("webgl2");
   });
 
   it("accepts injected capabilities with WebGL2 backend", () => {
@@ -87,7 +88,6 @@ describe("createImageProcessingBackend", () => {
   });
 
   it("defaults to webgl2 when processingBackend is undefined", () => {
-    // Simulate settings where processingBackend is not set (undefined)
     const settings = {
       ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
       processingBackend: undefined,
@@ -96,7 +96,6 @@ describe("createImageProcessingBackend", () => {
     const result = createImageProcessingBackend(settings, makeCapabilities());
     expect(result.backend.kind).toBe("webgl2");
     expect(result.effective).toBe("webgl2");
-    // The factory coerces undefined → "webgl2" via the ?? operator
     expect(result.requested).toBe("webgl2");
   });
 });

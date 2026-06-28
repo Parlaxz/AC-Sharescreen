@@ -545,7 +545,7 @@ describe("ViewerImageProcessor — setBackend", () => {
     const genBefore = statsBefore.generation;
 
     const newBackend = new MockWebGL2Backend();
-    processor.setBackend(newBackend);
+    await processor.setBackend(newBackend);
 
     const statsAfter = processor.getStats();
     expect(statsAfter.generation).toBeGreaterThan(genBefore);

@@ -1,6 +1,7 @@
 #include "FrameTransport.h"
 #include <stdexcept>
 #include <vector>
+#include <cstddef>
 
 namespace screenlink::video {
 
@@ -124,40 +125,100 @@ bool FrameTransport::WriteControlResponse(const std::string& response) {
     return bytesWritten == framed.size();
 }
 
+// ─── Exact I/O helpers (audit item 31) ──────────────────────────────
+
+static bool ReadExact(HANDLE pipe, void* buf, size_t bytes) {
+    if (bytes == 0) return true;
+    size_t total = 0;
+    auto* dst = static_cast<uint8_t*>(buf);
+    while (total < bytes) {
+        DWORD chunk = 0;
+        DWORD toRead = static_cast<DWORD>((bytes - total) < (64 * 1024) ? (bytes - total) : (64 * 1024));
+        BOOL ok = ReadFile(pipe, dst + total, toRead, &chunk, nullptr);
+        if (!ok) {
+            DWORD err = GetLastError();
+            if (err == ERROR_MORE_DATA) {
+                // Message-mode pipe with more data — count what we got and continue
+                total += chunk;
+                continue;
+            }
+            if (err != ERROR_BROKEN_PIPE) {
+                fprintf(stderr, "[FrameTransport] ReadFile error: %lu\n", err);
+            }
+            return false;
+        }
+        if (chunk == 0) return false; // EOF before complete
+        total += chunk;
+    }
+    return total == bytes;
+}
+
+static bool WriteAll(HANDLE pipe, const void* buf, size_t bytes) {
+    if (bytes == 0) return true;
+    size_t total = 0;
+    auto* src = static_cast<const uint8_t*>(buf);
+    while (total < bytes) {
+        DWORD chunk = 0;
+        DWORD toWrite = static_cast<DWORD>((bytes - total) < (64 * 1024) ? (bytes - total) : (64 * 1024));
+        BOOL ok = WriteFile(pipe, src + total, toWrite, &chunk, nullptr);
+        if (!ok) {
+            fprintf(stderr, "[FrameTransport] WriteFile error: %lu\n", GetLastError());
+            return false;
+        }
+        total += chunk;
+    }
+    return total == bytes;
+}
+
 // ─── Frame I/O (frame pipe, binary) ───────────────────────────────────
 
 bool FrameTransport::ReadFrame(FrameHeader& header, std::vector<uint8_t>& data) {
     if (framePipe_ == INVALID_HANDLE_VALUE) return false;
 
-    // Read header first
-    DWORD bytesRead = 0;
-    BOOL ok = ReadFile(framePipe_, &header, sizeof(header), &bytesRead, nullptr);
-    if (!ok || bytesRead != sizeof(header)) {
-        fprintf(stderr, "[FrameTransport] Failed to read frame header: %lu\n", GetLastError());
+    // Read header with partial-read resilience
+    if (!ReadExact(framePipe_, &header, sizeof(header))) {
+        fprintf(stderr, "[FrameTransport] Failed to read frame header\n");
         return false;
     }
 
-    // Validate header
+    // Validate header (audit item 32)
     if (header.magic != 0x464C4156454D5246ULL) {
-        fprintf(stderr, "[FrameTransport] Invalid frame header magic\n");
+        fprintf(stderr, "[FrameTransport] Invalid frame header magic: 0x%llX\n",
+                static_cast<unsigned long long>(header.magic));
         return false;
     }
-
-    // Read pixel data
+    if (header.headerSize < sizeof(FrameHeader) || header.headerSize > 256) {
+        fprintf(stderr, "[FrameTransport] Invalid header size: %u\n", header.headerSize);
+        return false;
+    }
+    if (header.inputWidth == 0 || header.inputHeight == 0 ||
+        header.inputWidth > kMaxFrameWidth || header.inputHeight > kMaxFrameHeight) {
+        fprintf(stderr, "[FrameTransport] Invalid input dimensions: %ux%u\n",
+                header.inputWidth, header.inputHeight);
+        return false;
+    }
+    if (header.inputStride < header.inputWidth * 4) {
+        fprintf(stderr, "[FrameTransport] Stride too small: %u < %u\n",
+                header.inputStride, header.inputWidth * 4);
+        return false;
+    }
     if (header.payloadBytes > kMaxFrameSize) {
-        fprintf(stderr, "[FrameTransport] Frame too large: %u > %u\n",
+        fprintf(stderr, "[FrameTransport] Payload too large: %u > %u\n",
                 header.payloadBytes, kMaxFrameSize);
         return false;
     }
+    // Multiplication overflow check
+    if (header.payloadBytes > 0 && header.payloadBytes / header.inputHeight < header.inputStride) {
+        fprintf(stderr, "[FrameTransport] Payload mismatch: %u bytes, %u height, %u stride\n",
+                header.payloadBytes, header.inputHeight, header.inputStride);
+        return false;
+    }
 
+    // Read pixel data with partial-read resilience
     data.resize(header.payloadBytes);
-    if (header.payloadBytes > 0) {
-        bytesRead = 0;
-        ok = ReadFile(framePipe_, data.data(), header.payloadBytes, &bytesRead, nullptr);
-        if (!ok || bytesRead != header.payloadBytes) {
-            fprintf(stderr, "[FrameTransport] Failed to read frame data: %lu\n", GetLastError());
-            return false;
-        }
+    if (header.payloadBytes > 0 && !ReadExact(framePipe_, data.data(), header.payloadBytes)) {
+        fprintf(stderr, "[FrameTransport] Failed to read frame data\n");
+        return false;
     }
 
     return true;
@@ -167,25 +228,16 @@ bool FrameTransport::WriteFrame(const FrameHeader& header,
                                  const void* data, size_t dataSize) {
     if (framePipe_ == INVALID_HANDLE_VALUE) return false;
 
-    DWORD bytesWritten = 0;
-
-    // Write header
-    BOOL ok = WriteFile(framePipe_, &header, sizeof(header),
-                        &bytesWritten, nullptr);
-    if (!ok || bytesWritten != sizeof(header)) {
-        fprintf(stderr, "[FrameTransport] Failed to write frame header: %lu\n", GetLastError());
+    // Write header with partial-write resilience
+    if (!WriteAll(framePipe_, &header, sizeof(header))) {
+        fprintf(stderr, "[FrameTransport] Failed to write frame header\n");
         return false;
     }
 
-    // Write pixel data
-    if (dataSize > 0) {
-        bytesWritten = 0;
-        ok = WriteFile(framePipe_, data, static_cast<DWORD>(dataSize),
-                        &bytesWritten, nullptr);
-        if (!ok || bytesWritten != dataSize) {
-            fprintf(stderr, "[FrameTransport] Failed to write frame data: %lu\n", GetLastError());
-            return false;
-        }
+    // Write pixel data with partial-write resilience
+    if (dataSize > 0 && !WriteAll(framePipe_, data, dataSize)) {
+        fprintf(stderr, "[FrameTransport] Failed to write frame data\n");
+        return false;
     }
 
     return true;

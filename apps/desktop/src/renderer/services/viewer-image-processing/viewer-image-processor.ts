@@ -143,16 +143,16 @@ export class ViewerImageProcessor {
 
   /**
    * Swap the active backend at runtime.
-   * Destroys the old backend and initialises the new one with current settings.
+   * Awaits old backend destruction before initialising the new one (audit item 39).
    */
-  setBackend(backend: ViewerImageBackend): void {
+  async setBackend(backend: ViewerImageBackend): Promise<void> {
     const wasRunning = this.state === "running";
     if (wasRunning) {
       this.cancelFrame();
     }
 
-    // Destroy old backend (fire-and-forget)
-    this.backend.destroy().catch(() => {});
+    // Await old backend destruction before proceeding
+    await this.backend.destroy().catch(() => {});
     this.backend = backend;
     this.frameInFlight = false;
     this.pendingFrame = false;
@@ -160,7 +160,7 @@ export class ViewerImageProcessor {
     this.frameSequence = 0;
 
     if (wasRunning && this.settings) {
-      this.start(this.settings);
+      await this.start(this.settings);
     }
   }
 

@@ -163,13 +163,7 @@ export function EnhancedVideoSurface({
             "NVIDIA VSR unavailable, fell back to WebGL2";
         }
 
-        // Notify parent of backend selection
-        onBackendChange?.(effective, fallbackReason);
-
-        if (cancelled) {
-          await backend.destroy();
-          return;
-        }
+          onBackendChange?.(effective, fallbackReason);
 
         processor = new ViewerImageProcessor(
           canvasRef.current!,
@@ -177,9 +171,13 @@ export function EnhancedVideoSurface({
           backend,
         );
 
+        const activeBackend = effective;
+        const activeFallbackReason = fallbackReason;
+
         const handleFirstFrame = () => {
           setFirstFrameReceived(true);
           onFirstFrame?.();
+          onBackendChange?.(activeBackend, activeFallbackReason);
         };
 
         processor.setCallbacks({
