@@ -81,6 +81,7 @@ class MockWebGL2Backend {
       lastGpuTimeMs: 5,
       contextLossCount: 0,
       backend: "webgl2",
+      scalingAlgorithm: "native",
     };
   }
 
@@ -99,14 +100,12 @@ class MockWebGL2Backend {
 
 function createVideoElement(): HTMLVideoElement {
   const video = document.createElement("video");
-  // Set readyState to HAVE_CURRENT_DATA by default for tests that need it
   Object.defineProperty(video, "readyState", {
     value: HTMLMediaElement.HAVE_CURRENT_DATA,
     writable: true,
   });
   Object.defineProperty(video, "videoWidth", { value: 1920, writable: true });
   Object.defineProperty(video, "videoHeight", { value: 1080, writable: true });
-  // Stub missing happy-dom methods for RVFC tests
   if (typeof video.requestVideoFrameCallback !== "function") {
     (video as unknown as { requestVideoFrameCallback: unknown }).requestVideoFrameCallback =
       vi.fn<(_: unknown) => number>().mockReturnValue(42);
@@ -130,12 +129,10 @@ const defaultSettings: ViewerImageEnhancementSettings = {
   enabled: true,
 };
 
-// We need to mock the backend module so ViewerImageProcessor uses MockWebGL2Backend
 vi.mock(
   "@/services/viewer-image-processing/webgl2-viewer-image-backend",
   () => {
     const MockBackend = vi.fn();
-    // We'll assign the mock instance proxy outside
     return { WebGL2ViewerImageBackend: MockBackend };
   },
 );
@@ -152,9 +149,6 @@ describe("ViewerImageProcessor — transient frame handling", () => {
     canvas = createCanvas();
     video = createVideoElement();
     mockBackend = new MockWebGL2Backend();
-
-    // Patch the processor to use our mock backend
-    // We do this by overriding the constructor's backend creation
     processor = new ViewerImageProcessor(canvas, video);
     (processor as unknown as { backend: MockWebGL2Backend }).backend =
       mockBackend;
@@ -171,18 +165,15 @@ describe("ViewerImageProcessor — transient frame handling", () => {
     const onStateChange = vi.fn();
     processor.setCallbacks({ onError, onStateChange });
 
-    // Set up mock to return transient frame
     mockBackend.setNextResult({ success: false, transient: true });
 
     processor.start(defaultSettings);
 
-    // Trigger frame processing
     const processCurrentFrame = (
       processor as unknown as { processCurrentFrame: () => void }
     ).processCurrentFrame;
     processCurrentFrame.call(processor);
 
-    // Error and state change should NOT be called for transient
     expect(onError).not.toHaveBeenCalled();
     expect(onStateChange).not.toHaveBeenCalledWith("error");
   });
@@ -284,14 +275,14 @@ describe("ViewerImageProcessor — settings live update (uniform mapping)", () =
 
     const settingsKeys: Array<keyof ViewerImageEnhancementSettings> = [
       "enabled",
-      "enhancedScaling",
+      "scalingAlgorithm",
       "sharpeningStrength",
       "chromaContribution",
       "artifactClamp",
       "textureNoiseSharpening",
       "antiRinging",
       "chromaCleanup",
-      "deblocking",
+      "compressionSmoothing",
     ];
 
     for (const key of settingsKeys) {
@@ -299,7 +290,9 @@ describe("ViewerImageProcessor — settings live update (uniform mapping)", () =
       const newVal =
         typeof defaultSettings[key] === "boolean"
           ? !(defaultSettings[key] as boolean)
-          : 0.99;
+          : key === "scalingAlgorithm"
+            ? "bilinear"
+            : 0.99;
       const patch = { [key]: newVal } as Partial<ViewerImageEnhancementSettings>;
       processor.updateSettings({ ...defaultSettings, ...patch });
       expect(mockBackend.updateSettingsCalled).toBe(true);
@@ -329,24 +322,19 @@ describe("ViewerImageProcessor — RVFC lifecycle", () => {
   });
 
   it("cancelFrame is safe to call on paused/destroyed processor", () => {
-    // start creates handles internally
     processor.start(defaultSettings);
 
-    // pause calls cancelFrame internally
     processor.pause();
     expect(processor.getState()).toBe("paused");
 
-    // second pause is no-op since state is already paused
     processor.pause();
     expect(processor.getState()).toBe("paused");
 
-    // resume recreates handles, then destroy clears them
     processor.resume();
     expect(processor.getState()).toBe("running");
     processor.destroy();
     expect(processor.getState()).toBe("destroyed");
 
-    // second destroy is safe
     processor.destroy();
     expect(processor.getState()).toBe("destroyed");
   });
@@ -460,7 +448,6 @@ describe("ViewerImageProcessor — fallback lifecycle", () => {
   });
 
   it("can restart after error state by starting a new processor", () => {
-    // First processor errors
     mockBackend.setNextResult({ success: false });
     processor.start(defaultSettings);
 
@@ -471,7 +458,6 @@ describe("ViewerImageProcessor — fallback lifecycle", () => {
 
     expect(processor.getState()).toBe("error");
 
-    // Create a new processor (simulates re-enable path)
     const processor2 = new ViewerImageProcessor(
       createCanvas(),
       createVideoElement(),
@@ -491,5 +477,33 @@ describe("ViewerImageProcessor — fallback lifecycle", () => {
     expect(processor2.getState()).toBe("running");
 
     processor2.destroy();
+  });
+});
+
+describe("ViewerImageProcessor — stats include scalingAlgorithm", () => {
+  let processor: ViewerImageProcessor;
+  let canvas: HTMLCanvasElement;
+  let video: HTMLVideoElement;
+  let mockBackend: MockWebGL2Backend;
+
+  beforeEach(() => {
+    canvas = createCanvas();
+    video = createVideoElement();
+    mockBackend = new MockWebGL2Backend();
+    processor = new ViewerImageProcessor(canvas, video);
+    (processor as unknown as { backend: MockWebGL2Backend }).backend =
+      mockBackend;
+  });
+
+  afterEach(() => {
+    if (processor.getState() !== "destroyed") {
+      processor.destroy();
+    }
+  });
+
+  it("getStats includes scalingAlgorithm", () => {
+    processor.start(defaultSettings);
+    const stats = processor.getStats();
+    expect(stats.scalingAlgorithm).toBe("native");
   });
 });

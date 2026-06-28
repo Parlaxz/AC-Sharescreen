@@ -2,8 +2,8 @@
 precision highp float;
 
 // SPDX-License-Identifier: MIT
-// Derived from AMD FidelityFX Contrast Adaptive Sharpening (CAS)
-// Copyright (c) 2021 Advanced Micro Devices, Inc.
+// Contrast-adaptive sharpening with independent chroma, artifact clamp,
+// and texture/noise discrimination.
 
 in vec2 v_texCoord;
 out vec4 fragColor;
@@ -18,7 +18,6 @@ uniform vec2 u_texSize;
 // Rec. 709 luminance coefficients
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
-// Contrast-adaptive sharpening (CAS-style)
 void main() {
     vec2 step = 1.0 / u_texSize;
     vec3 center = texture(u_sourceTexture, v_texCoord).rgb;
@@ -48,34 +47,54 @@ void main() {
     float localContrast = hi - lo;
 
     // -- CAS luma detail extraction -----------------------------------
-    // The CAS filter: detail = center - 0.25 * (up + down + left + right)
+    // The CAS filter: detail = center * 4 - (up + down + left + right)
     float lumaDetail = lumaCenter * 4.0 - lumaUp - lumaDown - lumaLeft - lumaRight;
     lumaDetail *= 0.25;
 
     // -- Texture/noise masking ----------------------------------------
-    // At low textureNoiseSharpening: focus on coherent edges (high localContrast)
-    // At high textureNoiseSharpening: include fine texture (low localContrast)
-    float noiseMaskStart = 0.02;  // below this contrast = noise
-    float noiseMaskEnd   = 0.15;  // above this contrast = edge
-    float edgeConfidence = smoothstep(noiseMaskStart, noiseMaskEnd, localContrast);
+    // textureNoiseSharpening changes which local detail is considered
+    // valid texture vs noise. It is subordinate to sharpening strength,
+    // not a second global strength.
+    // At 0: only strong edges (high localContrast) get sharpened
+    // At 1: fine texture detail (low localContrast) is also sharpened
+    float noiseFloor = 0.005;
+    float noiseCeil = 0.12;
+    // edgeConfidence: 0 at noiseFloor, 1 at noiseCeil
+    float edgeConfidence = smoothstep(noiseFloor, noiseCeil, localContrast);
+    // textureBlend: 0 = only edges, 1 = all detail including noise
     float textureBlend = clamp(u_textureNoiseSharpening, 0.0, 1.0);
+    // detailMask blends between "all detail" and "edges only"
     float detailMask = mix(1.0, edgeConfidence, 1.0 - textureBlend);
 
     float effectiveStrength = u_sharpeningStrength * detailMask;
 
-    // -- Chroma contribution ------------------------------------------
-    // Compute RGB detail
+    // -- Luminance detail (add to luma channel only) ------------------
+    // Add luma detail equally to all RGB channels via luminance weights
+    vec3 lumaDetailVec = vec3(lumaDetail * effectiveStrength);
+    // Scale by LUMA so neutral color gets correct luminance boost,
+    // colored edges get less to avoid tint
+    vec3 lumaSharp = center + lumaDetailVec * LUMA;
+
+    // -- Chroma (color-only) detail -----------------------------------
+    // Compute RGB detail independently for chroma
     vec3 rgbDetail = center * 4.0 - up - down - left - right;
     rgbDetail *= 0.25;
+    // Color-only detail = RGB detail minus its luma component
+    float rgbDetailLuma = dot(rgbDetail, LUMA);
+    vec3 colorDetail = rgbDetail - vec3(rgbDetailLuma);
 
-    // At chromaContribution=0: sharpen only luma
-    // At chromaContribution=1: full chroma sharpening
-    vec3 lumaSharp = center + lumaDetail * effectiveStrength * LUMA;
-    vec3 fullSharp = center + rgbDetail * effectiveStrength;
-    vec3 sharpened = mix(lumaSharp, fullSharp, clamp(u_chromaContribution, 0.0, 1.0));
+    // Blend chroma contribution: 0 = luma-only, 1 = full detail
+    float chromaBlend = clamp(u_chromaContribution, 0.0, 1.0);
+    // Color detail is multiplied by effectiveStrength too, but scaled
+    // by chromaBlend to prevent color artifacts at low chromaContribution
+    vec3 chromaSharp = lumaSharp + colorDetail * effectiveStrength * chromaBlend;
 
-    // -- Artifact clamp -----------------------------------------------
-    if (u_artifactClamp > 0.0) {
+    vec3 sharpened = chromaSharp;
+
+    // -- Artifact clamp (independent, not multiplied by sharpening strength) --
+    // 0 = unrestricted, 1 = strong local clamp
+    float clampStrength = clamp(u_artifactClamp, 0.0, 1.0);
+    if (clampStrength > 0.0) {
         // Sample corners for 3x3 neighborhood bounds
         vec3 nw = texture(u_sourceTexture, v_texCoord + vec2(-step.x, -step.y)).rgb;
         vec3 ne = texture(u_sourceTexture, v_texCoord + vec2( step.x, -step.y)).rgb;
@@ -93,7 +112,7 @@ void main() {
         localMax += boundRange * 0.1;
 
         // Blend between unrestricted and clamped
-        float clampStrength = clamp(u_artifactClamp, 0.0, 1.0) * u_sharpeningStrength;
+        // clampStrength is independent (not multiplied by sharpeningStrength)
         sharpened = mix(sharpened, clamp(sharpened, localMin, localMax), clampStrength);
     }
 

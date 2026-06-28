@@ -11,14 +11,46 @@ import {
   loadImageEnhancementSettings,
   saveImageEnhancementSettings,
   resetImageEnhancementSettings,
+  SCALING_ALGORITHMS,
+  SCALING_ALGORITHM_LABELS,
+  OVERSHOOTING_ALGORITHMS,
+  type ScalingAlgorithm,
 } from "@/services/viewer-image-processing/viewer-image-settings";
+
+describe("scaling algorithm enums", () => {
+  it("includes all expected algorithms", () => {
+    expect(SCALING_ALGORITHMS).toEqual([
+      "native",
+      "bilinear",
+      "nearest",
+      "bicubic",
+      "lanczos",
+      "fsr1-easu",
+    ]);
+  });
+
+  it("every algorithm has a label", () => {
+    for (const algo of SCALING_ALGORITHMS) {
+      expect(SCALING_ALGORITHM_LABELS[algo]).toBeTruthy();
+    }
+  });
+
+  it("overshooting algorithms include bicubic, lanczos, fsr1-easu", () => {
+    expect(OVERSHOOTING_ALGORITHMS.has("bicubic")).toBe(true);
+    expect(OVERSHOOTING_ALGORITHMS.has("lanczos")).toBe(true);
+    expect(OVERSHOOTING_ALGORITHMS.has("fsr1-easu")).toBe(true);
+    expect(OVERSHOOTING_ALGORITHMS.has("native")).toBe(false);
+    expect(OVERSHOOTING_ALGORITHMS.has("nearest")).toBe(false);
+    expect(OVERSHOOTING_ALGORITHMS.has("bilinear")).toBe(false);
+  });
+});
 
 describe("viewer-image-defaults", () => {
   it("all default values are within valid range", () => {
     const d = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS;
     expect(d.enabled).toBe(false);
-    expect(d.enhancedScaling).toBe(true);
-    for (const key of ["sharpeningStrength", "chromaContribution", "artifactClamp", "textureNoiseSharpening", "antiRinging", "chromaCleanup", "deblocking"]) {
+    expect(d.scalingAlgorithm).toBe("native");
+    for (const key of ["sharpeningStrength", "chromaContribution", "artifactClamp", "textureNoiseSharpening", "antiRinging", "chromaCleanup", "compressionSmoothing"]) {
       const v = d[key as keyof ViewerImageEnhancementSettings] as number;
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1);
@@ -33,7 +65,7 @@ describe("viewer-image-defaults", () => {
     expect(d.textureNoiseSharpening).toBeCloseTo(0.08);
     expect(d.antiRinging).toBeCloseTo(0.45);
     expect(d.chromaCleanup).toBeCloseTo(0.35);
-    expect(d.deblocking).toBeCloseTo(0.25);
+    expect(d.compressionSmoothing).toBeCloseTo(0.25);
   });
 
   it("control range has correct bounds", () => {
@@ -80,8 +112,8 @@ describe("validateSettings", () => {
   it("fills missing keys from defaults", () => {
     const result = validateSettings({ enabled: true });
     expect(result.enabled).toBe(true);
+    expect(result.scalingAlgorithm).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.scalingAlgorithm);
     expect(result.sharpeningStrength).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.sharpeningStrength);
-    expect(result.enhancedScaling).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.enhancedScaling);
   });
 
   it("clamps out-of-range numeric values", () => {
@@ -91,9 +123,9 @@ describe("validateSettings", () => {
   });
 
   it("replaces NaN/Infinity numeric values with defaults", () => {
-    const result = validateSettings({ sharpeningStrength: NaN, deblocking: Infinity });
+    const result = validateSettings({ sharpeningStrength: NaN, compressionSmoothing: Infinity });
     expect(result.sharpeningStrength).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.sharpeningStrength);
-    expect(result.deblocking).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.deblocking);
+    expect(result.compressionSmoothing).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionSmoothing);
   });
 
   it("replaces non-numeric values with defaults", () => {
@@ -103,24 +135,56 @@ describe("validateSettings", () => {
   });
 
   it("replaces non-boolean boolean keys with defaults", () => {
-    const result = validateSettings({ enabled: "yes", enhancedScaling: 1 });
+    const result = validateSettings({ enabled: "yes" });
     expect(result.enabled).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.enabled);
-    expect(result.enhancedScaling).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.enhancedScaling);
   });
 
-  it("accepts valid complete settings", () => {
+  it("accepts valid scalingAlgorithm values", () => {
+    for (const algo of SCALING_ALGORITHMS) {
+      const result = validateSettings({ scalingAlgorithm: algo });
+      expect(result.scalingAlgorithm).toBe(algo);
+    }
+  });
+
+  it("rejects invalid scalingAlgorithm, defaults to native", () => {
+    const result = validateSettings({ scalingAlgorithm: "magic" });
+    expect(result.scalingAlgorithm).toBe("native");
+  });
+
+  it("migrates legacy enhancedScaling=true to fsr1-easu", () => {
+    const result = validateSettings({ enhancedScaling: true });
+    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+  });
+
+  it("migrates legacy enhancedScaling=false to native", () => {
+    const result = validateSettings({ enhancedScaling: false });
+    expect(result.scalingAlgorithm).toBe("native");
+  });
+
+  it("scalingAlgorithm takes priority over legacy enhancedScaling", () => {
+    const result = validateSettings({ enhancedScaling: true, scalingAlgorithm: "lanczos" });
+    expect(result.scalingAlgorithm).toBe("lanczos");
+  });
+
+  it("accepts valid complete settings with new fields", () => {
     const valid: ViewerImageEnhancementSettings = {
       enabled: true,
-      enhancedScaling: false,
+      scalingAlgorithm: "lanczos",
       sharpeningStrength: 0.5,
       chromaContribution: 0.3,
       artifactClamp: 0.6,
       textureNoiseSharpening: 0.1,
       antiRinging: 0.4,
       chromaCleanup: 0.2,
-      deblocking: 0.15,
+      compressionSmoothing: 0.15,
     };
     expect(validateSettings(valid)).toEqual(valid);
+  });
+
+  it("ignores old deblocking field name (no auto-migration)", () => {
+    // The field was renamed to compressionSmoothing; old deblocking is not auto-migrated
+    const result = validateSettings({ deblocking: 0.5, scalingAlgorithm: "native" });
+    expect(result.compressionSmoothing).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.compressionSmoothing);
   });
 });
 
@@ -129,10 +193,7 @@ describe("localStorage persistence", () => {
   const store: Record<string, string> = {};
 
   beforeEach(() => {
-    // Clear the mock store
     for (const k of Object.keys(store)) delete store[k];
-    // Replace global localStorage with a full mock
-    // (happy-dom's built-in localStorage is incomplete in this project's version)
     vi.stubGlobal("localStorage", {
       getItem: (key: string) => store[key] ?? null,
       setItem: (key: string, value: string) => { store[key] = value; },
@@ -156,12 +217,14 @@ describe("localStorage persistence", () => {
     const settings: ViewerImageEnhancementSettings = {
       ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
       enabled: true,
+      scalingAlgorithm: "lanczos",
       sharpeningStrength: 0.42,
     };
     saveImageEnhancementSettings(settings);
     const loaded = loadImageEnhancementSettings();
     expect(loaded.enabled).toBe(true);
     expect(loaded.sharpeningStrength).toBe(0.42);
+    expect(loaded.scalingAlgorithm).toBe("lanczos");
   });
 
   it("loadImageEnhancementSettings returns defaults when stored data is corrupt", () => {
@@ -197,5 +260,17 @@ describe("localStorage persistence", () => {
     store["screenlink:viewer-image-enhancement"] = JSON.stringify({ sharpeningStrength: "NaN" });
     const result = loadImageEnhancementSettings();
     expect(result.sharpeningStrength).toBe(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS.sharpeningStrength);
+  });
+
+  it("load migrates stored legacy enhancedScaling=true", () => {
+    store["screenlink:viewer-image-enhancement"] = JSON.stringify({
+      enabled: true,
+      enhancedScaling: true,
+      sharpeningStrength: 0.5,
+    });
+    const result = loadImageEnhancementSettings();
+    expect(result.scalingAlgorithm).toBe("fsr1-easu");
+    expect(result.enabled).toBe(true);
+    expect(result.sharpeningStrength).toBe(0.5);
   });
 });

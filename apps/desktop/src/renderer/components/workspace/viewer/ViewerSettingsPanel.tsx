@@ -15,6 +15,10 @@ import { useStore } from "@/stores/main-store";
 import {
   clampValue,
   type ViewerImageEnhancementSettings,
+  type ScalingAlgorithm,
+  SCALING_ALGORITHMS,
+  SCALING_ALGORITHM_LABELS,
+  OVERSHOOTING_ALGORITHMS,
 } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   IMAGE_ENHANCEMENT_CONTROL_RANGE,
@@ -94,6 +98,7 @@ interface ViewerSettingsPanelProps {
     processingTimeMs: number | null;
     enhancedScalingActive: boolean;
     backend: string;
+    scalingAlgorithm?: ScalingAlgorithm;
   } | null;
   children: React.ReactNode;
 }
@@ -293,13 +298,11 @@ export function ViewerSettingsPanel({
   const handleSend = useCallback(() => {
     if (requestPending) return;
     onRequestChange(localQuality);
-    // Do NOT close on apply — user requested form stays open
   }, [localQuality, onRequestChange, requestPending]);
 
   const handleClear = useCallback(() => {
     if (requestPending) return;
-    onRequestChange(null); // null = clear = host defaults
-    // Do NOT close on clear either
+    onRequestChange(null);
   }, [onRequestChange, requestPending]);
 
   const handleFpsTextChange = useCallback((text: string) => {
@@ -353,6 +356,11 @@ export function ViewerSettingsPanel({
 
   const isCustom = requestState === null;
 
+  // ─── Algorithm helper ──────────────────────────────────────────────────
+  const algorithm = enhancementSettings.scalingAlgorithm;
+  const isOvershooting = OVERSHOOTING_ALGORITHMS.has(algorithm);
+  const antiRingingDisabled = !enhancementSettings.enabled || !isOvershooting;
+
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
@@ -366,7 +374,6 @@ export function ViewerSettingsPanel({
           {/* ── General tab (existing quality controls) ──── */}
           <TabsContent value="general" className="mt-0">
             <div className="space-y-3">
-              {/* ── Store presets ─────────────────────────────── */}
               {qualityPresets.length > 0 && (
                 <div>
                   <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
@@ -406,7 +413,6 @@ export function ViewerSettingsPanel({
                 </div>
               )}
 
-              {/* ── Inline presets ────────────────────────────── */}
               <div>
                 <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
                 <div className="flex flex-wrap gap-1">
@@ -434,7 +440,6 @@ export function ViewerSettingsPanel({
                 </div>
               </div>
 
-              {/* ── Resolution ───────────────────────────────── */}
               <div>
                 <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
                 <div className="flex flex-wrap gap-1">
@@ -455,9 +460,7 @@ export function ViewerSettingsPanel({
                 </div>
               </div>
 
-              {/* ── FPS and Bitrate inline ───────────────────── */}
               <div className="grid grid-cols-2 gap-4">
-                {/* FPS */}
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
@@ -487,7 +490,6 @@ export function ViewerSettingsPanel({
                   </div>
                 </div>
 
-                {/* Bitrate */}
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[10px] text-text-muted uppercase tracking-wide">Bitrate</span>
@@ -518,7 +520,6 @@ export function ViewerSettingsPanel({
                 </div>
               </div>
 
-              {/* ── Action buttons ───────────────────────────── */}
               <div className="flex items-center gap-2 pt-1">
                 <Button
                   variant="default"
@@ -540,7 +541,6 @@ export function ViewerSettingsPanel({
                 </Button>
               </div>
 
-              {/* ── Request feedback ─────────────────────────── */}
               {requestFeedback && (
                 <p className={cn(
                   "text-xs",
@@ -567,22 +567,33 @@ export function ViewerSettingsPanel({
                 />
               </div>
 
-              {/* Enhanced GPU Scaling */}
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-text-muted uppercase tracking-wide">Enhanced GPU Scaling</span>
-                <Switch
-                  checked={enhancementSettings.enhancedScaling}
-                  onCheckedChange={(checked) =>
-                    onEnhancementChange({ ...enhancementSettings, enhancedScaling: checked })
+              {/* Scaling Algorithm Dropdown */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-text-muted uppercase tracking-wide">Scaling Algorithm</span>
+                </div>
+                <select
+                  className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                  value={enhancementSettings.scalingAlgorithm}
+                  onChange={(e) =>
+                    onEnhancementChange({
+                      ...enhancementSettings,
+                      scalingAlgorithm: e.target.value as ScalingAlgorithm,
+                    })
                   }
                   disabled={!enhancementSettings.enabled}
-                  aria-label="Toggle Enhanced GPU Scaling"
-                />
+                  aria-label="Scaling Algorithm"
+                >
+                  {SCALING_ALGORITHMS.map((algo) => (
+                    <option key={algo} value={algo}>
+                      {SCALING_ALGORITHM_LABELS[algo]}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <hr className="border-border-subtle" />
 
-              {/* Numeric controls */}
               <EnhancementSliderControl
                 label="Sharpening Strength"
                 value={enhancementSettings.sharpeningStrength}
@@ -608,23 +619,32 @@ export function ViewerSettingsPanel({
                 onChange={(v) => onEnhancementChange({ ...enhancementSettings, textureNoiseSharpening: v })}
               />
               <EnhancementSliderControl
-                label="Anti-ringing"
-                value={enhancementSettings.antiRinging}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, antiRinging: v })}
-              />
-              <EnhancementSliderControl
                 label="Chroma Cleanup"
                 value={enhancementSettings.chromaCleanup}
                 disabled={!enhancementSettings.enabled}
                 onChange={(v) => onEnhancementChange({ ...enhancementSettings, chromaCleanup: v })}
               />
               <EnhancementSliderControl
-                label="Deblocking"
-                value={enhancementSettings.deblocking}
+                label="Compression Smoothing"
+                value={enhancementSettings.compressionSmoothing}
                 disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, deblocking: v })}
+                onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionSmoothing: v })}
               />
+
+              {/* Anti-ringing — only active for overshooting scalers */}
+              <div>
+                <EnhancementSliderControl
+                  label="Anti-ringing"
+                  value={enhancementSettings.antiRinging}
+                  disabled={antiRingingDisabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, antiRinging: v })}
+                />
+                {!isOvershooting && enhancementSettings.enabled && (
+                  <p className="text-[9px] text-text-muted mt-0.5">
+                    Only available for Bicubic, Lanczos, and FSR 1 EASU
+                  </p>
+                )}
+              </div>
 
               {/* Reset button */}
               <div className="pt-1">
@@ -661,9 +681,11 @@ export function ViewerSettingsPanel({
                         ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
                         : "—"}
                     </span>
-                    <span className="text-text-muted">Scaling</span>
+                    <span className="text-text-muted">Algorithm</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.enhancedScalingActive ? "Enhanced" : "Standard"}
+                      {enhancementStats.scalingAlgorithm
+                        ? SCALING_ALGORITHM_LABELS[enhancementStats.scalingAlgorithm] ?? enhancementStats.scalingAlgorithm
+                        : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
                     </span>
                   </div>
                 </div>

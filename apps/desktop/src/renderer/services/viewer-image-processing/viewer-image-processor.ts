@@ -5,7 +5,7 @@
  */
 
 import { WebGL2ViewerImageBackend } from "./webgl2-viewer-image-backend";
-import type { ViewerImageEnhancementSettings } from "./viewer-image-settings";
+import type { ViewerImageEnhancementSettings, ScalingAlgorithm } from "./viewer-image-settings";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,6 +32,7 @@ export interface ProcessorStats {
   enhancedScalingActive: boolean;
   backend: string;
   framesProcessed: number;
+  scalingAlgorithm: ScalingAlgorithm;
 }
 
 // ─── Processor ───────────────────────────────────────────────────────────────
@@ -176,6 +177,7 @@ export class ViewerImageProcessor {
       enhancedScalingActive: backendStats?.enhancedScalingActive ?? false,
       backend: backendStats?.backend ?? "unavailable",
       framesProcessed: this.framesProcessed,
+      scalingAlgorithm: backendStats?.scalingAlgorithm ?? "native",
     };
   }
 
