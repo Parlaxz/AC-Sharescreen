@@ -89,32 +89,43 @@ function formatLiveDuration(startedAt: number): string {
 
 // ─── Auto-hide timeout hook ──────────────────────────────────────────────
 
-function useControlsAutoHide(delay = 3000) {
+function useControlsAutoHide({ delayMs = 3000, locked = false }: { delayMs?: number; locked?: boolean }) {
   const [visible, setVisible] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const cancelTimer = useCallback(() => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+  }, []);
+
+  const scheduleTimer = useCallback(() => {
+    cancelTimer();
+    timerRef.current = setTimeout(() => setVisible(false), delayMs);
+  }, [delayMs, cancelTimer]);
+
   const show = useCallback(() => {
     setVisible(true);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setVisible(false), delay);
-  }, [delay]);
+    scheduleTimer();
+  }, [scheduleTimer]);
 
   const keepVisible = useCallback(() => {
     setVisible(true);
-    if (timerRef.current) clearTimeout(timerRef.current);
-  }, []);
+    cancelTimer();
+  }, [cancelTimer]);
 
   const hide = useCallback(() => {
-    if (timerRef.current) clearTimeout(timerRef.current);
+    cancelTimer();
     setVisible(false);
-  }, []);
+  }, [cancelTimer]);
 
   useEffect(() => {
-    timerRef.current = setTimeout(() => setVisible(false), delay);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [delay]);
+    if (locked) {
+      setVisible(true);
+      cancelTimer();
+      return;
+    }
+    scheduleTimer();
+    return cancelTimer;
+  }, [locked, scheduleTimer, cancelTimer]);
 
   return { visible, show, keepVisible, hide };
 }
@@ -399,7 +410,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // Auto-hide controls — stay visible while any popover panel is open
   // Track panel open state as a synthetic "always show" signal
   const { visible: controlsVisible, show: showControls, keepVisible, hide: hideControls } =
-    useControlsAutoHide(activePanel !== null ? 999999 : 3000);
+    useControlsAutoHide({ delayMs: 3000, locked: activePanel !== null });
 
   // Fullscreen change listener — use Electron IPC when available.
   // Syncs focusMode with fullscreen state so AppShell hides chrome
@@ -1627,65 +1638,64 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             </Button>
           </motion.div>
 
-          {/* Video controls overlay */}
-          <VideoControlsOverlay
-            isPaused={isPaused}
-            onTogglePlay={() => setIsPaused((p) => !p)}
-            isStreamPaused={streamPauseState === "paused"}
-            isStreamPauseTransitioning={streamPauseTransitioning}
-            onToggleStreamPause={handleToggleStreamPause}
-            volume={volume}
-            isMuted={isMuted}
-            onVolumeChange={handleVolumeChange}
-            onToggleMute={handleToggleMute}
-            currentStreamId={currentStreamId ?? ""}
-            onStreamSwitch={handleStreamSwitch}
-            connectionState={
-              displayStatus === "watching"
-                ? "connected"
-                : displayStatus === "degraded"
-                ? "degraded"
-                : "connected"
-            }
-            isFullscreen={isFullscreen}
-            onToggleFullscreen={handleToggleFullscreen}
-            onExit={handleExit}
-            controlsVisible={controlsVisible}
-            showControls={showControls}
-            isLive
-            isScreenLinkDeafened={isScreenLinkDeafened}
-            onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
-            currentBandwidthBps={currentBandwidthBps}
-            totalBytesReceived={totalBytesReceived}
-            discordMuteBinding={discordMuteBinding}
-            discordDeafenBinding={discordDeafenBinding}
-            syncScreenLinkDeafen={syncScreenLinkDeafen}
-            maxVolumePercent={maxVolumePercent}
+          {/* Unified panel shell with video controls as anchor */}
+          <ViewerPanelShell
             activePanel={activePanel}
             onActivePanelChange={setActivePanel}
-          />
+            session={sessionRef.current}
+            lastRequestedQuality={lastRequestedQuality}
+            effectiveBitrateKbps={effectiveBitrateKbps}
+            configuredBitrateBps={configuredBitrateBps}
+            requestState={viewerRequest}
+            onRequestChange={handleQualityRequestChange}
+            requestPending={qualityRequestPending}
+            lastRequestAccepted={lastQualityAccepted}
+            requestFeedback={qualityFeedback}
+            enhancementSettings={enhancementSettings}
+            onEnhancementChange={handleEnhancementChange}
+            onEnhancementReset={handleEnhancementReset}
+            enhancementStats={enhancementStats}
+            mediaSessionId={watchedSessionId}
+            viewerHistoryId={viewerHistoryId}
+          >
+            <VideoControlsOverlay
+              isPaused={isPaused}
+              onTogglePlay={() => setIsPaused((p) => !p)}
+              isStreamPaused={streamPauseState === "paused"}
+              isStreamPauseTransitioning={streamPauseTransitioning}
+              onToggleStreamPause={handleToggleStreamPause}
+              volume={volume}
+              isMuted={isMuted}
+              onVolumeChange={handleVolumeChange}
+              onToggleMute={handleToggleMute}
+              currentStreamId={currentStreamId ?? ""}
+              onStreamSwitch={handleStreamSwitch}
+              connectionState={
+                displayStatus === "watching"
+                  ? "connected"
+                  : displayStatus === "degraded"
+                  ? "degraded"
+                  : "connected"
+              }
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={handleToggleFullscreen}
+              onExit={handleExit}
+              controlsVisible={controlsVisible}
+              showControls={showControls}
+              isLive
+              isScreenLinkDeafened={isScreenLinkDeafened}
+              onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
+              currentBandwidthBps={currentBandwidthBps}
+              totalBytesReceived={totalBytesReceived}
+              discordMuteBinding={discordMuteBinding}
+              discordDeafenBinding={discordDeafenBinding}
+              syncScreenLinkDeafen={syncScreenLinkDeafen}
+              maxVolumePercent={maxVolumePercent}
+              activePanel={activePanel}
+              onActivePanelChange={setActivePanel}
+            />
+          </ViewerPanelShell>
         </div>
-
-        {/* Unified panel shell */}
-        <ViewerPanelShell
-          activePanel={activePanel}
-          onActivePanelChange={setActivePanel}
-          session={sessionRef.current}
-          lastRequestedQuality={lastRequestedQuality}
-          effectiveBitrateKbps={effectiveBitrateKbps}
-          configuredBitrateBps={configuredBitrateBps}
-          requestState={viewerRequest}
-          onRequestChange={handleQualityRequestChange}
-          requestPending={qualityRequestPending}
-          lastRequestAccepted={lastQualityAccepted}
-          requestFeedback={qualityFeedback}
-          enhancementSettings={enhancementSettings}
-          onEnhancementChange={handleEnhancementChange}
-          onEnhancementReset={handleEnhancementReset}
-          enhancementStats={enhancementStats}
-          mediaSessionId={watchedSessionId}
-          viewerHistoryId={viewerHistoryId}
-        />
       </motion.div>
     </ViewerShell>
   );

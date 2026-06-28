@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 import {
   Popover,
   PopoverAnchor,
   PopoverContent,
 } from "@/components/ui/popover";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { ViewerSettingsPanel, type ViewerRequestState } from "./ViewerSettingsPanel.js";
 import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { BandwidthGraphModal } from "../BandwidthGraphModal.js";
@@ -17,6 +18,7 @@ export type ActivePanel = "settings" | "diagnostics" | "bandwidth";
 interface ViewerPanelShellProps {
   activePanel: ActivePanel | null;
   onActivePanelChange: (panel: ActivePanel | null) => void;
+  children: React.ReactNode;
 
   // DiagnosticsPanel props
   session: ViewerSession | null;
@@ -61,25 +63,14 @@ interface ViewerPanelShellProps {
 
 // ─── ViewerPanelShell ───────────────────────────────────────────────────────
 
-/**
- * ViewerPanelShell — Unified Popover wrapper for settings, diagnostics,
- * and bandwidth panels. Manages a single `activePanel` state so that
- * only one panel is open at a time.
- *
- * Uses a hidden PopoverAnchor at the bottom-center of the viewer stage
- * for consistent positioning across all three panels.
- */
 export function ViewerPanelShell({
   activePanel,
   onActivePanelChange,
-
-  // Diagnostics
+  children,
   session,
   lastRequestedQuality,
   effectiveBitrateKbps,
   configuredBitrateBps,
-
-  // Settings
   requestState,
   onRequestChange,
   requestPending = false,
@@ -91,13 +82,11 @@ export function ViewerPanelShell({
   effectiveBackend,
   fallbackReason,
   enhancementStats = null,
-
-  // Bandwidth
   mediaSessionId,
   viewerHistoryId = null,
 }: ViewerPanelShellProps) {
   const width =
-    activePanel === "bandwidth" ? "w-[950px]" : "w-[750px]";
+    activePanel === "bandwidth" ? "w-[950px] max-w-[calc(100vw-32px)]" : "w-[750px] max-w-[calc(100vw-32px)]";
 
   const handleOpenChange = useMemo(
     () => (open: boolean) => {
@@ -111,55 +100,59 @@ export function ViewerPanelShell({
       open={activePanel !== null}
       onOpenChange={handleOpenChange}
     >
-      {/* Hidden anchor at bottom-center for popover positioning above controls */}
       <PopoverAnchor asChild>
-        <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 opacity-0 pointer-events-none" />
+        <div data-viewer-controls-anchor className="absolute inset-x-0 bottom-0">
+          {children}
+        </div>
       </PopoverAnchor>
       <PopoverContent
         side="top"
         align="center"
-        className={`${width} p-4 max-h-[85vh] overflow-y-auto`}
+        collisionPadding={16}
+        className={`${width} p-4`}
       >
-        {activePanel === "settings" && (
-          <ViewerSettingsPanel
-            contentOnly
-            requestState={requestState}
-            onRequestChange={onRequestChange}
-            requestPending={requestPending}
-            lastRequestAccepted={lastRequestAccepted}
-            requestFeedback={requestFeedback}
-            enhancementSettings={enhancementSettings}
-            onEnhancementChange={onEnhancementChange}
-            onEnhancementReset={onEnhancementReset}
-            effectiveBackend={effectiveBackend}
-            fallbackReason={fallbackReason}
-            enhancementStats={enhancementStats}
-            hideQuality
-          >
-            <span />
-          </ViewerSettingsPanel>
-        )}
-        {activePanel === "diagnostics" && (
-          <DiagnosticsPanel
-            contentOnly
-            session={session}
-            lastRequestedQuality={lastRequestedQuality}
-            effectiveBitrateKbps={effectiveBitrateKbps}
-            configuredBitrateBps={configuredBitrateBps}
-          >
-            <span />
-          </DiagnosticsPanel>
-        )}
-        {activePanel === "bandwidth" && (
-          <BandwidthGraphModal
-            contentOnly
-            open={false}
-            onOpenChange={() => {}}
-            mediaSessionId={mediaSessionId}
-            viewerMode
-            viewerHistoryId={viewerHistoryId}
-          />
-        )}
+        <ScrollArea className="max-h-[calc(85vh-2rem)]">
+          {activePanel === "settings" && (
+            <ViewerSettingsPanel
+              contentOnly
+              requestState={requestState}
+              onRequestChange={onRequestChange}
+              requestPending={requestPending}
+              lastRequestAccepted={lastRequestAccepted}
+              requestFeedback={requestFeedback}
+              enhancementSettings={enhancementSettings}
+              onEnhancementChange={onEnhancementChange}
+              onEnhancementReset={onEnhancementReset}
+              effectiveBackend={effectiveBackend}
+              fallbackReason={fallbackReason}
+              enhancementStats={enhancementStats}
+              hideQuality
+            >
+              <span />
+            </ViewerSettingsPanel>
+          )}
+          {activePanel === "diagnostics" && (
+            <DiagnosticsPanel
+              contentOnly
+              session={session}
+              lastRequestedQuality={lastRequestedQuality}
+              effectiveBitrateKbps={effectiveBitrateKbps}
+              configuredBitrateBps={configuredBitrateBps}
+            >
+              <span />
+            </DiagnosticsPanel>
+          )}
+          {activePanel === "bandwidth" && (
+            <BandwidthGraphModal
+              contentOnly
+              open={false}
+              onOpenChange={() => {}}
+              mediaSessionId={mediaSessionId}
+              viewerMode
+              viewerHistoryId={viewerHistoryId}
+            />
+          )}
+        </ScrollArea>
       </PopoverContent>
     </Popover>
   );

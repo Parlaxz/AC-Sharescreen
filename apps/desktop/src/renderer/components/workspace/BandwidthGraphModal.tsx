@@ -207,7 +207,7 @@ function getChartData(
 
   const baseTime = subset[0].startTimestampMs;
   return subset.map((b) => ({
-    time: (b.startTimestampMs - baseTime) / 1000,
+    time: b.startTimestampMs,
     smoothed: b.weightedAverageBitsPerSecond,
   }));
 }
@@ -218,9 +218,8 @@ function getConnectionHealthData(
   const { rawSamples } = snapshot.aggregate;
   if (rawSamples.length === 0) return [];
 
-  const baseTime = rawSamples[0].timestampMs;
   return rawSamples.map((s) => ({
-    time: (s.timestampMs - baseTime) / 1000,
+    time: s.timestampMs,
     packetLoss: s.packetLossPercent,
     rtt: s.rttMs,
     jitter: s.jitterMs,
@@ -279,17 +278,18 @@ function getMarkerColor(type: MarkerType): string {
 
 // ─── Axis formatters ────────────────────────────────────────────────────────
 
-function formatTimeAxis(seconds: number): string {
-  if (seconds < 0) return "0s";
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
+function formatTimeAxis(timestampMs: number): string {
+  // timestampMs is epoch. Render elapsed from chart minimum.
+  return ""; // Auto-formatted by Recharts with number type
+}
+
+function formatTooltipTime(timestampMs: number): string {
+  return new Date(timestampMs).toLocaleString();
 }
 
 function formatBitRateAxis(bitsPerSecond: number): string {
   if (bitsPerSecond >= 1_000_000) return (bitsPerSecond / 1_000_000).toFixed(1) + "M";
-  if (bitsPerSecond >= 1000) return Math.round(bitsPerSecond / 1000) + "K";
+  if (bitsPerSecond >= 1000) return Math.round(bitsPerSecond / 1000) + "k";
   return String(Math.round(bitsPerSecond));
 }
 
@@ -332,7 +332,7 @@ function ThroughputTooltip({
   return (
     <div className="rounded-standard border border-border-subtle bg-surface-3 p-3 text-xs shadow-md">
       <div className="mb-1.5 text-text-muted">
-        t + {formatTimeAxis(label ?? 0)}
+        {formatTooltipTime(label ?? 0)}
       </div>
       <div className="space-y-0.5">
         {d.smoothed !== undefined && (
@@ -675,7 +675,7 @@ export function BandwidthGraphModal({
         {/* ── Empty State ── */}
         {!hasData ? (
           <div className="h-64 flex items-center justify-center text-sm text-text-muted">
-            Aucune donnée de bande passante disponible pour l&apos;instant.
+            No bandwidth data available yet.
           </div>
         ) : (
           <Tabs defaultValue="throughput">
@@ -690,8 +690,7 @@ export function BandwidthGraphModal({
             <TabsContent value="throughput">
               {chartData.length === 0 ? (
                 <div className="h-48 flex items-center justify-center text-sm text-text-muted">
-                  Aucune donnée de bande passante disponible pour
-                  l&apos;instant.
+                  No bandwidth data available yet.
                 </div>
               ) : (
                 <div className="h-72">
@@ -711,6 +710,8 @@ export function BandwidthGraphModal({
                       />
                       <XAxis
                         dataKey="time"
+                        type="number"
+                        domain={["dataMin", "dataMax"]}
                         tickFormatter={formatTimeAxis}
                         tick={{ fontSize: 11 }}
                         stroke="var(--color-text-muted)"
@@ -958,10 +959,6 @@ export function BandwidthGraphModal({
   return (
     <TooltipProvider>
       <Popover open={open} onOpenChange={onOpenChange}>
-        {/* Hidden trigger at bottom-center to position popover above controls */}
-        <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 opacity-0 pointer-events-none" aria-hidden="true">
-          <PopoverTrigger asChild><span /></PopoverTrigger>
-        </div>
         <PopoverContent side="top" align="center" className="w-[950px] p-4">
           {content}
         </PopoverContent>
