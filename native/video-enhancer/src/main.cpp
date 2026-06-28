@@ -258,7 +258,17 @@ static int RunServe(const std::vector<std::string>& args) {
         return static_cast<int>(sv::ExitCode::kServeFailed);
     }
 
-    printf("[Serve] Pipes created, waiting for client...\n");
+    printf("[Serve] Pipes created, waiting for control client...\n");
+
+    // Accept the persistent frame pipe client first (one-time connection)
+    printf("[Serve] Waiting for persistent frame pipe client...\n");
+    if (!transport.WaitForClient(transport.GetFramePipe())) {
+        fprintf(stderr, "[Serve] Frame pipe client never connected\n");
+        transport.CloseControlPipe();
+        transport.CloseFramePipe();
+        return static_cast<int>(sv::ExitCode::kServeFailed);
+    }
+    printf("[Serve] Frame pipe client connected\n");
 
     while (true) {
         if (!transport.WaitForClient(transport.GetControlPipe())) {
@@ -329,13 +339,8 @@ static int RunServe(const std::vector<std::string>& args) {
                     break;
 
                 case sv::Command::kFrameAvailable: {
-                    if (!transport.WaitForClient(transport.GetFramePipe())) {
-                        response = MakeResponse(false, "Frame pipe connection failed", id);
-                    } else {
-                        success = HandleSubmitFrame(payload, transport);
-                        response = MakeResponse(success, success ? "" : "Frame processing failed", id);
-                        DisconnectNamedPipe(transport.GetFramePipe());
-                    }
+                    success = HandleSubmitFrame(payload, transport);
+                    response = MakeResponse(success, success ? "" : "Frame processing failed", id);
                     break;
                 }
 

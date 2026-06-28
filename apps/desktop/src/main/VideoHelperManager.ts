@@ -69,8 +69,8 @@ export class VideoHelperManager {
   }
 
   /**
-   * Submit a frame for processing via the frame named pipe.
-   * Writes header + pixel data to the persistent frame pipe.
+   * Submit a frame for processing via the persistent frame pipe.
+   * Writes header + pixel data to the already-connected pipe.
    */
   async submitFrame(
     generation: number,
@@ -79,25 +79,24 @@ export class VideoHelperManager {
     inputWidth: number,
     inputHeight: number,
   ): Promise<boolean> {
-    if (!this.controlSocket || !this.controlSocket.writable) return false;
+    if (this.state !== "ready" && this.state !== "processing") return false;
 
     try {
-      // Notify native that frame is available
-      const ack = await this.sendCommand("frameAvailable", {});
-      if (!ack || ack?.success !== true) return false;
-
       const config = this.lastConfig;
       const outW = config?.outputWidth ?? inputWidth;
       const outH = config?.outputHeight ?? inputHeight;
       const mode = config?.processingMode ?? "vsr";
       const qual = config?.qualityLevel ?? "high";
-
       const modeNum = mode === "vsr" ? 1 : mode === "high-bitrate" ? 2 : mode === "denoise" ? 3 : 4;
       const qualNum = qual === "low" ? 0 : qual === "medium" ? 1 : qual === "ultra" ? 3 : 2;
 
-      // Connect frame pipe and write binary header + data
-      const framePipe = `\\\\.\\pipe\\screenlink-video-${this.sessionId}-frame`;
-      const sent = await this.sendFrameData(framePipe, {
+      // Ensure persistent frame pipe connection
+      if (!this.framePipeConnected) {
+        const connected = await this.connectFramePipe();
+        if (!connected) return false;
+      }
+
+      const sent = await this.sendFrameData({
         generation,
         frameSequence,
         capturedAtUs: BigInt(Math.round(performance.now() * 1000)),
@@ -116,6 +115,34 @@ export class VideoHelperManager {
     } catch {
       return false;
     }
+  }
+
+  private framePipeClient: net.Socket | null = null;
+  private framePipeConnected = false;
+  private framePipeName = "";
+
+  private connectFramePipe(): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (this.framePipeClient) {
+        this.framePipeClient.destroy();
+        this.framePipeClient = null;
+      }
+      this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
+      const client = net.createConnection(`\\\\.\\pipe\\${this.framePipeName}`, () => {
+        this.framePipeClient = client;
+        this.framePipeConnected = true;
+        resolve(true);
+      });
+      client.on("error", () => {
+        this.framePipeConnected = false;
+        resolve(false);
+      });
+      client.setTimeout(5000, () => {
+        client.destroy();
+        this.framePipeConnected = false;
+        resolve(false);
+      });
+    });
   }
 
   /**
@@ -211,8 +238,8 @@ export class VideoHelperManager {
 
       const args = [
         "--serve",
-        "--control-pipe", `\\\\.\\pipe\\${this.ctrlPipeName}`,
-        "--frame-pipe", `\\\\.\\pipe\\screenlink-video-${this.sessionId}-frame`,
+        "--control-pipe", this.ctrlPipeName,
+        "--frame-pipe", `screenlink-video-${this.sessionId}-frame`,
         "--session-id", this.sessionId,
         "--auth-token", this.authToken,
         "--parent-pid", String(process.pid),
@@ -256,6 +283,16 @@ export class VideoHelperManager {
       const handshakeOk = await this.handshake(gen);
       if (!handshakeOk || gen !== this.lifecycleGeneration) {
         return false;
+      }
+
+      // Connect frame pipe persistently once we're ready
+      if (gen === this.lifecycleGeneration) {
+        this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
+        const fConnected = await this.connectFramePipe();
+        if (!fConnected && gen === this.lifecycleGeneration) {
+          this.handleHelperError("Frame pipe connection failed");
+          return false;
+        }
       }
 
       // Send configure
@@ -490,7 +527,6 @@ export class VideoHelperManager {
   // ─── Frame transport ────────────────────────────────────────────────
 
   private async sendFrameData(
-    pipePath: string,
     header: {
       generation: number;
       frameSequence: number;
@@ -508,71 +544,68 @@ export class VideoHelperManager {
     pixelData: Uint8Array,
   ): Promise<boolean> {
     return new Promise((resolve) => {
-      const socket = new net.Socket();
-      let settled = false;
+      const socket = this.framePipeClient;
+      if (!socket || !socket.writable) { resolve(false); return; }
 
+      let settled = false;
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        socket.destroy();
+        // Don't destroy persistent pipe — just mark stale
+        this.framePipeConnected = false;
         resolve(false);
       }, 5000);
 
-      socket.connect(pipePath, () => {
-        if (settled) return;
-        // Build binary header (64 bytes to match FrameHeader)
-        const magic = Buffer.alloc(8);
-        magic.writeBigUInt64LE(0x464C4156454D5246n);
-        const headerSize = 64;
-        const wireVersion = 1;
+      // Build binary header (80 bytes to match FrameHeader)
+      const magic = Buffer.alloc(8);
+      magic.writeBigUInt64LE(BigInt("0x464C4156454D5246"));
+      const HEADER_SIZE = 80;
+      const wireVersion = 1;
 
-        const headerBuf = Buffer.alloc(headerSize);
-        let offset = 0;
-        magic.copy(headerBuf, offset); offset += 8;
-        headerBuf.writeUInt32LE(headerSize, offset); offset += 4;
-        headerBuf.writeUInt32LE(wireVersion, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.generation, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.frameSequence, offset); offset += 4;
-        headerBuf.writeBigUInt64LE(header.capturedAtUs, offset); offset += 8;
-        headerBuf.writeUInt32LE(header.inputWidth, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.inputHeight, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.inputStride, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.pixelFormat, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.requestedOutputWidth, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.requestedOutputHeight, offset); offset += 4;
-        // slotIndex, payloadBytes, processingMode, qualityLevel, flags, resultCode
-        headerBuf.writeUInt32LE(0, offset); offset += 4; // slotIndex
-        headerBuf.writeUInt32LE(header.payloadBytes, offset); offset += 4; // payloadBytes
-        headerBuf.writeUInt32LE(header.processingMode, offset); offset += 4;
-        headerBuf.writeUInt32LE(header.qualityLevel, offset); offset += 4;
-        headerBuf.writeUInt32LE(0, offset); offset += 4; // flags
-        headerBuf.writeUInt32LE(0, offset); // resultCode
+      const headerBuf = Buffer.alloc(HEADER_SIZE);
+      let off = 0;
+      magic.copy(headerBuf, off); off += 8;
+      headerBuf.writeUInt32LE(HEADER_SIZE, off); off += 4;
+      headerBuf.writeUInt32LE(wireVersion, off); off += 4;
+      headerBuf.writeUInt32LE(header.generation, off); off += 4;
+      headerBuf.writeUInt32LE(header.frameSequence, off); off += 4;
+      headerBuf.writeBigUInt64LE(header.capturedAtUs, off); off += 8;
+      headerBuf.writeUInt32LE(header.inputWidth, off); off += 4;
+      headerBuf.writeUInt32LE(header.inputHeight, off); off += 4;
+      headerBuf.writeUInt32LE(header.inputStride, off); off += 4;
+      headerBuf.writeUInt32LE(header.pixelFormat, off); off += 4;
+      headerBuf.writeUInt32LE(header.requestedOutputWidth, off); off += 4;
+      headerBuf.writeUInt32LE(header.requestedOutputHeight, off); off += 4;
+      headerBuf.writeUInt32LE(0, off); off += 4; // slotIndex
+      headerBuf.writeUInt32LE(header.payloadBytes, off); off += 4;
+      headerBuf.writeUInt32LE(header.processingMode, off); off += 4;
+      headerBuf.writeUInt32LE(header.qualityLevel, off); off += 4;
+      headerBuf.writeUInt32LE(0, off); off += 4; // flags
+      headerBuf.writeUInt32LE(0, off); // resultCode (0 = pending)
 
-        // Write header + pixel data
-        socket.write(headerBuf);
-        socket.write(pixelData);
-
-        // Read result header back
-        let resultBuf = Buffer.alloc(0);
-        socket.on("data", (chunk: Buffer) => {
-          resultBuf = Buffer.concat([resultBuf, chunk]);
-          if (resultBuf.length >= headerSize) {
-            settled = true;
-            clearTimeout(timeout);
-            const resultCode = resultBuf.readUInt32LE(headerSize - 4); // last field
-            socket.destroy();
-            resolve(resultCode === 1);
-          }
-        });
-      });
-
-      socket.on("error", () => {
-        if (settled) return;
-        settled = true;
+      // Write header + pixel data
+      const ok = socket.write(Buffer.concat([headerBuf, pixelData]));
+      if (!ok) {
+        // Backpressure — schedule drain and retry concept, but for now mark failure
         clearTimeout(timeout);
-        socket.destroy();
+        settled = true;
         resolve(false);
-      });
+        return;
+      }
+
+      // Read result header back (same size)
+      let resultBuf = Buffer.alloc(0);
+      const onResultData = (chunk: Buffer): void => {
+        resultBuf = Buffer.concat([resultBuf, chunk]);
+        if (resultBuf.length >= HEADER_SIZE) {
+          settled = true;
+          clearTimeout(timeout);
+          socket.removeListener("data", onResultData);
+          const resultCode = resultBuf.readUInt32LE(HEADER_SIZE - 4);
+          resolve(resultCode === 1);
+        }
+      };
+      socket.on("data", onResultData);
     });
   }
 
