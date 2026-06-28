@@ -4,6 +4,7 @@
 #include "Diagnostics.h"
 #include "CapabilityProbe.h"
 #include "SimpleJson.h"
+#include "NvidiaVfxContext.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +15,17 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <algorithm>
+#include <memory>
 #include <unordered_map>
+
+// Undef Windows min/max macros
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 namespace sv = screenlink::video;
 
@@ -56,6 +67,68 @@ static struct {
     std::string pixelFormat;
     bool configured = false;
 } g_config;
+
+// ─── NVIDIA VFX context (lazy-init on configure) ─────────────────────
+
+static std::unique_ptr<sv::NvidiaVfxContext> g_nvidiaVfx;
+static bool g_nvidiaAvailable = false;
+static std::string g_nvidiaReason;
+
+static void InitNvidiaVfx(uint32_t outW, uint32_t outH) {
+    if (g_nvidiaVfx) return;
+
+    g_nvidiaVfx = std::make_unique<sv::NvidiaVfxContext>();
+    sv::NvVfxConfig vfxConfig;
+    vfxConfig.modelDir = sv::NvidiaVfxContext::FindModelDir(
+        sv::NvidiaVfxContext::FindSdkRoot());
+    vfxConfig.strength = std::max(1, std::min(4, static_cast<int32_t>(g_config.qualityLevel) + 1));
+
+    auto result = g_nvidiaVfx->Initialize(vfxConfig);
+    if (result == sv::NvVfxResult::kSuccess) {
+        result = g_nvidiaVfx->CreateEffect();
+    }
+    if (result != sv::NvVfxResult::kSuccess) {
+        g_nvidiaReason = g_nvidiaVfx->GetLastError();
+        g_nvidiaVfx.reset();
+        g_nvidiaAvailable = false;
+        return;
+    }
+
+    // Allocate input/output images matching configured dimensions
+    sv::NvVfxImage inputDesc;
+    inputDesc.width = g_config.inputWidth;
+    inputDesc.height = g_config.inputHeight;
+    inputDesc.stride = g_config.inputWidth * 4;
+    inputDesc.format = sv::NvVfxPixelFormat::kRGBA8;
+    inputDesc.pixels = nullptr;
+
+    sv::NvVfxImage outputDesc;
+    outputDesc.width = outW;
+    outputDesc.height = outH;
+    outputDesc.stride = outW * 4;
+    outputDesc.format = sv::NvVfxPixelFormat::kRGBA8;
+    outputDesc.pixels = nullptr;
+
+    if (g_nvidiaVfx->AllocateInput(inputDesc) != sv::NvVfxResult::kSuccess ||
+        g_nvidiaVfx->AllocateOutput(outputDesc) != sv::NvVfxResult::kSuccess) {
+        g_nvidiaReason = "Failed to allocate NVIDIA image resources";
+        g_nvidiaVfx.reset();
+        g_nvidiaAvailable = false;
+        return;
+    }
+
+    g_nvidiaAvailable = true;
+    printf("[Serve] NVIDIA Super Resolution initialized: %ux%u -> %ux%u\n",
+           g_config.inputWidth, g_config.inputHeight, outW, outH);
+}
+
+static void ShutdownNvidiaVfx() {
+    if (g_nvidiaVfx) {
+        g_nvidiaVfx->Destroy();
+        g_nvidiaVfx.reset();
+    }
+    g_nvidiaAvailable = false;
+}
 
 // ─── Helper: create JSON response ─────────────────────────────────────
 
@@ -124,11 +197,16 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
 
     g_config.configured = true;
 
-    printf("[Serve] Configured: %ux%u -> %ux%u mode=%u quality=%u pf=%s\n",
+    // Initialize NVIDIA VFX on configure
+    ShutdownNvidiaVfx();
+    InitNvidiaVfx(g_config.outputWidth, g_config.outputHeight);
+
+    printf("[Serve] Configured: %ux%u -> %ux%u mode=%u quality=%u pf=%s NVIDIA=%s\n",
            g_config.inputWidth, g_config.inputHeight,
            g_config.outputWidth, g_config.outputHeight,
            g_config.processingMode, g_config.qualityLevel,
-           g_config.pixelFormat.c_str());
+           g_config.pixelFormat.c_str(),
+           g_nvidiaAvailable ? "active" : g_nvidiaReason.c_str());
     return true;
 }
 
@@ -287,15 +365,43 @@ static int RunServe(const std::vector<std::string>& args) {
             // Process the frame
             auto start = std::chrono::high_resolution_clock::now();
             bool ok = false;
-            sv::FrameHeader outHeader = header;  // copy metadata
+            sv::FrameHeader outHeader = header;
             std::vector<uint8_t> outData;
 
-#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
-            // Real NVIDIA VFX processing (item 18)
-            ok = ProcessFrameNvidiaVfx(header, frameData, outHeader, outData);
-#else
-            // Passthrough: copy input to output (item 18)
-            {
+            if (g_nvidiaAvailable && g_nvidiaVfx) {
+                // Upload input pixels to NVIDIA
+                ok = g_nvidiaVfx->UploadInput(
+                    frameData.data(),
+                    header.inputWidth, header.inputHeight,
+                    header.inputStride,
+                    sv::NvVfxPixelFormat::kRGBA8
+                ) == sv::NvVfxResult::kSuccess;
+
+                if (ok) {
+                    ok = g_nvidiaVfx->RunFrame() == sv::NvVfxResult::kSuccess;
+                }
+
+                if (ok) {
+                    // Download output
+                    uint32_t outW = 0, outH = 0;
+                    outHeader.payloadBytes = g_config.outputWidth * g_config.outputHeight * 4;
+                    outData.resize(outHeader.payloadBytes);
+                    ok = g_nvidiaVfx->DownloadOutput(
+                        outData.data(), g_config.outputWidth * 4, outW, outH
+                    ) == sv::NvVfxResult::kSuccess;
+                    if (ok) {
+                        outHeader.inputWidth = outW;
+                        outHeader.inputHeight = outH;
+                        outHeader.inputStride = outW * 4;
+                    }
+                }
+
+                if (!ok) {
+                    fprintf(stderr, "[FrameWorker] NVIDIA VFX failed: %s\n",
+                            g_nvidiaVfx->GetLastError().c_str());
+                }
+            } else {
+                // Passthrough: copy input to output
                 outHeader.inputWidth = header.inputWidth;
                 outHeader.inputHeight = header.inputHeight;
                 outHeader.inputStride = header.inputWidth * 4;
@@ -303,7 +409,6 @@ static int RunServe(const std::vector<std::string>& args) {
                 outData = frameData;
                 ok = true;
             }
-#endif
 
             auto end = std::chrono::high_resolution_clock::now();
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -390,6 +495,7 @@ static int RunServe(const std::vector<std::string>& args) {
                 // Disconnect pipes to wake the frame worker
                 transport.CloseFramePipe();
                 transport.CloseControlPipe();
+                ShutdownNvidiaVfx();
                 if (frameWorker.joinable()) frameWorker.join();
                 return 0;
 
@@ -404,6 +510,7 @@ static int RunServe(const std::vector<std::string>& args) {
     // Cleanup control pipe and join frame worker
     transport.CloseFramePipe();
     transport.CloseControlPipe();
+    ShutdownNvidiaVfx();
     if (frameWorker.joinable()) frameWorker.join();
 
     return 0;

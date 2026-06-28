@@ -16,6 +16,7 @@ endif()
 # Strict warnings
 if(MSVC)
   add_compile_options(/W4 /WX /utf-8)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 else()
   add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
@@ -31,22 +32,57 @@ set(SOURCES
   src/Diagnostics.cpp
   src/SimpleJson.cpp
   src/CapabilityProbe.cpp
+  src/NvidiaVfxContext.cpp
 )
 
 # NVIDIA VFX integration (disabled by default)
 option(SCREENLINK_ENABLE_NVIDIA_VFX "Enable NVIDIA Video Effects SDK" OFF)
+set(NVIDIA_VFX_SDK_ROOT "" CACHE PATH "Path to NVIDIA Video Effects SDK root")
+set(NVIDIA_VFX_MODEL_DIR "" CACHE PATH "Path to NVIDIA VFX model directory")
 
 # Executable must be defined before target_compile_definitions can reference it
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 if(SCREENLINK_ENABLE_NVIDIA_VFX)
-  if(NOT DEFINED NVIDIA_VFX_SDK_ROOT)
-    message(FATAL_ERROR "NVIDIA_VFX_SDK_ROOT must be set when SCREENLINK_ENABLE_NVIDIA_VFX=ON")
+  # Resolve SDK root from option, environment, or known path
+  if(NOT NVIDIA_VFX_SDK_ROOT)
+    if(DEFINED ENV{NVIDIA_VFX_SDK_ROOT})
+      set(NVIDIA_VFX_SDK_ROOT "$ENV{NVIDIA_VFX_SDK_ROOT}")
+    elseif(EXISTS "C:/Program Files/NVIDIA Corporation/NVIDIA Video Effects")
+      set(NVIDIA_VFX_SDK_ROOT "C:/Program Files/NVIDIA Corporation/NVIDIA Video Effects")
+    else()
+      message(FATAL_ERROR
+        "NVIDIA_VFX_SDK_ROOT not set and SDK not found at default path. "
+        "Set -DNVIDIA_VFX_SDK_ROOT=<path> or the NVIDIA_VFX_SDK_ROOT environment variable.")
+    endif()
   endif()
+
+  message(STATUS "NVIDIA VFX SDK root: ${NVIDIA_VFX_SDK_ROOT}")
+
+  # Include NVIDIA headers
+  target_include_directories(${PROJECT_NAME} PRIVATE "${NVIDIA_VFX_SDK_ROOT}/include")
+
+  # Compile definition
   target_compile_definitions(${PROJECT_NAME} PRIVATE SCREENLINK_NVIDIA_VFX_ENABLED)
-  # Future: add VFX headers, link libraries
-  # target_include_directories(${PROJECT_NAME} PRIVATE ${NVIDIA_VFX_SDK_ROOT}/include)
-  # target_link_libraries(${PROJECT_NAME} PRIVATE ${NVIDIA_VFX_SDK_ROOT}/lib/NvVFX.lib)
+
+  # Model directory
+  if(NVIDIA_VFX_MODEL_DIR)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+      SCREENLINK_NVIDIA_VFX_MODEL_DIR="${NVIDIA_VFX_MODEL_DIR}")
+  elseif(DEFINED ENV{NVIDIA_VFX_MODEL_DIR})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+      SCREENLINK_NVIDIA_VFX_MODEL_DIR="$ENV{NVIDIA_VFX_MODEL_DIR}")
+  endif()
+
+  # Link NVIDIA VFX libraries
+  if(WIN32)
+    # The NVIDIA VFX SDK provides NvVFX.dll / NvVFX.lib
+    # Use LoadLibrary-based proxy to avoid import library dependency
+    # (NvVfxContext.cpp loads symbols at runtime)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+      "${NVIDIA_VFX_SDK_ROOT}/lib/NvVFX.lib"
+    )
+  endif()
 endif()
 
 # Regenerate build provenance at every build (not just configure)
