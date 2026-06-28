@@ -211,10 +211,8 @@ export function useHostViewerDiagnostics(
     // Feed cumulative host outbound bytes to metrics service
     if (mediaSessionId && totalCumulativeBytes > 0) {
       const svc = StreamMetricsService.getInstance();
-      const historyId = svc.findHistoryIdByMediaSessionId(mediaSessionId);
-      if (historyId) {
-        svc.feedHostBytes(historyId, totalCumulativeBytes, performance.now());
-      }
+      // Per-connection telemetry is now handled via registerConnection.
+      // This cumulative sum feed is replaced by per-peer getStats in the service.
     }
 
     return newStats;

@@ -352,7 +352,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         watchingTarget.logicalStreamId,
         selectedGroupId ?? "",
         groupName,
-        watchingTarget.hostName,
       );
       viewerHistoryIdRef.current = historyId;
       setViewerHistoryId(historyId);
@@ -363,23 +362,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       try {
         const diag = await sessionRef.current.getDiagnostics();
         if (diag) {
-          const videoBytes = diag.inboundVideo.bytesReceived ?? 0;
-          const audioBytes = diag.inboundAudio.bytesReceived ?? 0;
-          const totalNow = videoBytes + audioBytes;
-          const ssrc = diag.inboundVideo.ssrc ?? null;
-
-          // Feed viewer bytes into StreamMetricsService (canonical tracker)
+          // Register peer connection with StreamMetricsService if not already done
           if (viewerHistoryIdRef.current) {
-            StreamMetricsService.getInstance().feedViewerBytes(
-              viewerHistoryIdRef.current,
-              totalNow,
-              performance.now(),
-              ssrc,
-            );
-            // Read back bandwidth from the canonical source
+            // Read bandwidth from the canonical source
             const snapshot = StreamMetricsService.getInstance().getSnapshot(viewerHistoryIdRef.current);
-            setTotalBytesReceived(snapshot.totalBytes);
-            setCurrentBandwidthBps(snapshot.currentBitsPerSecond);
+            setTotalBytesReceived(snapshot.aggregate.totalBytes);
+            setCurrentBandwidthBps(snapshot.aggregate.currentBitsPerSecond);
           }
         }
       } catch {
