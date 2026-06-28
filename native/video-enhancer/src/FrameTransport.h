@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <windows.h>
 
 namespace screenlink::video {
 
@@ -57,6 +59,40 @@ struct FrameHeader {
 
     // Result (set by helper after processing)
     uint32_t resultCode = 0; // 0=pending, 1=success, 2=error
+};
+
+/// Named-pipe transport for control (JSON) and frame (binary) channels.
+class FrameTransport {
+public:
+    FrameTransport() = default;
+    ~FrameTransport() { CloseControlPipe(); CloseFramePipe(); }
+    FrameTransport(const FrameTransport&) = delete;
+    FrameTransport& operator=(const FrameTransport&) = delete;
+
+    // Pipe creation
+    bool CreateControlPipe(const std::string& name);
+    bool CreateFramePipe(const std::string& name);
+
+    // Client connection
+    bool WaitForClient(HANDLE pipe);
+    HANDLE GetControlPipe() const;
+    HANDLE GetFramePipe() const;
+
+    // Control messages (JSON, newline-delimited)
+    std::string ReadControlMessage();
+    bool WriteControlResponse(const std::string& response);
+
+    // Frame I/O (binary header + pixel data)
+    bool ReadFrame(FrameHeader& header, std::vector<uint8_t>& data);
+    bool WriteFrame(const FrameHeader& header, const void* data, size_t dataSize);
+
+    // Cleanup
+    void CloseControlPipe();
+    void CloseFramePipe();
+
+private:
+    HANDLE controlPipe_ = INVALID_HANDLE_VALUE;
+    HANDLE framePipe_ = INVALID_HANDLE_VALUE;
 };
 
 } // namespace screenlink::video

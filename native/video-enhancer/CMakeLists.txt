@@ -29,7 +29,20 @@ set(SOURCES
   src/Protocol.cpp
   src/FrameTransport.cpp
   src/Diagnostics.cpp
+  src/SimpleJson.cpp
+  src/CapabilityProbe.cpp
 )
+
+# NVIDIA VFX integration (disabled by default)
+option(SCREENLINK_ENABLE_NVIDIA_VFX "Enable NVIDIA Video Effects SDK" OFF)
+
+if(SCREENLINK_ENABLE_NVIDIA_VFX)
+  if(NOT DEFINED NVIDIA_VFX_SDK_ROOT)
+    message(FATAL_ERROR "NVIDIA_VFX_SDK_ROOT must be set when SCREENLINK_ENABLE_NVIDIA_VFX=ON")
+  endif()
+  target_compile_definitions(${PROJECT_NAME} PRIVATE SCREENLINK_NVIDIA_VFX_ENABLED)
+  # Future: add VFX headers, link libraries
+endif()
 
 # Executable
 add_executable(${PROJECT_NAME} ${SOURCES})

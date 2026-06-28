@@ -69,19 +69,53 @@ export class VideoHelperManager {
   }
 
   /**
-   * Submit a frame for processing.
-   * Phase 7: Implement frame submission via IPC/named pipe.
-   * For now, returns false (not implemented).
+   * Submit a frame for processing via the frame named pipe.
+   * Writes header + pixel data to the persistent frame pipe.
    */
   async submitFrame(
-    _generation: number,
-    _frameSequence: number,
-    _frameData: Uint8Array,
-    _inputWidth: number,
-    _inputHeight: number,
+    generation: number,
+    frameSequence: number,
+    frameData: Uint8Array,
+    inputWidth: number,
+    inputHeight: number,
   ): Promise<boolean> {
-    // Not yet implemented
-    return false;
+    if (!this.controlSocket || !this.controlSocket.writable) return false;
+
+    try {
+      // Notify native that frame is available
+      const ack = await this.sendCommand("frameAvailable", {});
+      if (!ack || ack?.success !== true) return false;
+
+      const config = this.lastConfig;
+      const outW = config?.outputWidth ?? inputWidth;
+      const outH = config?.outputHeight ?? inputHeight;
+      const mode = config?.processingMode ?? "vsr";
+      const qual = config?.qualityLevel ?? "high";
+
+      const modeNum = mode === "vsr" ? 1 : mode === "high-bitrate" ? 2 : mode === "denoise" ? 3 : 4;
+      const qualNum = qual === "low" ? 0 : qual === "medium" ? 1 : qual === "ultra" ? 3 : 2;
+
+      // Connect frame pipe and write binary header + data
+      const framePipe = `\\\\.\\pipe\\screenlink-video-${this.sessionId}-frame`;
+      const sent = await this.sendFrameData(framePipe, {
+        generation,
+        frameSequence,
+        capturedAtUs: BigInt(Math.round(performance.now() * 1000)),
+        inputWidth,
+        inputHeight,
+        inputStride: inputWidth * 4,
+        pixelFormat: 1, // BGRA8
+        requestedOutputWidth: outW,
+        requestedOutputHeight: outH,
+        processingMode: modeNum,
+        qualityLevel: qualNum,
+        payloadBytes: frameData.byteLength,
+      }, frameData);
+
+      return sent;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -392,6 +426,95 @@ export class VideoHelperManager {
           resolve(null);
         }
       }
+    });
+  }
+
+  // ─── Frame transport ────────────────────────────────────────────────
+
+  private async sendFrameData(
+    pipePath: string,
+    header: {
+      generation: number;
+      frameSequence: number;
+      capturedAtUs: bigint;
+      inputWidth: number;
+      inputHeight: number;
+      inputStride: number;
+      pixelFormat: number;
+      requestedOutputWidth: number;
+      requestedOutputHeight: number;
+      processingMode: number;
+      qualityLevel: number;
+      payloadBytes: number;
+    },
+    pixelData: Uint8Array,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      let settled = false;
+
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolve(false);
+      }, 5000);
+
+      socket.connect(pipePath, () => {
+        if (settled) return;
+        // Build binary header (64 bytes to match FrameHeader)
+        const magic = Buffer.alloc(8);
+        magic.writeBigUInt64LE(0x464C4156454D5246n);
+        const headerSize = 64;
+        const wireVersion = 1;
+
+        const headerBuf = Buffer.alloc(headerSize);
+        let offset = 0;
+        magic.copy(headerBuf, offset); offset += 8;
+        headerBuf.writeUInt32LE(headerSize, offset); offset += 4;
+        headerBuf.writeUInt32LE(wireVersion, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.generation, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.frameSequence, offset); offset += 4;
+        headerBuf.writeBigUInt64LE(header.capturedAtUs, offset); offset += 8;
+        headerBuf.writeUInt32LE(header.inputWidth, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.inputHeight, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.inputStride, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.pixelFormat, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.requestedOutputWidth, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.requestedOutputHeight, offset); offset += 4;
+        // slotIndex, payloadBytes, processingMode, qualityLevel, flags, resultCode
+        headerBuf.writeUInt32LE(0, offset); offset += 4; // slotIndex
+        headerBuf.writeUInt32LE(header.payloadBytes, offset); offset += 4; // payloadBytes
+        headerBuf.writeUInt32LE(header.processingMode, offset); offset += 4;
+        headerBuf.writeUInt32LE(header.qualityLevel, offset); offset += 4;
+        headerBuf.writeUInt32LE(0, offset); offset += 4; // flags
+        headerBuf.writeUInt32LE(0, offset); // resultCode
+
+        // Write header + pixel data
+        socket.write(headerBuf);
+        socket.write(pixelData);
+
+        // Read result header back
+        let resultBuf = Buffer.alloc(0);
+        socket.on("data", (chunk: Buffer) => {
+          resultBuf = Buffer.concat([resultBuf, chunk]);
+          if (resultBuf.length >= headerSize) {
+            settled = true;
+            clearTimeout(timeout);
+            const resultCode = resultBuf.readUInt32LE(headerSize - 4); // last field
+            socket.destroy();
+            resolve(resultCode === 1);
+          }
+        });
+      });
+
+      socket.on("error", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        socket.destroy();
+        resolve(false);
+      });
     });
   }
 

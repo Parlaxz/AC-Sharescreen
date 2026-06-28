@@ -1,0 +1,6 @@
+MSBuild version 17.5.0+6f08c67f3 for .NET Framework
+
+  Regenerating build provenance header...
+  main.cpp
+  screenlink-video-enhancer.vcxproj -> C:\Users\parla\OneDrive\Desktop\Development\AC-Sharescreen\native\video-enhancer\build\Release\screenlink-video-enhancer.exe
+  Building Custom Rule C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/native/video-enhancer/CMakeLists.txt
