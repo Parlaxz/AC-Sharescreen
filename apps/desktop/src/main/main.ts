@@ -8,6 +8,7 @@ import { WindowManager } from "./window-manager.js";
 import { TrayManager } from "./tray-manager.js";
 import type { TrayMenuActions } from "./tray-manager.js";
 import { QuickShareShortcutManager } from "./quick-share-shortcut-manager.js";
+import { GroupShortcutManager } from "./group-shortcut-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
 import { registerIpcHandlers } from "./ipc-handlers.js";
 import { registerPermissionHandler } from "./permissions.js";
@@ -62,6 +63,7 @@ let groupStore: GroupStore;
 let presetStore: QualityPresetStore;
 let updateManager: UpdateManager | null = null;
 let quickShareShortcutManager: QuickShareShortcutManager | null = null;
+let groupShortcutManager: GroupShortcutManager | null = null;
 
 app.whenReady().then(() => {
   if (isMultiInstance && !devProfile) {
@@ -129,6 +131,19 @@ app.whenReady().then(() => {
     },
   );
   quickShareShortcutManager.register();
+
+  // ── Group shortcut manager (per-group Quick Share / Quick Join) ─────
+  groupShortcutManager = new GroupShortcutManager(() => mainWindow);
+  // Register saved shortcuts for all existing groups
+  const allGroups = groupStore.list();
+  for (const g of allGroups) {
+    if (g.quickShareShortcut) {
+      groupShortcutManager.register(g.groupId, "quick-share", g.quickShareShortcut);
+    }
+    if (g.quickJoinShortcut) {
+      groupShortcutManager.register(g.groupId, "quick-join", g.quickJoinShortcut);
+    }
+  }
 
   // ── Single instance ────────────────────────────────────────────────────
   setupSingleInstance(windowManager);
@@ -260,6 +275,7 @@ app.whenReady().then(() => {
     (enabled, accelerator) => {
       quickShareShortcutManager?.updateConfig(enabled, accelerator);
     },
+    groupShortcutManager ?? undefined,
   );
 
   // ── Startup visibility ─────────────────────────────────────────────────
@@ -285,6 +301,10 @@ app.on("before-quit", () => {
   if (quickShareShortcutManager) {
     quickShareShortcutManager.destroy();
     quickShareShortcutManager = null;
+  }
+  if (groupShortcutManager) {
+    groupShortcutManager.destroy();
+    groupShortcutManager = null;
   }
   if (updateManager) {
     updateManager.destroy();

@@ -129,6 +129,14 @@ export interface ScreenLinkAPI {
   onStopSharing: (callback: () => void) => () => void;
   onOpenDiagnostics: (callback: () => void) => () => void;
 
+  // Group shortcut config
+  getGroupShortcutConfig: (groupId: string) => Promise<GroupShortcutConfigDTO>;
+  updateGroupShortcutConfig: (groupId: string, config: Partial<GroupShortcutConfigDTO>) => Promise<GroupShortcutConfigDTO>;
+  validateGroupShortcut: (shortcut: string, groupId: string, action: "quick-share" | "quick-join", excludeSelf?: boolean) => Promise<ShortcutValidationDTO>;
+
+  // Group shortcut execution events
+  onGroupShortcutExecute: (callback: (payload: { groupId: string; action: "quick-share" | "quick-join" }) => void) => () => void;
+
   // Discord shortcut simulation
   sendShortcut: (binding: ShortcutBinding) => Promise<{ success: boolean; error?: string }>;
 
@@ -199,6 +207,26 @@ export interface QuickShareConfigDTO {
   lastGroupId: string | null;
   lastSourceKind: "screen" | "window" | null;
   lastPresetId: string | null;
+}
+
+// ── Per-group shortcut config types ──────────────────────────────────────────
+
+export interface GroupShortcutConfigDTO {
+  quickShareShortcut: string | null;
+  quickJoinShortcut: string | null;
+  quickShareSource: {
+    id: string;
+    name: string;
+    kind: "screen" | "window";
+    displayId: string | null;
+  } | null;
+  quickShareDefaultPresetId: string | null;
+}
+
+export interface ShortcutValidationDTO {
+  valid: boolean;
+  error?: string;
+  normalized: string;
 }
 
 // â”€â”€â”€ Update types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

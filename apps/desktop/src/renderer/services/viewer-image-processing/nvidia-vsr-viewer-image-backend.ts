@@ -43,7 +43,7 @@ export class NvidiaVsrViewerImageBackend implements ViewerImageBackend {
     _video: HTMLVideoElement,
     _metadata?: FrameMetadata,
   ): Promise<FrameProcessResult> {
-    return { success: false, transient: true };
+    return { success: false };
   }
 
   resizeOutput(_width: number, _height: number, _dpr: number): void {

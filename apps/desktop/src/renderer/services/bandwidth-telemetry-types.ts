@@ -201,6 +201,19 @@ export function fmtBitRate(bitsPerSecond: number): string {
 }
 
 /**
+ * Format a byte rate for display.
+ * B/s, KB/s, or MB/s.
+ */
+export function fmtByteRate(bytesPerSecond: number): string {
+  if (bytesPerSecond <= 0) return "0 B/s";
+  if (bytesPerSecond < 1024) return Math.round(bytesPerSecond) + " B/s";
+  const kb = bytesPerSecond / 1024;
+  if (kb < 1024) return kb.toFixed(1) + " KB/s";
+  const mb = kb / 1024;
+  return mb.toFixed(1) + " MB/s";
+}
+
+/**
  * Format cumulative bytes for display.
  * KB, MB, or GB.
  */

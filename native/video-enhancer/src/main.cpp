@@ -2,20 +2,362 @@
 #include "Protocol.h"
 #include "CapabilityProbe.h"
 #include "FrameTransport.h"
+#include "SharedFrameRing.h"
 #include "NvidiaVsrContext.h"
+#include "Diagnostics.h"
+#include "SimpleJson.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
+#include <thread>
+#include <chrono>
 
-/// Print version JSON to stdout.
+namespace sv = screenlink::video;
+
+// ─── Global configuration (set by --serve commands) ───────────────────
+
+static struct {
+    std::string sessionId;
+    std::string authToken;
+    uint32_t inputWidth = 1920;
+    uint32_t inputHeight = 1080;
+    uint32_t outputWidth = 1920;
+    uint32_t outputHeight = 1080;
+    uint32_t processingMode = 1; // 1=VSR
+    uint32_t qualityLevel = 2;   // 2=high
+    bool configured = false;
+} g_config;
+
+static sv::NvidiaVsrContext g_vsr;
+
+// ─── Helper: create JSON response ─────────────────────────────────────
+
+static sv::JsonObject MakeResponse(bool success, const std::string& errorMsg = "") {
+    sv::JsonObject resp;
+    resp["success"] = sv::JsonValue(success);
+    if (!errorMsg.empty()) {
+        resp["error"] = sv::JsonValue(errorMsg);
+    }
+    return resp;
+}
+
+// ─── Command handlers ─────────────────────────────────────────────────
+
+static bool HandleHello(const sv::JsonObject& payload) {
+    auto* proto = sv::GetString(payload, "protocolVersion");
+    auto* sid = sv::GetString(payload, "sessionId");
+    auto* token = sv::GetString(payload, "authToken");
+
+    if (!proto || !sid || !token) {
+        fprintf(stderr, "[Serve] hello: missing required fields\n");
+        return false;
+    }
+
+    if (*sid != g_config.sessionId || *token != g_config.authToken) {
+        fprintf(stderr, "[Serve] hello: auth mismatch (sid=%s)\n", sid->c_str());
+        return false;
+    }
+
+    printf("[Serve] Client hello OK (protocol=%s)\n", proto->c_str());
+    return true;
+}
+
+static bool HandleConfigure(const sv::JsonObject& payload) {
+    g_config.inputWidth = static_cast<uint32_t>(
+        sv::GetNumber(payload, "inputWidth", 1920));
+    g_config.inputHeight = static_cast<uint32_t>(
+        sv::GetNumber(payload, "inputHeight", 1080));
+    g_config.outputWidth = static_cast<uint32_t>(
+        sv::GetNumber(payload, "outputWidth", 1920));
+    g_config.outputHeight = static_cast<uint32_t>(
+        sv::GetNumber(payload, "outputHeight", 1080));
+    g_config.processingMode = static_cast<uint32_t>(
+        sv::GetNumber(payload, "processingMode", 1));
+    g_config.qualityLevel = static_cast<uint32_t>(
+        sv::GetNumber(payload, "qualityLevel", 2));
+
+    g_vsr.Shutdown();
+    bool ok = g_vsr.Initialize(g_config.inputWidth, g_config.inputHeight,
+                                g_config.outputWidth, g_config.outputHeight);
+    g_config.configured = ok;
+
+    printf("[Serve] Configured: %ux%u -> %ux%u mode=%u quality=%u %s\n",
+           g_config.inputWidth, g_config.inputHeight,
+           g_config.outputWidth, g_config.outputHeight,
+           g_config.processingMode, g_config.qualityLevel,
+           ok ? "OK" : "FAILED");
+    return ok;
+}
+
+static bool HandleSubmitFrame(const sv::JsonObject& /*payload*/,
+                               sv::FrameTransport& transport) {
+    if (!g_config.configured) {
+        fprintf(stderr, "[Serve] submit-frame: not configured\n");
+        return false;
+    }
+
+    // Read frame from frame pipe
+    sv::FrameHeader header;
+    std::vector<uint8_t> frameData;
+
+    if (!transport.ReadFrame(header, frameData)) {
+        fprintf(stderr, "[Serve] submit-frame: read failed\n");
+        return false;
+    }
+
+    // Validate frame dimensions (allow auto-detection from header)
+    uint32_t inW = header.inputWidth ? header.inputWidth : g_config.inputWidth;
+    uint32_t inH = header.inputHeight ? header.inputHeight : g_config.inputHeight;
+    uint32_t outW = header.requestedOutputWidth ? header.requestedOutputWidth : g_config.outputWidth;
+    uint32_t outH = header.requestedOutputHeight ? header.requestedOutputHeight : g_config.outputHeight;
+
+    // Allocate output buffer
+    uint32_t outSize = outW * outH * 4;
+    std::vector<uint8_t> outputData(outSize);
+
+    // Process frame (CPU-staging bilinear upscale)
+    auto start = std::chrono::steady_clock::now();
+
+    // If dimensions differ, reinitialize VSR context
+    if (inW != g_config.inputWidth || inH != g_config.inputHeight ||
+        outW != g_config.outputWidth || outH != g_config.outputHeight) {
+        g_vsr.Shutdown();
+        g_vsr.Initialize(inW, inH, outW, outH);
+        g_config.inputWidth = inW;
+        g_config.inputHeight = inH;
+        g_config.outputWidth = outW;
+        g_config.outputHeight = outH;
+    }
+
+    bool processOk = g_vsr.ProcessFrame(
+        frameData.data(), static_cast<uint32_t>(frameData.size()),
+        outputData.data(), outSize);
+
+    auto end = std::chrono::steady_clock::now();
+    uint64_t elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
+    // Record diagnostics
+    sv::GetDiagnosticsCounters().RecordFrame(elapsedUs, processOk);
+
+    // Write result back
+    sv::FrameHeader resultHeader = header;
+    resultHeader.resultCode = processOk ? 1 : 2;
+    resultHeader.payloadBytes = outSize;
+
+    if (!transport.WriteFrame(resultHeader, outputData.data(), outSize)) {
+        fprintf(stderr, "[Serve] submit-frame: write result failed\n");
+        return false;
+    }
+
+    printf("[Serve] Frame %u processed: %ux%u -> %ux%u in %lluus %s\n",
+           header.frameSequence, inW, inH, outW, outH,
+           (unsigned long long)elapsedUs,
+           processOk ? "OK" : "FAILED");
+
+    return processOk;
+}
+
+static sv::DiagnosticSnapshot BuildStatsResponse() {
+    auto snap = sv::GetDiagnostics();
+    auto& ctr = sv::GetDiagnosticsCounters();
+    snap.uptimeMs = 0; // Phase 7+: track uptime
+    return snap;
+}
+
+// ─── Serve mode main loop ─────────────────────────────────────────────
+
+static int RunServe(const std::vector<std::string>& args) {
+    // Parse CLI arguments
+    std::string ctrlPipe, framePipe, sessionId, authToken;
+    uint32_t parentPid = 0;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == "--control-pipe" && i + 1 < args.size())
+            ctrlPipe = args[++i];
+        else if (args[i] == "--frame-pipe" && i + 1 < args.size())
+            framePipe = args[++i];
+        else if (args[i] == "--session-id" && i + 1 < args.size())
+            sessionId = args[++i];
+        else if (args[i] == "--auth-token" && i + 1 < args.size())
+            authToken = args[++i];
+        else if (args[i] == "--parent-pid" && i + 1 < args.size())
+            parentPid = static_cast<uint32_t>(std::stoul(args[++i]));
+    }
+
+    if (ctrlPipe.empty() || framePipe.empty() || sessionId.empty() || authToken.empty()) {
+        fprintf(stderr, "Missing required arguments for --serve\n");
+        return static_cast<int>(sv::ExitCode::kServeFailed);
+    }
+
+    g_config.sessionId = sessionId;
+    g_config.authToken = authToken;
+
+    printf("Video-enhancer serve mode started\n");
+    printf("  Control pipe: %s\n", ctrlPipe.c_str());
+    printf("  Frame pipe: %s\n", framePipe.c_str());
+    printf("  Session: %s\n", sessionId.c_str());
+    if (parentPid) {
+        printf("  Parent PID: %u\n", parentPid);
+    }
+
+    sv::FrameTransport transport;
+
+    // Create named pipe servers
+    if (!transport.CreateControlPipe(ctrlPipe)) {
+        fprintf(stderr, "[Serve] Failed to create control pipe\n");
+        return static_cast<int>(sv::ExitCode::kServeFailed);
+    }
+    if (!transport.CreateFramePipe(framePipe)) {
+        fprintf(stderr, "[Serve] Failed to create frame pipe\n");
+        transport.CloseControlPipe();
+        return static_cast<int>(sv::ExitCode::kServeFailed);
+    }
+
+    printf("[Serve] Pipes created, waiting for client...\n");
+
+    // Main connection loop (handle one client at a time)
+    while (true) {
+        // Wait for control client
+        if (!transport.WaitForClient(transport.GetControlPipe())) {
+            fprintf(stderr, "[Serve] Control pipe connection failed, retrying...\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        printf("[Serve] Control client connected\n");
+
+        // Process commands for this client
+        bool clientDone = false;
+        while (!clientDone) {
+            auto msg = transport.ReadControlMessage();
+            if (msg.empty()) {
+                printf("[Serve] Control client disconnected\n");
+                break;
+            }
+
+            // Parse JSON
+            sv::JsonObject req;
+            try {
+                req = sv::ParseJson(msg);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[Serve] JSON parse error: %s\n", e.what());
+                transport.WriteControlResponse(
+                    sv::SerializeJson(MakeResponse(false, "JSON parse error")));
+                continue;
+            }
+
+            auto* cmdStr = sv::GetString(req, "command");
+            if (!cmdStr) {
+                transport.WriteControlResponse(
+                    sv::SerializeJson(MakeResponse(false, "Missing 'command' field")));
+                continue;
+            }
+
+            auto cmd = sv::ParseCommand(*cmdStr);
+
+            // Extract payload (or use empty object)
+            sv::JsonObject payload;
+            auto* payloadStr = sv::GetString(req, "payload");
+            if (payloadStr) {
+                try {
+                    // Payload might be a nested JSON object string
+                    payload = sv::ParseJson(*payloadStr);
+                } catch (...) {
+                    // Empty payload
+                }
+            }
+
+            // Dispatch command
+            sv::JsonObject response;
+            bool success = false;
+
+            switch (cmd) {
+                case sv::Command::kHello:
+                    // Use entire request as payload since payload is embedded at top level
+                    success = HandleHello(req);
+                    response = MakeResponse(success, success ? "" : "Authentication failed");
+                    break;
+
+                case sv::Command::kConfigure: {
+                    // For configure, payload is embedded in the request
+                    success = HandleConfigure(req);
+                    response = MakeResponse(success, success ? "" : "Configuration failed");
+                    break;
+                }
+
+                case sv::Command::kFrameAvailable: {
+                    // Submit frame: need to connect frame pipe
+                    if (!transport.WaitForClient(transport.GetFramePipe())) {
+                        fprintf(stderr, "[Serve] Frame pipe connection failed\n");
+                        response = MakeResponse(false, "Frame pipe connection failed");
+                    } else {
+                        success = HandleSubmitFrame(req, transport);
+                        response = MakeResponse(success, success ? "" : "Frame processing failed");
+                        // Disconnect frame pipe for next frame
+                        DisconnectNamedPipe(transport.GetFramePipe());
+                    }
+                    break;
+                }
+
+                case sv::Command::kFlush:
+                    // No-op for CPU-staging
+                    response = MakeResponse(true);
+                    break;
+
+                case sv::Command::kStats: {
+                    auto stats = BuildStatsResponse();
+                    sv::JsonObject resp;
+                    resp["success"] = sv::JsonValue(true);
+                    resp["totalFramesSubmitted"] = sv::JsonValue(static_cast<double>(stats.totalFramesSubmitted));
+                    resp["totalFramesCompleted"] = sv::JsonValue(static_cast<double>(stats.totalFramesCompleted));
+                    resp["totalFramesDropped"] = sv::JsonValue(static_cast<double>(stats.totalFramesDropped));
+                    resp["totalProcessingErrors"] = sv::JsonValue(static_cast<double>(stats.totalProcessingErrors));
+                    resp["totalBytesProcessed"] = sv::JsonValue(static_cast<double>(stats.totalBytesProcessed));
+                    resp["lastProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.lastProcessingTimeUs));
+                    resp["maxProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.maxProcessingTimeUs));
+                    resp["minProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.minProcessingTimeUs));
+                    response = resp;
+                    break;
+                }
+
+                case sv::Command::kShutdown:
+                    printf("[Serve] Shutdown requested\n");
+                    transport.WriteControlResponse(
+                        sv::SerializeJson(MakeResponse(true)));
+                    transport.CloseControlPipe();
+                    transport.CloseFramePipe();
+                    g_vsr.Shutdown();
+                    return 0;
+
+                default:
+                    fprintf(stderr, "[Serve] Unknown command: %s\n", cmdStr->c_str());
+                    response = MakeResponse(false, "Unknown command");
+                    break;
+            }
+
+            // Send response
+            auto responseStr = sv::SerializeJson(response);
+            transport.WriteControlResponse(responseStr);
+        }
+
+        // Disconnect and wait for next client
+        DisconnectNamedPipe(transport.GetControlPipe());
+        printf("[Serve] Waiting for next client...\n");
+    }
+
+    return 0;
+}
+
+// ─── Stubs for other modes ────────────────────────────────────────────
+
 static void PrintVersion() {
     printf("{\n");
     printf("  \"name\": \"screenlink-video-enhancer\",\n");
     printf("  \"version\": \"0.1.0\",\n");
-    printf("  \"protocolVersion\": \"%s\",\n", screenlink::video::kProtocolVersion.data());
+    printf("  \"protocolVersion\": \"%s\",\n", sv::kProtocolVersion.data());
     printf("  \"build\": {\n");
     printf("    \"commit\": \"%s\",\n", BUILD_GIT_COMMIT);
     printf("    \"dirty\": %s,\n", BUILD_GIT_DIRTY ? "true" : "false");
@@ -27,9 +369,8 @@ static void PrintVersion() {
     printf("}\n");
 }
 
-/// Run capability probe and print JSON result to stdout.
 static int RunCapabilities() {
-    auto result = screenlink::video::ProbeCapability();
+    auto result = sv::ProbeCapability();
     printf("{\n");
     printf("  \"available\": %s,\n", result.available ? "true" : "false");
     printf("  \"reason\": \"%s\",\n", result.reason.c_str());
@@ -39,65 +380,63 @@ static int RunCapabilities() {
     return result.available ? 0 : 1;
 }
 
-/// Run built-in self-tests.
 static int RunSelfTest() {
     bool allPassed = true;
 
-    // Test protocol parsing
-    auto cmd = screenlink::video::ParseCommand("hello");
-    allPassed &= (cmd == screenlink::video::Command::kHello);
+    auto cmd = sv::ParseCommand("hello");
+    allPassed &= (cmd == sv::Command::kHello);
+    cmd = sv::ParseCommand("unknown_command");
+    allPassed &= (cmd == sv::Command::kUnknown);
+    cmd = sv::ParseCommand("shutdown");
+    allPassed &= (cmd == sv::Command::kShutdown);
 
-    cmd = screenlink::video::ParseCommand("unknown_command");
-    allPassed &= (cmd == screenlink::video::Command::kUnknown);
-
-    cmd = screenlink::video::ParseCommand("shutdown");
-    allPassed &= (cmd == screenlink::video::Command::kShutdown);
-
-    // Test command name conversion
-    auto name = screenlink::video::CommandName(screenlink::video::Command::kCapabilities);
+    auto name = sv::CommandName(sv::Command::kCapabilities);
     allPassed &= (name == "capabilities");
-
-    name = screenlink::video::CommandName(screenlink::video::Command::kUnknown);
+    name = sv::CommandName(sv::Command::kUnknown);
     allPassed &= (name == "unknown");
 
-    // Test protocol version is non-empty
-    allPassed &= !screenlink::video::kProtocolVersion.empty();
+    allPassed &= !sv::kProtocolVersion.empty();
+
+    // Test JSON parser
+    try {
+        auto obj = sv::ParseJson(R"({"hello":"world","num":42,"flag":true,"null":null})");
+        allPassed &= (sv::GetString(obj, "hello") != nullptr);
+        allPassed &= (*sv::GetString(obj, "hello") == "world");
+        allPassed &= (sv::GetNumber(obj, "num") == 42.0);
+        allPassed &= (sv::GetBool(obj, "flag") == true);
+    } catch (...) {
+        allPassed = false;
+    }
+
+    // Test JSON serializer round-trip
+    try {
+        sv::JsonObject obj;
+        obj["test"] = sv::JsonValue(std::string("value"));
+        auto json = sv::SerializeJson(obj);
+        auto parsed = sv::ParseJson(json);
+        auto* val = sv::GetString(parsed, "test");
+        allPassed &= (val != nullptr && *val == "value");
+    } catch (...) {
+        allPassed = false;
+    }
+
+    // Test VSR context CPU-staging
+    {
+        sv::NvidiaVsrContext ctx;
+        allPassed &= ctx.Initialize(4, 4, 8, 8);
+        uint8_t src[64];
+        uint8_t dst[256];
+        for (int i = 0; i < 64; ++i) src[i] = static_cast<uint8_t>(i);
+        allPassed &= ctx.ProcessFrame(src, 64, dst, 256);
+        ctx.Shutdown();
+        allPassed &= !ctx.IsInitialized();
+    }
 
     printf("Self-tests: %s\n", allPassed ? "ALL PASSED" : "FAILED");
     return allPassed ? 0 : 1;
 }
 
-/// Run persistent serve mode (daemon).
-/// Phase 7+ will flesh out the full implementation.
-static int RunServe(const std::vector<std::string>& args) {
-    // Parse --control-pipe, --frame-pipe, --session-id, --auth-token
-    std::string ctrlPipe, framePipe, sessionId, authToken;
-
-    for (size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == "--control-pipe" && i + 1 < args.size())
-            ctrlPipe = args[++i];
-        else if (args[i] == "--frame-pipe" && i + 1 < args.size())
-            framePipe = args[++i];
-        else if (args[i] == "--session-id" && i + 1 < args.size())
-            sessionId = args[++i];
-        else if (args[i] == "--auth-token" && i + 1 < args.size())
-            authToken = args[++i];
-    }
-
-    if (ctrlPipe.empty() || framePipe.empty() || sessionId.empty() || authToken.empty()) {
-        fprintf(stderr, "Missing required arguments for --serve\n");
-        return static_cast<int>(screenlink::video::ExitCode::kServeFailed);
-    }
-
-    printf("Video-enhancer serve mode started\n");
-    printf("  Control pipe: %s\n", ctrlPipe.c_str());
-    printf("  Frame pipe: %s\n", framePipe.c_str());
-    printf("  Session: %s\n", sessionId.c_str());
-
-    // Phase 7: Implement full serve mode with named pipe server + frame ring
-    fprintf(stderr, "Serve mode not yet fully implemented (Phase 7)\n");
-    return static_cast<int>(screenlink::video::ExitCode::kServeFailed);
-}
+// ─── Entry point ──────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
     std::vector<std::string> args;
@@ -114,5 +453,5 @@ int main(int argc, char* argv[]) {
     if (args[0] == "--serve") { return RunServe(args); }
 
     fprintf(stderr, "Unknown command: %s\n", args[0].c_str());
-    return static_cast<int>(screenlink::video::ExitCode::kUnknownCommand);
+    return static_cast<int>(sv::ExitCode::kUnknownCommand);
 }

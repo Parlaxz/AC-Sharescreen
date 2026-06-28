@@ -22,6 +22,7 @@ import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts.js";
 import { usePreloadEvents } from "./hooks/use-preload-events.js";
 import { initializeAppRuntime } from "./services/initialize-app-runtime.js";
 import { acquirePhase3Runtime, releasePhase3Runtime } from "./services/phase3-runtime.js";
+import { initGroupShortcutListener } from "./services/group-shortcut-service.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
 
 export function App() {
@@ -56,6 +57,12 @@ export function App() {
 
   // Subscribe to main-process tray events
   usePreloadEvents();
+
+  // Initialize group shortcut listener (Quick Share / Quick Join via global shortcuts)
+  useEffect(() => {
+    const cleanup = initGroupShortcutListener();
+    return cleanup;
+  }, []);
 
   // Listen for quick-share:open event from global shortcut or tray
   useEffect(() => {

@@ -5,7 +5,7 @@ import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.
 import { probeNvidiaVsrCapability } from "./nvidia-capability-service.js";
 import { AudioHelperManager } from "./AudioHelperManager.js";
 import { VideoHelperManager } from "./VideoHelperManager.js";
-import type { VideoEnhancerConfig } from "./VideoHelperManager.js";
+import type { VideoEnhancerConfig } from "./video-enhancer-protocol.js";
 import {
   generateVdoStreamId,
   generateVdoPassword,
@@ -18,6 +18,7 @@ import type { SecureStore } from "./secure-store.js";
 import type { TrayManager } from "./tray-manager.js";
 import type { GroupStore } from "./group-store.js";
 import type { QualityPresetStore } from "./quality-preset-store.js";
+import type { GroupShortcutManager } from "./group-shortcut-manager.js";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import {
@@ -106,6 +107,7 @@ export function registerIpcHandlers(
   groupStore?: GroupStore,
   presetStore?: QualityPresetStore,
   onQuickShareConfigUpdated?: (enabled: boolean, accelerator: string) => void,
+  groupShortcutManager?: GroupShortcutManager,
 ): void {
   // â”€â”€ VDO session credentials (for LAN testing) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -339,6 +341,11 @@ export function registerIpcHandlers(
     });
 
     ipcMain.handle("leave-group", (_event, groupId: string) => {
+      // Unregister any per-group shortcuts before removing
+      if (groupShortcutManager) {
+        groupShortcutManager.unregister(groupId, "quick-share");
+        groupShortcutManager.unregister(groupId, "quick-join");
+      }
       groupStore.leave(groupId);
     });
 
@@ -346,9 +353,76 @@ export function registerIpcHandlers(
       const identity = settings.get().deviceIdentity;
       return groupStore.getConnectionConfig(groupId, identity.deviceId);
     });
+
+    // ── Per-group shortcut config ─────────────────────────────────────
+    ipcMain.handle("get-group-shortcut-config", (_event, groupId: string) => {
+      return groupStore.getGroupShortcutConfig(groupId);
+    });
+
+    ipcMain.handle(
+      "update-group-shortcut-config",
+      (
+        _event,
+        groupId: string,
+        config: {
+          quickShareShortcut?: string | null;
+          quickJoinShortcut?: string | null;
+          quickShareSource?: { id: string; name: string; kind: "screen" | "window"; displayId: string | null } | null;
+          quickShareDefaultPresetId?: string | null;
+        },
+      ) => {
+        if (!groupShortcutManager || !groupStore.get(groupId)) {
+          throw new Error("Group not found or shortcut manager unavailable");
+        }
+
+        // If quickShareShortcut is being changed, try to register it
+        if ("quickShareShortcut" in config) {
+          const result = groupShortcutManager.register(
+            groupId,
+            "quick-share",
+            config.quickShareShortcut ?? null,
+          );
+          if (!result.success) {
+            throw new Error(result.error ?? "Failed to register Quick Share shortcut");
+          }
+        }
+
+        // If quickJoinShortcut is being changed, try to register it
+        if ("quickJoinShortcut" in config) {
+          const result = groupShortcutManager.register(
+            groupId,
+            "quick-join",
+            config.quickJoinShortcut ?? null,
+          );
+          if (!result.success) {
+            throw new Error(result.error ?? "Failed to register Quick Join shortcut");
+          }
+        }
+
+        groupStore.updateGroupShortcutConfig(groupId, config);
+        return groupStore.getGroupShortcutConfig(groupId);
+      },
+    );
+
+    // Validation-only (no registration, no persistence)
+    ipcMain.handle(
+      "validate-group-shortcut",
+      (
+        _event,
+        shortcut: string,
+        groupId: string,
+        action: "quick-share" | "quick-join",
+        excludeSelf?: boolean,
+      ) => {
+        if (!groupShortcutManager) {
+          return { valid: false, error: "Shortcut manager not available" };
+        }
+        return groupShortcutManager.validate(shortcut, groupId, action, excludeSelf);
+      },
+    );
   }
 
-  // â”€â”€ Quality presets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Quality presets ────────────────────────────────────────────────────────
 
   if (presetStore) {
     ipcMain.handle("list-quality-presets", () => presetStore.list());
@@ -599,6 +673,34 @@ export function registerIpcHandlers(
     } catch (err) {
       return { success: false, error: String(err) };
     }
+  });
+
+  // ── Video helper ──────────────────────────────────────────────────────────────
+
+  ipcMain.handle("video-helper:start", async (_event, config: VideoEnhancerConfig) => {
+    const manager = ensureVideoHelperManager();
+    return await manager.start(config);
+  });
+
+  ipcMain.handle("video-helper:stop", async (_event, shutdown?: boolean) => {
+    const manager = ensureVideoHelperManager();
+    await manager.stop(shutdown ?? false);
+  });
+
+  ipcMain.handle("video-helper:submit-frame", async (_event, generation: number, frameSequence: number, frameData: number[], inputWidth: number, inputHeight: number) => {
+    const manager = ensureVideoHelperManager();
+    const buffer = new Uint8Array(frameData);
+    return await manager.submitFrame(generation, frameSequence, buffer, inputWidth, inputHeight);
+  });
+
+  ipcMain.handle("video-helper:flush", async () => {
+    const manager = ensureVideoHelperManager();
+    return await manager.flush();
+  });
+
+  ipcMain.handle("video-helper:get-state", async () => {
+    const mgr = videoHelperManager;
+    return mgr ? mgr.getState() : "disconnected";
   });
 
   // â”€â”€ Tray state updates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

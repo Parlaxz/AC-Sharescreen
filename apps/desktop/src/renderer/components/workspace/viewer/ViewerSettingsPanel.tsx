@@ -397,7 +397,7 @@ export function ViewerSettingsPanel({
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-[500px] p-4">
+      <PopoverContent side="top" align="center" className="w-[750px] p-4">
         <Tabs defaultValue="general" className="w-full">
           <TabsList className="w-full mb-2">
             <TabsTrigger value="general" className="flex-1 text-xs">General</TabsTrigger>
@@ -406,9 +406,9 @@ export function ViewerSettingsPanel({
 
           {/* ── General tab (existing quality controls) ──── */}
           <TabsContent value="general" className="mt-0">
-            <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
               {qualityPresets.length > 0 && (
-                <div>
+                <div className="col-span-2 sm:col-span-1">
                   <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
                   <div className="flex flex-wrap gap-1">
                     {qualityPresets.map((preset) => {
@@ -446,7 +446,7 @@ export function ViewerSettingsPanel({
                 </div>
               )}
 
-              <div>
+              <div className={cn(qualityPresets.length > 0 ? "col-span-2 sm:col-span-1" : "col-span-2")}>
                 <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
                 <div className="flex flex-wrap gap-1">
                   {VIEWER_REQUEST_PRESETS.map((preset) => {
@@ -473,7 +473,7 @@ export function ViewerSettingsPanel({
                 </div>
               </div>
 
-              <div>
+              <div className="col-span-2">
                 <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>
                 <div className="flex flex-wrap gap-1">
                   {RESOLUTION_CHOICES.map((r) => (
@@ -493,7 +493,7 @@ export function ViewerSettingsPanel({
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2 grid grid-cols-2 gap-4">
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-[10px] text-text-muted uppercase tracking-wide">FPS</span>
@@ -553,7 +553,7 @@ export function ViewerSettingsPanel({
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 pt-1">
+              <div className="col-span-2 flex items-center gap-2 pt-1">
                 <Button
                   variant="default"
                   size="sm"
@@ -576,7 +576,7 @@ export function ViewerSettingsPanel({
 
               {requestFeedback && (
                 <p className={cn(
-                  "text-xs",
+                  "col-span-2 text-xs",
                   lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
                 )}>
                   {requestFeedback}
@@ -587,7 +587,7 @@ export function ViewerSettingsPanel({
 
           {/* ── Image Enhancements tab ────────────────────── */}
           <TabsContent value="enhancements" className="mt-0 max-h-[60vh] overflow-y-auto">
-            <div className="space-y-4">
+            <div className="space-y-3">
               {/* Master toggle */}
               <div className="flex items-center justify-between">
                 <span className="text-[10px] text-text-muted uppercase tracking-wide">GPU Image Enhancements</span>
@@ -600,97 +600,97 @@ export function ViewerSettingsPanel({
                 />
               </div>
 
-              {/* Processing Backend selection */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] text-text-muted uppercase tracking-wide">Processing Backend</span>
+              {/* Processing Backend + WebGL Scaler side by side */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">Processing Backend</span>
+                  </div>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                    value={enhancementSettings.processingBackend ?? "webgl2"}
+                    onChange={(e) =>
+                      onEnhancementChange({
+                        ...enhancementSettings,
+                        processingBackend: e.target.value as ProcessingBackend,
+                      })
+                    }
+                    disabled={!enhancementSettings.enabled}
+                    aria-label="Processing Backend"
+                  >
+                    {PROCESSING_BACKENDS.map((backend) => (
+                      <option key={backend} value={backend}>
+                        {PROCESSING_BACKEND_LABELS[backend]}
+                      </option>
+                    ))}
+                  </select>
+                  {fallbackReason && (
+                    <p className="text-[10px] text-amber-500 mt-1">{fallbackReason}</p>
+                  )}
+                  {effectiveBackend && effectiveBackend !== enhancementSettings.processingBackend && (
+                    <p className="text-[10px] text-text-muted mt-0.5">
+                      Active: {effectiveBackend}
+                    </p>
+                  )}
                 </div>
-                <select
-                  className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                  value={enhancementSettings.processingBackend ?? "webgl2"}
-                  onChange={(e) =>
-                    onEnhancementChange({
-                      ...enhancementSettings,
-                      processingBackend: e.target.value as ProcessingBackend,
-                    })
-                  }
-                  disabled={!enhancementSettings.enabled}
-                  aria-label="Processing Backend"
-                >
-                  {PROCESSING_BACKENDS.map((backend) => (
-                    <option key={backend} value={backend}>
-                      {PROCESSING_BACKEND_LABELS[backend]}
-                    </option>
-                  ))}
-                </select>
-                {fallbackReason && (
-                  <p className="text-[10px] text-amber-500 mt-1">{fallbackReason}</p>
-                )}
-                {effectiveBackend && effectiveBackend !== enhancementSettings.processingBackend && (
-                  <p className="text-[10px] text-text-muted mt-0.5">
-                    Active: {effectiveBackend}
-                  </p>
-                )}
-              </div>
 
-              {/* WebGL Scaler Dropdown */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] text-text-muted uppercase tracking-wide">WebGL Scaler</span>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">WebGL Scaler</span>
+                  </div>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                    value={enhancementSettings.webglScalingAlgorithm ?? "native"}
+                    onChange={(e) =>
+                      onEnhancementChange({
+                        ...enhancementSettings,
+                        webglScalingAlgorithm: e.target.value as ScalingAlgorithm,
+                      })
+                    }
+                    disabled={!enhancementSettings.enabled}
+                    aria-label="WebGL Scaler"
+                  >
+                    {SCALING_ALGORITHMS.map((algo) => (
+                      <option key={algo} value={algo}>
+                        {SCALING_ALGORITHM_LABELS[algo]}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <select
-                  className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                  value={enhancementSettings.webglScalingAlgorithm ?? "native"}
-                  onChange={(e) =>
-                    onEnhancementChange({
-                      ...enhancementSettings,
-                      webglScalingAlgorithm: e.target.value as ScalingAlgorithm,
-                    })
-                  }
-                  disabled={!enhancementSettings.enabled}
-                  aria-label="WebGL Scaler"
-                >
-                  {SCALING_ALGORITHMS.map((algo) => (
-                    <option key={algo} value={algo}>
-                      {SCALING_ALGORITHM_LABELS[algo]}
-                    </option>
-                  ))}
-                </select>
               </div>
 
               <hr className="border-border-subtle" />
 
-              {/* Sharpness */}
-              <EnhancementSliderControl
-                label="Sharpness"
-                value={enhancementSettings.sharpeningStrength}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
-              />
+              {/* Sliders in a 2-column grid */}
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                <EnhancementSliderControl
+                  label="Sharpness"
+                  value={enhancementSettings.sharpeningStrength}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
+                />
 
-              {/* Noise Protection — replaces Texture/Noise Sharpening */}
-              <EnhancementSliderControl
-                label="Noise Protection"
-                value={enhancementSettings.noiseProtection}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
-              />
+                <EnhancementSliderControl
+                  label="Noise Protection"
+                  value={enhancementSettings.noiseProtection}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
+                />
 
-              {/* Compression Cleanup — replaces Chroma Cleanup + Compression Smoothing */}
-              <EnhancementSliderControl
-                label="Compression Cleanup"
-                value={enhancementSettings.compressionCleanup}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
-              />
+                <EnhancementSliderControl
+                  label="Compression Cleanup"
+                  value={enhancementSettings.compressionCleanup}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
+                />
 
-              {/* Debanding — new */}
-              <EnhancementSliderControl
-                label="Debanding"
-                value={enhancementSettings.debanding}
-                disabled={!enhancementSettings.enabled}
-                onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
-              />
+                <EnhancementSliderControl
+                  label="Debanding"
+                  value={enhancementSettings.debanding}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
+                />
+              </div>
 
               {/* FSR Target Scale — only when FSR 1 EASU is selected */}
               {isFsr && (

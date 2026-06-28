@@ -17,6 +17,7 @@ import {
 } from "react";
 import { cn } from "@/lib/utils";
 import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
+import type { ViewerImageBackend } from "@/services/viewer-image-processing/viewer-image-backend";
 import type {
   ProcessorState,
   ProcessorStats,
@@ -24,6 +25,7 @@ import type {
 import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-image-processor";
 import { getImageProcessingCapabilities, augmentWithNvidiaCapability } from "@/services/viewer-image-processing/viewer-image-capabilities";
 import { createImageProcessingBackend } from "@/services/viewer-image-processing/viewer-image-backend-factory";
+import { WebGL2ViewerImageBackend } from "@/services/viewer-image-processing/webgl2-viewer-image-backend";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +76,7 @@ export function EnhancedVideoSurface({
   const [processorState, setProcessorState] = useState<ProcessorState>("idle");
   const [fallback, setFallback] = useState<boolean>(false);
   const [firstFrameReceived, setFirstFrameReceived] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState(0);
 
   // ─── Capabilities check on mount (async IPC probe) ────────────────────
 
@@ -110,6 +113,7 @@ export function EnhancedVideoSurface({
 
   useEffect(() => {
     setFirstFrameReceived(false);
+    setRetryAttempt(0);
     if (enabled) {
       setFallback(false);
     }
@@ -142,8 +146,22 @@ export function EnhancedVideoSurface({
     (async () => {
       try {
         // Create the appropriate backend based on settings + capabilities
-        const { backend, effective, fallbackReason } =
-          createImageProcessingBackend(settings);
+        // On retry attempts, force-create a WebGL2 backend directly
+        let backend: ViewerImageBackend;
+        let effective: string;
+        let fallbackReason: string | undefined;
+
+        if (retryAttempt === 0) {
+          const result = createImageProcessingBackend(settings);
+          backend = result.backend;
+          effective = result.effective;
+          fallbackReason = result.fallbackReason;
+        } else {
+          backend = new WebGL2ViewerImageBackend();
+          effective = "webgl2";
+          fallbackReason =
+            "NVIDIA VSR unavailable, fell back to WebGL2";
+        }
 
         // Notify parent of backend selection
         onBackendChange?.(effective, fallbackReason);
@@ -170,6 +188,11 @@ export function EnhancedVideoSurface({
             onProcessorStateChange?.(state);
           },
           onError: (reason: string) => {
+            if (effective === "nvidia-vsr" && retryAttempt < 1) {
+              // Retry with WebGL2 fallback
+              setRetryAttempt((n) => n + 1);
+              return; // Don't set fallback yet
+            }
             setFirstFrameReceived(false);
             setFallback(true);
             onProcessingError?.(reason);
@@ -184,12 +207,16 @@ export function EnhancedVideoSurface({
         processorRef.current = processor;
       } catch (err) {
         if (!cancelled) {
-          setFallback(true);
-          onProcessingError?.(
-            err instanceof Error
-              ? err.message
-              : "Failed to create processing backend",
-          );
+          if (retryAttempt < 1) {
+            setRetryAttempt((n) => n + 1);
+          } else {
+            setFallback(true);
+            onProcessingError?.(
+              err instanceof Error
+                ? err.message
+                : "Failed to create processing backend",
+            );
+          }
         }
       }
     })();
@@ -197,11 +224,11 @@ export function EnhancedVideoSurface({
     return () => {
       cancelled = true;
       if (processor) {
-        processor.destroy();
+        processor.destroy().catch(() => {});
         processorRef.current = null;
       }
     };
-  }, [enabled, fallback, videoElement]); // intentionally limited deps
+  }, [enabled, fallback, videoElement, retryAttempt]); // intentionally limited deps
 
   // ─── Backend switching on processingBackend change ────────────────────
 

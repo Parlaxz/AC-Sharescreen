@@ -4,7 +4,7 @@ import type { ScreenLinkAPI } from "./api-types.js";
 const api: ScreenLinkAPI = {
   getSources: () => ipcRenderer.invoke("get-sources"),
 
-  // â”€â”€ Window controls (Stage 3.7B) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Window controls ──────────────────────────────────────────────────────
   windowControls: {
     minimize: () => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
@@ -65,14 +65,11 @@ const api: ScreenLinkAPI = {
   traySetViewing: (viewing) => ipcRenderer.send("tray-set-viewing", viewing),
 
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
-  getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
+
   probeNvidiaVsrCapability: () => ipcRenderer.invoke("nvidia:probe-capability"),
 
-  /**
-   * Write text to the OS clipboard via the main process. Bypasses
-   * the renderer's `navigator.clipboard.writeText` which is often
-   * blocked in Electron with "Write permission denied".
-   */
+  getAudioCapabilities: () => ipcRenderer.invoke("get-audio-capabilities"),
+
   clipboardWriteText: (text: string) => ipcRenderer.invoke("clipboard-write-text", text),
 
   requestAudioPort: () => ipcRenderer.invoke("request-audio-port"),
@@ -89,14 +86,14 @@ const api: ScreenLinkAPI = {
   getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
   getPipelineSnapshot: () => ipcRenderer.invoke("get-pipeline-snapshot"),
 
-  // â”€â”€ Updates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Updates ──────────────────────────────────────────────────────────────
   getUpdateStatus: () => ipcRenderer.invoke("updates:get-status"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),
   restartAndInstallUpdate: () => ipcRenderer.invoke("updates:install"),
   checkDownloadAndInstall: () => ipcRenderer.invoke("updates:full-update"),
 
-  // â”€â”€ Quick Share â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Quick Share ──────────────────────────────────────────────────────────
   getQuickShareConfig: () => ipcRenderer.invoke("get-quick-share-config"),
   updateQuickShareConfig: (partial) => ipcRenderer.invoke("update-quick-share-config", partial),
   onQuickShareOpen: (callback) => {
@@ -105,7 +102,20 @@ const api: ScreenLinkAPI = {
     return () => { ipcRenderer.removeListener("quick-share:open", handler); };
   },
 
-  // â”€â”€ Tray-originated mainâ†’renderer events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Group shortcut config
+  getGroupShortcutConfig: (groupId) => ipcRenderer.invoke("get-group-shortcut-config", groupId),
+  updateGroupShortcutConfig: (groupId, config) => ipcRenderer.invoke("update-group-shortcut-config", groupId, config),
+  validateGroupShortcut: (shortcut, groupId, action, excludeSelf) =>
+    ipcRenderer.invoke("validate-group-shortcut", shortcut, groupId, action, excludeSelf),
+
+  // Group shortcut execution events
+  onGroupShortcutExecute: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { groupId: string; action: "quick-share" | "quick-join" }) => callback(payload);
+    ipcRenderer.on("group-shortcut:execute", handler);
+    return () => { ipcRenderer.removeListener("group-shortcut:execute", handler); };
+  },
+
+  // ── Tray-originated main-to-renderer events ──────────────────────────────
   onOpenSourcePicker: (callback) => {
     const handler = () => callback();
     ipcRenderer.on("open-source-picker", handler);
@@ -151,4 +161,3 @@ ipcRenderer.on('pcm:port', (_event: Electron.IpcRendererEvent) => {
     window.postMessage({ type: 'pcm:port' }, '*', [port]);
   }
 });
-

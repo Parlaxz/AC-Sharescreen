@@ -331,10 +331,10 @@ export function DiagnosticsPanel({
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-[500px] p-4 max-h-[80vh] overflow-y-auto">
+      <PopoverContent side="top" align="center" className="w-[750px] p-4 max-h-[80vh] overflow-y-auto">
         <div className="space-y-4">
           {/* Connection + Video columns */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-4 gap-3">
             {/* Connection section */}
             <div>
               <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
@@ -385,7 +385,7 @@ export function DiagnosticsPanel({
           <Separator />
 
           {/* Audio + Quality columns */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-4 gap-3">
             {/* Audio section */}
             <div>
               <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">

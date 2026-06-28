@@ -16,6 +16,13 @@ import { SecureStore } from "./secure-store.js";
 } from "@screenlink/shared";
 import { z } from "zod";
 
+const QuickShareSourceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: z.enum(["screen", "window"]),
+  displayId: z.string().nullable(),
+}).nullable();
+
 const LocalGroupRecordSchema = z.object({
   groupId: z.string().uuid(),
   controlRoomId: z.string().min(1),
@@ -25,6 +32,10 @@ const LocalGroupRecordSchema = z.object({
   joinedAt: z.number().int().positive(),
   notificationsEnabled: z.boolean(),
   creatorDeviceId: z.string().optional(),
+  quickShareShortcut: z.string().nullable().optional(),
+  quickJoinShortcut: z.string().nullable().optional(),
+  quickShareSource: QuickShareSourceSchema.optional(),
+  quickShareDefaultPresetId: z.string().nullable().optional(),
 });
 
 export interface LocalGroupRecord {
@@ -36,6 +47,15 @@ export interface LocalGroupRecord {
   joinedAt: number;
   notificationsEnabled: boolean;
   creatorDeviceId?: string;
+  quickShareShortcut?: string | null;
+  quickJoinShortcut?: string | null;
+  quickShareSource?: {
+    id: string;
+    name: string;
+    kind: "screen" | "window";
+    displayId: string | null;
+  } | null;
+  quickShareDefaultPresetId?: string | null;
 }
 
 export interface GroupConnectionConfig {
@@ -407,6 +427,60 @@ export class GroupStore {
   leave(groupId: string): void {
     if (!this.records.has(groupId)) return;
     this.records.delete(groupId);
+    this.persist();
+  }
+
+  // ── Per-group quick action shortcut settings ───────────────────────────
+
+  getQuickShareShortcut(groupId: string): string | null {
+    return this.records.get(groupId)?.quickShareShortcut ?? null;
+  }
+
+  getQuickJoinShortcut(groupId: string): string | null {
+    return this.records.get(groupId)?.quickJoinShortcut ?? null;
+  }
+
+  getQuickShareSource(groupId: string): LocalGroupRecord["quickShareSource"] {
+    return this.records.get(groupId)?.quickShareSource ?? null;
+  }
+
+  getQuickShareDefaultPresetId(groupId: string): string | null {
+    return this.records.get(groupId)?.quickShareDefaultPresetId ?? null;
+  }
+
+  getGroupShortcutConfig(groupId: string): {
+    quickShareShortcut: string | null;
+    quickJoinShortcut: string | null;
+    quickShareSource: LocalGroupRecord["quickShareSource"];
+    quickShareDefaultPresetId: string | null;
+  } {
+    const record = this.records.get(groupId);
+    if (!record) {
+      return { quickShareShortcut: null, quickJoinShortcut: null, quickShareSource: null, quickShareDefaultPresetId: null };
+    }
+    return {
+      quickShareShortcut: record.quickShareShortcut ?? null,
+      quickJoinShortcut: record.quickJoinShortcut ?? null,
+      quickShareSource: record.quickShareSource ?? null,
+      quickShareDefaultPresetId: record.quickShareDefaultPresetId ?? null,
+    };
+  }
+
+  updateGroupShortcutConfig(
+    groupId: string,
+    config: {
+      quickShareShortcut?: string | null;
+      quickJoinShortcut?: string | null;
+      quickShareSource?: { id: string; name: string; kind: "screen" | "window"; displayId: string | null } | null;
+      quickShareDefaultPresetId?: string | null;
+    },
+  ): void {
+    const record = this.records.get(groupId);
+    if (!record) return;
+    if ("quickShareShortcut" in config) record.quickShareShortcut = config.quickShareShortcut ?? null;
+    if ("quickJoinShortcut" in config) record.quickJoinShortcut = config.quickJoinShortcut ?? null;
+    if ("quickShareSource" in config) record.quickShareSource = config.quickShareSource ?? null;
+    if ("quickShareDefaultPresetId" in config) record.quickShareDefaultPresetId = config.quickShareDefaultPresetId ?? null;
     this.persist();
   }
 }

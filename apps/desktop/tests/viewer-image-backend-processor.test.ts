@@ -339,10 +339,10 @@ describe("ViewerImageProcessor — RVFC lifecycle", () => {
 
     processor.resume();
     expect(processor.getState()).toBe("running");
-    processor.destroy();
+    await processor.destroy();
     expect(processor.getState()).toBe("destroyed");
 
-    processor.destroy();
+    await processor.destroy();
     expect(processor.getState()).toBe("destroyed");
   });
 

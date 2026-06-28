@@ -1,6 +1,5 @@
-import { app } from "electron";
-import path from "node:path";
 import { spawn } from "node:child_process";
+import { getVideoEnhancerHelperPath } from "./helper-path.js";
 
 export interface NvidiaCapabilityResult {
   available: boolean;
@@ -12,23 +11,6 @@ export interface NvidiaCapabilityResult {
 let cachedResult: NvidiaCapabilityResult | null = null;
 
 /**
- * Resolve the video-enhancer helper binary path.
- */
-function getVideoEnhancerPath(): string {
-  const HELPER_EXE = "screenlink-video-enhancer.exe";
-
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, HELPER_EXE);
-  }
-
-  // Development path: from dist/main/, go up to repo root, then to native build output
-  return path.join(
-    __dirname, "..", "..", "..", "..",
-    "native", "video-enhancer", "build", "Release", HELPER_EXE,
-  );
-}
-
-/**
  * Probe NVIDIA RTX VSR capability.
  * First tries the native helper --capabilities command.
  * Falls back to a graceful unavailable if the helper isn't built yet.
@@ -37,7 +19,7 @@ export async function probeNvidiaVsrCapability(): Promise<NvidiaCapabilityResult
   if (cachedResult) return cachedResult;
 
   try {
-    const helperPath = getVideoEnhancerPath();
+    const helperPath = getVideoEnhancerHelperPath();
 
     // Check if the helper binary exists
     const fs = await import("node:fs");

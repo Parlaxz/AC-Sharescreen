@@ -20,11 +20,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+} from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -44,6 +43,7 @@ import type {
 } from "@/services/bandwidth-telemetry-types";
 import {
   fmtBitRate,
+  fmtByteRate,
   fmtCumulativeBytes,
   fmtDuration,
   fmtHourlyUsage,
@@ -176,11 +176,11 @@ function getChartData(
       if (s.timestampMs < cutoff) continue;
       data.push({
         time: (s.timestampMs - baseTime) / 1000,
-        smoothed: i < ewmaSeries.length ? ewmaSeries[i] : undefined,
-        raw: showRaw ? s.mediaBitsPerSecond : undefined,
-        target: s.configuredVideoBitsPerSecond ?? undefined,
-        video: s.videoBitsPerSecond,
-        audio: s.audioBitsPerSecond,
+        smoothed: i < ewmaSeries.length ? ewmaSeries[i] / 8 : undefined,
+        raw: showRaw ? s.mediaBitsPerSecond / 8 : undefined,
+        target: s.configuredVideoBitsPerSecond ? s.configuredVideoBitsPerSecond / 8 : undefined,
+        video: s.videoBitsPerSecond ? s.videoBitsPerSecond / 8 : null,
+        audio: s.audioBitsPerSecond ? s.audioBitsPerSecond / 8 : null,
       });
     }
 
@@ -286,10 +286,10 @@ function formatTimeAxis(seconds: number): string {
   return `${s}s`;
 }
 
-function formatBitrateAxis(value: number): string {
-  if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
-  if (value >= 1_000) return Math.round(value / 1_000) + "k";
-  return String(value);
+function formatByteAxis(value: number): string {
+  if (value >= 1_048_576) return (value / 1_048_576).toFixed(1) + "M";
+  if (value >= 1024) return Math.round(value / 1024) + "K";
+  return String(Math.round(value));
 }
 
 // ─── useBandwidthSnapshot hook ──────────────────────────────────────────────
@@ -338,7 +338,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Smoothed</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtBitRate(d.smoothed)}
+              {fmtByteRate(d.smoothed)}
             </span>
           </div>
         )}
@@ -346,7 +346,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Raw</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtBitRate(d.raw)}
+              {fmtByteRate(d.raw)}
             </span>
           </div>
         )}
@@ -354,7 +354,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Target</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtBitRate(d.target)}
+              {fmtByteRate(d.target)}
             </span>
           </div>
         )}
@@ -362,7 +362,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Video</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtBitRate(d.video)}
+              {fmtByteRate(d.video)}
             </span>
           </div>
         )}
@@ -370,7 +370,7 @@ function ThroughputTooltip({
           <div className="flex justify-between gap-4">
             <span className="text-text-secondary">Audio</span>
             <span className="font-mono tabular-nums text-text-primary">
-              {fmtBitRate(d.audio)}
+              {fmtByteRate(d.audio)}
             </span>
           </div>
         )}
@@ -558,23 +558,27 @@ export function BandwidthGraphModal({
 
   return (
     <TooltipProvider>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-3xl max-h-[85vh]">
-          <DialogHeader>
-            <DialogTitle>Bandwidth</DialogTitle>
-          </DialogHeader>
+      <Popover open={open} onOpenChange={onOpenChange}>
+        {/* Hidden trigger at bottom-center to position popover above controls */}
+        <div className="fixed bottom-24 left-1/2 z-50 -translate-x-1/2 opacity-0 pointer-events-none" aria-hidden="true">
+          <PopoverTrigger asChild><span /></PopoverTrigger>
+        </div>
+        <PopoverContent side="top" align="center" className="w-[950px] p-4">
+          <div className="text-lg font-semibold mb-4 text-text-primary">
+            Bandwidth
+          </div>
 
           <ScrollArea className="max-h-[calc(85vh-8rem)] pr-2">
             {/* ── Summary Row ── */}
             <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4 text-sm">
               <SummaryItem
                 label="Current"
-                value={fmtBitRate(snapshot.currentBitsPerSecond)}
+                value={fmtByteRate(snapshot.currentBitsPerSecond / 8)}
               />
-              <SummaryItem label="30s Avg" value={fmtBitRate(avg30s)} />
+              <SummaryItem label="30s Avg" value={fmtByteRate(avg30s / 8)} />
               <SummaryItem
                 label="Peak"
-                value={fmtBitRate(snapshot.peakBitsPerSecond)}
+                value={fmtByteRate(snapshot.peakBitsPerSecond / 8)}
               />
               <SummaryItem
                 label="Total"
@@ -611,8 +615,8 @@ export function BandwidthGraphModal({
             </div>
 
             {/* ── Time Range Selector ── */}
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex gap-1">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex gap-0.5">
                 {TIME_RANGES.map((r) => (
                   <Button
                     key={r.label}
@@ -716,11 +720,11 @@ export function BandwidthGraphModal({
                             stroke="var(--color-text-muted)"
                           />
                           <YAxis
-                            tickFormatter={formatBitrateAxis}
+                            tickFormatter={formatByteAxis}
                             tick={{ fontSize: 11 }}
                             stroke="var(--color-text-muted)"
                             label={{
-                              value: "bps",
+                              value: "B/s",
                               angle: -90,
                               position: "insideLeft",
                               style: {
@@ -765,12 +769,12 @@ export function BandwidthGraphModal({
                           {snapshot.configuredBitsPerSecond != null &&
                             snapshot.configuredBitsPerSecond > 0 && (
                               <ReferenceLine
-                                y={snapshot.configuredBitsPerSecond}
+                                y={snapshot.configuredBitsPerSecond / 8}
                                 stroke="var(--color-warning)"
                                 strokeDasharray="6 3"
                                 label={
                                   <Label
-                                    value={`Target: ${fmtBitRate(snapshot.configuredBitsPerSecond)}`}
+                                    value={`Target: ${fmtByteRate(snapshot.configuredBitsPerSecond / 8)}`}
                                     position="right"
                                     style={{
                                       fontSize: 10,
@@ -944,8 +948,8 @@ export function BandwidthGraphModal({
               </Tabs>
             )}
           </ScrollArea>
-        </DialogContent>
-      </Dialog>
+        </PopoverContent>
+      </Popover>
     </TooltipProvider>
   );
 }

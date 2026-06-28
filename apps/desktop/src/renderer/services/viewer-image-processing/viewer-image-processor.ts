@@ -211,10 +211,10 @@ export class ViewerImageProcessor {
   /**
    * Tear down the processor and release all GPU resources.
    */
-  destroy(): void {
+  async destroy(): Promise<void> {
     this.cancelFrame();
     try {
-      this.backend.destroy();
+      await this.backend.destroy();
     } catch {
       // Swallow destroy errors
     }

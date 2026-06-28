@@ -1,9 +1,9 @@
-import { app } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
-import path from "node:path";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { VIDEO_ENHANCER_PROTOCOL_VERSION } from "./video-enhancer-protocol.js";
+import type { VideoEnhancerConfig } from "./video-enhancer-protocol.js";
+import { getVideoEnhancerHelperPath } from "./helper-path.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -14,15 +14,6 @@ export type VideoHelperState =
   | "ready"
   | "processing"
   | "error";
-
-export interface VideoEnhancerConfig {
-  inputWidth: number;
-  inputHeight: number;
-  outputWidth: number;
-  outputHeight: number;
-  processingMode: string;
-  qualityLevel: string;
-}
 
 export interface VideoHelperCallbacks {
   onStateChange?: (state: VideoHelperState) => void;
@@ -55,6 +46,9 @@ export class VideoHelperManager {
   private readonly maxRestarts = 3;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Last config for restart
+  private lastConfig: VideoEnhancerConfig | null = null;
+
   // Diagnostics interval
   private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -80,11 +74,11 @@ export class VideoHelperManager {
    * For now, returns false (not implemented).
    */
   async submitFrame(
-    generation: number,
-    frameSequence: number,
-    frameData: Uint8Array,
-    inputWidth: number,
-    inputHeight: number,
+    _generation: number,
+    _frameSequence: number,
+    _frameData: Uint8Array,
+    _inputWidth: number,
+    _inputHeight: number,
   ): Promise<boolean> {
     // Not yet implemented
     return false;
@@ -121,7 +115,11 @@ export class VideoHelperManager {
         outputHeight: config.outputHeight,
         processingMode: config.processingMode,
         qualityLevel: config.qualityLevel,
+        pixelFormat: config.pixelFormat,
       });
+      if (response?.success === true) {
+        this.lastConfig = { ...config };
+      }
       return response?.success === true;
     } catch {
       return false;
@@ -170,7 +168,7 @@ export class VideoHelperManager {
     const gen = this.lifecycleGeneration;
 
     try {
-      const helperPath = this.getHelperPath();
+      const helperPath = getVideoEnhancerHelperPath();
 
       // Generate new session identity
       this.sessionId = randomUUID().replace(/-/g, "").substring(0, 32);
@@ -234,10 +232,12 @@ export class VideoHelperManager {
         outputHeight: config.outputHeight,
         processingMode: config.processingMode,
         qualityLevel: config.qualityLevel,
+        pixelFormat: config.pixelFormat,
       });
 
       this.state = "ready";
       this.restartAttempts = 0;
+      this.lastConfig = { ...config };
       this.callbacks.onStateChange?.("ready");
 
       // Start diagnostics polling
@@ -329,7 +329,8 @@ export class VideoHelperManager {
 
   private sendCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
     return new Promise((resolve) => {
-      if (!this.controlSocket || !this.controlSocket.writable) {
+      const socket = this.controlSocket;
+      if (!socket || !socket.writable) {
         resolve(null);
         return;
       }
@@ -353,7 +354,7 @@ export class VideoHelperManager {
         const newlineIdx = responseData.indexOf("\n");
         if (newlineIdx >= 0) {
           settled = true;
-          this.controlSocket?.removeListener("data", onData);
+          socket.removeListener("data", onData);
           clearTimeout(timeout);
           try {
             resolve(JSON.parse(responseData.substring(0, newlineIdx)));
@@ -366,19 +367,19 @@ export class VideoHelperManager {
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
-        this.controlSocket?.removeListener("data", onData);
+        socket.removeListener("data", onData);
         resolve(null);
       }, 5000);
 
-      this.controlSocket.on("data", onData);
+      socket.on("data", onData);
 
       try {
-        this.controlSocket.write(data, (err) => {
+        socket.write(data, (err) => {
           if (err) {
             if (!settled) {
               settled = true;
               clearTimeout(timeout);
-              this.controlSocket?.removeListener("data", onData);
+              socket.removeListener("data", onData);
               resolve(null);
             }
           }
@@ -387,7 +388,7 @@ export class VideoHelperManager {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          this.controlSocket?.removeListener("data", onData);
+          socket.removeListener("data", onData);
           resolve(null);
         }
       }
@@ -396,7 +397,7 @@ export class VideoHelperManager {
 
   // ─── Error handling and restart ────────────────────────────────────────
 
-  private handleHelperExit(gen: number, code: number): void {
+  private handleHelperExit(gen: number, _code: number): void {
     this.helper = null;
     this.controlSocket = null;
 
@@ -429,14 +430,16 @@ export class VideoHelperManager {
     this.restartTimer = setTimeout(() => {
       if (gen !== this.lifecycleGeneration) return;
       this.restartTimer = null;
-      this.startHelper({
+      const config = this.lastConfig ?? {
         inputWidth: 1920,
         inputHeight: 1080,
         outputWidth: 1920,
         outputHeight: 1080,
-        processingMode: "vsr",
-        qualityLevel: "high",
-      }).catch(() => {});
+        processingMode: "vsr" as const,
+        qualityLevel: "high" as const,
+        pixelFormat: "bgra8" as const,
+      };
+      this.startHelper(config).catch(() => {});
     }, delay);
   }
 
@@ -463,21 +466,6 @@ export class VideoHelperManager {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
-  }
-
-  // ─── Path resolution ──────────────────────────────────────────────────
-
-  private getHelperPath(): string {
-    const HELPER_EXE = "screenlink-video-enhancer.exe";
-
-    if (app.isPackaged) {
-      return path.join(process.resourcesPath, HELPER_EXE);
-    }
-
-    return path.join(
-      __dirname, "..", "..", "..", "..",
-      "native", "video-enhancer", "build", "Release", HELPER_EXE,
-    );
   }
 
   // ─── Cleanup ───────────────────────────────────────────────────────────
