@@ -208,6 +208,15 @@ export class ViewerSession {
   // we pipe the capture stream directly instead of VDO relay.
   private selfViewEndedHandler: (() => void) | null = null;
 
+  /** Max self-view retry attempts when capture stream is not yet available. */
+  private static readonly SELF_VIEW_MAX_RETRIES = 3;
+  /** Delay (ms) between self-view retry attempts. */
+  private static readonly SELF_VIEW_RETRY_DELAY_MS = 2_000;
+  /** Current self-view retry count. Resets on successful start(). */
+  private _selfViewRetryCount = 0;
+  /** Handle for cancelling a scheduled self-view retry. */
+  private _selfViewRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Session identity (set by start)
   private groupId = "";
   private hostDeviceId = "";
@@ -542,6 +551,10 @@ export class ViewerSession {
     ViewerSession.nextGeneration++;
     this._generation = ViewerSession.nextGeneration;
 
+    // Reset self-view retry counter on fresh start attempt
+    this._selfViewRetryCount = 0;
+    this.cancelSelfViewRetryTimer();
+
     await this.runJoinFlow();
   }
 
@@ -678,6 +691,7 @@ export class ViewerSession {
         this.clearStatusInterval();
         this.cancelPendingJoin();
         this.cancelRemoteTrackEndedTimer();
+        this.cancelSelfViewRetryTimer();
 
         // 3) Remove self-view track-end listener before clearing stream
         if (this.selfViewEndedHandler) {
@@ -1214,6 +1228,13 @@ export class ViewerSession {
     }
   }
 
+  private cancelSelfViewRetryTimer(): void {
+    if (this._selfViewRetryTimer) {
+      clearTimeout(this._selfViewRetryTimer);
+      this._selfViewRetryTimer = null;
+    }
+  }
+
   /**
    * Self-viewing: host is the local device, so pipe the capture stream
    * directly to the video element instead of routing through VDO relay.
@@ -1227,7 +1248,20 @@ export class ViewerSession {
     const ssm = runtime.getStreamSessionManager();
     const captureStream = ssm.getCaptureStream();
     if (!captureStream) {
-      this.setError("no local capture stream");
+      console.warn("[ViewerSession] self-view: no capture stream available yet");
+      // Stay in "connecting" — do NOT transition to error or begin teardown.
+      // The publishing stream is unaffected; the preview will retry.
+      if (this._selfViewRetryCount < ViewerSession.SELF_VIEW_MAX_RETRIES) {
+        this._selfViewRetryCount++;
+        this.onError?.(`No local capture stream. Retrying (${this._selfViewRetryCount}/${ViewerSession.SELF_VIEW_MAX_RETRIES})...`);
+        this._selfViewRetryTimer = setTimeout(() => {
+          this._selfViewRetryTimer = null;
+          void this.startSelfView(runtime);
+        }, ViewerSession.SELF_VIEW_RETRY_DELAY_MS);
+      } else {
+        this.onError?.("No local capture stream available. Click Preview to try again.");
+        // Stay in "connecting" — the user can retry manually via the UI button
+      }
       return;
     }
 
