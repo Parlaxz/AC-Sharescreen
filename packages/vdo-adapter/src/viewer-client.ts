@@ -379,6 +379,27 @@ export class ViewerClient {
       const sdk = this.sdk;
       const activeStreamId = this._activeStreamId;
 
+      // 0) Best-effort guard against SDK auto-reconnect.
+      //    The SDK was constructed with maxReconnectAttempts=10, so even
+      //    though stopViewing(streamId) marks the disconnect as intentional
+      //    for the SDK's internal state, there is a window between that
+      //    call and the subsequent disconnect() where a reconnect timer
+      //    could fire.  As a belt-and-suspenders measure we try to set
+      //    the runtime reconnect property to 0 on the SDK instance.
+      //    Property names vary by SDK build; try common ones.
+      if (sdk) {
+        const reconnectConfig = sdk as unknown as Record<string, unknown>;
+        try {
+          reconnectConfig.maxReconnectAttempts = 0;
+        } catch { /* best-effort */ }
+        try {
+          reconnectConfig._maxReconnectAttempts = 0;
+        } catch { /* best-effort */ }
+        try {
+          reconnectConfig.reconnectAttempts = 0;
+        } catch { /* best-effort */ }
+      }
+
       // 1) Stop viewing the active stream first. SDK 1.3.18 accepts the
       //    streamID argument, which marks the disconnect as intentional
       //    and cancels the per-stream retry timer so the SDK will NOT

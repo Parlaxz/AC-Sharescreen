@@ -78,6 +78,19 @@ const EMPTY_RECEIVED: ViewerRow["received"] = { bitrateKbps: null, width: null, 
 const EMPTY_SENT: ViewerRow["sent"] = { bitrateKbps: null, width: null, height: null, fps: null, packetLossPercent: null, rttMs: null, codec: null };
 const EMPTY_REQUESTED: ViewerRow["requested"] = { bitrateKbps: null, width: null, height: null, fps: null, presetName: null };
 
+function toSentStats(stats: HostObservedViewerStats | null): ViewerRow["sent"] {
+  if (!stats) return EMPTY_SENT;
+  return {
+    bitrateKbps: stats.sentBitrateKbps,
+    width: stats.sentWidth,
+    height: stats.sentHeight,
+    fps: stats.sentFps,
+    packetLossPercent: stats.packetLossPercent,
+    rttMs: stats.rttMs,
+    codec: stats.codec,
+  };
+}
+
 function isViewerStatusEvent(value: unknown): value is ViewerStatusEvent {
   return (
     typeof value === "object" &&
@@ -250,7 +263,7 @@ export function useHostViewerDiagnostics(
                 fps: status.displayedFps,
               }
             : EMPTY_RECEIVED,
-          sent: hostStat ?? EMPTY_SENT,
+          sent: toSentStats(hostStat),
           requested,
           lastStatusAt: status.sampledAt,
         });
@@ -263,7 +276,7 @@ export function useHostViewerDiagnostics(
           if (seen.has(viewerDeviceId)) {
             // Already emitted above — augment with host stats
             const existing = newRows.find((r) => r.viewerDeviceId === viewerDeviceId);
-            if (existing) existing.sent = hostStats.get(peerUuid) ?? EMPTY_SENT;
+            if (existing) existing.sent = toSentStats(hostStats.get(peerUuid) ?? null);
             continue;
           }
           seen.add(viewerDeviceId);
@@ -273,7 +286,7 @@ export function useHostViewerDiagnostics(
             connectedAt: now,
             state: "unknown",
             received: EMPTY_RECEIVED,
-            sent: hostStats.get(peerUuid) ?? EMPTY_SENT,
+            sent: toSentStats(hostStats.get(peerUuid) ?? null),
             requested: EMPTY_REQUESTED,
             lastStatusAt: null,
           });

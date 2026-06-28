@@ -139,9 +139,9 @@ describe("Watch Stream Flow (Stage 5)", () => {
 
     router.routeMessage(GROUP_ID, envelope);
 
-    // Should trigger removeViewer on the binding
-    // (or be passed to viewerBinding for handling)
-    expect(viewerBinding.removeViewer).toHaveBeenCalledWith("viewer-dev");
+    // Should trigger removeViewer(viewerDeviceId, viewerSessionId) on the binding.
+    // viewerSessionId is optional and will be undefined when not present in the envelope.
+    expect(viewerBinding.removeViewer).toHaveBeenCalledWith("viewer-dev", undefined);
   });
 
   it("routes stream.join.response and resolves pending join with credential fields", async () => {

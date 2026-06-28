@@ -188,6 +188,10 @@ export class ViewerImageProcessor {
   private scheduleFrame(): void {
     if (this.state !== "running") return;
 
+    // Guard: never register more than one pending callback at a time
+    if (this.rvfcHandle !== null) return;
+    if (this.rafHandle !== null) return;
+
     if (
       typeof HTMLVideoElement.prototype.requestVideoFrameCallback ===
         "function"
@@ -219,6 +223,9 @@ export class ViewerImageProcessor {
   ): void => {
     if (this.state !== "running") return;
 
+    // Clear handle — this callback has consumed the pending registration
+    this.rvfcHandle = null;
+
     // Only process if we got a genuinely new frame
     if (metadata.mediaTime === this.lastMediaTime) {
       this.scheduleFrame();
@@ -232,6 +239,9 @@ export class ViewerImageProcessor {
 
   private onRafFrame = (): void => {
     if (this.state !== "running") return;
+
+    // Clear handle — this callback has consumed the pending registration
+    this.rafHandle = null;
 
     const currentTime = this.videoElement.currentTime;
     if (currentTime === this.rafLastTime) {
@@ -248,6 +258,12 @@ export class ViewerImageProcessor {
 
   private processCurrentFrame(): void {
     const result = this.backend.processFrame(this.videoElement);
+
+    // Transient frames (video not ready yet) — skip silently, continue loop
+    if (result.transient) {
+      return;
+    }
+
     this.framesProcessed++;
 
     if (!result.success) {

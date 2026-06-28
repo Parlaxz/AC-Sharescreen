@@ -50,6 +50,9 @@ export interface BackendInitResult {
 export interface FrameProcessResult {
   success: boolean;
   gpuTimeMs?: number;
+  /** true when the frame was skipped due to transient conditions (e.g. video not ready yet).
+   *  Callers should NOT treat this as a permanent failure or trigger fallback. */
+  transient?: boolean;
 }
 
 export interface BackendStats {
@@ -63,6 +66,11 @@ export interface BackendStats {
   backend: "webgl2" | "unavailable";
 }
 
+interface DisjointTimerQueryWebGL2 {
+  TIME_ELAPSED_EXT: number;
+  GPU_DISJOINT_EXT: number;
+}
+
 // Maximum dimension to prevent GPU overload (4K ceiling)
 const MAX_OUTPUT_DIMENSION = 3840;
 
@@ -72,7 +80,7 @@ export class WebGL2ViewerImageBackend {
   // Core GL state
   private gl: WebGL2RenderingContext | null = null;
   private canvas: HTMLCanvasElement | null = null;
-  private vao: WebGLVertexArrayOES | null = null;
+  private vao: WebGLVertexArrayObject | null = null;
   private contextLossCount = 0;
   private initialized = false;
 
@@ -84,8 +92,12 @@ export class WebGL2ViewerImageBackend {
   private lastCleanupHeight = 0;
   private upscaleTexture: WebGLTexture | null = null;
   private upscaleFBO: WebGLFramebuffer | null = null;
+  private lastUpscaleWidth = 0;
+  private lastUpscaleHeight = 0;
   private outputTexture: WebGLTexture | null = null;
   private outputFBO: WebGLFramebuffer | null = null;
+  private lastOutputWidth = 0;
+  private lastOutputHeight = 0;
 
   // Shader programs
   private fullscreenProgram: WebGLProgram | null = null;
@@ -119,7 +131,7 @@ export class WebGL2ViewerImageBackend {
   };
 
   // GPU timers (EXT_disjoint_timer_query_webgl2)
-  private timerExt: EXTDisjointTimerQueryWebGL2 | null = null;
+  private timerExt: DisjointTimerQueryWebGL2 | null = null;
   private timerQueries: WebGLQuery[] = [];
   private activeTimerIndex = 0;
   private lastGpuTimeMs: number | null = null;
@@ -303,8 +315,8 @@ export class WebGL2ViewerImageBackend {
       const vw = videoElement.videoWidth;
       const vh = videoElement.videoHeight;
       if (vw === 0 || vh === 0) {
-        // Video not ready yet
-        return { success: false, gpuTimeMs: 0 };
+        // Video not ready yet — transient, not a failure
+        return { success: false, gpuTimeMs: 0, transient: true };
       }
 
       if (vw !== this.inputWidth || vh !== this.inputHeight) {
@@ -322,10 +334,13 @@ export class WebGL2ViewerImageBackend {
 
       // Guard: skip if video element hasn't decoded a usable frame yet
       if (videoElement.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        return { success: false, gpuTimeMs: 0 };
+        return { success: false, gpuTimeMs: 0, transient: true };
       }
 
       // --- Step 1: Upload video frame to source texture ---
+      // Flip Y during upload so texel row 0 = bottom of video (standard GL convention).
+      // This matches FBO-rendered textures where row 0 = bottom of viewport.
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.sourceTexture);
       gl.texSubImage2D(
@@ -591,32 +606,17 @@ export class WebGL2ViewerImageBackend {
     if (
       this.upscaleTexture &&
       this.upscaleFBO &&
-      this.outputWidth > 0 &&
-      this.outputHeight > 0
+      this.outputWidth === this.lastUpscaleWidth &&
+      this.outputHeight === this.lastUpscaleHeight
     ) {
-      // Check current dimensions match
-      const bound =
-        gl.getParameter(gl.TEXTURE_BINDING_2D) === this.upscaleTexture;
-      if (!bound) {
-        // Quick dimension check by binding and querying
-        gl.bindTexture(gl.TEXTURE_2D, this.upscaleTexture);
-        const w = gl.getTexLevelParameter(gl.TEXTURE_2D, 0, gl.TEXTURE_WIDTH);
-        const h = gl.getTexLevelParameter(gl.TEXTURE_2D, 0, gl.TEXTURE_HEIGHT);
-        if (w === this.outputWidth && h === this.outputHeight) return;
-      } else {
-        // Can rely on cached dimensions if we tracked them
-        // For simplicity, just recreate if dimensions might have changed
-        if (
-          this.sourceWidth === this.outputWidth &&
-          this.sourceHeight === this.outputHeight
-        )
-          return;
-      }
+      return; // Already valid — same dimensions as last allocation
     }
 
     deleteTexture(gl, this.upscaleTexture);
     deleteFramebuffer(gl, this.upscaleFBO);
 
+    this.lastUpscaleWidth = this.outputWidth;
+    this.lastUpscaleHeight = this.outputHeight;
     this.upscaleTexture = createTexture(gl, this.outputWidth, this.outputHeight);
     this.upscaleFBO = createFramebuffer(gl, this.upscaleTexture);
   }
@@ -627,14 +627,18 @@ export class WebGL2ViewerImageBackend {
 
     if (
       this.outputTexture &&
-      this.outputFBO
+      this.outputFBO &&
+      this.outputWidth === this.lastOutputWidth &&
+      this.outputHeight === this.lastOutputHeight
     ) {
-      return; // Already allocated
+      return; // Already allocated and matching current dimensions
     }
 
     deleteTexture(gl, this.outputTexture);
     deleteFramebuffer(gl, this.outputFBO);
 
+    this.lastOutputWidth = this.outputWidth;
+    this.lastOutputHeight = this.outputHeight;
     this.outputTexture = createTexture(gl, this.outputWidth, this.outputHeight);
     this.outputFBO = createFramebuffer(gl, this.outputTexture);
   }
@@ -656,6 +660,8 @@ export class WebGL2ViewerImageBackend {
     ) {
       deleteTexture(gl, this.upscaleTexture);
       deleteFramebuffer(gl, this.upscaleFBO);
+      this.lastUpscaleWidth = this.outputWidth;
+      this.lastUpscaleHeight = this.outputHeight;
       this.upscaleTexture = createTexture(
         gl,
         this.outputWidth,
@@ -747,7 +753,7 @@ export class WebGL2ViewerImageBackend {
     if (!this.timerExt || this.timerQueries.length < 2) return;
     try {
       const query = this.timerQueries[this.activeTimerIndex];
-      this.timerExt.beginQueryEXT(this.timerExt.TIME_ELAPSED_EXT, query);
+      gl.beginQuery(this.timerExt.TIME_ELAPSED_EXT, query);
     } catch {
       this.timerExt = null;
       this.timerQueries = [];
@@ -757,7 +763,7 @@ export class WebGL2ViewerImageBackend {
   private endTimer(gl: WebGL2RenderingContext): void {
     if (!this.timerExt || this.timerQueries.length < 2) return;
     try {
-      this.timerExt.endQueryEXT(this.timerExt.TIME_ELAPSED_EXT);
+      gl.endQuery(this.timerExt.TIME_ELAPSED_EXT);
     } catch {
       this.timerExt = null;
       this.timerQueries = [];
@@ -766,6 +772,8 @@ export class WebGL2ViewerImageBackend {
 
   private readTimerResult(): void {
     if (!this.timerExt || this.timerQueries.length < 2) return;
+    const gl = this.gl;
+    if (!gl) return;
 
     try {
       // Read the *previous* timer query result (non-blocking)
@@ -773,18 +781,18 @@ export class WebGL2ViewerImageBackend {
       const prevQuery = this.timerQueries[prevIndex];
 
       if (this.pendingTimerAvailable) {
-        const available = this.timerExt.getQueryObjectEXT(
+        const available = gl.getQueryParameter(
           prevQuery,
-          this.timerExt.QUERY_RESULT_AVAILABLE_EXT,
+          gl.QUERY_RESULT_AVAILABLE,
         );
         if (available) {
           // Check for disjoint operation (e.g. GPU frequency change)
           const disjoint =
-            this.gl?.getParameter(this.timerExt.GPU_DISJOINT_EXT) ?? false;
+            gl.getParameter(this.timerExt.GPU_DISJOINT_EXT) ?? false;
           if (!disjoint) {
-            const timeNs = this.timerExt.getQueryObjectEXT(
+            const timeNs = gl.getQueryParameter(
               prevQuery,
-              this.timerExt.QUERY_RESULT_EXT,
+              gl.QUERY_RESULT,
             ) as number;
             this.lastGpuTimeMs = timeNs / 1_000_000;
           }
@@ -814,8 +822,12 @@ export class WebGL2ViewerImageBackend {
       this.lastCleanupHeight = 0;
       this.upscaleTexture = null;
       this.upscaleFBO = null;
+      this.lastUpscaleWidth = 0;
+      this.lastUpscaleHeight = 0;
       this.outputTexture = null;
       this.outputFBO = null;
+      this.lastOutputWidth = 0;
+      this.lastOutputHeight = 0;
       this.fullscreenProgram = null;
       this.cleanupProgram = null;
       this.easuProgram = null;
@@ -849,10 +861,16 @@ export class WebGL2ViewerImageBackend {
     this.sourceTexture = null;
     this.cleanupTexture = null;
     this.cleanupFBO = null;
+    this.lastCleanupWidth = 0;
+    this.lastCleanupHeight = 0;
     this.upscaleTexture = null;
     this.upscaleFBO = null;
+    this.lastUpscaleWidth = 0;
+    this.lastUpscaleHeight = 0;
     this.outputTexture = null;
     this.outputFBO = null;
+    this.lastOutputWidth = 0;
+    this.lastOutputHeight = 0;
     this.fullscreenProgram = null;
     this.cleanupProgram = null;
     this.easuProgram = null;

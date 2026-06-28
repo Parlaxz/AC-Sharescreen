@@ -20,6 +20,7 @@ interface ScreenLinkUpdateApi {
   checkForUpdates: () => Promise<UpdateStatusDTO>;
   downloadUpdate: () => Promise<UpdateStatusDTO>;
   restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
+  checkDownloadAndInstall: () => Promise<UpdateStatusDTO>;
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 

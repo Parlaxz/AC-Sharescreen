@@ -54,7 +54,7 @@ function probeCapabilities(): ImageProcessingCapabilities {
 
   const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
   const maxRenderbufferSize = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number;
-  const extensions = gl.getSupportedExtensions();
+  const extensions = gl.getSupportedExtensions() ?? [];
 
   const extDisjointTimerQuery =
     gl.getExtension("EXT_disjoint_timer_query_webgl2") !== null;

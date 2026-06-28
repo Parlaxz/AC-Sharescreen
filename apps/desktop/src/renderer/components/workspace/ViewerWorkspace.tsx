@@ -47,7 +47,7 @@ import {
 import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
-import type { ProcessorStats } from "@/components/workspace/viewer/EnhancedVideoSurface";
+import type { ProcessorState, ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
 import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   loadImageEnhancementSettings,
@@ -244,6 +244,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   });
   const [enhancementStats, setEnhancementStats] = useState<ProcessorStats | null>(null);
   const [enhancementFallback, setEnhancementFallback] = useState(false);
+  /** Tracks whether at least one GPU-enhanced frame has been successfully rendered */
+  const [enhancementActive, setEnhancementActive] = useState(false);
 
   // Refs for closure-safe access in callbacks
   const enhancementSettingsRef = useRef(enhancementSettings);
@@ -390,17 +392,44 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Callbacks ────────────────────────────────────────────────────
 
   const handleExit = useCallback(async () => {
-    // Stop the session
+    // 1) Authoritative teardown: call destroy() (not stop+destroy).
+    //    destroy() handles all cleanup: sendLeave, cancel timers,
+    //    shutdown ViewerClient, clear video.srcObject, clear pause
+    //    state, and null callbacks.
     if (sessionRef.current) {
-      sessionRef.current.stop();
       sessionRef.current.destroy();
       sessionRef.current = null;
     }
-    // Clear watching target to avoid stale state
+
+    // 2) Clear visual stale state that destroy() does not own
+    //    (React component state managed via useState).
+    setEnhancementActive(false);
+    setEnhancementFallback(false);
+    setEnhancementStats(null);
+    setStreamPauseState("playing");
+    setStreamPausePoster(null);
+    setSessionState("idle");
+    setCurrentStreamId(null);
+    setCurrentBandwidthBps(0);
+    setTotalBytesReceived(0);
+    bandwidthTrackerRef.current = createBandwidthTracker();
+
+    // 3) Clear the video element srcObject defensively (the
+    //    session's copy was already cleared, but React's ref
+    //    might still hold a reference).
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+        videoRef.current.srcObject = null;
+      } catch { /* ignore */ }
+    }
+
+    // 4) Clear watching target and store viewing state
     useStore.getState().setWatchingTarget(null);
     setIsViewing(false);
     setViewStatus("");
-    // Exit fullscreen if active
+
+    // 5) Exit fullscreen if active
     if (isFullscreen) {
       const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
       if (api) {
@@ -409,7 +438,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         void document.exitFullscreen();
       }
     }
-    // Navigate back to the group overview
+
+    // 6) Navigate back to group overview
     navigate("overview");
   }, [setIsViewing, setViewStatus, isFullscreen, navigate]);
 
@@ -483,6 +513,32 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   const handleEnhancementReset = useCallback(() => {
     setEnhancementSettings(resetImageEnhancementSettings());
+  }, []);
+
+  const handleEnhancementProcessorStateChange = useCallback((state: ProcessorState) => {
+    if (state === "error") {
+      setEnhancementActive(false);
+      setEnhancementFallback(true);
+    }
+  }, []);
+
+  const handleEnhancementProcessingError = useCallback((reason: string) => {
+    console.warn("[ViewerWorkspace] GPU enhancement error:", reason);
+    setEnhancementActive(false);
+    setEnhancementFallback(true);
+  }, []);
+
+  const handleEnhancementContextRestored = useCallback(() => {
+    setEnhancementActive(false);
+    setEnhancementFallback(false);
+  }, []);
+
+  const handleEnhancementFirstFrame = useCallback(() => {
+    setEnhancementActive(true);
+  }, []);
+
+  const handleEnhancementStatsUpdate = useCallback((stats: ProcessorStats) => {
+    setEnhancementStats(stats);
   }, []);
 
   // ── Audio boost pipeline (Web Audio API GainNode) ────────────────
@@ -687,6 +743,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
     } catch { /* ignore */ }
   }, [viewerRequest]);
+
+  // ── Reset enhancement fallback/active state when re-enabled ──────────
+  useEffect(() => {
+    setEnhancementActive(false);
+    if (enhancementSettings.enabled) {
+      setEnhancementFallback(false);
+    }
+  }, [enhancementSettings.enabled]);
 
   // Persist image enhancement settings to localStorage
   useEffect(() => {
@@ -1020,7 +1084,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         );
         if (!stillExists) {
           // Our stream is gone — destroy session and show ended
-          sessionRef.current.stop();
           sessionRef.current.destroy();
           sessionRef.current = null;
           setViewStatus("ended");
@@ -1041,7 +1104,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       const currWatched = state.watchedStreamsBySessionId;
       if (exactMediaSessionId && prevWatched[exactMediaSessionId] && !currWatched[exactMediaSessionId]) {
         if (sessionRef.current) {
-          sessionRef.current.stop();
           sessionRef.current.destroy();
           sessionRef.current = null;
         }
@@ -1387,7 +1449,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               "h-full object-contain",
               streamPauseState === "paused" && "opacity-30",
               // Hide native video when GPU canvas is actively rendering
-              !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
+              // Hide native video only after GPU canvas has rendered at least one frame
+              enhancementActive && !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
             )}
             playsInline
             autoPlay
@@ -1403,21 +1466,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             videoElement={videoRef.current}
             enabled={!enhancementFallback && enhancementSettings.enabled}
             settings={enhancementSettings}
-            onProcessorStateChange={(state) => {
-              if (state === "error") {
-                setEnhancementFallback(true);
-              }
-            }}
-            onProcessingError={(reason) => {
-              console.warn("[ViewerWorkspace] GPU enhancement error:", reason);
-              setEnhancementFallback(true);
-            }}
-            onFirstFrame={() => {
-              // First enhanced frame successfully rendered
-            }}
-            onStatsUpdate={(stats) => {
-              setEnhancementStats(stats);
-            }}
+            onProcessorStateChange={handleEnhancementProcessorStateChange}
+            onProcessingError={handleEnhancementProcessingError}
+            onContextRestored={handleEnhancementContextRestored}
+            onFirstFrame={handleEnhancementFirstFrame}
+            onStatsUpdate={handleEnhancementStatsUpdate}
           />
 
           {/* ── Paused overlay (frozen frame poster + play icon + label) ── */}

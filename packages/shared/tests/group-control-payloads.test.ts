@@ -68,7 +68,7 @@ describe("GroupHelloPayloadSchema", () => {
 
 describe("GroupHelloResponsePayloadSchema", () => {
   it("accepts valid response", () => {
-    const r = GroupHelloResponsePayloadSchema.safeParse({ deviceId: "dev-1", displayName: "Alice" });
+    const r = GroupHelloResponsePayloadSchema.safeParse({ deviceId: "dev-1", displayName: "Alice", protocolVersion: 3 });
     expect(r.success).toBe(true);
   });
 

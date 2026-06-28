@@ -39,6 +39,8 @@ export interface EnhancedVideoSurfaceProps {
   onProcessorStateChange?: (state: ProcessorState) => void;
   /** Fired on unrecoverable processing error */
   onProcessingError?: (reason: string) => void;
+  /** Fired after a WebGL context restore so the parent can retry */
+  onContextRestored?: () => void;
   /** Fired on the first successfully processed frame */
   onFirstFrame?: () => void;
   /** Fired periodically (~500 ms) with processing statistics */
@@ -54,6 +56,7 @@ export function EnhancedVideoSurface({
   className,
   onProcessorStateChange,
   onProcessingError,
+  onContextRestored,
   onFirstFrame,
   onStatsUpdate,
 }: EnhancedVideoSurfaceProps): ReactElement | null {
@@ -65,6 +68,7 @@ export function EnhancedVideoSurface({
 
   const [processorState, setProcessorState] = useState<ProcessorState>("idle");
   const [fallback, setFallback] = useState<boolean>(false);
+  const [firstFrameReceived, setFirstFrameReceived] = useState(false);
 
   // ─── Capabilities check on mount ──────────────────────────────────────
 
@@ -81,6 +85,31 @@ export function EnhancedVideoSurface({
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ─── Reset fallback / first-frame state when re-enabled ──────────────
+
+  useEffect(() => {
+    setFirstFrameReceived(false);
+    if (enabled) {
+      setFallback(false);
+    }
+  }, [enabled]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleContextRestored = () => {
+      setFirstFrameReceived(false);
+      setFallback(false);
+      onContextRestored?.();
+    };
+
+    canvas.addEventListener("webglcontextrestored", handleContextRestored);
+    return () => {
+      canvas.removeEventListener("webglcontextrestored", handleContextRestored);
+    };
+  }, [onContextRestored]);
+
   // ─── Processor initialisation ─────────────────────────────────────────
 
   useEffect(() => {
@@ -91,18 +120,22 @@ export function EnhancedVideoSurface({
       videoElement,
     );
 
+    const handleFirstFrame = () => {
+      setFirstFrameReceived(true);
+      onFirstFrame?.();
+    };
+
     processor.setCallbacks({
       onStateChange: (state: ProcessorState) => {
         setProcessorState(state);
         onProcessorStateChange?.(state);
       },
       onError: (reason: string) => {
+        setFirstFrameReceived(false);
         setFallback(true);
         onProcessingError?.(reason);
       },
-      onFirstFrame: () => {
-        onFirstFrame?.();
-      },
+      onFirstFrame: handleFirstFrame,
       onStatsUpdate: (stats: ProcessorStats) => {
         onStatsUpdate?.(stats);
       },
@@ -127,22 +160,21 @@ export function EnhancedVideoSurface({
   // ─── Pause / resume on enabled toggle ─────────────────────────────────
 
   useEffect(() => {
+    const wasEnabled = prevEnabledRef.current;
+    prevEnabledRef.current = enabled;
+
     const proc = processorRef.current;
     if (!proc) return;
 
-    if (enabled && !prevEnabledRef.current) {
-      // Transitioned from disabled to enabled
+    if (enabled && !wasEnabled) {
       if (proc.getState() === "paused") {
         proc.resume();
       }
-    } else if (!enabled && prevEnabledRef.current) {
-      // Transitioned from enabled to disabled
+    } else if (!enabled && wasEnabled) {
       if (proc.getState() === "running") {
         proc.pause();
       }
     }
-
-    prevEnabledRef.current = enabled;
   }, [enabled]);
 
   // ─── ResizeObserver for container sizing ──────────────────────────────
@@ -180,11 +212,10 @@ export function EnhancedVideoSurface({
 
   // ─── Render ───────────────────────────────────────────────────────────
 
-  // When in fallback mode, render nothing — parent should show native video
-  if (fallback) return null;
-
   const canvasVisible =
     enabled &&
+    !fallback &&
+    firstFrameReceived &&
     (processorState === "running" || processorState === "paused");
 
   return (

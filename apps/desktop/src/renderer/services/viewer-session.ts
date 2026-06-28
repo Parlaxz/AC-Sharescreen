@@ -733,6 +733,8 @@ export class ViewerSession {
           this.onStateChange = null;
           this.onStreamReceived = null;
           this.onError = null;
+          this.onPauseStateChange = null;
+          this.onPosterFrameChange = null;
         }
       } finally {
         this._tearingDown = false;

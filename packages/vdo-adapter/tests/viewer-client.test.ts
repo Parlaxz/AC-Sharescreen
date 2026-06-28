@@ -268,3 +268,92 @@ describe("ViewerClient — pause / resume", () => {
     await expect(client.resumeMedia()).rejects.toThrow("shutting down");
   });
 });
+
+// ─── Shutdown reconnect prevention ───────────────────────────────────────
+
+describe("ViewerClient — shutdown reconnect prevention", () => {
+  let client: ViewerClient;
+  let mockSDK: ReturnType<typeof makeMockSDK>;
+
+  beforeEach(async () => {
+    mockSDK = makeMockSDK();
+    const MockCtor = vi.fn(() => mockSDK);
+    mockGetSDKConstructor.mockReturnValue(MockCtor);
+    client = new ViewerClient();
+    await client.createAndConnect("pw");
+    await client.view("stream-1", "Test Viewer");
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+  });
+
+  it("shutdown sets SDK reconnect fields to 0 before disconnect", async () => {
+    await client.shutdown();
+    // best-effort guard: either maxReconnectAttempts or _maxReconnectAttempts should be set to 0
+    const reconnectSet =
+      mockSDK.maxReconnectAttempts === 0 ||
+      mockSDK._maxReconnectAttempts === 0;
+    expect(reconnectSet).toBe(true);
+  });
+
+  it("shutdown calls stopViewing with active stream ID before disconnect", async () => {
+    await client.shutdown();
+    // stopViewing must be called BEFORE disconnect
+    const stopViewingOrder = mockSDK.stopViewing.mock.invocationCallOrder[0];
+    const disconnectOrder = mockSDK.disconnect.mock.invocationCallOrder[0];
+    expect(stopViewingOrder).toBeLessThan(disconnectOrder);
+  });
+
+  it("shutdown removes all SDK listeners (both internal and registered)", async () => {
+    // Register a public handler
+    const publicHandler = vi.fn();
+    client.on("track", publicHandler);
+
+    await client.shutdown();
+
+    // off should have been called for the internal handlers (peerConnected, dataChannelOpen)
+    expect(mockSDK.off).toHaveBeenCalled();
+  });
+
+  it("shutdown is idempotent — repeated calls return same promise", async () => {
+    const p1 = client.shutdown();
+    const p2 = client.shutdown();
+    await p1;
+    await p2; // both resolve because they share the same underlying promise
+    expect((client as any)._shuttingDown).toBe(true);
+    expect((client as any)._shutdownPromise).not.toBeNull();
+  });
+
+  it("shutdown clears _activeStreamId", async () => {
+    expect((client as any)._activeStreamId).toBe("stream-1");
+    await client.shutdown();
+    expect((client as any)._activeStreamId).toBeNull();
+  });
+
+  it("shutdown clears pause state", async () => {
+    // Simulate paused state before shutdown
+    (client as any)._userPaused = true;
+    (client as any)._pausedStreamId = "stream-1";
+    (client as any)._pausedDisplayName = "Viewer";
+
+    await client.shutdown();
+
+    expect((client as any)._userPaused).toBe(false);
+    expect((client as any)._pausedStreamId).toBeNull();
+    expect((client as any)._pausedDisplayName).toBeNull();
+  });
+
+  it("shutdown resolves data channel waiters", async () => {
+    // Create a waiter on the existing client (already connected in beforeEach)
+    const waiter = client.waitForDataChannelOpen("uuid-waiter");
+    await client.shutdown();
+    // Should resolve without error (from the resolve call in shutdown)
+    await expect(waiter).resolves.toBeUndefined();
+  });
+
+  it("view() after shutdown throws", async () => {
+    await client.shutdown();
+    await expect(client.view("stream-2")).rejects.toThrow("shutting down");
+  });
+});

@@ -16,7 +16,10 @@ import {
   clampValue,
   type ViewerImageEnhancementSettings,
 } from "@/services/viewer-image-processing/viewer-image-settings";
-import { IMAGE_ENHANCEMENT_CONTROL_RANGE } from "@/services/viewer-image-processing/viewer-image-defaults";
+import {
+  IMAGE_ENHANCEMENT_CONTROL_RANGE,
+  VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
+} from "@/services/viewer-image-processing/viewer-image-defaults";
 
 // ─── Viewer quality request state ─────────────────────────────────────────
 
@@ -77,11 +80,11 @@ interface ViewerSettingsPanelProps {
   /** Max value for the bitrate slider kbps (default 5000) */
   maxSliderBitrateKbps?: number;
   /** Current GPU image enhancement settings */
-  enhancementSettings: ViewerImageEnhancementSettings;
+  enhancementSettings?: ViewerImageEnhancementSettings;
   /** Called live when any enhancement control changes */
-  onEnhancementChange: (settings: ViewerImageEnhancementSettings) => void;
+  onEnhancementChange?: (settings: ViewerImageEnhancementSettings) => void;
   /** Called when the user clicks Reset to Defaults in the enhancements tab */
-  onEnhancementReset: () => void;
+  onEnhancementReset?: () => void;
   /** Processing statistics (shown when enhancements enabled) */
   enhancementStats?: {
     inputWidth: number;
@@ -206,9 +209,9 @@ export function ViewerSettingsPanel({
   requestFeedback = null,
   onOpenChange,
   maxSliderBitrateKbps = 5000,
-  enhancementSettings,
-  onEnhancementChange,
-  onEnhancementReset,
+  enhancementSettings = VIEWER_IMAGE_ENHANCEMENT_DEFAULTS,
+  onEnhancementChange = () => {},
+  onEnhancementReset = () => {},
   enhancementStats = null,
   children,
 }: ViewerSettingsPanelProps) {

@@ -630,3 +630,116 @@ describe("ViewerSession — readiness timeout", () => {
     expect(errors.length).toBe(0);
   });
 });
+
+describe("ViewerSession — destroy lifecycle", () => {
+  let session: ViewerSession;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    session = new ViewerSession();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("destroy clears video.srcObject and pauses the video element", () => {
+    const mockVideo = {
+      pause: vi.fn(),
+      srcObject: "fake-stream",
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    session.bindVideoElement(mockVideo);
+    // Simulate having a received stream
+    Object.defineProperty(session, "_receivedStream", { value: "some-stream", writable: true });
+
+    session.destroy();
+
+    // video.pause and srcObject cleared
+    expect(mockVideo.pause).toHaveBeenCalled();
+    expect((mockVideo as any).srcObject).toBeNull();
+  });
+
+  it("destroy cancels readiness timer", () => {
+    const cancelSpy = vi.fn();
+    (session as any).cancelReadinessTimer = cancelSpy;
+
+    session.destroy();
+
+    expect(cancelSpy).toHaveBeenCalled();
+  });
+
+  it("destroy clears status interval", () => {
+    const clearSpy = vi.fn();
+    (session as any).clearStatusInterval = clearSpy;
+
+    session.destroy();
+
+    expect(clearSpy).toHaveBeenCalled();
+  });
+
+  it("destroy cancels pending join", () => {
+    const cancelSpy = vi.fn();
+    (session as any).cancelPendingJoin = cancelSpy;
+
+    session.destroy();
+
+    expect(cancelSpy).toHaveBeenCalled();
+  });
+
+  it("destroy clears callback references (onStateChange, onStreamReceived, onError)", () => {
+    session.onStateChange = vi.fn();
+    session.onStreamReceived = vi.fn();
+    session.onError = vi.fn();
+
+    session.destroy();
+
+    // After final teardown, callbacks should be nulled
+    expect(session.onStateChange).toBeNull();
+    expect(session.onStreamReceived).toBeNull();
+    expect(session.onError).toBeNull();
+  });
+
+  it("destroy is idempotent", () => {
+    session.destroy();
+    // Second destroy should not throw
+    expect(() => session.destroy()).not.toThrow();
+    // State should be "ended"
+    expect(session.state).toBe("ended");
+  });
+
+  it("destroy clears received stream", () => {
+    Object.defineProperty(session, "_receivedStream", { value: "some-stream", writable: true });
+
+    session.destroy();
+
+    expect((session as any)._receivedStream).toBeNull();
+  });
+
+  it("destroy clears pause state and poster", () => {
+    Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
+    Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
+
+    session.destroy();
+
+    expect(session.pauseState).toBe("playing");
+    expect(session.pausePoster).toBeNull();
+  });
+
+  it("destroy clears bind token and mediaSessionId", () => {
+    Object.defineProperty(session, "_bindToken", { value: "token-123", writable: true });
+    Object.defineProperty(session, "_bindMediaSessionId", { value: "ms-1", writable: true });
+
+    session.destroy();
+
+    expect((session as any)._bindToken).toBeNull();
+    expect((session as any)._bindMediaSessionId).toBeNull();
+  });
+});
