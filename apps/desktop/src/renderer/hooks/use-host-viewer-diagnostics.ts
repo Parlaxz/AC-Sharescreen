@@ -156,6 +156,8 @@ export function useHostViewerDiagnostics(
   const [rows, setRows] = useState<ViewerRow[]>([]);
   const statusMapRef = useRef<Map<string, ViewerStatusEvent>>(new Map());
   const bytesRef = useRef<Map<string, { lastBytes: number; lastTime: number }>>(new Map());
+  const registeredRef = useRef<Set<string>>(new Set());
+  const historyIdRef = useRef<string | null>(null);
   const bindingRef = useRef(viewerBindings);
   bindingRef.current = viewerBindings;
 
@@ -177,7 +179,6 @@ export function useHostViewerDiagnostics(
 
     const newBytes = new Map<string, { lastBytes: number; lastTime: number }>();
     const newStats = new Map<string, HostObservedViewerStats>();
-    let totalCumulativeBytes = 0;
 
     for (const [uuid, group] of sdk.connections) {
       const pc = group.publisher?.pc;
@@ -200,7 +201,27 @@ export function useHostViewerDiagnostics(
         }
         newBytes.set(uuid, { lastBytes: bytesSent, lastTime: Date.now() });
         newStats.set(uuid, { ...base, sentBitrateKbps });
-        totalCumulativeBytes += bytesSent;
+        // Register each publisher PC with StreamMetricsService
+        if (mediaSessionId && pc) {
+          const svc = StreamMetricsService.getInstance();
+          const connId = `host-${uuid}`;
+          if (!registeredRef.current.has(connId)) {
+            let historyId = historyIdRef.current;
+            if (!historyId) {
+              historyId = svc.startHostSession(mediaSessionId, logicalStreamId, groupId, "");
+              historyIdRef.current = historyId;
+            }
+            svc.registerConnection({
+              historyId,
+              connectionId: connId,
+              viewerDeviceId: null,
+              displayName: null,
+              peerConnection: pc,
+              direction: "outbound",
+            });
+            registeredRef.current.add(connId);
+          }
+        }
       } catch {
         // Best effort
       }
@@ -208,15 +229,8 @@ export function useHostViewerDiagnostics(
 
     bytesRef.current = newBytes;
 
-    // Feed cumulative host outbound bytes to metrics service
-    if (mediaSessionId && totalCumulativeBytes > 0) {
-      const svc = StreamMetricsService.getInstance();
-      // Per-connection telemetry is now handled via registerConnection.
-      // This cumulative sum feed is replaced by per-peer getStats in the service.
-    }
-
     return newStats;
-  }, [sdk, mediaSessionId]);
+  }, [sdk, mediaSessionId, logicalStreamId, groupId]);
 
   // Merge all data sources every poll cycle
   useEffect(() => {

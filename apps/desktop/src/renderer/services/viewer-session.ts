@@ -797,6 +797,17 @@ export class ViewerSession {
    * Expose the underlying ViewerClient for the UI/store task to access
    * the real VDO connection. Returns null if no client is active.
    */
+  /** Get the raw RTCPeerConnection for metrics registration. Returns null if no active media connection. */
+  getPeerConnection(): RTCPeerConnection | null {
+    if (!this.viewerClient || this._destructed) return null;
+    const sdk = this.viewerClient.getSDK();
+    if (!sdk) return null;
+    const entries = Array.from(sdk.connections.entries());
+    if (entries.length === 0) return null;
+    const [, group] = entries[0];
+    return group.viewer?.pc ?? group.publisher?.pc ?? null;
+  }
+
   getViewerClient(): ViewerClient | null {
     return this.viewerClient;
   }

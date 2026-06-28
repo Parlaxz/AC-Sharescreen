@@ -62,6 +62,8 @@ export interface TelemetrySample {
   monotonicTimestampMs: number;
   intervalMs: number;
   mediaBitsPerSecond: number;
+  videoBitsPerSecond: number | null;
+  audioBitsPerSecond: number | null;
   transportBitsPerSecond: number | null;
   cumulativeMediaBytes: number;
   cumulativeTransportBytes: number | null;

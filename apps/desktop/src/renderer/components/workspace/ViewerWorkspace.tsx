@@ -323,7 +323,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Bandwidth tracking ──
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
-  const bandwidthPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const unregisterMetricsRef = useRef<(() => void) | null>(null);
+  const metricsSubscriptionRef = useRef<(() => void) | null>(null);
 
   // Poll WebRTC stats for bandwidth
   useEffect(() => {
@@ -331,10 +332,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     if (!sessionRef.current || sessionState === "ended" || sessionState === "error") {
       setCurrentBandwidthBps(0);
       setTotalBytesReceived(0);
-      if (bandwidthPollRef.current) {
-        clearInterval(bandwidthPollRef.current);
-        bandwidthPollRef.current = null;
-      }
+      // Unregister metrics connection
+      if (unregisterMetricsRef.current) { unregisterMetricsRef.current(); unregisterMetricsRef.current = null; }
+      if (metricsSubscriptionRef.current) { metricsSubscriptionRef.current(); metricsSubscriptionRef.current = null; }
       // Finalize viewer session if active
       if (viewerHistoryIdRef.current) {
         const id = viewerHistoryIdRef.current;
@@ -345,13 +345,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       return;
     }
 
-    // Paused or reconnecting: clear rate display
+    // Paused or reconnecting: keep registration but show zero
     if (sessionState === "paused" || sessionState === "reconnecting") {
       setCurrentBandwidthBps(0);
-      if (bandwidthPollRef.current) {
-        clearInterval(bandwidthPollRef.current);
-        bandwidthPollRef.current = null;
-      }
       return;
     }
 
@@ -368,32 +364,39 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setViewerHistoryId(historyId);
     }
 
-    const poll = async () => {
-      if (!sessionRef.current) return;
-      try {
-        const diag = await sessionRef.current.getDiagnostics();
-        if (diag) {
-          // Register peer connection with StreamMetricsService if not already done
-          if (viewerHistoryIdRef.current) {
-            // Read bandwidth from the canonical source
-            const snapshot = StreamMetricsService.getInstance().getSnapshot(viewerHistoryIdRef.current);
-            setTotalBytesReceived(snapshot.aggregate.totalBytes);
-            setCurrentBandwidthBps(snapshot.aggregate.currentBitsPerSecond);
-          }
-        }
-      } catch {
-        // best-effort
-      }
-    };
+    // Register RTCPeerConnection with StreamMetricsService when available
+    if (viewerHistoryIdRef.current && !unregisterMetricsRef.current) {
+      const pc = sessionRef.current.getPeerConnection();
+      if (pc) {
+        const historyId = viewerHistoryIdRef.current;
+        const unregister = StreamMetricsService.getInstance().registerConnection({
+          historyId,
+          connectionId: `viewer-${historyId}`,
+          viewerDeviceId: null,
+          displayName: null,
+          peerConnection: pc,
+          direction: "inbound",
+        });
+        unregisterMetricsRef.current = unregister;
 
-    poll();
-    bandwidthPollRef.current = setInterval(poll, 1000);
+        // Subscribe to snapshot changes
+        const unsub = StreamMetricsService.getInstance().subscribe(historyId, () => {
+          if (viewerHistoryIdRef.current !== historyId) return;
+          const snapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
+          setCurrentBandwidthBps(snapshot.aggregate.currentBitsPerSecond);
+          setTotalBytesReceived(snapshot.aggregate.totalBytes);
+        });
+        metricsSubscriptionRef.current = unsub;
+
+        // Initial read
+        const snapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
+        setTotalBytesReceived(snapshot.aggregate.totalBytes);
+      }
+    }
 
     return () => {
-      if (bandwidthPollRef.current) {
-        clearInterval(bandwidthPollRef.current);
-        bandwidthPollRef.current = null;
-      }
+      // Cleanup runs only when the effect re-runs due to deps changing;
+      // the explicit reset at the top of the next run handles teardown.
     };
   }, [sessionState, watchingTarget, selectedGroupId, groupsById]);
 
