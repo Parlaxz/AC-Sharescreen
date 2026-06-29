@@ -426,14 +426,20 @@ static int RunServe(const std::vector<std::string>& args) {
             sv::FrameHeader header;
             std::vector<uint8_t> frameData;
 
+            // ── Phase 6: Measure input receive time around ReadFrame (not idle wait) ──
+            auto t_read_start = std::chrono::high_resolution_clock::now();
             if (!transport.ReadFrame(header, frameData)) {
-                // Pipe closed or error Ã¢â‚¬â€ exit worker
+                // Pipe closed or error — exit worker
                 fprintf(stderr, "[FrameWorker] Frame pipe read failed, stopping\n");
                 break;
             }
+            auto t_read_end = std::chrono::high_resolution_clock::now();
+            uint64_t inputReceiveUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(t_read_end - t_read_start).count());
+            auto t0_total = t_read_end;
 
             if (!g_config.configured) {
-                // Configuration required first Ã¢â‚¬â€ skip
+                // Configuration required first — skip
                 continue;
             }
 
@@ -448,35 +454,47 @@ static int RunServe(const std::vector<std::string>& args) {
             }
 
             auto& diag = sv::GetDiagnosticsCounters();
-            diag.totalFramesSubmitted++;
 
-            // Process the frame
-            auto start = std::chrono::high_resolution_clock::now();
+            // ── Phase 6: Per-stage native timing (process-local, μs) ─────
             bool ok = false;
             sv::FrameHeader outHeader = header;
             std::vector<uint8_t> outData;
+            uint64_t uploadUs = 0, effectUs = 0, downloadUs = 0, outputWriteUs = 0;
 
             if (g_nvidiaAvailable && g_nvidiaVfx) {
-                // Upload input pixels to NVIDIA
+                // Upload input pixels to NVIDIA (CPU→GPU)
+                auto t_up_start = std::chrono::high_resolution_clock::now();
                 ok = g_nvidiaVfx->UploadInput(
                     frameData.data(),
                     header.inputWidth, header.inputHeight,
                     header.inputStride,
                     sv::NvVfxPixelFormat::kRGBA8
                 ) == sv::NvVfxResult::kSuccess;
+                auto t_up_end = std::chrono::high_resolution_clock::now();
+                uploadUs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t_up_end - t_up_start).count());
 
                 if (ok) {
+                    // NVIDIA VFX processing (GPU)
+                    auto t_eff_start = std::chrono::high_resolution_clock::now();
                     ok = g_nvidiaVfx->RunFrame() == sv::NvVfxResult::kSuccess;
+                    auto t_eff_end = std::chrono::high_resolution_clock::now();
+                    effectUs = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(t_eff_end - t_eff_start).count());
                 }
 
                 if (ok) {
-                    // Download output
+                    // Download output (GPU→CPU)
+                    auto t_dl_start = std::chrono::high_resolution_clock::now();
                     uint32_t outW = 0, outH = 0;
                     outHeader.payloadBytes = g_config.outputWidth * g_config.outputHeight * 4;
                     outData.resize(outHeader.payloadBytes);
                     ok = g_nvidiaVfx->DownloadOutput(
                         outData.data(), g_config.outputWidth * 4, outW, outH
                     ) == sv::NvVfxResult::kSuccess;
+                    auto t_dl_end = std::chrono::high_resolution_clock::now();
+                    downloadUs = static_cast<uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(t_dl_end - t_dl_start).count());
                     if (ok) {
                         outHeader.inputWidth = outW;
                         outHeader.inputHeight = outH;
@@ -498,15 +516,26 @@ static int RunServe(const std::vector<std::string>& args) {
                 ok = true;
             }
 
-            auto end = std::chrono::high_resolution_clock::now();
-            auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-            diag.RecordFrame(static_cast<uint64_t>(us), ok);
-
             // ── Phase 4: Always write back a correlated result ──────────
             // Every accepted frame returns exactly one result, whether it
             // succeeded or failed. Never drop a frame silently.
+
+            // Measure output write time
+            auto t_ow_start = std::chrono::high_resolution_clock::now();
+
+            auto t_total_end = std::chrono::high_resolution_clock::now();
+            uint64_t totalUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(t_total_end - t0_total).count());
+
             if (ok) {
                 outHeader.resultCode = 1;
+                // Fill native timing fields into output header
+                outHeader.nativeInputReceiveUs = static_cast<uint32_t>(inputReceiveUs);
+                outHeader.nativeUploadUs = static_cast<uint32_t>(uploadUs);
+                outHeader.nativeEffectUs = static_cast<uint32_t>(effectUs);
+                outHeader.nativeDownloadUs = static_cast<uint32_t>(downloadUs);
+                outHeader.nativeOutputWriteUs = static_cast<uint32_t>(outputWriteUs); // updated below
+                outHeader.nativeTotalUs = static_cast<uint32_t>(totalUs);
 
                 // Write back the processed frame
                 if (!transport.WriteFrame(outHeader, outData.data(), outData.size())) {
@@ -518,6 +547,8 @@ static int RunServe(const std::vector<std::string>& args) {
                 outHeader = header; // preserve original frame identity
                 outHeader.resultCode = 2; // error
                 outHeader.payloadBytes = 0; // no pixel data on failure
+                outHeader.nativeInputReceiveUs = static_cast<uint32_t>(inputReceiveUs);
+                outHeader.nativeTotalUs = static_cast<uint32_t>(totalUs);
                 if (!transport.WriteFrame(outHeader, nullptr, 0)) {
                     fprintf(stderr, "[FrameWorker] Failed to write failure result\n");
                 }
@@ -525,6 +556,14 @@ static int RunServe(const std::vector<std::string>& args) {
                 fprintf(stderr, "[FrameWorker] Frame processing failed: %s\n",
                         g_nvidiaVfx ? g_nvidiaVfx->GetLastError().c_str() : "NVIDIA unavailable");
             }
+
+            auto t_ow_end = std::chrono::high_resolution_clock::now();
+            outputWriteUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(t_ow_end - t_ow_start).count());
+
+            // Record detailed per-stage timing breakdown (Phase 6)
+            diag.RecordFrameDetails(totalUs, ok,
+                                     inputReceiveUs, uploadUs, effectUs, downloadUs, outputWriteUs);
         }
     });
 
@@ -593,6 +632,12 @@ static int RunServe(const std::vector<std::string>& args) {
                 resp["lastProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.lastProcessingTimeUs));
                 resp["maxProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.maxProcessingTimeUs));
                 resp["minProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.minProcessingTimeUs));
+                // Phase 6: Native timing breakdown
+                resp["lastInputReceiveUs"] = sv::JsonValue(static_cast<double>(stats.lastInputReceiveUs));
+                resp["lastUploadUs"] = sv::JsonValue(static_cast<double>(stats.lastUploadUs));
+                resp["lastEffectUs"] = sv::JsonValue(static_cast<double>(stats.lastEffectUs));
+                resp["lastDownloadUs"] = sv::JsonValue(static_cast<double>(stats.lastDownloadUs));
+                resp["lastOutputWriteUs"] = sv::JsonValue(static_cast<double>(stats.lastOutputWriteUs));
                 response = resp;
                 break;
             }

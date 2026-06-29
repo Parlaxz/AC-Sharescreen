@@ -59,6 +59,14 @@ struct FrameHeader {
 
     // Result (set by helper after processing)
     uint32_t resultCode = 0; // 0=pending, 1=success, 2=error
+
+    // Native per-stage timing (microseconds, filled by helper after processing)
+    uint32_t nativeInputReceiveUs = 0;
+    uint32_t nativeUploadUs = 0;
+    uint32_t nativeEffectUs = 0;
+    uint32_t nativeDownloadUs = 0;
+    uint32_t nativeOutputWriteUs = 0;
+    uint32_t nativeTotalUs = 0;
 };
 
 /// Named-pipe transport for control (JSON) and frame (binary) channels.

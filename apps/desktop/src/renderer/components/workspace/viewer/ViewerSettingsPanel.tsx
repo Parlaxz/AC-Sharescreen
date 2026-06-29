@@ -12,6 +12,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { loadSettings } from "@/services/settings-actions";
 import { useStore } from "@/stores/main-store";
+import type { ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
 import {
   clampValue,
   type ViewerImageEnhancementSettings,
@@ -160,7 +161,7 @@ interface ViewerSettingsPanelProps {
   /** When true, the quality tab in the popover is hidden */
   hideQuality?: boolean;
   /** Processing statistics (shown when enhancements enabled) */
-  enhancementStats?: {
+  enhancementStats?: (Omit<Partial<ProcessorStats>, "backend"> & {
     inputWidth: number;
     inputHeight: number;
     outputWidth: number;
@@ -168,29 +169,7 @@ interface ViewerSettingsPanelProps {
     processingTimeMs: number | null;
     enhancedScalingActive: boolean;
     backend: string;
-    scalingAlgorithm?: ScalingAlgorithm;
-    easuTargetWidth?: number;
-    easuTargetHeight?: number;
-    finalBicubicActive?: boolean;
-    fsrFinalScaler?: FsrFinalScaler | null;
-    rcasActive?: boolean;
-    activePasses?: string[];
-    backpressureDrops?: number;
-    generation?: number;
-    framesProcessed?: number;
-    // Phase 1: Truthful live statistics
-    framesDisplayed?: number;
-    completedFps?: number;
-    captureReadbackTimeMs?: number | null;
-    nativeTransportProcessingTimeMs?: number | null;
-    displayUploadTimeMs?: number | null;
-    totalEnhancedFrameLatencyMs?: number | null;
-    nativeOutputWidth?: number;
-    nativeOutputHeight?: number;
-    nativeQualityLevel?: number | null;
-    schedulerDrops?: number;
-    nativeFailures?: number;
-  } | null;
+  }) | null;
   children: React.ReactNode;
   /** When true, render only the content tabs without Popover wrappers */
   contentOnly?: boolean;
@@ -1004,7 +983,7 @@ export function ViewerSettingsPanel({
                       : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
                 </span>
 
-                {/* Phase 1: Expanded NVIDIA statistics */}
+                {/* Phase 1: Expanded NVIDIA statistics with Phase 6 rolling stats */}
                 {enhancementStats.backend === "nvidia-vsr" && (
                   <>
                     <span className="text-text-muted">Frames Displayed</span>
@@ -1014,67 +993,123 @@ export function ViewerSettingsPanel({
 
                     <span className="text-text-muted">Completed FPS</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"completedFps" in enhancementStats
-                        ? `${(enhancementStats as Record<string, unknown>).completedFps as number}`
+                      {enhancementStats.completedFps != null
+                        ? `${enhancementStats.completedFps.toFixed(1)}`
                         : "—"}
                     </span>
 
-                    <span className="text-text-muted">Capture/Readback</span>
+                    <span className="text-text-muted">Capture/Readback (avg)</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"captureReadbackTimeMs" in enhancementStats
-                        ? `${((enhancementStats as Record<string, unknown>).captureReadbackTimeMs as number)?.toFixed(2) ?? "—"} ms`
+                      {enhancementStats.captureReadbackTimeMs != null
+                        ? `${enhancementStats.captureReadbackTimeMs.toFixed(2)} ms`
                         : "—"}
                     </span>
 
-                    <span className="text-text-muted">Native Transport+Process</span>
+                    <span className="text-text-muted">Native Effect (round trip)</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"nativeTransportProcessingTimeMs" in enhancementStats
-                        ? `${((enhancementStats as Record<string, unknown>).nativeTransportProcessingTimeMs as number)?.toFixed(2) ?? "—"} ms`
+                      {enhancementStats.nativeTransportProcessingTimeMs != null
+                        ? `${enhancementStats.nativeTransportProcessingTimeMs.toFixed(2)} ms`
                         : "—"}
                     </span>
 
                     <span className="text-text-muted">Display Upload</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"displayUploadTimeMs" in enhancementStats
-                        ? `${((enhancementStats as Record<string, unknown>).displayUploadTimeMs as number)?.toFixed(2) ?? "—"} ms`
+                      {enhancementStats.displayUploadTimeMs != null
+                        ? `${enhancementStats.displayUploadTimeMs.toFixed(2)} ms`
                         : "—"}
                     </span>
 
-                    <span className="text-text-muted">Total Latency</span>
+                    <span className="text-text-muted">Total Latency (avg)</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"totalEnhancedFrameLatencyMs" in enhancementStats
-                        ? `${((enhancementStats as Record<string, unknown>).totalEnhancedFrameLatencyMs as number)?.toFixed(2) ?? "—"} ms`
+                      {enhancementStats.totalEnhancedFrameLatencyMs != null
+                        ? `${enhancementStats.totalEnhancedFrameLatencyMs.toFixed(2)} ms`
                         : "—"}
                     </span>
+
+                    {/* Phase 6: Rolling window statistics */}
+                    {enhancementStats.avgNativeRoundTripMs != null && (
+                      <>
+                        <span className="text-text-muted">Native Effect (avg)</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.avgNativeRoundTripMs.toFixed(2)} ms
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.p50NativeRoundTripMs != null && (
+                      <>
+                        <span className="text-text-muted">Native Effect (p50)</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.p50NativeRoundTripMs.toFixed(2)} ms
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.p95NativeRoundTripMs != null && (
+                      <>
+                        <span className="text-text-muted">Native Effect (p95)</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.p95NativeRoundTripMs.toFixed(2)} ms
+                        </span>
+                      </>
+                    )}
+                    {enhancementStats.avgTotalLatencyMs != null && (
+                      <>
+                        <span className="text-text-muted">E2E Latency (avg)</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.avgTotalLatencyMs.toFixed(2)} ms
+                        </span>
+                      </>
+                    )}
+                    {(enhancementStats.windowSampleCount ?? 0) > 0 && (
+                      <>
+                        <span className="text-text-muted">Window Samples</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {enhancementStats.windowSampleCount ?? 0}
+                        </span>
+                      </>
+                    )}
 
                     <span className="text-text-muted">Native Output</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"nativeOutputWidth" in enhancementStats
-                        ? `${(enhancementStats as Record<string, unknown>).nativeOutputWidth as number}x${(enhancementStats as Record<string, unknown>).nativeOutputHeight as number}`
+                      {enhancementStats.nativeOutputWidth != null && enhancementStats.nativeOutputWidth > 0
+                        ? `${enhancementStats.nativeOutputWidth}x${enhancementStats.nativeOutputHeight}`
                         : `${enhancementStats.outputWidth}x${enhancementStats.outputHeight}`}
                     </span>
 
-                    {"nativeQualityLevel" in enhancementStats && (enhancementStats as Record<string, unknown>).nativeQualityLevel != null && (
+                    {"nativeQualityLevel" in enhancementStats && enhancementStats.nativeQualityLevel != null && (
                       <>
                         <span className="text-text-muted">QualityLevel</span>
                         <span className="text-text-secondary font-mono text-right">
-                          {(enhancementStats as Record<string, unknown>).nativeQualityLevel as number}
+                          {enhancementStats.nativeQualityLevel}
                         </span>
                       </>
                     )}
 
                     <span className="text-text-muted">Scheduler Drops</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"schedulerDrops" in enhancementStats
-                        ? `${(enhancementStats as Record<string, unknown>).schedulerDrops as number}`
-                        : "0"}
+                      {enhancementStats.schedulerDrops ?? 0}
                     </span>
 
                     <span className="text-text-muted">Native Failures</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {"nativeFailures" in enhancementStats
-                        ? `${(enhancementStats as Record<string, unknown>).nativeFailures as number}`
-                        : "0"}
+                      {enhancementStats.nativeFailures ?? 0}
+                    </span>
+
+                    {/* Phase 6: Processor-level counters */}
+                    <span className="text-text-muted">Processing Attempts</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.processingAttempts ?? enhancementStats.framesProcessed}
+                    </span>
+                    <span className="text-text-muted">Coalesced Frames</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.coalescedFrames ?? 0}
+                    </span>
+                    <span className="text-text-muted">Backend Drops</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.backpressureDrops ?? 0}
+                    </span>
+                    <span className="text-text-muted">Stale-Gen Results</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.staleGenerationDrops ?? 0}
                     </span>
                   </>
                 )}

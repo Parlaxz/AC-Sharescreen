@@ -14,6 +14,7 @@ import type {
 } from "./viewer-image-settings";
 
 import { canonicalQualityLevel } from "@screenlink/shared";
+import { nextMonotonicId, lifecycleLog } from "./lifecycle-id";
 
 type NativeVideoConfig = {
   inputWidth: number;
@@ -77,6 +78,13 @@ const EMPTY_STATS: BackendStats = {
   framesProcessed: 0,
   activePasses: [],
   backpressureDrops: 0,
+  processingAttempts: 0,
+  completedAttempts: 0,
+  displayedCount: 0,
+  coalescedCount: 0,
+  backendDrops: 0,
+  staleGenerationResults: 0,
+  failures: 0,
 };
 
 const VERTEX_SHADER = `#version 300 es
@@ -222,6 +230,8 @@ function clampDimension(value: number): number {
 
 export class NvidiaVsrBackend implements ViewerImageBackend {
   readonly kind: BackendKind = "nvidia-vsr";
+  /** Stable monotonically increasing instance identifier */
+  readonly instanceId: number = nextMonotonicId();
 
   private canvas: HTMLCanvasElement | null = null;
 
@@ -295,6 +305,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         }
         this.framePort = port;
         port.start();
+        lifecycleLog("NvidiaBackend", "framePortAcquired", {
+          instanceId: this.instanceId,
+        });
         resolve(true);
       };
 
@@ -306,6 +319,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           settled = true;
           clearTimeout(timeout);
           window.removeEventListener("message", onMessage);
+          lifecycleLog("NvidiaBackend", "framePortFailed", {
+            instanceId: this.instanceId,
+          });
           resolve(false);
         }
       });
@@ -517,9 +533,10 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         nativeQualityLevel: this.currentQualityLevel,
       };
 
-      console.info(
-        "[nvidia-vsr] Native backend initialized",
-      );
+      lifecycleLog("NvidiaBackend", "initialize", {
+        instanceId: this.instanceId,
+        generation: this.generation,
+      });
 
       return { success: true };
     }
@@ -664,6 +681,13 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         this.captureCanvas.height = inputHeight;
       }
 
+      // ── Phase 6: Correlated frame identity ─────────────────────────────
+      const generation = metadata?.generation ?? this.generation;
+      const frameSequence = metadata?.frameSequence ?? 0;
+
+      // ── Renderer timing: Phase A1 — drawImage ──────────────────────────
+      const frameStart = performance.now();
+
       this.captureContext.drawImage(
         video,
         0,
@@ -672,13 +696,29 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         inputHeight,
       );
 
-      const source =
-        this.captureContext.getImageData(
-          0,
-          0,
-          inputWidth,
-          inputHeight,
-        );
+      const afterDrawImage = performance.now();
+      const drawImageMs = afterDrawImage - frameStart;
+
+      // ── Renderer timing: Phase A2 — getImageData ───────────────────────
+      const source = this.captureContext.getImageData(
+        0,
+        0,
+        inputWidth,
+        inputHeight,
+      );
+
+      const afterGetImageData = performance.now();
+      const getImageDataMs = afterGetImageData - afterDrawImage;
+
+      // ── Renderer timing: Phase A3 — input buffer preparation ──────────
+      const frameData = new Uint8Array(
+        source.data.buffer,
+        source.data.byteOffset,
+        source.data.byteLength,
+      );
+
+      const afterBufferPrep = performance.now();
+      const inputBufferPreparationMs = afterBufferPrep - afterGetImageData;
 
       const api = getVideoApi();
 
@@ -686,54 +726,38 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         return { success: false };
       }
 
-      const generation =
-        metadata?.generation ?? this.generation;
-
-      const frameSequence =
-        metadata?.frameSequence ?? 0;
-
-      // Phase 1: Truthful timing breakdown
-      // Phase A: Capture + readback time
-      const captureStart = performance.now();
-
-      // Phase B: Native transport + processing time (submission + result)
-      // Phase C: Display upload time
-
+      // ── Renderer timing: Phase B — native transport (renderer-observed) ──
       let result: NativeFrameResult | null = null;
-
-      // Phase A completed — measure capture time
-      const afterCapture = performance.now();
-      const captureReadbackMs = afterCapture - captureStart;
 
       if (this.framePort || await this.acquireFramePort()) {
         result = await this.submitFrameViaPort(
           generation,
           frameSequence,
-          new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength),
+          frameData,
           inputWidth,
           inputHeight,
         );
       } else {
         // Fall back to invoke-based submission
-        result =
-          await api.videoHelperSubmitFrame(
-            generation,
-            frameSequence,
-            new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength),
-            inputWidth,
-            inputHeight,
-          );
+        result = await api.videoHelperSubmitFrame(
+          generation,
+          frameSequence,
+          frameData,
+          inputWidth,
+          inputHeight,
+        );
       }
 
-      // Phase B completed — measure native transport + processing time
-      const afterSubmit = performance.now();
-      const nativeTransportProcessingMs = afterSubmit - afterCapture;
+      const afterResult = performance.now();
+      // rendererToResultMs = renderer-observed round-trip wait for native result
+      const rendererToResultMs = afterResult - afterBufferPrep;
 
       if (!result) {
-        console.error(
-          "[nvidia-vsr] Native helper returned no frame",
-        );
-
+        this.stats = {
+          ...this.stats,
+          failures: (this.stats.failures ?? 0) + 1,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        };
         return { success: false };
       }
 
@@ -742,10 +766,12 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         result.frameSequence ??
         frameSequence;
 
-      if (
-        result.generation !== generation ||
-        resultSequence !== frameSequence
-      ) {
+      if (result.generation !== generation || resultSequence !== frameSequence) {
+        this.stats = {
+          ...this.stats,
+          staleGenerationResults: (this.stats.staleGenerationResults ?? 0) + 1,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        };
         return {
           success: false,
           transient: true,
@@ -754,35 +780,32 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
       const pixels = normalizePixels(result.pixels);
 
-      const expectedBytes =
-        result.width * result.height * 4;
+      const expectedBytes = result.width * result.height * 4;
 
-      if (
-        result.width <= 0 ||
-        result.height <= 0 ||
-        pixels.byteLength !== expectedBytes
-      ) {
-        console.error(
-          "[nvidia-vsr] Invalid native output frame",
-          {
-            width: result.width,
-            height: result.height,
-            bytes: pixels.byteLength,
-            expectedBytes,
-          },
-        );
-
+      if (result.width <= 0 || result.height <= 0 || pixels.byteLength !== expectedBytes) {
+        this.stats = {
+          ...this.stats,
+          failures: (this.stats.failures ?? 0) + 1,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        };
         return { success: false };
       }
 
-      // Phase C: Display upload (texImage2D + drawArrays)
+      // ── Renderer timing: Phase C — texture upload (texImage2D + drawArrays) ──
+      const uploadStart = performance.now();
       this.renderOutput(pixels, result.width, result.height);
-
       const afterDisplay = performance.now();
-      const displayUploadMs = afterDisplay - afterSubmit;
+      const textureUploadMs = afterDisplay - uploadStart;
 
-      // Total latency from capture start to display complete
-      const totalLatencyMs = afterDisplay - captureStart;
+      // Derived renderer-phase totals
+      const captureReadbackMs = drawImageMs + getImageDataMs;
+      const displayUploadMs = textureUploadMs;
+      const rendererTotalMs = afterDisplay - frameStart;
+
+      // Native transport+processing is carried as renderer-observed duration
+      // (rendererToResultMs). No cross-process clock subtractions.
+      // The native side separately tracks its own internal breakdown
+      // (upload, effect, download) which arrives via diagnostics polling.
 
       this.stats = {
         inputWidth,
@@ -790,27 +813,67 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         outputWidth: result.width,
         outputHeight: result.height,
         enhancedScalingActive:
-          result.width > inputWidth ||
-          result.height > inputHeight,
-        lastGpuTimeMs: nativeTransportProcessingMs,
+          result.width > inputWidth || result.height > inputHeight,
+        lastGpuTimeMs: rendererToResultMs,
         backend: "nvidia-vsr",
-        framesProcessed:
-          this.stats.framesProcessed + 1,
+        framesProcessed: this.stats.framesProcessed + 1,
         activePasses: ["nvidia-vsr"],
-        backpressureDrops:
-          this.stats.backpressureDrops,
+        backpressureDrops: this.stats.backpressureDrops,
         generation,
         nativeQualityLevel: this.currentQualityLevel,
+        processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        completedAttempts: (this.stats.completedAttempts ?? 0) + 1,
+        displayedCount: (this.stats.displayedCount ?? 0) + 1,
+        coalescedCount: this.stats.coalescedCount ?? 0,
+        backendDrops: this.stats.backpressureDrops,
+        staleGenerationResults: this.stats.staleGenerationResults ?? 0,
+        failures: this.stats.failures ?? 0,
       };
+
+      // Main-process timings (from submitFrame result, if available)
+      const mainInputHandlingMs = (result as any).mainInputHandlingMs;
+      const pipeWriteMs = (result as any).pipeWriteMs;
+      const pipeWaitAndReadMs = (result as any).pipeWaitAndReadMs;
+      const mainOutputPostMs = (result as any).mainOutputPostMs;
+
+      // Native per-stage timings from frame header
+      const nativeInputReceiveMs = (result as any).nativeInputReceiveMs;
+      const nativeUploadMs = (result as any).nativeUploadMs;
+      const nativeEffectMs = (result as any).nativeEffectMs;
+      const nativeDownloadMs = (result as any).nativeDownloadMs;
+      const nativeOutputWriteMs = (result as any).nativeOutputWriteMs;
+      const nativeTotalMs = (result as any).nativeTotalMs;
+
+      // nativeTransportProcessingMs: true native total (from header) or fallback to rendererToResultMs
+      const trueNativeTransportMs = nativeTotalMs ?? rendererToResultMs;
 
       return {
         success: true,
-        gpuTimeMs: nativeTransportProcessingMs,
-        totalLatencyMs,
+        gpuTimeMs: rendererToResultMs,
+        totalLatencyMs: afterDisplay - frameStart,
         timingBreakdown: {
           captureReadbackMs,
-          nativeTransportProcessingMs,
+          drawImageMs,
+          getImageDataMs,
+          inputBufferPreparationMs,
+          rendererToResultMs,
+          textureUploadMs,
+          rendererTotalMs,
+          // Use true native total when available, not a duplicate of rendererToResultMs
+          nativeTransportProcessingMs: trueNativeTransportMs,
           displayUploadMs,
+          // Main-process per-frame timings
+          mainInputHandlingMs,
+          pipeWriteMs,
+          pipeWaitAndReadMs,
+          mainOutputPostMs,
+          // Native per-stage timings
+          nativeInputReceiveMs,
+          nativeUploadMs,
+          nativeEffectMs,
+          nativeDownloadMs,
+          nativeOutputWriteMs,
+          nativeTotalMs,
         },
       };
     }
@@ -834,12 +897,17 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     };
   }
 
-  async destroy(): Promise<void> {
+  async destroy(reason?: string): Promise<void> {
     if (this.destroyed) {
       return;
     }
 
     this.destroyed = true;
+
+    lifecycleLog("NvidiaBackend", "destroy", {
+      instanceId: this.instanceId,
+      reason: reason ?? "unspecified",
+    });
     this.initialized = false;
     this.frameInFlight = false;
     this.configKey = null;

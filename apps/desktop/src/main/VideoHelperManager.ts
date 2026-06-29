@@ -24,11 +24,24 @@ export interface VideoHelperCallbacks {
 
 // €‚€‚€‚ Manager €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
 
+// ─── Main-process lifecycle logging ─────────────────────────────────────────
+
+let _lifecycleLogging = true; // low-volume; always on in main process
+
+function helperLifecycleLog(event: string, details?: Record<string, unknown>): void {
+  if (!_lifecycleLogging) return;
+  if (details && Object.keys(details).length > 0) {
+    console.log(`[lifecycle:VideoHelper] ${event}`, JSON.stringify(details));
+  } else {
+    console.log(`[lifecycle:VideoHelper] ${event}`);
+  }
+}
+
 export class VideoHelperManager {
- // Core state
- private helper: ChildProcess | null = null;
- private state: VideoHelperState = "disconnected";
- private callbacks: VideoHelperCallbacks = {};
+  // Core state
+  private helper: ChildProcess | null = null;
+  private state: VideoHelperState = "disconnected";
+  private callbacks: VideoHelperCallbacks = {};
 
  // Session identity
  private sessionId = "";
@@ -65,26 +78,35 @@ export class VideoHelperManager {
  /**
  * Start the video-helper and establish control connection.
  */
- async start(config: VideoEnhancerConfig): Promise<boolean> {
- if (this.state === "ready" || this.state === "processing") {
- const current = this.lastConfig;
+  async start(config: VideoEnhancerConfig): Promise<boolean> {
+    if (this.state === "ready" || this.state === "processing") {
+      const current = this.lastConfig;
 
- const configurationMatches =
- current !== null &&
- current.inputWidth === config.inputWidth &&
- current.inputHeight === config.inputHeight &&
- current.outputWidth === config.outputWidth &&
- current.outputHeight === config.outputHeight &&
- current.processingMode === config.processingMode &&
- current.qualityLevel === config.qualityLevel &&
- current.pixelFormat === config.pixelFormat;
+      const configurationMatches =
+        current !== null &&
+        current.inputWidth === config.inputWidth &&
+        current.inputHeight === config.inputHeight &&
+        current.outputWidth === config.outputWidth &&
+        current.outputHeight === config.outputHeight &&
+        current.processingMode === config.processingMode &&
+        current.qualityLevel === config.qualityLevel &&
+        current.pixelFormat === config.pixelFormat;
 
- if (configurationMatches) {
- return true;
- }
+      if (configurationMatches) {
+        helperLifecycleLog("start (idempotent)", {
+          lifecycleGeneration: this.lifecycleGeneration,
+        });
+        return true;
+      }
 
- return this.reconfigure(config);
- }
+      helperLifecycleLog("reconfigure via start", {
+        lifecycleGeneration: this.lifecycleGeneration,
+        inputWidth: config.inputWidth,
+        inputHeight: config.inputHeight,
+        processingMode: config.processingMode,
+      });
+      return this.reconfigure(config);
+    }
 
  if (this.startPromise) {
  console.log(
@@ -107,54 +129,95 @@ export class VideoHelperManager {
  }
  }
 
- /**
- * Submit a frame for processing via the persistent frame pipe.
- * Writes header + pixel data to the already-connected pipe.
- */
- async submitFrame(
- generation: number,
- frameSequence: number,
- frameData: Uint8Array,
- inputWidth: number,
- inputHeight: number,
- ): Promise<{ generation: number; sequence: number; pixels: Uint8Array; width: number; height: number } | null> {
- if (this.state !== "ready" && this.state !== "processing") return null;
+  /**
+   * Submit a frame for processing via the persistent frame pipe.
+   * Writes header + pixel data to the already-connected pipe.
+   * Returns result with pixel data, dimensions, and per-frame timing breakdowns.
+   */
+  async submitFrame(
+  generation: number,
+  frameSequence: number,
+  frameData: Uint8Array,
+  inputWidth: number,
+  inputHeight: number,
+  ): Promise<{
+    generation: number;
+    sequence: number;
+    pixels: Uint8Array;
+    width: number;
+    height: number;
+    /** Main-process per-frame timings (ms) */
+    mainInputHandlingMs?: number;
+    pipeWriteMs?: number;
+    pipeWaitAndReadMs?: number;
+    mainOutputPostMs?: number;
+    /** Native per-stage timings from frame header (μs converted to ms) */
+    nativeInputReceiveMs?: number;
+    nativeUploadMs?: number;
+    nativeEffectMs?: number;
+    nativeDownloadMs?: number;
+    nativeOutputWriteMs?: number;
+    nativeTotalMs?: number;
+  } | null> {
+  if (this.state !== "ready" && this.state !== "processing") return null;
 
- try {
- const config = this.lastConfig;
- const outW = config?.outputWidth ?? inputWidth;
- const outH = config?.outputHeight ?? inputHeight;
- const mode = config?.processingMode ?? "vsr";
- const qual = config?.qualityLevel ?? "high";
- const modeNum = mode === "vsr" ? 1 : mode === "high-bitrate" ? 2 : mode === "denoise" ? 3 : 4;
- const qualNum = qual === "low" ? 0 : qual === "medium" ? 1 : qual === "ultra" ? 3 : 2;
+  const mainStart = performance.now();
 
- // Ensure persistent frame pipe connection
- if (!this.framePipeConnected) {
- const connected = await this.connectFramePipe();
- if (!connected) return null;
- }
+  try {
+  const config = this.lastConfig;
+  const outW = config?.outputWidth ?? inputWidth;
+  const outH = config?.outputHeight ?? inputHeight;
+  const mode = config?.processingMode ?? "vsr";
+  const qual = config?.qualityLevel ?? "high";
+  const modeNum = mode === "vsr" ? 1 : mode === "high-bitrate" ? 2 : mode === "denoise" ? 3 : 4;
+  const qualNum = qual === "low" ? 0 : qual === "medium" ? 1 : qual === "ultra" ? 3 : 2;
 
- const sent = await this.sendFrameData({
- generation,
- frameSequence,
- capturedAtUs: BigInt(Math.round(performance.now() * 1000)),
- inputWidth,
- inputHeight,
- inputStride: inputWidth * 4,
- pixelFormat: 2, // RGBA8
- requestedOutputWidth: outW,
- requestedOutputHeight: outH,
- processingMode: modeNum,
- qualityLevel: qualNum,
- payloadBytes: frameData.byteLength,
- }, frameData);
+  const afterInputHandling = performance.now();
+  const mainInputHandlingMs = afterInputHandling - mainStart;
 
- return sent;
- } catch {
- return null;
- }
- }
+  // Ensure persistent frame pipe connection
+  if (!this.framePipeConnected) {
+  const connected = await this.connectFramePipe();
+  if (!connected) return null;
+  }
+
+  const afterPipeConnect = performance.now();
+  const pipeWriteMs = afterPipeConnect - afterInputHandling;
+
+  const sent = await this.sendFrameData({
+  generation,
+  frameSequence,
+  capturedAtUs: BigInt(Math.round(performance.now() * 1000)),
+  inputWidth,
+  inputHeight,
+  inputStride: inputWidth * 4,
+  pixelFormat: 2, // RGBA8
+  requestedOutputWidth: outW,
+  requestedOutputHeight: outH,
+  processingMode: modeNum,
+  qualityLevel: qualNum,
+  payloadBytes: frameData.byteLength,
+  }, frameData);
+
+  const afterResult = performance.now();
+  // pipeWaitAndReadMs = time spent waiting for native result (the bulk of round-trip)
+  const pipeWaitAndReadMs = afterResult - afterPipeConnect;
+  const mainOutputPostMs = afterResult - afterInputHandling; // post-input handling time
+
+  if (!sent) return null;
+
+  // Attach main-process timings and native timings from the response
+  return {
+    ...sent,
+    mainInputHandlingMs,
+    pipeWriteMs,
+    pipeWaitAndReadMs,
+    mainOutputPostMs,
+  };
+  } catch {
+  return null;
+  }
+  }
 
  private framePipeClient: net.Socket | null = null;
  private framePipeConnected = false;
@@ -187,47 +250,61 @@ export class VideoHelperManager {
  /**
  * Stop processing and optionally shut down the helper.
  */
- async stop(shutdown = false): Promise<void> {
- // Invalidate any asynchronous startup that has not completed.
- this.lifecycleGeneration += 1;
- this.startPromise = null;
- this.shuttingDown_ = true;
- this.clearDiagnosticsInterval();
- this.clearRestartTimer();
+  async stop(shutdown = false): Promise<void> {
+  // Invalidate any asynchronous startup that has not completed.
+  this.lifecycleGeneration += 1;
+  this.startPromise = null;
+  this.shuttingDown_ = true;
+  this.clearDiagnosticsInterval();
+  this.clearRestartTimer();
 
- if (shutdown && this.controlSocket) {
- await this.sendCommand("shutdown", {}).catch(() => {});
- }
+  helperLifecycleLog("helperStop", {
+    lifecycleGeneration: this.lifecycleGeneration,
+    shutdown,
+    lastState: this.state,
+  });
 
- await this.cleanup();
- this.state = "disconnected";
- this.callbacks.onStateChange?.("disconnected");
- }
+  if (shutdown && this.controlSocket) {
+  await this.sendCommand("shutdown", {}).catch(() => {});
+  }
+
+  await this.cleanup();
+  this.state = "disconnected";
+  this.callbacks.onStateChange?.("disconnected");
+  }
 
  /**
  * Update processing configuration.
  */
- async reconfigure(config: VideoEnhancerConfig): Promise<boolean> {
- if (this.state !== "ready" && this.state !== "processing") return false;
+  async reconfigure(config: VideoEnhancerConfig): Promise<boolean> {
+  if (this.state !== "ready" && this.state !== "processing") return false;
 
- try {
- const response = await this.sendCommand("configure", {
- inputWidth: config.inputWidth,
- inputHeight: config.inputHeight,
- outputWidth: config.outputWidth,
- outputHeight: config.outputHeight,
- processingMode: config.processingMode,
- qualityLevel: config.qualityLevel,
- pixelFormat: config.pixelFormat,
- });
- if (response?.success === true) {
- this.lastConfig = { ...config };
- }
- return response?.success === true;
- } catch {
- return false;
- }
- }
+  helperLifecycleLog("helperReconfigure", {
+    lifecycleGeneration: this.lifecycleGeneration,
+    inputWidth: config.inputWidth,
+    inputHeight: config.inputHeight,
+    processingMode: config.processingMode,
+    qualityLevel: config.qualityLevel,
+  });
+
+  try {
+  const response = await this.sendCommand("configure", {
+  inputWidth: config.inputWidth,
+  inputHeight: config.inputHeight,
+  outputWidth: config.outputWidth,
+  outputHeight: config.outputHeight,
+  processingMode: config.processingMode,
+  qualityLevel: config.qualityLevel,
+  pixelFormat: config.pixelFormat,
+  });
+  if (response?.success === true) {
+  this.lastConfig = { ...config };
+  }
+  return response?.success === true;
+  } catch {
+  return false;
+  }
+  }
 
  /**
  * Flush any pending frames.
@@ -264,14 +341,24 @@ export class VideoHelperManager {
 
  // €‚€‚€‚ Private: Helper lifecycle €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
 
- private async startHelper(config: VideoEnhancerConfig): Promise<boolean> {
- this.lifecycleGeneration++;
- this.shuttingDown_ = false;
+  private async startHelper(config: VideoEnhancerConfig): Promise<boolean> {
+  this.lifecycleGeneration++;
+  this.shuttingDown_ = false;
 
- const gen = this.lifecycleGeneration;
+  const gen = this.lifecycleGeneration;
 
- try {
- const helperPath = getVideoEnhancerHelperPath();
+  helperLifecycleLog("helperStart", {
+    lifecycleGeneration: gen,
+    inputWidth: config.inputWidth,
+    inputHeight: config.inputHeight,
+    outputWidth: config.outputWidth,
+    outputHeight: config.outputHeight,
+    processingMode: config.processingMode,
+    qualityLevel: config.qualityLevel,
+  });
+
+  try {
+  const helperPath = getVideoEnhancerHelperPath();
 
  // Generate new session identity
  this.sessionId = randomUUID().replace(/-/g, "").substring(0, 32);
@@ -352,10 +439,14 @@ export class VideoHelperManager {
  return false;
  }
 
- this.state = "ready";
- this.restartAttempts = 0;
- this.lastConfig = { ...config };
- this.callbacks.onStateChange?.("ready");
+  this.state = "ready";
+  this.restartAttempts = 0;
+  this.lastConfig = { ...config };
+  this.callbacks.onStateChange?.("ready");
+  helperLifecycleLog("helperReady", {
+    lifecycleGeneration: gen,
+    sessionId: this.sessionId,
+  });
 
  // Start diagnostics polling
  this.startDiagnosticsInterval();
@@ -589,7 +680,19 @@ export class VideoHelperManager {
  payloadBytes: number;
  },
  pixelData: Uint8Array,
- ): Promise<{ generation: number; sequence: number; pixels: Uint8Array; width: number; height: number } | null> {
+ ): Promise<{
+ generation: number;
+ sequence: number;
+ pixels: Uint8Array;
+ width: number;
+ height: number;
+ nativeInputReceiveMs?: number;
+ nativeUploadMs?: number;
+ nativeEffectMs?: number;
+ nativeDownloadMs?: number;
+ nativeOutputWriteMs?: number;
+ nativeTotalMs?: number;
+ } | null> {
  return new Promise((resolve) => {
  const socket = this.framePipeClient;
  if (!socket || !socket.writable) { resolve(null); return; }
@@ -602,11 +705,11 @@ export class VideoHelperManager {
  resolve(null);
  }, 5000);
 
- // Build binary header (80 bytes to match FrameHeader)
- const magic = Buffer.alloc(8);
- magic.writeBigUInt64LE(BigInt("0x464C4156454D5246"));
- const HEADER_SIZE = 80;
- const wireVersion = 1;
+  // Build binary header (104 bytes to match extended FrameHeader with native timings)
+  const magic = Buffer.alloc(8);
+  magic.writeBigUInt64LE(BigInt("0x464C4156454D5246"));
+  const HEADER_SIZE = 104;
+  const wireVersion = 1;
 
  const headerBuf = Buffer.alloc(HEADER_SIZE);
  let off = 0;
@@ -627,9 +730,17 @@ export class VideoHelperManager {
  headerBuf.writeUInt32LE(header.processingMode, off); off += 4;
  headerBuf.writeUInt32LE(header.qualityLevel, off); off += 4;
  headerBuf.writeUInt32LE(0, off); off += 4; // flags
- headerBuf.writeUInt32LE(0, off); // resultCode (0 = pending)
+  headerBuf.writeUInt32LE(0, off); // resultCode (0 = pending)
+  off += 4;
+  // Zero-filled native timing fields (input side, filled by native on output)
+  headerBuf.writeUInt32LE(0, off); off += 4; // nativeInputReceiveUs
+  headerBuf.writeUInt32LE(0, off); off += 4; // nativeUploadUs
+  headerBuf.writeUInt32LE(0, off); off += 4; // nativeEffectUs
+  headerBuf.writeUInt32LE(0, off); off += 4; // nativeDownloadUs
+  headerBuf.writeUInt32LE(0, off); off += 4; // nativeOutputWriteUs
+  headerBuf.writeUInt32LE(0, off);      // nativeTotalUs
 
- // Write header + pixel data (audit item 14: backpressure handling)
+  // Write header + pixel data (audit item 14: backpressure handling)
  const combined = Buffer.concat([headerBuf, pixelData]);
  const writeResult = socket.write(combined);
 
@@ -724,18 +835,34 @@ export class VideoHelperManager {
  }
  }
 
- if (resultPayload && resultPayloadRead >= resultPayload.length) {
- settled = true;
- clearTimeout(timeout);
- socket.removeListener("data", onResultData);
- resolve({
- generation: header.generation,
- sequence: header.frameSequence,
- pixels: resultPayload,
- width: resultBuf.readUInt32LE(32), // inputWidth in output header
- height: resultBuf.readUInt32LE(36), // inputHeight in output header
- });
- }
+  if (resultPayload && resultPayloadRead >= resultPayload.length) {
+  settled = true;
+  clearTimeout(timeout);
+  socket.removeListener("data", onResultData);
+
+  // Parse native timing fields from extended header (offsets 80-100)
+  const nativeInputReceiveUs = resultBuf.readUInt32LE(80);
+  const nativeUploadUs = resultBuf.readUInt32LE(84);
+  const nativeEffectUs = resultBuf.readUInt32LE(88);
+  const nativeDownloadUs = resultBuf.readUInt32LE(92);
+  const nativeOutputWriteUs = resultBuf.readUInt32LE(96);
+  const nativeTotalUs = resultBuf.readUInt32LE(100);
+
+  resolve({
+  generation: header.generation,
+  sequence: header.frameSequence,
+  pixels: resultPayload,
+  width: resultBuf.readUInt32LE(32), // inputWidth in output header
+  height: resultBuf.readUInt32LE(36), // inputHeight in output header
+  // Convert μs to ms for consistency with renderer timings
+  nativeInputReceiveMs: nativeInputReceiveUs > 0 ? nativeInputReceiveUs / 1000 : undefined,
+  nativeUploadMs: nativeUploadUs > 0 ? nativeUploadUs / 1000 : undefined,
+  nativeEffectMs: nativeEffectUs > 0 ? nativeEffectUs / 1000 : undefined,
+  nativeDownloadMs: nativeDownloadUs > 0 ? nativeDownloadUs / 1000 : undefined,
+  nativeOutputWriteMs: nativeOutputWriteUs > 0 ? nativeOutputWriteUs / 1000 : undefined,
+  nativeTotalMs: nativeTotalUs > 0 ? nativeTotalUs / 1000 : undefined,
+  });
+  }
  };
  socket.on("data", onResultData);
  });
@@ -743,15 +870,22 @@ export class VideoHelperManager {
 
  // €‚€‚€‚ Error handling and restart €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
 
- private handleHelperExit(gen: number, _code: number): void {
- this.helper = null;
- this.controlSocket = null;
+  private handleHelperExit(gen: number, code: number): void {
+  this.helper = null;
+  this.controlSocket = null;
 
- if (gen !== this.lifecycleGeneration) return;
- if (this.shuttingDown_) return;
+  helperLifecycleLog("helperExit", {
+    lifecycleGeneration: gen,
+    exitCode: code,
+    currentGeneration: this.lifecycleGeneration,
+    shuttingDown: this.shuttingDown_,
+  });
 
- this.attemptRestart(gen);
- }
+  if (gen !== this.lifecycleGeneration) return;
+  if (this.shuttingDown_) return;
+
+  this.attemptRestart(gen);
+  }
 
  private handleHelperError(reason: string): void {
  if (this.shuttingDown_) return;
@@ -870,6 +1004,11 @@ export class VideoHelperManager {
   createFramePort(): Electron.MessagePortMain {
     this.closeFramePort();
 
+    helperLifecycleLog("framePortCreate", {
+      lifecycleGeneration: this.lifecycleGeneration,
+      state: this.state,
+    });
+
     const { port1: rendererPort, port2: mainPort } = new MessageChannelMain();
 
     mainPort.on("message", async (evt: Electron.MessageEvent) => {
@@ -925,6 +1064,17 @@ export class VideoHelperManager {
           height: result.height,
           // Convert Buffer → Uint8Array for structured clone compatibility
           pixels: new Uint8Array(result.pixels),
+          // Main-process and native per-frame timings
+          mainInputHandlingMs: (result as any).mainInputHandlingMs,
+          pipeWriteMs: (result as any).pipeWriteMs,
+          pipeWaitAndReadMs: (result as any).pipeWaitAndReadMs,
+          mainOutputPostMs: (result as any).mainOutputPostMs,
+          nativeInputReceiveMs: (result as any).nativeInputReceiveMs,
+          nativeUploadMs: (result as any).nativeUploadMs,
+          nativeEffectMs: (result as any).nativeEffectMs,
+          nativeDownloadMs: (result as any).nativeDownloadMs,
+          nativeOutputWriteMs: (result as any).nativeOutputWriteMs,
+          nativeTotalMs: (result as any).nativeTotalMs,
         });
       } catch (err) {
         mainPort.postMessage({
@@ -948,6 +1098,9 @@ export class VideoHelperManager {
    */
   closeFramePort(): void {
     if (this.framePort) {
+      helperLifecycleLog("framePortClose", {
+        lifecycleGeneration: this.lifecycleGeneration,
+      });
       this.framePort.close();
       this.framePort = null;
     }

@@ -29,6 +29,16 @@ import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-
 import { getImageProcessingCapabilities, augmentWithNvidiaCapability } from "@/services/viewer-image-processing/viewer-image-capabilities";
 import { createImageProcessingBackend } from "@/services/viewer-image-processing/viewer-image-backend-factory";
 import { FallbackChainController } from "@/services/viewer-image-processing/fallback-chain-controller";
+import {
+  nextMonotonicId,
+  lifecycleLog,
+  enableLifecycleLogging,
+} from "@/services/viewer-image-processing/lifecycle-id";
+
+// Enable lifecycle logging in dev builds
+if (typeof import.meta !== "undefined" && import.meta.env.DEV) {
+  enableLifecycleLogging();
+}
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -69,9 +79,11 @@ export function EnhancedVideoSurface({
   onStatsUpdate,
   onBackendChange,
 }: EnhancedVideoSurfaceProps): ReactElement | null {
+  const instanceId = useRef<number>(nextMonotonicId());
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const processorRef = useRef<ViewerImageProcessor | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const prevVideoElementRef = useRef<HTMLVideoElement | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const prevEnabledRef = useRef<boolean>(enabled);
   const prevSettingsRef = useRef<ViewerImageEnhancementSettings | null>(null);
@@ -82,10 +94,28 @@ export function EnhancedVideoSurface({
   const [fallback, setFallback] = useState<boolean>(false);
   const [firstFrameReceived, setFirstFrameReceived] = useState(false);
 
+  // ─── Cleanup reason detection refs (updated during render) ────────────
+  // Must be declared AFTER useState calls to avoid temporal-dead-zone on fallback.
+  const _mountedRef = useRef(true);
+  const _renderEnabledRef = useRef(enabled);
+  const _renderVideoRef = useRef<HTMLVideoElement | null>(null);
+  const _renderFallbackRef = useRef(fallback);
+
+  // Track current render-phase values so the old effect cleanup can compare
+  // closure-captured values against the incoming values to determine exactly
+  // which dependency caused the effect to re-run.
+  _renderEnabledRef.current = enabled;
+  _renderVideoRef.current = videoElement;
+  _renderFallbackRef.current = fallback;
+
   // ─── Capabilities check on mount (async IPC probe) ────────────────────
 
   useEffect(() => {
     let cancelled = false;
+
+    lifecycleLog("Surface", "mount", {
+      instanceId: instanceId.current,
+    });
 
     (async () => {
       try {
@@ -110,6 +140,9 @@ export function EnhancedVideoSurface({
 
     return () => {
       cancelled = true;
+      lifecycleLog("Surface", "unmount", {
+        instanceId: instanceId.current,
+      });
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -121,6 +154,17 @@ export function EnhancedVideoSurface({
       setFallback(false);
     }
   }, [enabled]);
+
+  // ─── Log fallback changes ────────────────────────────────────────────
+
+  useEffect(() => {
+    if (fallback) {
+      lifecycleLog("Surface", "fallbackChange", {
+        instanceId: instanceId.current,
+        fallback: true,
+      });
+    }
+  }, [fallback]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -138,10 +182,32 @@ export function EnhancedVideoSurface({
     };
   }, [onContextRestored]);
 
+  // ─── Mount status tracking for cleanup reason detection ───────────────
+  // On component unmount this cleanup runs BEFORE the processor effect's cleanup
+  // (declaration order), so _mountedRef is already false when the processor
+  // cleanup checks it.
+  useEffect(() => {
+    _mountedRef.current = true;
+    return () => {
+      _mountedRef.current = false;
+    };
+  }, []);
+
   // ─── Processor initialisation (async, with backend factory) ──────────
 
   useEffect(() => {
     if (!enabled || fallback || !videoElement || !canvasRef.current) return;
+
+    // Detect videoElement identity change
+    const prevVideo = prevVideoElementRef.current;
+    if (prevVideo !== videoElement) {
+      lifecycleLog("Surface", "videoElementChange", {
+        instanceId: instanceId.current,
+        prevVideoElement: prevVideo !== null,
+        newVideoElement: true,
+      });
+      prevVideoElementRef.current = videoElement;
+    }
 
     let processor: ViewerImageProcessor | null = null;
     let cancelled = false;
@@ -164,6 +230,13 @@ export function EnhancedVideoSurface({
           videoElement,
           backend,
         );
+
+        lifecycleLog("Surface", "processorCreated", {
+          instanceId: instanceId.current,
+          processorInstanceId: processor.instanceId,
+          videoElementIdentity: videoElement !== null,
+          backendKind: backend.kind,
+        });
 
         const handleFirstFrame = () => {
           setFirstFrameReceived(true);
@@ -232,7 +305,35 @@ export function EnhancedVideoSurface({
     return () => {
       cancelled = true;
       if (processor) {
-        processor.destroy().catch(() => {});
+        // Compare closure-captured (old) values against render-phase refs (new)
+        // to determine exactly which dependency caused the re-run.
+        // _mountedRef is set to false by the mount-tracking effect's cleanup
+        // on component unmount (runs before this cleanup due to declaration order).
+        let destroyReason: string;
+        if (!_mountedRef.current) {
+          destroyReason = "component-unmount";
+        } else if (videoElement !== _renderVideoRef.current) {
+          destroyReason = "video-element-changed";
+        } else if (enabled !== _renderEnabledRef.current) {
+          destroyReason = "enabled-disabled";
+        } else if (fallback !== _renderFallbackRef.current) {
+          destroyReason = "fallback-activated";
+        } else {
+          destroyReason = "initialization-effect-cleanup";
+        }
+
+        lifecycleLog("Surface", "processorDestroy", {
+          instanceId: instanceId.current,
+          processorInstanceId: processor.instanceId,
+          reason: destroyReason,
+          prevEnabled: enabled,
+          currEnabled: _renderEnabledRef.current,
+          prevFallback: fallback,
+          currFallback: _renderFallbackRef.current,
+          prevVideoPresent: videoElement !== null,
+          currVideoPresent: _renderVideoRef.current !== null,
+        });
+        processor.destroy(destroyReason).catch(() => {});
         processorRef.current = null;
       }
     };
@@ -281,10 +382,20 @@ export function EnhancedVideoSurface({
     if (!proc) return;
 
     if (enabled && !wasEnabled) {
+      lifecycleLog("Surface", "enabledChange", {
+        instanceId: instanceId.current,
+        previous: false,
+        current: true,
+      });
       if (proc.getState() === "paused") {
         proc.resume();
       }
     } else if (!enabled && wasEnabled) {
+      lifecycleLog("Surface", "enabledChange", {
+        instanceId: instanceId.current,
+        previous: true,
+        current: false,
+      });
       if (proc.getState() === "running") {
         proc.pause();
       }

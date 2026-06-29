@@ -15,6 +15,29 @@ void DiagnosticsCounters::RecordFrame(uint64_t elapsedUs, bool success) {
     minProcessingTimeUs = std::min(minProcessingTimeUs.load(), elapsedUs);
 }
 
+void DiagnosticsCounters::RecordFrameDetails(
+    uint64_t elapsedUs, bool success,
+    uint64_t inputReceiveUs,
+    uint64_t uploadUs,
+    uint64_t effectUs,
+    uint64_t downloadUs,
+    uint64_t outputWriteUs)
+{
+    totalFramesSubmitted++;
+    if (success) totalFramesCompleted++;
+    else totalProcessingErrors++;
+
+    lastProcessingTimeUs = elapsedUs;
+    maxProcessingTimeUs = std::max(maxProcessingTimeUs.load(), elapsedUs);
+    minProcessingTimeUs = std::min(minProcessingTimeUs.load(), elapsedUs);
+
+    lastInputReceiveUs = inputReceiveUs;
+    lastUploadUs = uploadUs;
+    lastEffectUs = effectUs;
+    lastDownloadUs = downloadUs;
+    lastOutputWriteUs = outputWriteUs;
+}
+
 void DiagnosticsCounters::Reset() {
     totalFramesSubmitted = 0;
     totalFramesCompleted = 0;
@@ -24,6 +47,11 @@ void DiagnosticsCounters::Reset() {
     lastProcessingTimeUs = 0;
     maxProcessingTimeUs = 0;
     minProcessingTimeUs = UINT64_MAX;
+    lastInputReceiveUs = 0;
+    lastUploadUs = 0;
+    lastEffectUs = 0;
+    lastDownloadUs = 0;
+    lastOutputWriteUs = 0;
 }
 
 DiagnosticsCounters& GetDiagnosticsCounters() {
@@ -41,6 +69,14 @@ DiagnosticSnapshot GetDiagnostics() {
     snap.maxProcessingTimeUs = g_counters.maxProcessingTimeUs;
     snap.minProcessingTimeUs = g_counters.minProcessingTimeUs;
     snap.uptimeMs = 0; // Phase 7: track uptime
+
+    // Phase 6: Native timing breakdown
+    snap.lastInputReceiveUs = g_counters.lastInputReceiveUs;
+    snap.lastUploadUs = g_counters.lastUploadUs;
+    snap.lastEffectUs = g_counters.lastEffectUs;
+    snap.lastDownloadUs = g_counters.lastDownloadUs;
+    snap.lastOutputWriteUs = g_counters.lastOutputWriteUs;
+
     return snap;
 }
 

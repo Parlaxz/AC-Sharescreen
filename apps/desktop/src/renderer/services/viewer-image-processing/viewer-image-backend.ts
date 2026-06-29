@@ -34,9 +34,32 @@ export interface FrameProcessResult {
   backpressureDrop?: boolean;
   /** Timing breakdown for Phase 1 truthful statistics */
   timingBreakdown?: {
+    // Renderer-process timings (performance.now, process-local)
     captureReadbackMs?: number;
+    drawImageMs?: number;
+    getImageDataMs?: number;
+    inputBufferPreparationMs?: number;
+    /** Renderer-observed wait for native result */
+    rendererToResultMs?: number;
+    textureUploadMs?: number;
+    rendererTotalMs?: number;
+    // Native-process transport+processing (carried as durations, not raw deltas)
     nativeTransportProcessingMs?: number;
     displayUploadMs?: number;
+
+    // Main-process per-frame timings (captured in VideoHelperManager.submitFrame)
+    mainInputHandlingMs?: number;
+    pipeWriteMs?: number;
+    pipeWaitAndReadMs?: number;
+    mainOutputPostMs?: number;
+
+    // Native per-stage timings from frame header (μs→ms conversion)
+    nativeInputReceiveMs?: number;
+    nativeUploadMs?: number;
+    nativeEffectMs?: number;
+    nativeDownloadMs?: number;
+    nativeOutputWriteMs?: number;
+    nativeTotalMs?: number;
   };
   /** Total latency from capture to displayed frame */
   totalLatencyMs?: number;
@@ -71,6 +94,22 @@ export interface BackendStats {
   /** Canonical NVIDIA QualityLevel when backend is nvidia-vsr */
   nativeQualityLevel?: number | null;
 
+  // ── Phase 6: Processor-level counters ──────────────────────────────────
+  /** Number of frames submitted for processing */
+  processingAttempts?: number;
+  /** Number of frames completed successfully */
+  completedAttempts?: number;
+  /** Number of frames displayed */
+  displayedCount?: number;
+  /** Number of frames coalesced due to backpressure */
+  coalescedCount?: number;
+  /** Number of backend-generated drops */
+  backendDrops?: number;
+  /** Number of stale-generation result discards */
+  staleGenerationResults?: number;
+  /** Number of processing failures */
+  failures?: number;
+
   // ── Extended fields (populated by WebGL2 backend, undefined for others) ──
   scalingAlgorithm?: ScalingAlgorithm;
   easuTargetWidth?: number;
@@ -94,5 +133,5 @@ export interface ViewerImageBackend {
   resizeOutput(width: number, height: number, dpr: number): void;
   onSourceResize?(sourceWidth: number, sourceHeight: number): void;
   getStats(): BackendStats;
-  destroy(): Promise<void>;
+  destroy(reason?: string): Promise<void>;
 }

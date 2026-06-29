@@ -44,6 +44,21 @@ export interface VideoEnhancerDiagnostics {
   totalProcessingErrors: number;
   lastProcessingTimeUs: number;
   maxProcessingTimeUs: number;
+  minProcessingTimeUs: number;
+
+  // Phase 6: Native timing breakdown (microseconds, process-local)
+  /** Time to receive input frame data over the pipe */
+  nativeInputReceiveUs?: number;
+  /** Time to upload pixels to GPU (CPU→GPU transfer) */
+  nativeUploadUs?: number;
+  /** Time for NVIDIA VFX processing (RunFrame) */
+  nativeEffectUs?: number;
+  /** Time to download processed pixels from GPU (GPU→CPU transfer) */
+  nativeDownloadUs?: number;
+  /** Time to write output frame back over the pipe */
+  nativeOutputWriteUs?: number;
+  /** Total native processing time (sum of above) */
+  nativeTotalUs?: number;
 }
 
 export interface VideoEnhancerStats {

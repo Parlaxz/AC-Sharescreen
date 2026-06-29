@@ -6,6 +6,8 @@
 
 import type { ViewerImageBackend, BackendKind } from "./viewer-image-backend";
 import type { ViewerImageEnhancementSettings, ScalingAlgorithm, FsrFinalScaler } from "./viewer-image-settings";
+import { nextMonotonicId, lifecycleLog } from "./lifecycle-id";
+import { BoundedWindowStats } from "@/lib/bounded-window-stats";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,18 @@ export interface ProcessorStats {
   completedFps: number;
   /** Time to capture + readback pixels from video element (ms) */
   captureReadbackTimeMs: number | null;
+  /** drawImage portion of capture (ms) */
+  drawImageTimeMs: number | null;
+  /** getImageData portion of capture (ms) */
+  getImageDataTimeMs: number | null;
+  /** Input buffer preparation time (ms) */
+  inputBufferPreparationTimeMs: number | null;
+  /** Renderer-observed round-trip wait for native result (ms) */
+  rendererToResultTimeMs: number | null;
+  /** Texture upload time (ms) */
+  textureUploadTimeMs: number | null;
+  /** Renderer total processing time per frame (ms) */
+  rendererTotalTimeMs: number | null;
   /** Native transport + processing time (ms) */
   nativeTransportProcessingTimeMs: number | null;
   /** Time to upload processed pixels to display texture (ms) */
@@ -64,11 +78,68 @@ export interface ProcessorStats {
   schedulerDrops: number;
   /** Number of native processing failures */
   nativeFailures: number;
+
+  // ─── Main-process per-frame timings (averaged over processed frames) ──
+  mainInputHandlingTimeMs: number | null;
+  pipeWriteTimeMs: number | null;
+  pipeWaitAndReadTimeMs: number | null;
+  mainOutputPostTimeMs: number | null;
+
+  // ─── Native per-stage timings (from frame header, μs→ms) ────────────
+  nativeInputReceiveTimeMs: number | null;
+  nativeUploadTimeMs: number | null;
+  nativeEffectTimeMs: number | null;
+  nativeDownloadTimeMs: number | null;
+  nativeOutputWriteTimeMs: number | null;
+  nativeTotalTimeMs: number | null;
+
+  // ─── Phase 6: Bounded-window rolling statistics ───────────────────────
+  /** Rolling average renderer total time (ms) over bounded window */
+  avgRendererTotalMs: number | null;
+  /** Median (p50) renderer total time (ms) */
+  p50RendererTotalMs: number | null;
+  /** 95th percentile renderer total time (ms) */
+  p95RendererTotalMs: number | null;
+  /** Rolling average native effect round-trip (ms) */
+  avgNativeRoundTripMs: number | null;
+  /** Median (p50) native round-trip (ms) */
+  p50NativeRoundTripMs: number | null;
+  /** 95th percentile native round-trip (ms) */
+  p95NativeRoundTripMs: number | null;
+  /** Rolling average total latency (ms) */
+  avgTotalLatencyMs: number | null;
+  /** Sample count in the rolling window */
+  windowSampleCount: number;
+
+  // ─── Phase 4: Lifecycle counters ────────────────────────────────────────
+  /** Number of source video frame callbacks received (RVFC + rAF) */
+  sourceCallbacksReceived: number;
+  /** Number of times beginFrameProcessing was entered */
+  processingAttempts: number;
+  /** Number of times frames were coalesced due to backpressure */
+  coalescedFrames: number;
+  /** Number of stale-generation results discarded after backend swap/restart */
+  staleGenerationDrops: number;
+
+  // ─── Phase 6: Processor-level counters ──────────────────────────────────
+  /** Number of frames submitted for processing */
+  processingAttemptsTotal: number;
+  /** Number of frames completed successfully */
+  completedAttempts: number;
+  /** Number of frames displayed */
+  displayedCount: number;
+  /** Number of backend-generated drops */
+  backendDrops: number;
+  /** Number of processing failures */
+  failures: number;
 }
 
 // ─── Processor ───────────────────────────────────────────────────────────────
 
 export class ViewerImageProcessor {
+  /** Stable monotonically increasing instance identifier for lifecycle tracking */
+  readonly instanceId: number = nextMonotonicId();
+
   private backend: ViewerImageBackend;
   private canvas: HTMLCanvasElement;
   private videoElement: HTMLVideoElement;
@@ -116,6 +187,59 @@ export class ViewerImageProcessor {
   private lastNativeOutputWidth = 0;
   private lastNativeOutputHeight = 0;
 
+  // Accumulators for the 6 renderer timing fields that were previously null
+  private drawImageTotalMs = 0;
+  private drawImageCount = 0;
+  private getImageDataTotalMs = 0;
+  private getImageDataCount = 0;
+  private inputBufferPreparationTotalMs = 0;
+  private inputBufferPreparationCount = 0;
+  private rendererToResultTotalMs = 0;
+  private rendererToResultCount = 0;
+  private textureUploadTotalMs = 0;
+  private textureUploadCount = 0;
+  private rendererTotalTotalMs = 0;
+  private rendererTotalCount = 0;
+
+  // Main-process per-frame timing accumulators
+  private mainInputHandlingTotalMs = 0;
+  private mainInputHandlingCount = 0;
+  private pipeWriteTotalMs = 0;
+  private pipeWriteCount = 0;
+  private pipeWaitAndReadTotalMs = 0;
+  private pipeWaitAndReadCount = 0;
+  private mainOutputPostTotalMs = 0;
+  private mainOutputPostCount = 0;
+
+  // Native per-stage timing accumulators (from frame header, μs→ms)
+  private nativeInputReceiveTotalMs = 0;
+  private nativeInputReceiveCount = 0;
+  private nativeUploadTotalMs = 0;
+  private nativeUploadCount = 0;
+  private nativeEffectTotalMs = 0;
+  private nativeEffectCount = 0;
+  private nativeDownloadTotalMs = 0;
+  private nativeDownloadCount = 0;
+  private nativeOutputWriteTotalMs = 0;
+  private nativeOutputWriteCount = 0;
+  private nativeTotalTotalMs = 0;
+  private nativeTotalCount = 0;
+
+  // Phase 6: Bounded-window rolling stats (capacity=250 samples)
+  private rendererTotalStats = new BoundedWindowStats(250);
+  private nativeRoundTripStats = new BoundedWindowStats(250);
+  private totalLatencyStats = new BoundedWindowStats(250);
+
+  // Phase 4: Lifecycle counters
+  private _sourceCallbacksReceived = 0;
+  private _processingAttempts = 0;
+  private _coalescedFrames = 0;
+  private _staleGenerationDrops = 0;
+  private _completedAttempts = 0;
+  private _displayedCount = 0;
+  private _backendDrops = 0;
+  private _failures = 0;
+
   constructor(
     canvas: HTMLCanvasElement,
     videoElement: HTMLVideoElement,
@@ -124,6 +248,10 @@ export class ViewerImageProcessor {
     this.canvas = canvas;
     this.videoElement = videoElement;
     this.backend = backend;
+    lifecycleLog("Processor", "create", {
+      instanceId: this.instanceId,
+      backendKind: backend.kind,
+    });
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────
@@ -189,6 +317,11 @@ export class ViewerImageProcessor {
 
     this.state = "running";
     this.callbacks.onStateChange?.("running");
+    lifecycleLog("Processor", "start", {
+      instanceId: this.instanceId,
+      generation: this.generation,
+      backendKind: this.backend.kind,
+    });
     this.scheduleFrame();
   }
 
@@ -197,6 +330,7 @@ export class ViewerImageProcessor {
    * Awaits old backend destruction before initialising the new one (audit item 39).
    */
   async setBackend(backend: ViewerImageBackend): Promise<void> {
+    const oldKind = this.backend.kind;
     const needsRestart =
       this.state === "running" ||
       this.state === "error" ||
@@ -205,8 +339,15 @@ export class ViewerImageProcessor {
       this.cancelFrame();
     }
 
+    lifecycleLog("Processor", "setBackend", {
+      instanceId: this.instanceId,
+      oldBackend: oldKind,
+      newBackend: backend.kind,
+      generation: this.generation,
+    });
+
     // Await old backend destruction before proceeding
-    await this.backend.destroy().catch(() => {});
+    await this.backend.destroy("Backend swap").catch(() => {});
     this.backend = backend;
     // Reset state to idle so that start() can re-initialize
     this.state = "idle";
@@ -237,6 +378,7 @@ export class ViewerImageProcessor {
     if (this.state !== "running") return;
     this.state = "paused";
     this.cancelFrame();
+    lifecycleLog("Processor", "pause", { instanceId: this.instanceId });
     this.callbacks.onStateChange?.("paused");
   }
 
@@ -246,6 +388,7 @@ export class ViewerImageProcessor {
   resume(): void {
     if (this.state !== "paused") return;
     this.state = "running";
+    lifecycleLog("Processor", "resume", { instanceId: this.instanceId });
     this.callbacks.onStateChange?.("running");
     this.scheduleFrame();
   }
@@ -267,12 +410,20 @@ export class ViewerImageProcessor {
   /**
    * Tear down the processor and release all GPU resources.
    * Idempotent: safe to call multiple times or before start().
+   *
+   * @param reason  Optional human-readable reason for the destruction (for observability).
    */
-  async destroy(): Promise<void> {
+  async destroy(reason?: string): Promise<void> {
     if (this.state === "destroyed") return;
     this.cancelFrame();
+    lifecycleLog("Processor", "destroy", {
+      instanceId: this.instanceId,
+      reason: reason ?? "unspecified",
+      state: this.state,
+      generation: this.generation,
+    });
     try {
-      await this.backend.destroy();
+      await this.backend.destroy(reason);
     } catch {
       // Swallow destroy errors
     }
@@ -319,6 +470,24 @@ export class ViewerImageProcessor {
       captureReadbackTimeMs: this.captureReadbackCount > 0
         ? this.captureReadbackTotalMs / this.captureReadbackCount
         : null,
+      drawImageTimeMs: this.drawImageCount > 0
+        ? this.drawImageTotalMs / this.drawImageCount
+        : null,
+      getImageDataTimeMs: this.getImageDataCount > 0
+        ? this.getImageDataTotalMs / this.getImageDataCount
+        : null,
+      inputBufferPreparationTimeMs: this.inputBufferPreparationCount > 0
+        ? this.inputBufferPreparationTotalMs / this.inputBufferPreparationCount
+        : null,
+      rendererToResultTimeMs: this.rendererToResultCount > 0
+        ? this.rendererToResultTotalMs / this.rendererToResultCount
+        : null,
+      textureUploadTimeMs: this.textureUploadCount > 0
+        ? this.textureUploadTotalMs / this.textureUploadCount
+        : null,
+      rendererTotalTimeMs: this.rendererTotalCount > 0
+        ? this.rendererTotalTotalMs / this.rendererTotalCount
+        : null,
       nativeTransportProcessingTimeMs: this.nativeTransportProcessingCount > 0
         ? this.nativeTransportProcessingTotalMs / this.nativeTransportProcessingCount
         : null,
@@ -333,6 +502,81 @@ export class ViewerImageProcessor {
       nativeQualityLevel: backendStats?.nativeQualityLevel ?? null,
       schedulerDrops: this.schedulerDropCount,
       nativeFailures: this.nativeFailureCount,
+
+      // ─── Main-process per-frame timing averages ─────────────────────────
+      mainInputHandlingTimeMs: this.mainInputHandlingCount > 0
+        ? this.mainInputHandlingTotalMs / this.mainInputHandlingCount
+        : null,
+      pipeWriteTimeMs: this.pipeWriteCount > 0
+        ? this.pipeWriteTotalMs / this.pipeWriteCount
+        : null,
+      pipeWaitAndReadTimeMs: this.pipeWaitAndReadCount > 0
+        ? this.pipeWaitAndReadTotalMs / this.pipeWaitAndReadCount
+        : null,
+      mainOutputPostTimeMs: this.mainOutputPostCount > 0
+        ? this.mainOutputPostTotalMs / this.mainOutputPostCount
+        : null,
+
+      // ─── Native per-stage timing averages (from frame header) ──────────
+      nativeInputReceiveTimeMs: this.nativeInputReceiveCount > 0
+        ? this.nativeInputReceiveTotalMs / this.nativeInputReceiveCount
+        : null,
+      nativeUploadTimeMs: this.nativeUploadCount > 0
+        ? this.nativeUploadTotalMs / this.nativeUploadCount
+        : null,
+      nativeEffectTimeMs: this.nativeEffectCount > 0
+        ? this.nativeEffectTotalMs / this.nativeEffectCount
+        : null,
+      nativeDownloadTimeMs: this.nativeDownloadCount > 0
+        ? this.nativeDownloadTotalMs / this.nativeDownloadCount
+        : null,
+      nativeOutputWriteTimeMs: this.nativeOutputWriteCount > 0
+        ? this.nativeOutputWriteTotalMs / this.nativeOutputWriteCount
+        : null,
+      nativeTotalTimeMs: this.nativeTotalCount > 0
+        ? this.nativeTotalTotalMs / this.nativeTotalCount
+        : null,
+
+      // Phase 6: Bounded-window rolling statistics
+      avgRendererTotalMs: this.rendererTotalStats.count > 0
+        ? this.rendererTotalStats.average()
+        : null,
+      p50RendererTotalMs: this.rendererTotalStats.count > 0
+        ? this.rendererTotalStats.median()
+        : null,
+      p95RendererTotalMs: this.rendererTotalStats.count > 0
+        ? this.rendererTotalStats.p95()
+        : null,
+      avgNativeRoundTripMs: this.nativeRoundTripStats.count > 0
+        ? this.nativeRoundTripStats.average()
+        : null,
+      p50NativeRoundTripMs: this.nativeRoundTripStats.count > 0
+        ? this.nativeRoundTripStats.median()
+        : null,
+      p95NativeRoundTripMs: this.nativeRoundTripStats.count > 0
+        ? this.nativeRoundTripStats.p95()
+        : null,
+      avgTotalLatencyMs: this.totalLatencyStats.count > 0
+        ? this.totalLatencyStats.average()
+        : null,
+      windowSampleCount: Math.min(
+        this.rendererTotalStats.count,
+        this.nativeRoundTripStats.count,
+        this.totalLatencyStats.count,
+      ),
+
+      // Phase 4: Lifecycle counters
+      sourceCallbacksReceived: this._sourceCallbacksReceived,
+      processingAttempts: this._processingAttempts,
+      coalescedFrames: this._coalescedFrames,
+      staleGenerationDrops: this._staleGenerationDrops,
+
+      // Phase 6: Processor-level counters
+      processingAttemptsTotal: this._processingAttempts,
+      completedAttempts: this._completedAttempts,
+      displayedCount: this._displayedCount,
+      backendDrops: this._backendDrops,
+      failures: this._failures,
     };
   }
 
@@ -380,6 +624,8 @@ export class ViewerImageProcessor {
   ): void => {
     if (this.state !== "running") return;
 
+    this._sourceCallbacksReceived++;
+
     // Clear handle — this callback has consumed the pending registration
     this.rvfcHandle = null;
 
@@ -393,6 +639,7 @@ export class ViewerImageProcessor {
     // Backpressure: if a frame is currently being processed async, mark
     // the newest available frame as pending and drop this invocation.
     if (this.frameInFlight) {
+      this._coalescedFrames++;
       this.pendingFrame = true;
       return;
     }
@@ -402,6 +649,8 @@ export class ViewerImageProcessor {
 
   private onRafFrame = (): void => {
     if (this.state !== "running") return;
+
+    this._sourceCallbacksReceived++;
 
     // Clear handle — this callback has consumed the pending registration
     this.rafHandle = null;
@@ -416,6 +665,7 @@ export class ViewerImageProcessor {
     // Backpressure: if a frame is currently being processed async, mark
     // the newest available frame as pending and drop this invocation.
     if (this.frameInFlight) {
+      this._coalescedFrames++;
       this.pendingFrame = true;
       this.rafHandle = requestAnimationFrame(this.onRafFrame);
       return;
@@ -428,6 +678,7 @@ export class ViewerImageProcessor {
   // ─── Async frame processing ────────────────────────────────────────────
 
   private beginFrameProcessing(): void {
+    this._processingAttempts++;
     this.frameInFlight = true;
     this.processCurrentFrameAsync().finally(() => {
       this.frameInFlight = false;
@@ -460,18 +711,25 @@ export class ViewerImageProcessor {
     });
 
     // Ignore results from stale generations (backend swap or restart)
-    if (gen !== this.generation) return;
+    if (gen !== this.generation) {
+      this._staleGenerationDrops++;
+      return;
+    }
 
     // Transient frames (video not ready yet) — skip silently
     if (result.transient) return;
 
     // Backpressure drops from the backend — skip
-    if (result.backpressureDrop) return;
+    if (result.backpressureDrop) {
+      this._backendDrops++;
+      return;
+    }
 
     if (!result.success) {
       // Don't count failures in the processed count
       this.framesProcessed--;
       this.nativeFailureCount++;
+      this._failures++;
       this.callbacks.onError?.("Frame processing failed");
       // Transition to error state so the parent can fall back to native video
       this.state = "error";
@@ -500,7 +758,33 @@ export class ViewerImageProcessor {
         this.captureReadbackTotalMs += tb.captureReadbackMs;
         this.captureReadbackCount++;
       }
+      if (tb.drawImageMs != null) {
+        this.drawImageTotalMs += tb.drawImageMs;
+        this.drawImageCount++;
+      }
+      if (tb.getImageDataMs != null) {
+        this.getImageDataTotalMs += tb.getImageDataMs;
+        this.getImageDataCount++;
+      }
+      if (tb.inputBufferPreparationMs != null) {
+        this.inputBufferPreparationTotalMs += tb.inputBufferPreparationMs;
+        this.inputBufferPreparationCount++;
+      }
+      if (tb.rendererToResultMs != null) {
+        this.rendererToResultTotalMs += tb.rendererToResultMs;
+        this.rendererToResultCount++;
+      }
+      if (tb.textureUploadMs != null) {
+        this.textureUploadTotalMs += tb.textureUploadMs;
+        this.textureUploadCount++;
+      }
+      if (tb.rendererTotalMs != null) {
+        this.rendererTotalTotalMs += tb.rendererTotalMs;
+        this.rendererTotalCount++;
+      }
       if (tb.nativeTransportProcessingMs != null) {
+        // nativeTransportProcessingMs now carries the true native-side total
+        // (from frame header) rather than duplicating rendererToResultMs
         this.nativeTransportProcessingTotalMs += tb.nativeTransportProcessingMs;
         this.nativeTransportProcessingCount++;
       }
@@ -508,12 +792,66 @@ export class ViewerImageProcessor {
         this.displayUploadTotalMs += tb.displayUploadMs;
         this.displayUploadCount++;
       }
+      // Accumulate main-process per-frame timings
+      if (tb.mainInputHandlingMs != null) {
+        this.mainInputHandlingTotalMs += tb.mainInputHandlingMs;
+        this.mainInputHandlingCount++;
+      }
+      if (tb.pipeWriteMs != null) {
+        this.pipeWriteTotalMs += tb.pipeWriteMs;
+        this.pipeWriteCount++;
+      }
+      if (tb.pipeWaitAndReadMs != null) {
+        this.pipeWaitAndReadTotalMs += tb.pipeWaitAndReadMs;
+        this.pipeWaitAndReadCount++;
+      }
+      if (tb.mainOutputPostMs != null) {
+        this.mainOutputPostTotalMs += tb.mainOutputPostMs;
+        this.mainOutputPostCount++;
+      }
+      // Accumulate native per-stage timings (from frame header)
+      if (tb.nativeInputReceiveMs != null) {
+        this.nativeInputReceiveTotalMs += tb.nativeInputReceiveMs;
+        this.nativeInputReceiveCount++;
+      }
+      if (tb.nativeUploadMs != null) {
+        this.nativeUploadTotalMs += tb.nativeUploadMs;
+        this.nativeUploadCount++;
+      }
+      if (tb.nativeEffectMs != null) {
+        this.nativeEffectTotalMs += tb.nativeEffectMs;
+        this.nativeEffectCount++;
+      }
+      if (tb.nativeDownloadMs != null) {
+        this.nativeDownloadTotalMs += tb.nativeDownloadMs;
+        this.nativeDownloadCount++;
+      }
+      if (tb.nativeOutputWriteMs != null) {
+        this.nativeOutputWriteTotalMs += tb.nativeOutputWriteMs;
+        this.nativeOutputWriteCount++;
+      }
+      if (tb.nativeTotalMs != null) {
+        this.nativeTotalTotalMs += tb.nativeTotalMs;
+        this.nativeTotalCount++;
+      }
+      // Push to bounded-window rolling stats
+      if (tb.rendererTotalMs != null) {
+        this.rendererTotalStats.push(tb.rendererTotalMs);
+      }
+      if (tb.rendererToResultMs != null) {
+        this.nativeRoundTripStats.push(tb.rendererToResultMs);
+      }
     }
 
     if (result.totalLatencyMs != null) {
       this.totalLatencySumMs += result.totalLatencyMs;
       this.totalLatencyCount++;
+      this.totalLatencyStats.push(result.totalLatencyMs);
     }
+
+    // Increment processor-level counters
+    this._completedAttempts++;
+    this._displayedCount++;
 
     // Fire first-frame callback once
     if (!this.firstFrameFired) {

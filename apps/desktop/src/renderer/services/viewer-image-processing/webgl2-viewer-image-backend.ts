@@ -44,6 +44,7 @@ import type {
   FrameMetadata,
   BackendStats,
 } from "./viewer-image-backend";
+import { nextMonotonicId, lifecycleLog } from "./lifecycle-id";
 
 // Vite ?raw imports for shader source strings
 import fullscreenVert from "./shaders/fullscreen.vert.glsl?raw";
@@ -167,6 +168,8 @@ function computeEasuConstants(
 
 export class WebGL2ViewerImageBackend implements ViewerImageBackend {
   readonly kind: BackendKind = "webgl2";
+  /** Stable monotonically increasing instance identifier for lifecycle tracking */
+  readonly instanceId: number = nextMonotonicId();
 
   // Core GL state
   private gl: WebGL2RenderingContext | null = null;
@@ -941,7 +944,12 @@ export class WebGL2ViewerImageBackend implements ViewerImageBackend {
 
   // ─── Cleanup ───────────────────────────────────────────────────────────
 
-  async destroy(): Promise<void> {
+  async destroy(reason?: string): Promise<void> {
+    lifecycleLog("WebGL2Backend", "destroy", {
+      instanceId: this.instanceId,
+      reason: reason ?? "unspecified",
+    });
+
     if (this._onContextLost && this.canvas) {
       this.canvas.removeEventListener(
         "webglcontextlost",
