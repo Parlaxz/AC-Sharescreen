@@ -137,6 +137,7 @@ const api: ScreenLinkAPI = {
   // Video helper
   videoHelperStart: (config) => ipcRenderer.invoke("video-helper:start", config),
   videoHelperStop: (shutdown) => ipcRenderer.invoke("video-helper:stop", shutdown),
+  videoHelperReconfigure: (config) => ipcRenderer.invoke("video-helper:reconfigure", config),
   videoHelperSubmitFrame: (generation, frameSequence, frameData, inputWidth, inputHeight) =>
     ipcRenderer.invoke("video-helper:submit-frame", generation, frameSequence, frameData, inputWidth, inputHeight),
   videoHelperFlush: () => ipcRenderer.invoke("video-helper:flush"),

@@ -687,9 +687,14 @@ export function registerIpcHandlers(
     await manager.stop(shutdown ?? false);
   });
 
-  ipcMain.handle("video-helper:submit-frame", async (_event, generation: number, frameSequence: number, frameData: number[], inputWidth: number, inputHeight: number) => {
+  ipcMain.handle("video-helper:reconfigure", async (_event, config: VideoEnhancerConfig) => {
     const manager = ensureVideoHelperManager();
-    const buffer = new Uint8Array(frameData);
+    return await manager.reconfigure(config);
+  });
+
+  ipcMain.handle("video-helper:submit-frame", async (_event, generation: number, frameSequence: number, frameData: Buffer | Uint8Array, inputWidth: number, inputHeight: number) => {
+    const manager = ensureVideoHelperManager();
+    const buffer = frameData instanceof Uint8Array ? frameData : Buffer.from(frameData);
     return await manager.submitFrame(generation, frameSequence, buffer, inputWidth, inputHeight);
   });
 

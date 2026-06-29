@@ -50,7 +50,7 @@ import {
   subscribeToNvidiaCapability,
 } from "@/services/nvidia-capability-store";
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Viewer quality request state Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//  Viewer quality request state 
 
 /**
  * The viewer's requested quality values. These map directly to the
@@ -79,7 +79,7 @@ function NvidiaCapabilityStatus() {
   }
 
   if (!capability.available) {
-    const reason = capability.reason.split("-").join(" ");
+    const reason = capability.reason.split("-").join(" - ");
 
     return (
       <p className="text-[10px] text-amber-500">
@@ -91,7 +91,7 @@ function NvidiaCapabilityStatus() {
   return (
     <p className="text-[10px] text-emerald-500">
       NVIDIA RTX Video available
-      {capability.adapterName ? ` â€” ${capability.adapterName}` : ""}.
+      {capability.adapterName ? `  ${capability.adapterName}` : "N/A"}.
     </p>
   );
 }
@@ -130,7 +130,7 @@ export const RESOLUTION_CHOICES: Array<{ label: string; w: number; h: number }> 
   { label: "144p", w: 256, h: 144 },
 ];
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Props Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//  Props 
 
 interface ViewerSettingsPanelProps {
   /** Current viewer request state (null = no request = host defaults) */
@@ -183,14 +183,14 @@ interface ViewerSettingsPanelProps {
   contentOnly?: boolean;
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//  Helpers 
 
 /** Clamp a value between min and max */
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Enhancement slider sub-component Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//  Enhancement slider sub-component 
 
 /**
  * A single slider + number-input pair for GPU image enhancement controls.
@@ -271,7 +271,7 @@ function EnhancementSliderControl({
   );
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Preset type from store Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//  Preset type from store 
 
 interface StorePreset {
   id: string;
@@ -279,10 +279,10 @@ interface StorePreset {
   settings: Record<string, unknown>;
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ ViewerSettingsPanel Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//  ViewerSettingsPanel 
 
 /**
- * ViewerSettingsPanel Ã¢â‚¬â€ Quality request controls with explicit resolution,
+ * ViewerSettingsPanel  Quality request controls with explicit resolution,
  * FPS, and bitrate inputs. Sends `quality.viewer.request` protocol messages
  * via the parent callback.
  */
@@ -440,7 +440,7 @@ export function ViewerSettingsPanel({
 
   const isCustom = requestState === null;
 
-  // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Algorithm helper Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+  //  Algorithm helper 
   const algorithm = enhancementSettings.webglScalingAlgorithm ?? "native";
   const isFsr = algorithm === "fsr1-easu";
 
@@ -451,7 +451,7 @@ export function ViewerSettingsPanel({
         <TabsTrigger value="enhancements" className="flex-1 text-xs">Image Enhancements</TabsTrigger>
       </TabsList>
 
-      {/* Ã¢â€â‚¬Ã¢â€â‚¬ General tab (existing quality controls) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */}
+      {/*  General tab (existing quality controls)  */}
       <TabsContent value="general" className="mt-0">
         <div className="grid grid-cols-2 gap-3">
           {qualityPresets.length > 0 && (
@@ -632,7 +632,7 @@ export function ViewerSettingsPanel({
         </div>
       </TabsContent>
 
-      {/* Ã¢â€â‚¬Ã¢â€â‚¬ Image Enhancements tab Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */}
+      {/*  Image Enhancements tab  */}
       <TabsContent value="enhancements" className="mt-0 max-h-[60vh] overflow-y-auto">
         <div className="space-y-3">
           {/* Master toggle */}
@@ -739,7 +739,7 @@ export function ViewerSettingsPanel({
             />
           </div>
 
-          {/* FSR Target Scale Ã¢â‚¬â€ only when FSR 1 EASU is selected */}
+          {/* FSR Target Scale  only when FSR 1 EASU is selected */}
           {isFsr && (
             <div>
               <div className="flex items-center justify-between mb-1">
@@ -766,7 +766,7 @@ export function ViewerSettingsPanel({
             </div>
           )}
 
-          {/* FSR Final Scaler Ã¢â‚¬â€ only when FSR is selected */}
+          {/* FSR Final Scaler  only when FSR is selected */}
           {isFsr && (
             <div>
               <div className="flex items-center justify-between mb-1">
@@ -793,7 +793,7 @@ export function ViewerSettingsPanel({
             </div>
           )}
 
-          {/* NVIDIA RTX Video Settings Ã¢â‚¬â€ disabled until renderer pipeline exists */}
+          {/* NVIDIA RTX Video Settings  disabled until renderer pipeline exists */}
           <hr className="border-border-subtle" />
           <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
           <NvidiaCapabilityStatus />
@@ -810,7 +810,7 @@ export function ViewerSettingsPanel({
             </Button>
           </div>
 
-          {/* Ã¢â€â‚¬Ã¢â€â‚¬ Processing statistics Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */}
+          {/*  Processing statistics  */}
               {enhancementSettings.enabled && enhancementStats && (
             <div className="pt-2 border-t border-border-subtle">
               <p className="text-[10px] text-text-muted uppercase tracking-wide mb-2">Processing Stats</p>
@@ -855,7 +855,7 @@ export function ViewerSettingsPanel({
                   <>
                     <span className="text-text-muted">RCAS</span>
                     <span className="text-text-secondary font-mono text-right">
-                      {enhancementStats.rcasActive ? "Active" : "Ã¢â‚¬â€"}
+                      {enhancementStats.rcasActive ? "Active" : "Off"}
                     </span>
                   </>
                 )}
@@ -863,7 +863,7 @@ export function ViewerSettingsPanel({
                   <>
                     <span className="text-text-muted">Passes</span>
                     <span className="text-text-secondary font-mono text-right text-[10px]">
-                      {enhancementStats.activePasses.join(" Ã¢â€ â€™ ")}
+                      {enhancementStats.activePasses.join("  ")}
                     </span>
                   </>
                 )}
@@ -887,17 +887,19 @@ export function ViewerSettingsPanel({
                     </span>
                   </>
                 )}
-                <span className="text-text-muted">GPU Time</span>
+                <span className="text-text-muted">Native Round Trip</span>
                 <span className="text-text-secondary font-mono text-right">
                   {enhancementStats.processingTimeMs != null
                     ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
-                    : "Ã¢â‚¬â€"}
+                    : "N/A"}
                 </span>
                 <span className="text-text-muted">Algorithm</span>
                 <span className="text-text-secondary font-mono text-right">
-                  {enhancementStats.scalingAlgorithm
-                    ? SCALING_ALGORITHM_LABELS[enhancementStats.scalingAlgorithm] ?? enhancementStats.scalingAlgorithm
-                    : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
+                  {enhancementStats.backend === "nvidia-vsr"
+                    ? "NVIDIA RTX Video"
+                    : enhancementStats.scalingAlgorithm
+                      ? SCALING_ALGORITHM_LABELS[enhancementStats.scalingAlgorithm] ?? enhancementStats.scalingAlgorithm
+                      : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
                 </span>
               </div>
             </div>

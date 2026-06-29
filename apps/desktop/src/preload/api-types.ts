@@ -143,7 +143,8 @@ export interface ScreenLinkAPI {
   // Video helper
   videoHelperStart: (config: Record<string, unknown>) => Promise<boolean>;
   videoHelperStop: (shutdown?: boolean) => Promise<void>;
-  videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: number[], inputWidth: number, inputHeight: number) => Promise<boolean>;
+  videoHelperReconfigure: (config: Record<string, unknown>) => Promise<boolean>;
+  videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: Uint8Array, inputWidth: number, inputHeight: number) => Promise<boolean>;
   videoHelperFlush: () => Promise<boolean>;
   videoHelperGetState: () => Promise<string>;
 
