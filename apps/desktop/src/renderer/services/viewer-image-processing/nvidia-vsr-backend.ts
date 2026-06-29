@@ -317,7 +317,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   }
 
   /**
-   * Submit a frame via the MessagePort (zero-copy) instead of IPC invoke.
+   * Submit a frame via the MessagePort using structured-cloned binary data.
    */
   private submitFrameViaPort(
     generation: number,
@@ -384,15 +384,13 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         });
       };
 
-      // Transfer the pixel buffer (zero-copy)
+      // Send the exact-size pixel buffer through structured clone
       const buffer = frameData.buffer.slice(
         frameData.byteOffset,
         frameData.byteOffset + frameData.byteLength,
       );
       port.postMessage(
-        { generation, frameSequence, inputWidth, inputHeight, frameData: buffer },
-        [buffer],
-      );
+        { generation, frameSequence, inputWidth, inputHeight, frameData: buffer });
     });
   }
 
