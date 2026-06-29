@@ -6,27 +6,48 @@ import { VIDEO_ENHANCER_PROTOCOL_VERSION } from "./video-enhancer-protocol.js";
 import type { VideoEnhancerConfig } from "./video-enhancer-protocol.js";
 import { getVideoEnhancerHelperPath } from "./helper-path.js";
 
-// --- Types────────────────────────────────────────────────────€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
+// --- Types ──────────────────────────────────────────────────────────
 
 export type VideoHelperState =
- | "disconnected"
- | "connecting"
- | "handshaking"
- | "ready"
- | "processing"
- | "error";
+  | "disconnected"
+  | "connecting"
+  | "handshaking"
+  | "ready"
+  | "processing"
+  | "error";
 
 export interface VideoHelperCallbacks {
- onStateChange?: (state: VideoHelperState) => void;
- onError?: (reason: string) => void;
- onFrameComplete?: (generation: number, frameSequence: number) => void;
+  onStateChange?: (state: VideoHelperState) => void;
+  onError?: (reason: string) => void;
+  onFrameComplete?: (generation: number, frameSequence: number) => void;
 }
 
-// €‚€‚€‚ Manager €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
+// Frame response type
+interface FrameResponse {
+  generation: number;
+  sequence: number;
+  pixels: Uint8Array;
+  width: number;
+  height: number;
+  nativeInputReceiveMs?: number;
+  nativeUploadMs?: number;
+  nativeEffectMs?: number;
+  nativeDownloadMs?: number;
+  nativePreWriteTotalMs?: number;
+}
 
-// ─── Main-process lifecycle logging ─────────────────────────────────────────
+// ─── Client lease ─────────────────────────────────────────────────────
 
-let _lifecycleLogging = true; // low-volume; always on in main process
+interface ClientInfo {
+  clientId: string;
+  generation: number;
+  framePort: Electron.MessagePortMain | null;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+}
+
+// ─── Manager lifecycle logging ────────────────────────────────────────
+
+let _lifecycleLogging = true;
 
 function helperLifecycleLog(event: string, details?: Record<string, unknown>): void {
   if (!_lifecycleLogging) return;
@@ -37,47 +58,355 @@ function helperLifecycleLog(event: string, details?: Record<string, unknown>): v
   }
 }
 
+// ─── Frame pipe parser (one persistent instance per frame socket) ─────
+
+const FRAME_MAGIC = 0x464C4156454D5246n;
+const HEADER_SIZE = 104;
+
+enum ParserState {
+  Header = 0,
+  Payload = 1,
+}
+
+interface PendingFrame {
+  generation: number;
+  frameSequence: number;
+  resolve: (result: FrameResponse | null) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+class FramePipeParser {
+  private state = ParserState.Header;
+  private headerBuf = Buffer.alloc(0);
+  private payloadBuf: Buffer | null = null;
+  private payloadRead = 0;
+  private pending: PendingFrame | null = null;
+  private header: {
+    generation: number;
+    frameSequence: number;
+    resultCode: number;
+    payloadBytes: number;
+    width: number;
+    height: number;
+    nativeInputReceiveUs: number;
+    nativeUploadUs: number;
+    nativeEffectUs: number;
+    nativeDownloadUs: number;
+    nativeOutputWriteUs: number;
+    nativeTotalUs: number;
+  } | null = null;
+
+  reset(): void {
+    this.state = ParserState.Header;
+    this.headerBuf = Buffer.alloc(0);
+    this.payloadBuf = null;
+    this.payloadRead = 0;
+    this.header = null;
+    if (this.pending) {
+      clearTimeout(this.pending.timeout);
+      this.pending.resolve(null);
+      this.pending = null;
+    }
+  }
+
+  /** Install a pending correlation before writing. */
+  installPending(
+    generation: number,
+    frameSequence: number,
+    resolve: (result: FrameResponse | null) => void,
+    timeoutMs: number,
+  ): { timeout: ReturnType<typeof setTimeout> } {
+    if (this.pending) {
+      // Should not happen — only one in-flight per parser
+      clearTimeout(this.pending.timeout);
+      this.pending.resolve(null);
+    }
+    const timeout = setTimeout(() => {
+      if (this.pending) {
+        const p = this.pending;
+        this.pending = null;
+        this.reset();
+        p.resolve(null);
+      }
+    }, timeoutMs);
+    this.pending = { generation, frameSequence, resolve, timeout };
+    return { timeout };
+  }
+
+  /** Feed incoming chunk data. Returns FrameResponse when a complete result is parsed. */
+  feed(chunk: Buffer): FrameResponse | null {
+    if (this.state === ParserState.Header) {
+      this.headerBuf = Buffer.concat([this.headerBuf, chunk]);
+
+      while (this.headerBuf.length >= HEADER_SIZE) {
+        const magic = this.headerBuf.readBigUInt64LE(0);
+        if (magic !== FRAME_MAGIC) {
+          // Invalid magic — reset
+          this.reset();
+          return null;
+        }
+
+        const resultCode = this.headerBuf.readUInt32LE(76);
+        const payloadBytes = this.headerBuf.readUInt32LE(60);
+
+        if (payloadBytes > 200 * 1024 * 1024) {
+          // Too large — protocol error
+          this.reset();
+          return null;
+        }
+
+        this.header = {
+          generation: this.headerBuf.readUInt32LE(16),
+          frameSequence: this.headerBuf.readUInt32LE(20),
+          resultCode,
+          payloadBytes,
+          width: this.headerBuf.readUInt32LE(32),
+          height: this.headerBuf.readUInt32LE(36),
+          nativeInputReceiveUs: this.headerBuf.readUInt32LE(80),
+          nativeUploadUs: this.headerBuf.readUInt32LE(84),
+          nativeEffectUs: this.headerBuf.readUInt32LE(88),
+          nativeDownloadUs: this.headerBuf.readUInt32LE(92),
+          nativeOutputWriteUs: this.headerBuf.readUInt32LE(96),
+          nativeTotalUs: this.headerBuf.readUInt32LE(100),
+        };
+
+        // Move past header
+        const extra = this.headerBuf.length - HEADER_SIZE;
+        this.headerBuf = this.headerBuf.subarray(HEADER_SIZE);
+
+        if (this.header.resultCode !== 1) {
+          // Error or pending
+          const p = this.pending;
+          this.pending = null;
+          if (p) {
+            clearTimeout(p.timeout);
+            p.resolve(null);
+          }
+          this.reset();
+          return null;
+        }
+
+        if (payloadBytes === 0) {
+          // Empty payload
+          const p = this.pending;
+          this.pending = null;
+          if (p) {
+            clearTimeout(p.timeout);
+            p.resolve(null);
+          }
+          this.reset();
+          return null;
+        }
+
+        this.state = ParserState.Payload;
+        this.payloadBuf = Buffer.alloc(payloadBytes);
+        this.payloadRead = 0;
+
+        // Copy any already-in-buffer payload bytes
+        if (extra > 0) {
+          const toCopy = Math.min(extra, payloadBytes);
+          this.headerBuf.copy(this.payloadBuf, 0, 0, toCopy);
+          this.payloadRead = toCopy;
+          this.headerBuf = this.headerBuf.subarray(toCopy);
+        }
+
+        // Check if payload complete
+        if (this.payloadRead >= payloadBytes) {
+          return this.emitResult();
+        }
+      }
+      return null;
+    }
+
+    // Payload state
+    if (this.state === ParserState.Payload && this.payloadBuf && this.header) {
+      const remaining = this.payloadBuf.length - this.payloadRead;
+      const toCopy = Math.min(remaining, chunk.length);
+      chunk.copy(this.payloadBuf, this.payloadRead, 0, toCopy);
+      this.payloadRead += toCopy;
+      const leftover = chunk.subarray(toCopy);
+
+      if (this.payloadRead >= this.payloadBuf.length) {
+        const result = this.emitResult();
+        // If there's leftover data, recurse for potential multiple responses
+        if (leftover.length > 0) {
+          return this.feed(leftover) ?? result;
+        }
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  private emitResult(): FrameResponse | null {
+    if (!this.header || !this.payloadBuf) return null;
+
+    const h = this.header;
+    const p = this.pending;
+
+    // Check generation/sequence match BEFORE clearing state
+    if (p && (h.generation !== p.generation || h.frameSequence !== p.frameSequence)) {
+      // Mismatch — stale or out-of-order response; resolve pending with null
+      this.pending = null;
+      if (p) {
+        clearTimeout(p.timeout);
+        p.resolve(null);
+      }
+      this.reset();
+      return null;
+    }
+
+    // Build result BEFORE resetting state
+    const result: FrameResponse = {
+      generation: h.generation,
+      sequence: h.frameSequence,
+      pixels: this.payloadBuf,
+      width: h.width,
+      height: h.height,
+      nativeInputReceiveMs: h.nativeInputReceiveUs > 0 ? h.nativeInputReceiveUs / 1000 : undefined,
+      nativeUploadMs: h.nativeUploadUs > 0 ? h.nativeUploadUs / 1000 : undefined,
+      nativeEffectMs: h.nativeEffectUs > 0 ? h.nativeEffectUs / 1000 : undefined,
+      nativeDownloadMs: h.nativeDownloadUs > 0 ? h.nativeDownloadUs / 1000 : undefined,
+      nativePreWriteTotalMs: h.nativeTotalUs > 0 ? h.nativeTotalUs / 1000 : undefined,
+    };
+
+    // Clear pending before resetting
+    this.pending = null;
+    if (p) {
+      clearTimeout(p.timeout);
+      p.resolve(result);
+    }
+    // reset() clears headerBuf, payloadBuf, header; result still holds payloadBuf ref
+    this.reset();
+    return result;
+  }
+
+  get hasPending(): boolean {
+    return this.pending !== null;
+  }
+}
+
+// ─── Manager ─────────────────────────────────────────────────────────
+
 export class VideoHelperManager {
   // Core state
   private helper: ChildProcess | null = null;
   private state: VideoHelperState = "disconnected";
   private callbacks: VideoHelperCallbacks = {};
 
- // Session identity
- private sessionId = "";
- private authToken = "";
+  // Session identity
+  private sessionId = "";
+  private authToken = "";
 
- // Pipe names
- private ctrlPipeName = "";
+  // Pipe names
+  private ctrlPipeName = "";
 
- // Control client
- private controlSocket: net.Socket | null = null;
+  // Control client
+  private controlSocket: net.Socket | null = null;
 
- // Lifecycle guards
- private lifecycleGeneration = 0;
- private shuttingDown_ = false;
- private restartAttempts = 0;
- private readonly maxRestarts = 3;
- private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  // Lifecycle guards
+  private lifecycleGeneration = 0;
+  private shuttingDown_ = false;
+  private restartAttempts = 0;
+  private readonly maxRestarts = 3;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
 
- // Last config for restart
- private lastConfig: VideoEnhancerConfig | null = null;
+  // Last config for restart
+  private lastConfig: VideoEnhancerConfig | null = null;
 
- // All callers share one in-progress helper startup.
- private startPromise: Promise<boolean> | null = null;
+  // All callers share one in-progress helper startup.
+  private startPromise: Promise<boolean> | null = null;
 
- // Diagnostics interval
- private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
+  // Diagnostics interval
+  private diagnosticsInterval: ReturnType<typeof setInterval> | null = null;
 
- constructor() {
- // Lazy initialization
- }
+  // ── Client lease system ─────────────────────────────────────────────
+  private clients = new Map<string, ClientInfo>();
+  private idleShutdownTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly IDLE_SHUTDOWN_MS = 2000;
 
- // €‚€‚€‚ Public API €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
+  // ── Frame pipe ──────────────────────────────────────────────────────
+  private framePipeClient: net.Socket | null = null;
+  private framePipeConnected = false;
+  private framePipeName = "";
+  private frameParser: FramePipeParser | null = null;
 
- /**
- * Start the video-helper and establish control connection.
- */
+  // ── Frame port management ────────────────────────────────────────────
+  private framePorts = new Map<string, Electron.MessagePortMain>();
+
+  constructor() {
+    // Lazy initialization
+  }
+
+  // ── Client lease API ─────────────────────────────────────────────────
+
+  /**
+   * Acquire an opaque clientId for the renderer.
+   * Extends/creates the idle shutdown timer.
+   */
+  acquireClient(): string {
+    this.cancelIdleShutdown();
+    const clientId = randomUUID();
+    const client: ClientInfo = {
+      clientId,
+      generation: 0,
+      framePort: null,
+      idleTimer: null,
+    };
+    this.clients.set(clientId, client);
+    helperLifecycleLog("clientAcquire", { clientId, activeClients: this.clients.size });
+    return clientId;
+  }
+
+  /**
+   * Release a client lease. Idempotent. Closes only that client's frame port.
+   * Stops the helper only if the idle shutdown timer expires without reacquire.
+   */
+  releaseClient(clientId: string): void {
+    const client = this.clients.get(clientId);
+    if (!client) {
+      helperLifecycleLog("clientRelease (stale)", { clientId });
+      return; // Stale release — idempotent, cannot stop newer resources
+    }
+
+    // Close this client's frame port only
+    this.closeClientFramePort(clientId);
+    this.clients.delete(clientId);
+    helperLifecycleLog("clientRelease", { clientId, activeClients: this.clients.size });
+
+    // If no clients remain, start the idle shutdown grace period
+    if (this.clients.size === 0) {
+      this.startIdleShutdown();
+    }
+  }
+
+  /**
+   * Validate that a clientId is still active (has an active lease).
+   */
+  isClientActive(clientId: string): boolean {
+    return this.clients.has(clientId);
+  }
+
+  // ── Idle shutdown ───────────────────────────────────────────────────
+
+  private startIdleShutdown(): void {
+    this.cancelIdleShutdown();
+    this.idleShutdownTimer = setTimeout(() => {
+      helperLifecycleLog("idleShutdown", { lifecycleGeneration: this.lifecycleGeneration });
+      this.stop(false).catch(() => {});
+    }, this.IDLE_SHUTDOWN_MS);
+  }
+
+  private cancelIdleShutdown(): void {
+    if (this.idleShutdownTimer) {
+      clearTimeout(this.idleShutdownTimer);
+      this.idleShutdownTimer = null;
+    }
+  }
+
+  // ── Public API ──────────────────────────────────────────────────────
+
   async start(config: VideoEnhancerConfig): Promise<boolean> {
     if (this.state === "ready" || this.state === "processing") {
       const current = this.lastConfig;
@@ -108,903 +437,182 @@ export class VideoHelperManager {
       return this.reconfigure(config);
     }
 
- if (this.startPromise) {
- console.log(
- `[VideoHelper] Joining startup already in progress (${this.state})`,
- );
+    if (this.startPromise) {
+      console.log(
+        `[VideoHelper] Joining startup already in progress (${this.state})`,
+      );
+      return this.startPromise;
+    }
 
- return this.startPromise;
- }
+    const pendingStartup = this.startHelper(config);
+    this.startPromise = pendingStartup;
 
- const pendingStartup = this.startHelper(config);
- this.startPromise = pendingStartup;
-
- try {
- return await pendingStartup;
- }
- finally {
- if (this.startPromise === pendingStartup) {
- this.startPromise = null;
- }
- }
- }
+    try {
+      return await pendingStartup;
+    }
+    finally {
+      if (this.startPromise === pendingStartup) {
+        this.startPromise = null;
+      }
+    }
+  }
 
   /**
    * Submit a frame for processing via the persistent frame pipe.
-   * Writes header + pixel data to the already-connected pipe.
-   * Returns result with pixel data, dimensions, and per-frame timing breakdowns.
+   * Serializes header as its own Buffer and writes header + pixel data
+   * separately with backpressure handling.
    */
   async submitFrame(
-  generation: number,
-  frameSequence: number,
-  frameData: Uint8Array,
-  inputWidth: number,
-  inputHeight: number,
+    generation: number,
+    frameSequence: number,
+    frameData: Uint8Array,
+    inputWidth: number,
+    inputHeight: number,
   ): Promise<{
     generation: number;
     sequence: number;
     pixels: Uint8Array;
     width: number;
     height: number;
-    /** Main-process per-frame timings (ms) */
     mainInputHandlingMs?: number;
-    pipeWriteMs?: number;
-    pipeWaitAndReadMs?: number;
-    mainOutputPostMs?: number;
-    /** Native per-stage timings from frame header (μs converted to ms) */
+    requestWriteMs?: number;
+    responseWaitMs?: number;
+    mainHandlerTotalMs?: number;
     nativeInputReceiveMs?: number;
     nativeUploadMs?: number;
     nativeEffectMs?: number;
     nativeDownloadMs?: number;
-    nativeOutputWriteMs?: number;
-    nativeTotalMs?: number;
+    nativePreWriteTotalMs?: number;
   } | null> {
-  if (this.state !== "ready" && this.state !== "processing") return null;
+    if (this.state !== "ready" && this.state !== "processing") return null;
 
-  const mainStart = performance.now();
+    const mainStart = performance.now();
 
-  try {
-  const config = this.lastConfig;
-  const outW = config?.outputWidth ?? inputWidth;
-  const outH = config?.outputHeight ?? inputHeight;
-  const mode = config?.processingMode ?? "vsr";
-  const qual = config?.qualityLevel ?? "high";
-  const modeNum = mode === "vsr" ? 1 : mode === "high-bitrate" ? 2 : mode === "denoise" ? 3 : 4;
-  const qualNum = qual === "low" ? 0 : qual === "medium" ? 1 : qual === "ultra" ? 3 : 2;
+    try {
+      const config = this.lastConfig;
+      const outW = config?.outputWidth ?? inputWidth;
+      const outH = config?.outputHeight ?? inputHeight;
+      const mode = config?.processingMode ?? "vsr";
+      const qual = config?.qualityLevel ?? "high";
+      const modeNum = mode === "vsr" ? 1 : mode === "high-bitrate" ? 2 : mode === "denoise" ? 3 : 4;
+      const qualNum = qual === "low" ? 0 : qual === "medium" ? 1 : qual === "ultra" ? 3 : 2;
 
-  const afterInputHandling = performance.now();
-  const mainInputHandlingMs = afterInputHandling - mainStart;
+      const afterInputHandling = performance.now();
+      const mainInputHandlingMs = afterInputHandling - mainStart;
 
-  // Ensure persistent frame pipe connection
-  if (!this.framePipeConnected) {
-  const connected = await this.connectFramePipe();
-  if (!connected) return null;
+      // Ensure persistent frame pipe connection
+      if (!this.framePipeConnected) {
+        const connected = await this.connectFramePipe();
+        if (!connected) return null;
+      }
+
+      // Serialize header into its own Buffer (no Buffer.concat with pixel data)
+      const headerBuf = Buffer.alloc(HEADER_SIZE);
+      let off = 0;
+      headerBuf.writeBigUInt64LE(BigInt("0x464C4156454D5246"), off); off += 8;
+      headerBuf.writeUInt32LE(HEADER_SIZE, off); off += 4;
+      headerBuf.writeUInt32LE(1, off); off += 4; // wireVersion
+      headerBuf.writeUInt32LE(generation, off); off += 4;
+      headerBuf.writeUInt32LE(frameSequence, off); off += 4;
+      headerBuf.writeBigUInt64LE(BigInt(Math.round(performance.now() * 1000)), off); off += 8;
+      headerBuf.writeUInt32LE(inputWidth, off); off += 4;
+      headerBuf.writeUInt32LE(inputHeight, off); off += 4;
+      headerBuf.writeUInt32LE(inputWidth * 4, off); off += 4; // inputStride
+      headerBuf.writeUInt32LE(2, off); off += 4; // pixelFormat = RGBA8
+      headerBuf.writeUInt32LE(outW, off); off += 4;
+      headerBuf.writeUInt32LE(outH, off); off += 4;
+      headerBuf.writeUInt32LE(0, off); off += 4; // slotIndex
+      headerBuf.writeUInt32LE(frameData.byteLength, off); off += 4; // payloadBytes
+      headerBuf.writeUInt32LE(modeNum, off); off += 4;
+      headerBuf.writeUInt32LE(qualNum, off); off += 4;
+      headerBuf.writeUInt32LE(0, off); off += 4; // flags
+      headerBuf.writeUInt32LE(0, off); off += 4; // resultCode
+      headerBuf.writeUInt32LE(0, off); off += 4; // nativeInputReceiveUs
+      headerBuf.writeUInt32LE(0, off); off += 4; // nativeUploadUs
+      headerBuf.writeUInt32LE(0, off); off += 4; // nativeEffectUs
+      headerBuf.writeUInt32LE(0, off); off += 4; // nativeDownloadUs
+      headerBuf.writeUInt32LE(0, off); off += 4; // nativeOutputWriteUs (always 0 in per-frame)
+      headerBuf.writeUInt32LE(0, off);      // nativeTotalUs
+
+      const socket = this.framePipeClient;
+      if (!socket || !socket.writable) return null;
+
+      // Create zero-copy Buffer view from frameData
+      const pixelBuf = Buffer.from(frameData.buffer, frameData.byteOffset, frameData.byteLength);
+
+      // Install pending correlation BEFORE writing, then write header + payload separately.
+      // requestWriteMs measures actual write accept duration (header + payload write callbacks).
+      // responseWaitMs measures from write completion to result arrival (native processing + pipe round-trip).
+      const writeStart = performance.now();
+      let writeEndTs = writeStart;
+
+      const result = await new Promise<FrameResponse | null>((resolve) => {
+        if (!this.frameParser) {
+          resolve(null);
+          return;
+        }
+
+        this.frameParser.installPending(generation, frameSequence, resolve, 5000);
+
+        // Write header first, then payload. The pixel write callback records writeEndTs.
+        socket!.write(headerBuf, (err) => {
+          if (err) { resolve(null); return; }
+          socket!.write(pixelBuf, (writeErr) => {
+            writeEndTs = performance.now();
+            if (writeErr) { resolve(null); return; }
+            // Both writes accepted; result arrives asynchronously via parser
+          });
+        });
+      });
+
+      const afterResult = performance.now();
+      const actualRequestWriteMs = writeEndTs - writeStart;
+      const actualResponseWaitMs = afterResult - writeEndTs;
+      const mainHandlerTotalMs = afterResult - mainStart;
+
+      if (!result) return null;
+
+      // Attach main-process timings
+      return {
+        generation: result.generation,
+        sequence: result.sequence,
+        pixels: result.pixels,
+        width: result.width,
+        height: result.height,
+        mainInputHandlingMs,
+        requestWriteMs: actualRequestWriteMs,
+        responseWaitMs: actualResponseWaitMs,
+        mainHandlerTotalMs,
+        nativeInputReceiveMs: result.nativeInputReceiveMs,
+        nativeUploadMs: result.nativeUploadMs,
+        nativeEffectMs: result.nativeEffectMs,
+        nativeDownloadMs: result.nativeDownloadMs,
+        nativePreWriteTotalMs: result.nativePreWriteTotalMs,
+      };
+    } catch {
+      return null;
+    }
   }
 
-  const afterPipeConnect = performance.now();
-  const pipeWriteMs = afterPipeConnect - afterInputHandling;
-
-  const sent = await this.sendFrameData({
-  generation,
-  frameSequence,
-  capturedAtUs: BigInt(Math.round(performance.now() * 1000)),
-  inputWidth,
-  inputHeight,
-  inputStride: inputWidth * 4,
-  pixelFormat: 2, // RGBA8
-  requestedOutputWidth: outW,
-  requestedOutputHeight: outH,
-  processingMode: modeNum,
-  qualityLevel: qualNum,
-  payloadBytes: frameData.byteLength,
-  }, frameData);
-
-  const afterResult = performance.now();
-  // pipeWaitAndReadMs = time spent waiting for native result (the bulk of round-trip)
-  const pipeWaitAndReadMs = afterResult - afterPipeConnect;
-  const mainOutputPostMs = afterResult - afterInputHandling; // post-input handling time
-
-  if (!sent) return null;
-
-  // Attach main-process timings and native timings from the response
-  return {
-    ...sent,
-    mainInputHandlingMs,
-    pipeWriteMs,
-    pipeWaitAndReadMs,
-    mainOutputPostMs,
-  };
-  } catch {
-  return null;
-  }
-  }
-
- private framePipeClient: net.Socket | null = null;
- private framePipeConnected = false;
- private framePipeName = "";
-
- private connectFramePipe(): Promise<boolean> {
- return new Promise((resolve) => {
- if (this.framePipeClient) {
- this.framePipeClient.destroy();
- this.framePipeClient = null;
- }
- this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
- const client = net.createConnection(`\\\\.\\pipe\\${this.framePipeName}`, () => {
- this.framePipeClient = client;
- this.framePipeConnected = true;
- resolve(true);
- });
- client.on("error", () => {
- this.framePipeConnected = false;
- resolve(false);
- });
- client.setTimeout(5000, () => {
- client.destroy();
- this.framePipeConnected = false;
- resolve(false);
- });
- });
- }
-
- /**
- * Stop processing and optionally shut down the helper.
- */
-  async stop(shutdown = false): Promise<void> {
-  // Invalidate any asynchronous startup that has not completed.
-  this.lifecycleGeneration += 1;
-  this.startPromise = null;
-  this.shuttingDown_ = true;
-  this.clearDiagnosticsInterval();
-  this.clearRestartTimer();
-
-  helperLifecycleLog("helperStop", {
-    lifecycleGeneration: this.lifecycleGeneration,
-    shutdown,
-    lastState: this.state,
-  });
-
-  if (shutdown && this.controlSocket) {
-  await this.sendCommand("shutdown", {}).catch(() => {});
-  }
-
-  await this.cleanup();
-  this.state = "disconnected";
-  this.callbacks.onStateChange?.("disconnected");
-  }
-
- /**
- * Update processing configuration.
- */
-  async reconfigure(config: VideoEnhancerConfig): Promise<boolean> {
-  if (this.state !== "ready" && this.state !== "processing") return false;
-
-  helperLifecycleLog("helperReconfigure", {
-    lifecycleGeneration: this.lifecycleGeneration,
-    inputWidth: config.inputWidth,
-    inputHeight: config.inputHeight,
-    processingMode: config.processingMode,
-    qualityLevel: config.qualityLevel,
-  });
-
-  try {
-  const response = await this.sendCommand("configure", {
-  inputWidth: config.inputWidth,
-  inputHeight: config.inputHeight,
-  outputWidth: config.outputWidth,
-  outputHeight: config.outputHeight,
-  processingMode: config.processingMode,
-  qualityLevel: config.qualityLevel,
-  pixelFormat: config.pixelFormat,
-  });
-  if (response?.success === true) {
-  this.lastConfig = { ...config };
-  }
-  return response?.success === true;
-  } catch {
-  return false;
-  }
-  }
-
- /**
- * Flush any pending frames.
- */
- async flush(): Promise<boolean> {
- if (this.state !== "ready" && this.state !== "processing") return false;
-
- try {
- const response = await this.sendCommand("flush", {});
- return response?.success === true;
- } catch {
- return false;
- }
- }
-
- /**
- * Get diagnostics from the helper.
- */
- async getDiagnostics(): Promise<Record<string, unknown> | null> {
- try {
- return await this.sendCommand("stats", {});
- } catch {
- return null;
- }
- }
-
- setCallbacks(callbacks: VideoHelperCallbacks): void {
- this.callbacks = callbacks;
- }
-
- getState(): VideoHelperState {
- return this.state;
- }
-
- // €‚€‚€‚ Private: Helper lifecycle €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
-
-  private async startHelper(config: VideoEnhancerConfig): Promise<boolean> {
-  this.lifecycleGeneration++;
-  this.shuttingDown_ = false;
-
-  const gen = this.lifecycleGeneration;
-
-  helperLifecycleLog("helperStart", {
-    lifecycleGeneration: gen,
-    inputWidth: config.inputWidth,
-    inputHeight: config.inputHeight,
-    outputWidth: config.outputWidth,
-    outputHeight: config.outputHeight,
-    processingMode: config.processingMode,
-    qualityLevel: config.qualityLevel,
-  });
-
-  try {
-  const helperPath = getVideoEnhancerHelperPath();
-
- // Generate new session identity
- this.sessionId = randomUUID().replace(/-/g, "").substring(0, 32);
- this.authToken = randomUUID().replace(/-/g, "").substring(0, 32);
- this.ctrlPipeName = `screenlink-video-${this.sessionId}-ctrl`;
-
- const args = [
- "--serve",
- "--control-pipe", this.ctrlPipeName,
- "--frame-pipe", `screenlink-video-${this.sessionId}-frame`,
- "--session-id", this.sessionId,
- "--auth-token", this.authToken,
- "--parent-pid", String(process.pid),
- ];
-
- this.state = "connecting";
- this.callbacks.onStateChange?.("connecting");
-
- this.helper = spawn(helperPath, args, {
- windowsHide: true,
- stdio: ["ignore", "pipe", "pipe"],
- });
-
- // Handle stderr for diagnostics
- this.helper.stderr?.on("data", (data: Buffer) => {
- console.error(`[VideoHelper] ${data.toString().trim()}`);
- });
-
- // Handle exit
- this.helper.on("exit", (code, signal) => {
- console.log(`[VideoHelper] Exited with code=${code} signal=${signal}`);
- this.handleHelperExit(gen, code ?? -1);
- });
-
- this.helper.on("error", (err) => {
- console.error(`[VideoHelper] Error: ${err.message}`);
- if (gen !== this.lifecycleGeneration) return;
- this.handleHelperError(err.message);
- });
-
- // Wait briefly for helper to create pipes
- await new Promise((r) => setTimeout(r, 500));
-
- // Connect control pipe
- const connected = await this.connectControlPipe(gen, 5000);
- if (!connected || gen !== this.lifecycleGeneration) {
- return false;
- }
-
- // Handshake
- const handshakeOk = await this.handshake(gen);
- if (!handshakeOk || gen !== this.lifecycleGeneration) {
- return false;
- }
-
- // Connect frame pipe persistently once we're ready
- if (gen === this.lifecycleGeneration) {
- this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
- const fConnected = await this.connectFramePipe();
- if (!fConnected && gen === this.lifecycleGeneration) {
- this.handleHelperError("Frame pipe connection failed");
- return false;
- }
- }
-
- // Send configure (audit item 15: require response)
- const configReply = await this.sendCommand("configure", {
- inputWidth: config.inputWidth,
- inputHeight: config.inputHeight,
- outputWidth: config.outputWidth,
- outputHeight: config.outputHeight,
- processingMode: config.processingMode,
- qualityLevel: config.qualityLevel,
- pixelFormat: config.pixelFormat,
- });
- if (configReply?.success !== true || gen !== this.lifecycleGeneration) {
- this.handleHelperError("Configuration rejected by helper");
- return false;
- }
-
-  this.state = "ready";
-  this.restartAttempts = 0;
-  this.lastConfig = { ...config };
-  this.callbacks.onStateChange?.("ready");
-  helperLifecycleLog("helperReady", {
-    lifecycleGeneration: gen,
-    sessionId: this.sessionId,
-  });
-
- // Start diagnostics polling
- this.startDiagnosticsInterval();
-
- return true;
- } catch (err) {
- if (gen !== this.lifecycleGeneration) return false;
- this.handleHelperError(
- err instanceof Error ? err.message : "Failed to start helper",
- );
- return false;
- }
- }
-
- private async connectControlPipe(gen: number, timeoutMs: number): Promise<boolean> {
- return new Promise((resolve) => {
- const socket = new net.Socket();
- let settled = false;
-
- const timeout = setTimeout(() => {
- if (settled) return;
- settled = true;
- socket.destroy();
- if (gen === this.lifecycleGeneration) {
- this.handleHelperError("Control pipe connection timeout");
- }
- resolve(false);
- }, timeoutMs);
-
- socket.connect(`\\\\.\\pipe\\${this.ctrlPipeName}`, () => {
- if (settled) return;
- settled = true;
- clearTimeout(timeout);
- if (gen !== this.lifecycleGeneration) {
- socket.destroy();
- resolve(false);
- return;
- }
- this.controlSocket = socket;
- this.state = "handshaking";
- this.callbacks.onStateChange?.("handshaking");
-
- // Wire up shared data dispatcher for all command responses
- socket.on("data", this.controlDataHandler);
-
- // Wire up error handling for the connected socket
- socket.on("error", (err) => {
- console.error(`[VideoHelper] Control socket error: ${err.message}`);
- if (gen !== this.lifecycleGeneration) return;
- this.handleHelperError(`Control socket error: ${err.message}`);
- });
-
- socket.on("close", () => {
- console.log("[VideoHelper] Control socket closed");
- if (this.controlSocket === socket) {
- this.controlSocket = null;
- }
- });
-
- resolve(true);
- });
-
- socket.on("error", () => {
- if (settled) return;
- // Connection refused ‚€ will be retried by caller if needed
- });
- });
- }
-
- private async handshake(gen: number): Promise<boolean> {
- try {
- const response = await this.sendCommand("hello", {
- protocolVersion: VIDEO_ENHANCER_PROTOCOL_VERSION,
- sessionId: this.sessionId,
- authToken: this.authToken,
- });
- const ok = response?.success === true;
- if (!ok && gen === this.lifecycleGeneration) {
- this.handleHelperError("Handshake failed");
- }
- return ok;
- } catch {
- if (gen === this.lifecycleGeneration) {
- this.handleHelperError("Handshake error");
- }
- return false;
- }
- }
-
- // €‚€‚€‚ IPC communication €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
-
- // Command queue: one active command at a time, FIFO
- private commandQueue: Array<{
- id: string;
- command: string;
- payload: Record<string, unknown>;
- resolve: (result: Record<string, unknown> | null) => void;
- }> = [];
- private commandInFlight = false;
- private responseBuffer = "";
-
- private enqueueCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
- return new Promise((resolve) => {
- this.commandQueue.push({
- id: randomUUID(),
- command,
- payload,
- resolve,
- });
- this.processQueue();
- });
- }
-
- private processQueue(): void {
- if (this.commandInFlight) return;
- const next = this.commandQueue.shift();
- if (!next) return;
-
- const socket = this.controlSocket;
- if (!socket || !socket.writable) {
- next.resolve(null);
- return;
- }
-
- this.commandInFlight = true;
-
- const request = {
- id: next.id,
- protocolVersion: VIDEO_ENHANCER_PROTOCOL_VERSION,
- sessionId: this.sessionId,
- authToken: this.authToken,
- command: next.command,
- payload: next.payload,
- };
-
- const data = JSON.stringify(request) + "\n";
-
- let settled = false;
- const timeout = setTimeout(() => {
- if (settled) return;
- settled = true;
- // Don't remove the shared control data handler ‚€ only remove this pending entry
- this.pendingCommands.delete(pendingKey);
- this.commandInFlight = false;
- next.resolve(null);
- this.processQueue();
- }, 5000);
-
- // Store resolver for shared data dispatcher
- const pendingKey = next.id;
- this.pendingCommands.set(pendingKey, {
- resolve: next.resolve,
- timeout,
- });
-
- try {
- socket.write(data, (err) => {
- if (err && !settled) {
- settled = true;
- clearTimeout(timeout);
- this.pendingCommands.delete(pendingKey);
- this.commandInFlight = false;
- next.resolve(null);
- this.processQueue();
- }
- });
- } catch {
- if (!settled) {
- settled = true;
- clearTimeout(timeout);
- socket.removeListener("data", this.controlDataHandler);
- this.pendingCommands.delete(pendingKey);
- this.commandInFlight = false;
- next.resolve(null);
- this.processQueue();
- }
- }
- }
-
- private pendingCommands = new Map<string, {
- resolve: (result: Record<string, unknown> | null) => void;
- timeout: ReturnType<typeof setTimeout>;
- }>();
-
- private controlDataHandler = (chunk: Buffer): void => {
- this.responseBuffer += chunk.toString();
- const newlineIdx = this.responseBuffer.indexOf("\n");
- if (newlineIdx < 0) return;
-
- const message = this.responseBuffer.substring(0, newlineIdx);
- this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
-
- try {
- const response = JSON.parse(message);
- const id = response.id as string | undefined;
-
- if (id && this.pendingCommands.has(id)) {
- const pending = this.pendingCommands.get(id)!;
- clearTimeout(pending.timeout);
- this.pendingCommands.delete(id);
- this.commandInFlight = false;
- pending.resolve(response);
- this.processQueue();
- } else {
- // Unmatched response ‚€ may be a late reply or diagnostic
- }
- } catch {
- // Malformed JSON ‚€ ignore
- }
- };
-
- private sendCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
- return this.enqueueCommand(command, payload);
- }
-
- // €‚€‚€‚ Frame transport €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
-
- private async sendFrameData(
- header: {
- generation: number;
- frameSequence: number;
- capturedAtUs: bigint;
- inputWidth: number;
- inputHeight: number;
- inputStride: number;
- pixelFormat: number;
- requestedOutputWidth: number;
- requestedOutputHeight: number;
- processingMode: number;
- qualityLevel: number;
- payloadBytes: number;
- },
- pixelData: Uint8Array,
- ): Promise<{
- generation: number;
- sequence: number;
- pixels: Uint8Array;
- width: number;
- height: number;
- nativeInputReceiveMs?: number;
- nativeUploadMs?: number;
- nativeEffectMs?: number;
- nativeDownloadMs?: number;
- nativeOutputWriteMs?: number;
- nativeTotalMs?: number;
- } | null> {
- return new Promise((resolve) => {
- const socket = this.framePipeClient;
- if (!socket || !socket.writable) { resolve(null); return; }
-
- let settled = false;
- const timeout = setTimeout(() => {
- if (settled) return;
- settled = true;
- this.framePipeConnected = false;
- resolve(null);
- }, 5000);
-
-  // Build binary header (104 bytes to match extended FrameHeader with native timings)
-  const magic = Buffer.alloc(8);
-  magic.writeBigUInt64LE(BigInt("0x464C4156454D5246"));
-  const HEADER_SIZE = 104;
-  const wireVersion = 1;
-
- const headerBuf = Buffer.alloc(HEADER_SIZE);
- let off = 0;
- magic.copy(headerBuf, off); off += 8;
- headerBuf.writeUInt32LE(HEADER_SIZE, off); off += 4;
- headerBuf.writeUInt32LE(wireVersion, off); off += 4;
- headerBuf.writeUInt32LE(header.generation, off); off += 4;
- headerBuf.writeUInt32LE(header.frameSequence, off); off += 4;
- headerBuf.writeBigUInt64LE(header.capturedAtUs, off); off += 8;
- headerBuf.writeUInt32LE(header.inputWidth, off); off += 4;
- headerBuf.writeUInt32LE(header.inputHeight, off); off += 4;
- headerBuf.writeUInt32LE(header.inputStride, off); off += 4;
- headerBuf.writeUInt32LE(header.pixelFormat, off); off += 4;
- headerBuf.writeUInt32LE(header.requestedOutputWidth, off); off += 4;
- headerBuf.writeUInt32LE(header.requestedOutputHeight, off); off += 4;
- headerBuf.writeUInt32LE(0, off); off += 4; // slotIndex
- headerBuf.writeUInt32LE(header.payloadBytes, off); off += 4;
- headerBuf.writeUInt32LE(header.processingMode, off); off += 4;
- headerBuf.writeUInt32LE(header.qualityLevel, off); off += 4;
- headerBuf.writeUInt32LE(0, off); off += 4; // flags
-  headerBuf.writeUInt32LE(0, off); // resultCode (0 = pending)
-  off += 4;
-  // Zero-filled native timing fields (input side, filled by native on output)
-  headerBuf.writeUInt32LE(0, off); off += 4; // nativeInputReceiveUs
-  headerBuf.writeUInt32LE(0, off); off += 4; // nativeUploadUs
-  headerBuf.writeUInt32LE(0, off); off += 4; // nativeEffectUs
-  headerBuf.writeUInt32LE(0, off); off += 4; // nativeDownloadUs
-  headerBuf.writeUInt32LE(0, off); off += 4; // nativeOutputWriteUs
-  headerBuf.writeUInt32LE(0, off);      // nativeTotalUs
-
-  // Write header + pixel data (audit item 14: backpressure handling)
- const combined = Buffer.concat([headerBuf, pixelData]);
- const writeResult = socket.write(combined);
-
- if (!writeResult) {
- // Data accepted into buffer, wait for drain before reading response
- socket.once("drain", () => {
- // Drain complete ‚€ continue to read response below
- });
- } else {
- // Immediate write ‚€ proceed
- }
-
- // Read result frame header + payload back (audit item 13)
- let resultBuf = Buffer.alloc(0);
- let resultPayload: Buffer | null = null;
- let resultPayloadRead = 0;
-
- const onResultData = (chunk: Buffer): void => {
- resultBuf = Buffer.concat([resultBuf, chunk]);
-
- // Read header first
- if (resultBuf.length >= HEADER_SIZE && resultPayload === null) {
- const magic = resultBuf.readBigUInt64LE(0);
- if (magic !== 0x464C4156454D5246n) {
- // Not a valid frame header ‚€ discard
- settled = true;
- clearTimeout(timeout);
- socket.removeListener("data", onResultData);
- resolve(null);
- return;
- }
-
- const resultCode = resultBuf.readUInt32LE(76);
-
- if (resultCode !== 1) {
-   settled = true;
-   clearTimeout(timeout);
-   socket.removeListener("data", onResultData);
-
-   console.error(
-     `[VideoHelper] Native frame failed: resultCode=${resultCode} generation=${header.generation} sequence=${header.frameSequence}`,
-   );
-
-   resolve(null);
-   return;
- }
-
- const payloadBytes = resultBuf.readUInt32LE(60);
-
- if (payloadBytes === 0) {
-   settled = true;
-   clearTimeout(timeout);
-   socket.removeListener("data", onResultData);
-
-   console.error(
-     `[VideoHelper] Native frame succeeded with an empty payload: generation=${header.generation} sequence=${header.frameSequence}`,
-   );
-
-   resolve(null);
-   return;
- }
-  if (payloadBytes > 200 * 1024 * 1024) {
-    // Too large — protocol error
-    settled = true;
-    clearTimeout(timeout);
-    socket.removeListener("data", onResultData);
-    socket.destroy();
-    this.framePipeConnected = false;
-    resolve(null);
-    return;
-  }
-
-  resultPayload = Buffer.alloc(payloadBytes);
- // Copy any payload bytes already in resultBuf after the header
- const extra = resultBuf.length - HEADER_SIZE;
- if (extra > 0) {
- const toCopy = Math.min(extra, payloadBytes);
- resultBuf.copy(resultPayload, 0, HEADER_SIZE, HEADER_SIZE + toCopy);
- resultPayloadRead = toCopy;
- }
- }
-
- // Read payload
- if (resultPayload && resultPayloadRead < resultPayload.length) {
- const remaining = resultPayload.length - resultPayloadRead;
- const avail = resultBuf.length - HEADER_SIZE - resultPayloadRead;
- const toCopy = Math.min(remaining, avail);
- if (toCopy > 0) {
- resultBuf.copy(resultPayload, resultPayloadRead,
- HEADER_SIZE + resultPayloadRead, HEADER_SIZE + resultPayloadRead + toCopy);
- resultPayloadRead += toCopy;
- }
- }
-
-  if (resultPayload && resultPayloadRead >= resultPayload.length) {
-  settled = true;
-  clearTimeout(timeout);
-  socket.removeListener("data", onResultData);
-
-  // Parse native timing fields from extended header (offsets 80-100)
-  const nativeInputReceiveUs = resultBuf.readUInt32LE(80);
-  const nativeUploadUs = resultBuf.readUInt32LE(84);
-  const nativeEffectUs = resultBuf.readUInt32LE(88);
-  const nativeDownloadUs = resultBuf.readUInt32LE(92);
-  const nativeOutputWriteUs = resultBuf.readUInt32LE(96);
-  const nativeTotalUs = resultBuf.readUInt32LE(100);
-
-  resolve({
-  generation: header.generation,
-  sequence: header.frameSequence,
-  pixels: resultPayload,
-  width: resultBuf.readUInt32LE(32), // inputWidth in output header
-  height: resultBuf.readUInt32LE(36), // inputHeight in output header
-  // Convert μs to ms for consistency with renderer timings
-  nativeInputReceiveMs: nativeInputReceiveUs > 0 ? nativeInputReceiveUs / 1000 : undefined,
-  nativeUploadMs: nativeUploadUs > 0 ? nativeUploadUs / 1000 : undefined,
-  nativeEffectMs: nativeEffectUs > 0 ? nativeEffectUs / 1000 : undefined,
-  nativeDownloadMs: nativeDownloadUs > 0 ? nativeDownloadUs / 1000 : undefined,
-  nativeOutputWriteMs: nativeOutputWriteUs > 0 ? nativeOutputWriteUs / 1000 : undefined,
-  nativeTotalMs: nativeTotalUs > 0 ? nativeTotalUs / 1000 : undefined,
-  });
-  }
- };
- socket.on("data", onResultData);
- });
- }
-
- // €‚€‚€‚ Error handling and restart €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
-
-  private handleHelperExit(gen: number, code: number): void {
-  this.helper = null;
-  this.controlSocket = null;
-
-  helperLifecycleLog("helperExit", {
-    lifecycleGeneration: gen,
-    exitCode: code,
-    currentGeneration: this.lifecycleGeneration,
-    shuttingDown: this.shuttingDown_,
-  });
-
-  if (gen !== this.lifecycleGeneration) return;
-  if (this.shuttingDown_) return;
-
-  this.attemptRestart(gen);
-  }
-
- private handleHelperError(reason: string): void {
- if (this.shuttingDown_) return;
-
- this.state = "error";
- this.callbacks.onStateChange?.("error");
- this.callbacks.onError?.(reason);
-
- this.attemptRestart(this.lifecycleGeneration);
- }
-
- private attemptRestart(gen: number): void {
- if (gen !== this.lifecycleGeneration) return;
- if (this.restartAttempts >= this.maxRestarts) {
- this.callbacks.onError?.("Video helper reached max restart attempts");
- return;
- }
-
- this.restartAttempts++;
- const delay = Math.min(5000 * Math.pow(2, this.restartAttempts - 1), 20000);
-
- this.restartTimer = setTimeout(() => {
- if (gen !== this.lifecycleGeneration) return;
- this.restartTimer = null;
- const config = this.lastConfig ?? {
- inputWidth: 1920,
- inputHeight: 1080,
- outputWidth: 1920,
- outputHeight: 1080,
- processingMode: "vsr" as const,
- qualityLevel: "high" as const,
- pixelFormat: "bgra8" as const,
- };
- this.startHelper(config).catch(() => {});
- }, delay);
- }
-
- // €‚€‚€‚ Diagnostics €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
-
- private startDiagnosticsInterval(): void {
- this.clearDiagnosticsInterval();
- this.diagnosticsInterval = setInterval(async () => {
- if (this.state === "ready" || this.state === "processing") {
- await this.getDiagnostics();
- }
- }, 5000);
- }
-
- private clearDiagnosticsInterval(): void {
- if (this.diagnosticsInterval) {
- clearInterval(this.diagnosticsInterval);
- this.diagnosticsInterval = null;
- }
- }
-
- private clearRestartTimer(): void {
- if (this.restartTimer) {
- clearTimeout(this.restartTimer);
- this.restartTimer = null;
- }
- }
-
- // €‚€‚€‚ Cleanup €‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚€‚
-
- private async cleanup(): Promise<void> {
- this.clearDiagnosticsInterval();
- this.clearRestartTimer();
-
- this.controlSocket?.destroy();
- this.controlSocket = null;
-
- if (this.helper) {
- return new Promise((resolve) => {
- const helper = this.helper!;
- const killTimeout = setTimeout(() => {
- helper.kill("SIGKILL");
- }, 5000);
-
- const exitHandler = () => {
- clearTimeout(killTimeout);
- this.helper = null;
- resolve();
- };
-
- helper.on("exit", exitHandler);
-
- // Send graceful termination
- try {
- helper.kill("SIGTERM");
- } catch {
- // Process may already be dead
- }
-
- // Handle case where helper already exited
- if (helper.exitCode !== null) {
- clearTimeout(killTimeout);
- this.helper = null;
- resolve();
- }
- });
- }
- }
-
-  destroy(): void {
-  this.shuttingDown_ = true;
-  this.stop(true).catch(() => {});
-  }
-
-  // ── Phase 5: MessagePort frame IPC ──────────────────────────────────────
+  // ── Frame port management (clientId-gated) ─────────────────────────
 
   /**
    * Create a MessageChannel for zero-copy frame data transfer.
-   * Returns one port to send to the renderer; the other port stays in
-   * the main process and forwards submissions to submitFrame().
+   * Associates the port with a clientId. If the client already has a port,
+   * the old one is closed first.
    */
-  createFramePort(): Electron.MessagePortMain {
-    this.closeFramePort();
+  createFramePort(clientId: string): Electron.MessagePortMain | null {
+    const client = this.clients.get(clientId);
+    if (!client) {
+      helperLifecycleLog("framePortCreate (no client)", { clientId });
+      return null;
+    }
+
+    // Close existing port for this client
+    this.closeClientFramePort(clientId);
 
     helperLifecycleLog("framePortCreate", {
+      clientId,
       lifecycleGeneration: this.lifecycleGeneration,
       state: this.state,
     });
@@ -1013,12 +621,25 @@ export class VideoHelperManager {
 
     mainPort.on("message", async (evt: Electron.MessageEvent) => {
       const msg = evt.data as {
+        clientId?: string;
         generation: number;
         frameSequence: number;
         inputWidth: number;
         inputHeight: number;
         frameData?: ArrayBuffer;
       };
+
+      // Validate message from this client only
+      if (msg.clientId !== clientId) {
+        mainPort.postMessage({ error: "Client ID mismatch" });
+        return;
+      }
+
+      // Check if this client is still active
+      if (!this.clients.has(clientId)) {
+        mainPort.postMessage({ error: "Client released" });
+        return;
+      }
 
       if (
         typeof msg.generation !== "number" ||
@@ -1030,7 +651,6 @@ export class VideoHelperManager {
         return;
       }
 
-      // The pixel buffer arrives transferred in msg.frameData (ArrayBuffer)
       const ab = msg.frameData;
       if (!ab || ab.byteLength === 0) {
         mainPort.postMessage({ error: "No frame data" });
@@ -1053,28 +673,24 @@ export class VideoHelperManager {
           return;
         }
 
-        // Send result back. Note: Electron's MessagePortMain only supports
-        // MessagePortMain[] in the transfer list (not ArrayBuffer), so we
-        // send pixels as a regular cloned buffer. The critical zero-copy
-        // path is renderer→main (frame submission), not the return path.
+        // Send result back with truthful telemetry labels
         mainPort.postMessage({
           generation: result.generation,
           sequence: result.sequence,
           width: result.width,
           height: result.height,
-          // Convert Buffer → Uint8Array for structured clone compatibility
           pixels: new Uint8Array(result.pixels),
-          // Main-process and native per-frame timings
-          mainInputHandlingMs: (result as any).mainInputHandlingMs,
-          pipeWriteMs: (result as any).pipeWriteMs,
-          pipeWaitAndReadMs: (result as any).pipeWaitAndReadMs,
-          mainOutputPostMs: (result as any).mainOutputPostMs,
-          nativeInputReceiveMs: (result as any).nativeInputReceiveMs,
-          nativeUploadMs: (result as any).nativeUploadMs,
-          nativeEffectMs: (result as any).nativeEffectMs,
-          nativeDownloadMs: (result as any).nativeDownloadMs,
-          nativeOutputWriteMs: (result as any).nativeOutputWriteMs,
-          nativeTotalMs: (result as any).nativeTotalMs,
+          // Main-process per-frame timings
+          mainInputHandlingMs: result.mainInputHandlingMs,
+          requestWriteMs: result.requestWriteMs,
+          responseWaitMs: result.responseWaitMs,
+          mainHandlerTotalMs: result.mainHandlerTotalMs,
+          // Native pre-write timings (only knowable-before-write stages)
+          nativeInputReceiveMs: result.nativeInputReceiveMs,
+          nativeUploadMs: result.nativeUploadMs,
+          nativeEffectMs: result.nativeEffectMs,
+          nativeDownloadMs: result.nativeDownloadMs,
+          nativePreWriteTotalMs: result.nativePreWriteTotalMs,
         });
       } catch (err) {
         mainPort.postMessage({
@@ -1083,26 +699,600 @@ export class VideoHelperManager {
       }
     });
 
-    // Keep mainPort alive — it won't GC while referenced
-    // MessagePortMain queues renderer messages until start() is called.
     mainPort.start();
-    this.framePort = mainPort;
+    this.framePorts.set(clientId, mainPort);
+    client.framePort = mainPort;
 
     return rendererPort;
   }
 
-  private framePort: Electron.MessagePortMain | null = null;
-
   /**
-   * Close the current frame port if open.
+   * Close frame port for a specific client.
    */
-  closeFramePort(): void {
-    if (this.framePort) {
-      helperLifecycleLog("framePortClose", {
-        lifecycleGeneration: this.lifecycleGeneration,
-      });
-      this.framePort.close();
-      this.framePort = null;
+  private closeClientFramePort(clientId: string): void {
+    const port = this.framePorts.get(clientId);
+    if (port) {
+      helperLifecycleLog("framePortClose", { clientId });
+      port.close();
+      this.framePorts.delete(clientId);
     }
+    const client = this.clients.get(clientId);
+    if (client) {
+      client.framePort = null;
+    }
+  }
+
+  // ── Legacy stop / destroy ──────────────────────────────────────────
+
+  async stop(shutdown = false): Promise<void> {
+    this.lifecycleGeneration += 1;
+    this.startPromise = null;
+    this.shuttingDown_ = true;
+    this.clearDiagnosticsInterval();
+    this.clearRestartTimer();
+    this.cancelIdleShutdown();
+
+    helperLifecycleLog("helperStop", {
+      lifecycleGeneration: this.lifecycleGeneration,
+      shutdown,
+      lastState: this.state,
+    });
+
+    if (shutdown && this.controlSocket) {
+      await this.sendCommand("shutdown", {}).catch(() => {});
+    }
+
+    await this.cleanup();
+    this.state = "disconnected";
+    this.callbacks.onStateChange?.("disconnected");
+  }
+
+  async reconfigure(config: VideoEnhancerConfig): Promise<boolean> {
+    if (this.state !== "ready" && this.state !== "processing") return false;
+
+    helperLifecycleLog("helperReconfigure", {
+      lifecycleGeneration: this.lifecycleGeneration,
+      inputWidth: config.inputWidth,
+      inputHeight: config.inputHeight,
+      processingMode: config.processingMode,
+      qualityLevel: config.qualityLevel,
+    });
+
+    try {
+      const response = await this.sendCommand("configure", {
+        inputWidth: config.inputWidth,
+        inputHeight: config.inputHeight,
+        outputWidth: config.outputWidth,
+        outputHeight: config.outputHeight,
+        processingMode: config.processingMode,
+        qualityLevel: config.qualityLevel,
+        pixelFormat: config.pixelFormat,
+      });
+      if (response?.success === true) {
+        this.lastConfig = { ...config };
+      }
+      return response?.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async flush(): Promise<boolean> {
+    if (this.state !== "ready" && this.state !== "processing") return false;
+
+    try {
+      const response = await this.sendCommand("flush", {});
+      return response?.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getDiagnostics(): Promise<Record<string, unknown> | null> {
+    try {
+      return await this.sendCommand("stats", {});
+    } catch {
+      return null;
+    }
+  }
+
+  setCallbacks(callbacks: VideoHelperCallbacks): void {
+    this.callbacks = callbacks;
+  }
+
+  getState(): VideoHelperState {
+    return this.state;
+  }
+
+  // ── Private: Helper lifecycle ──────────────────────────────────────
+
+  private async startHelper(config: VideoEnhancerConfig): Promise<boolean> {
+    this.lifecycleGeneration++;
+    this.shuttingDown_ = false;
+
+    const gen = this.lifecycleGeneration;
+
+    helperLifecycleLog("helperStart", {
+      lifecycleGeneration: gen,
+      inputWidth: config.inputWidth,
+      inputHeight: config.inputHeight,
+      outputWidth: config.outputWidth,
+      outputHeight: config.outputHeight,
+      processingMode: config.processingMode,
+      qualityLevel: config.qualityLevel,
+    });
+
+    try {
+      const helperPath = getVideoEnhancerHelperPath();
+
+      this.sessionId = randomUUID().replace(/-/g, "").substring(0, 32);
+      this.authToken = randomUUID().replace(/-/g, "").substring(0, 32);
+      this.ctrlPipeName = `screenlink-video-${this.sessionId}-ctrl`;
+
+      const args = [
+        "--serve",
+        "--control-pipe", this.ctrlPipeName,
+        "--frame-pipe", `screenlink-video-${this.sessionId}-frame`,
+        "--session-id", this.sessionId,
+        "--auth-token", this.authToken,
+        "--parent-pid", String(process.pid),
+      ];
+
+      this.state = "connecting";
+      this.callbacks.onStateChange?.("connecting");
+
+      this.helper = spawn(helperPath, args, {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      this.helper.stderr?.on("data", (data: Buffer) => {
+        console.error(`[VideoHelper] ${data.toString().trim()}`);
+      });
+
+      this.helper.on("exit", (code, signal) => {
+        console.log(`[VideoHelper] Exited with code=${code} signal=${signal}`);
+        this.handleHelperExit(gen, code ?? -1);
+      });
+
+      this.helper.on("error", (err) => {
+        console.error(`[VideoHelper] Error: ${err.message}`);
+        if (gen !== this.lifecycleGeneration) return;
+        this.handleHelperError(err.message);
+      });
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      const connected = await this.connectControlPipe(gen, 5000);
+      if (!connected || gen !== this.lifecycleGeneration) {
+        return false;
+      }
+
+      const handshakeOk = await this.handshake(gen);
+      if (!handshakeOk || gen !== this.lifecycleGeneration) {
+        return false;
+      }
+
+      // Connect frame pipe persistently once we're ready
+      if (gen === this.lifecycleGeneration) {
+        this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
+        const fConnected = await this.connectFramePipe();
+        if (!fConnected && gen === this.lifecycleGeneration) {
+          this.handleHelperError("Frame pipe connection failed");
+          return false;
+        }
+      }
+
+      const configReply = await this.sendCommand("configure", {
+        inputWidth: config.inputWidth,
+        inputHeight: config.inputHeight,
+        outputWidth: config.outputWidth,
+        outputHeight: config.outputHeight,
+        processingMode: config.processingMode,
+        qualityLevel: config.qualityLevel,
+        pixelFormat: config.pixelFormat,
+      });
+      if (configReply?.success !== true || gen !== this.lifecycleGeneration) {
+        this.handleHelperError("Configuration rejected by helper");
+        return false;
+      }
+
+      this.state = "ready";
+      this.restartAttempts = 0;
+      this.lastConfig = { ...config };
+      this.callbacks.onStateChange?.("ready");
+      helperLifecycleLog("helperReady", {
+        lifecycleGeneration: gen,
+        sessionId: this.sessionId,
+      });
+
+      this.startDiagnosticsInterval();
+
+      return true;
+    } catch (err) {
+      if (gen !== this.lifecycleGeneration) return false;
+      this.handleHelperError(
+        err instanceof Error ? err.message : "Failed to start helper",
+      );
+      return false;
+    }
+  }
+
+  // ── Control pipe ───────────────────────────────────────────────────
+
+  private async connectControlPipe(gen: number, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = new net.Socket();
+      let settled = false;
+
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        if (gen === this.lifecycleGeneration) {
+          this.handleHelperError("Control pipe connection timeout");
+        }
+        resolve(false);
+      }, timeoutMs);
+
+      socket.connect(`\\\\.\\pipe\\${this.ctrlPipeName}`, () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (gen !== this.lifecycleGeneration) {
+          socket.destroy();
+          resolve(false);
+          return;
+        }
+        this.controlSocket = socket;
+        this.state = "handshaking";
+        this.callbacks.onStateChange?.("handshaking");
+
+        socket.on("data", this.controlDataHandler);
+
+        socket.on("error", (err) => {
+          console.error(`[VideoHelper] Control socket error: ${err.message}`);
+          if (gen !== this.lifecycleGeneration) return;
+          this.handleHelperError(`Control socket error: ${err.message}`);
+        });
+
+        socket.on("close", () => {
+          console.log("[VideoHelper] Control socket closed");
+          if (this.controlSocket === socket) {
+            this.controlSocket = null;
+          }
+        });
+
+        resolve(true);
+      });
+
+      socket.on("error", () => {
+        if (settled) return;
+      });
+    });
+  }
+
+  private async handshake(gen: number): Promise<boolean> {
+    try {
+      const response = await this.sendCommand("hello", {
+        protocolVersion: VIDEO_ENHANCER_PROTOCOL_VERSION,
+        sessionId: this.sessionId,
+        authToken: this.authToken,
+      });
+      const ok = response?.success === true;
+      if (!ok && gen === this.lifecycleGeneration) {
+        this.handleHelperError("Handshake failed");
+      }
+      return ok;
+    } catch {
+      if (gen === this.lifecycleGeneration) {
+        this.handleHelperError("Handshake error");
+      }
+      return false;
+    }
+  }
+
+  // ── IPC communication ──────────────────────────────────────────────
+
+  private commandQueue: Array<{
+    id: string;
+    command: string;
+    payload: Record<string, unknown>;
+    resolve: (result: Record<string, unknown> | null) => void;
+  }> = [];
+  private commandInFlight = false;
+  private responseBuffer = "";
+
+  private enqueueCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    return new Promise((resolve) => {
+      this.commandQueue.push({
+        id: randomUUID(),
+        command,
+        payload,
+        resolve,
+      });
+      this.processQueue();
+    });
+  }
+
+  private processQueue(): void {
+    if (this.commandInFlight) return;
+    const next = this.commandQueue.shift();
+    if (!next) return;
+
+    const socket = this.controlSocket;
+    if (!socket || !socket.writable) {
+      next.resolve(null);
+      return;
+    }
+
+    this.commandInFlight = true;
+
+    const request = {
+      id: next.id,
+      protocolVersion: VIDEO_ENHANCER_PROTOCOL_VERSION,
+      sessionId: this.sessionId,
+      authToken: this.authToken,
+      command: next.command,
+      payload: next.payload,
+    };
+
+    const data = JSON.stringify(request) + "\n";
+
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      this.pendingCommands.delete(next.id);
+      this.commandInFlight = false;
+      next.resolve(null);
+      this.processQueue();
+    }, 5000);
+
+    this.pendingCommands.set(next.id, {
+      resolve: next.resolve,
+      timeout,
+    });
+
+    try {
+      socket.write(data, (err) => {
+        if (err && !settled) {
+          settled = true;
+          clearTimeout(timeout);
+          this.pendingCommands.delete(next.id);
+          this.commandInFlight = false;
+          next.resolve(null);
+          this.processQueue();
+        }
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        this.pendingCommands.delete(next.id);
+        this.commandInFlight = false;
+        next.resolve(null);
+        this.processQueue();
+      }
+    }
+  }
+
+  private pendingCommands = new Map<string, {
+    resolve: (result: Record<string, unknown> | null) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+
+  private controlDataHandler = (chunk: Buffer): void => {
+    this.responseBuffer += chunk.toString();
+    const newlineIdx = this.responseBuffer.indexOf("\n");
+    if (newlineIdx < 0) return;
+
+    const message = this.responseBuffer.substring(0, newlineIdx);
+    this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
+
+    try {
+      const response = JSON.parse(message);
+      const id = response.id as string | undefined;
+
+      if (id && this.pendingCommands.has(id)) {
+        const pending = this.pendingCommands.get(id)!;
+        clearTimeout(pending.timeout);
+        this.pendingCommands.delete(id);
+        this.commandInFlight = false;
+        pending.resolve(response);
+        this.processQueue();
+      }
+    } catch {
+      // Malformed JSON — ignore
+    }
+  };
+
+  private sendCommand(command: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    return this.enqueueCommand(command, payload);
+  }
+
+  // ── Frame pipe ─────────────────────────────────────────────────────
+
+  private connectFramePipe(): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (this.framePipeClient) {
+        this.framePipeClient.destroy();
+        this.framePipeClient = null;
+      }
+      this.frameParser = new FramePipeParser();
+      this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
+      const client = net.createConnection(`\\\\.\\pipe\\${this.framePipeName}`, () => {
+        this.framePipeClient = client;
+        this.framePipeConnected = true;
+
+        // Wire up persistent frame-pipe data handler (one parser per socket)
+        client.on("data", (chunk: Buffer) => {
+          if (!this.frameParser) return;
+          const result = this.frameParser.feed(chunk);
+          if (result) {
+            // Result is delivered via the installPending callback
+            // The parser calls the pending resolve internally
+          }
+        });
+
+        resolve(true);
+      });
+      client.on("error", () => {
+        this.framePipeConnected = false;
+        resolve(false);
+      });
+      client.setTimeout(5000, () => {
+        client.destroy();
+        this.framePipeConnected = false;
+        resolve(false);
+      });
+    });
+  }
+
+  // ── Error handling and restart ─────────────────────────────────────
+
+  private handleHelperExit(gen: number, code: number): void {
+    this.helper = null;
+    this.controlSocket = null;
+
+    helperLifecycleLog("helperExit", {
+      lifecycleGeneration: gen,
+      exitCode: code,
+      currentGeneration: this.lifecycleGeneration,
+      shuttingDown: this.shuttingDown_,
+    });
+
+    if (gen !== this.lifecycleGeneration) return;
+    if (this.shuttingDown_) return;
+
+    this.attemptRestart(gen);
+  }
+
+  private handleHelperError(reason: string): void {
+    if (this.shuttingDown_) return;
+
+    this.state = "error";
+    this.callbacks.onStateChange?.("error");
+    this.callbacks.onError?.(reason);
+
+    this.attemptRestart(this.lifecycleGeneration);
+  }
+
+  private attemptRestart(gen: number): void {
+    if (gen !== this.lifecycleGeneration) return;
+    if (this.restartAttempts >= this.maxRestarts) {
+      this.callbacks.onError?.("Video helper reached max restart attempts");
+      return;
+    }
+
+    this.restartAttempts++;
+    const delay = Math.min(5000 * Math.pow(2, this.restartAttempts - 1), 20000);
+
+    this.restartTimer = setTimeout(() => {
+      if (gen !== this.lifecycleGeneration) return;
+      this.restartTimer = null;
+      const config = this.lastConfig ?? {
+        inputWidth: 1920,
+        inputHeight: 1080,
+        outputWidth: 1920,
+        outputHeight: 1080,
+        processingMode: "vsr" as const,
+        qualityLevel: "high" as const,
+        pixelFormat: "bgra8" as const,
+      };
+      this.startHelper(config).catch(() => {});
+    }, delay);
+  }
+
+  // ── Diagnostics ────────────────────────────────────────────────────
+
+  private startDiagnosticsInterval(): void {
+    this.clearDiagnosticsInterval();
+    this.diagnosticsInterval = setInterval(async () => {
+      if (this.state === "ready" || this.state === "processing") {
+        await this.getDiagnostics();
+      }
+    }, 5000);
+  }
+
+  private clearDiagnosticsInterval(): void {
+    if (this.diagnosticsInterval) {
+      clearInterval(this.diagnosticsInterval);
+      this.diagnosticsInterval = null;
+    }
+  }
+
+  private clearRestartTimer(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+  }
+
+  // ── Cleanup ─────────────────────────────────────────────────────────
+
+  private async cleanup(): Promise<void> {
+    this.clearDiagnosticsInterval();
+    this.clearRestartTimer();
+    this.cancelIdleShutdown();
+
+    // Close all client frame ports
+    for (const [clientId] of this.framePorts) {
+      this.closeClientFramePort(clientId);
+    }
+    this.clients.clear();
+
+    // Destroy parser
+    if (this.frameParser) {
+      this.frameParser.reset();
+      this.frameParser = null;
+    }
+
+    // Destroy frame pipe
+    if (this.framePipeClient) {
+      this.framePipeClient.removeAllListeners();
+      this.framePipeClient.destroy();
+      this.framePipeClient = null;
+    }
+    this.framePipeConnected = false;
+
+    // Destroy control socket
+    this.controlSocket?.destroy();
+    this.controlSocket = null;
+
+    // Kill helper
+    if (this.helper) {
+      return new Promise((resolve) => {
+        const helper = this.helper!;
+        const killTimeout = setTimeout(() => {
+          helper.kill("SIGKILL");
+        }, 5000);
+
+        const exitHandler = () => {
+          clearTimeout(killTimeout);
+          this.helper = null;
+          resolve();
+        };
+
+        helper.on("exit", exitHandler);
+
+        try {
+          helper.kill("SIGTERM");
+        } catch {
+          // Process may already be dead
+        }
+
+        if (helper.exitCode !== null) {
+          clearTimeout(killTimeout);
+          this.helper = null;
+          resolve();
+        }
+      });
+    }
+  }
+
+  destroy(): void {
+    this.shuttingDown_ = true;
+    this.stop(true).catch(() => {});
   }
 }

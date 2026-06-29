@@ -41,6 +41,9 @@ type ScreenLinkVideoApi = {
     reason: string;
   }>;
 
+  videoHelperAcquireClient?: () => Promise<{ clientId: string }>;
+  videoHelperReleaseClient?: (clientId: string) => Promise<{ success: boolean }>;
+
   videoHelperStart?: (
     config: NativeVideoConfig,
   ) => Promise<boolean>;
@@ -65,6 +68,8 @@ type ScreenLinkVideoApi = {
 
   /** Phase 5: Request a dedicated MessagePort for zero-copy frame transfer */
   requestFramePort?: () => Promise<{ success: boolean }>;
+  /** Phase 6: Request a frame port bound to a specific clientId lease */
+  requestFramePortForClient?: (clientId: string) => Promise<{ success: boolean; error?: string }>;
 };
 
 const EMPTY_STATS: BackendStats = {
@@ -208,17 +213,27 @@ function createProgram(
 
 function normalizePixels(
   value: NativeFrameResult["pixels"],
+  expectedLength?: number,
 ): Uint8Array {
   if (value instanceof Uint8Array) {
-    return value;
+    // If exact Uint8Array with expected length, use directly
+    if (expectedLength === undefined || value.byteLength === expectedLength) {
+      return value;
+    }
+    // Otherwise create a right-sized copy
+    return new Uint8Array(value);
   }
 
   if (value instanceof Uint8ClampedArray) {
-    return new Uint8Array(
+    const result = new Uint8Array(
       value.buffer,
       value.byteOffset,
       value.byteLength,
     );
+    if (expectedLength === undefined || result.byteLength === expectedLength) {
+      return result;
+    }
+    return new Uint8Array(result);
   }
 
   return new Uint8Array();
@@ -243,6 +258,12 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   private vao: WebGLVertexArrayObject | null = null;
   private texture: WebGLTexture | null = null;
 
+  // Cached sampler uniform location (looked up once after program creation)
+  private textureUniformLocation: WebGLUniformLocation | null = null;
+  // Persistent texture dimensions for texSubImage2D optimization
+  private textureWidth = 0;
+  private textureHeight = 0;
+
   private settings: ViewerImageEnhancementSettings | null = null;
 
   private initialized = false;
@@ -262,14 +283,38 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
   private currentQualityLevel: number | null = null;
 
-  // Phase 5: MessagePort frame IPC
+  // Phase 5: MessagePort frame IPC with clientId lease
+  private clientId: string | null = null;
   private framePort: MessagePort | null = null;
   private framePortRequested = false;
   private pendingFramePort: Promise<boolean> | null = null;
 
   /**
-   * Acquire the dedicated frame MessagePort from the main process.
-   * Returns true when the port is ready, false if unavailable.
+   * Acquire a client lease and then the dedicated frame MessagePort.
+   */
+  private async acquireClientAndPort(): Promise<boolean> {
+    const api = getVideoApi();
+
+    // Acquire client lease
+    if (!this.clientId && api?.videoHelperAcquireClient) {
+      try {
+        const { clientId } = await api.videoHelperAcquireClient();
+        this.clientId = clientId;
+        lifecycleLog("NvidiaBackend", "clientAcquired", {
+          instanceId: this.instanceId,
+          clientId,
+        });
+      } catch {
+        return false;
+      }
+    }
+
+    return this.acquireFramePort();
+  }
+
+  /**
+   * Acquire the dedicated frame MessagePort from the main process,
+   * associated with our clientId.
    */
   private async acquireFramePort(): Promise<boolean> {
     if (this.framePort) return true;
@@ -278,7 +323,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     }
 
     const api = getVideoApi();
-    if (!api?.requestFramePort) return false;
+    if (!api?.requestFramePortForClient && !api?.requestFramePort) return false;
 
     this.framePortRequested = true;
 
@@ -307,20 +352,26 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         port.start();
         lifecycleLog("NvidiaBackend", "framePortAcquired", {
           instanceId: this.instanceId,
+          clientId: this.clientId,
         });
         resolve(true);
       };
 
       window.addEventListener("message", onMessage);
 
-      // Trigger port creation in the main process
-      api.requestFramePort!().then((result) => {
+      // Trigger port creation in the main process (with clientId when available)
+      const portPromise = this.clientId && api.requestFramePortForClient
+        ? api.requestFramePortForClient(this.clientId)
+        : api.requestFramePort!();
+
+      portPromise.then((result) => {
         if (!result.success && !settled) {
           settled = true;
           clearTimeout(timeout);
           window.removeEventListener("message", onMessage);
           lifecycleLog("NvidiaBackend", "framePortFailed", {
             instanceId: this.instanceId,
+            clientId: this.clientId,
           });
           resolve(false);
         }
@@ -334,6 +385,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
   /**
    * Submit a frame via the MessagePort using structured-cloned binary data.
+   * Uses exact-buffer path: if frameData covers entire backing ArrayBuffer,
+   * use that exact buffer with structured clone and no slice.
+   * If partial view, create exactly one right-sized copy.
    */
   private submitFrameViaPort(
     generation: number,
@@ -400,13 +454,29 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         });
       };
 
-      // Send the exact-size pixel buffer through structured clone
-      const buffer = frameData.buffer.slice(
-        frameData.byteOffset,
-        frameData.byteOffset + frameData.byteLength,
-      );
+      // Exact-buffer path: if frameData covers entire backing ArrayBuffer, use exact buffer
+      // with structured clone and no slice. No transfer list for pixel ArrayBuffer.
+      const byteOff = frameData.byteOffset;
+      const byteLen = frameData.byteLength;
+      const backingBuf = frameData.buffer as ArrayBuffer;
+      let buffer: ArrayBuffer;
+      if (byteOff === 0 && byteLen === backingBuf.byteLength) {
+        // Complete coverage — use exact backing buffer without slice
+        buffer = backingBuf;
+      } else {
+        // Partial view — create exactly one right-sized copy
+        buffer = backingBuf.slice(byteOff, byteOff + byteLen);
+      }
+
       port.postMessage(
-        { generation, frameSequence, inputWidth, inputHeight, frameData: buffer });
+        {
+          clientId: this.clientId,
+          generation,
+          frameSequence,
+          inputWidth,
+          inputHeight,
+          frameData: buffer,
+        });
     });
   }
 
@@ -483,6 +553,11 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       }
 
       this.program = createProgram(this.gl);
+
+      // Cache sampler uniform location once after program creation
+      this.textureUniformLocation =
+        this.gl.getUniformLocation(this.program, "uTexture");
+
       this.vao = this.gl.createVertexArray();
       this.texture = this.gl.createTexture();
 
@@ -524,6 +599,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
       this.gl.bindTexture(this.gl.TEXTURE_2D, null);
 
+      this.textureWidth = 0;
+      this.textureHeight = 0;
+
       this.generation += 1;
       this.initialized = true;
 
@@ -541,6 +619,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       return { success: true };
     }
     catch (error) {
+      // Release client lease on initialization failure
+      this.releaseClient();
       return {
         success: false,
         reason:
@@ -729,7 +809,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       // ── Renderer timing: Phase B — native transport (renderer-observed) ──
       let result: NativeFrameResult | null = null;
 
-      if (this.framePort || await this.acquireFramePort()) {
+      if (this.framePort || await this.acquireClientAndPort()) {
         result = await this.submitFrameViaPort(
           generation,
           frameSequence,
@@ -778,9 +858,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         };
       }
 
-      const pixels = normalizePixels(result.pixels);
-
       const expectedBytes = result.width * result.height * 4;
+      const pixels = normalizePixels(result.pixels, expectedBytes);
 
       if (result.width <= 0 || result.height <= 0 || pixels.byteLength !== expectedBytes) {
         this.stats = {
@@ -791,7 +870,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         return { success: false };
       }
 
-      // ── Renderer timing: Phase C — texture upload (texImage2D + drawArrays) ──
+      // ── Renderer timing: Phase C — texture upload (texImage2D/texSubImage2D + drawArrays) ──
       const uploadStart = performance.now();
       this.renderOutput(pixels, result.width, result.height);
       const afterDisplay = performance.now();
@@ -832,20 +911,21 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
       // Main-process timings (from submitFrame result, if available)
       const mainInputHandlingMs = (result as any).mainInputHandlingMs;
-      const pipeWriteMs = (result as any).pipeWriteMs;
-      const pipeWaitAndReadMs = (result as any).pipeWaitAndReadMs;
-      const mainOutputPostMs = (result as any).mainOutputPostMs;
+      const requestWriteMs = (result as any).requestWriteMs;
+      const responseWaitMs = (result as any).responseWaitMs;
+      const responsePayloadReadMs = (result as any).responsePayloadReadMs;
+      const mainHandlerTotalMs = (result as any).mainHandlerTotalMs;
 
-      // Native per-stage timings from frame header
+      // Native per-stage timings from frame header (only knowable-before-write stages)
       const nativeInputReceiveMs = (result as any).nativeInputReceiveMs;
       const nativeUploadMs = (result as any).nativeUploadMs;
       const nativeEffectMs = (result as any).nativeEffectMs;
       const nativeDownloadMs = (result as any).nativeDownloadMs;
-      const nativeOutputWriteMs = (result as any).nativeOutputWriteMs;
-      const nativeTotalMs = (result as any).nativeTotalMs;
+      // nativeOutputWriteMs is NOT exposed per-frame; only in aggregate diagnostics
+      const nativePreWriteTotalMs = (result as any).nativePreWriteTotalMs;
 
-      // nativeTransportProcessingMs: true native total (from header) or fallback to rendererToResultMs
-      const trueNativeTransportMs = nativeTotalMs ?? rendererToResultMs;
+      // nativeTransportProcessingMs: true native pre-write total (from header) or fallback to rendererToResultMs
+      const trueNativeTransportMs = nativePreWriteTotalMs ?? rendererToResultMs;
 
       return {
         success: true,
@@ -859,21 +939,20 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           rendererToResultMs,
           textureUploadMs,
           rendererTotalMs,
-          // Use true native total when available, not a duplicate of rendererToResultMs
+          // Use true native pre-write total when available, not a duplicate of rendererToResultMs
           nativeTransportProcessingMs: trueNativeTransportMs,
           displayUploadMs,
-          // Main-process per-frame timings
+          // Main-process per-frame timings (truthful labels)
           mainInputHandlingMs,
-          pipeWriteMs,
-          pipeWaitAndReadMs,
-          mainOutputPostMs,
-          // Native per-stage timings
+          requestWriteMs,
+          responseWaitMs,
+          mainHandlerTotalMs,
+          // Native per-stage timings (only knowable-before-write)
           nativeInputReceiveMs,
           nativeUploadMs,
           nativeEffectMs,
           nativeDownloadMs,
-          nativeOutputWriteMs,
-          nativeTotalMs,
+          nativePreWriteTotalMs,
         },
       };
     }
@@ -907,6 +986,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     lifecycleLog("NvidiaBackend", "destroy", {
       instanceId: this.instanceId,
       reason: reason ?? "unspecified",
+      clientId: this.clientId,
     });
     this.initialized = false;
     this.frameInFlight = false;
@@ -914,13 +994,10 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
     const api = getVideoApi();
 
-    if (this.helperStarted) {
-      await api?.videoHelperFlush?.().catch(() => false);
-      await api?.videoHelperStop?.(true).catch(() => {});
-    }
+    // Release client lease (does NOT globally stop the helper)
+    this.releaseClient();
 
-    this.helperStarted = false;
-
+    // Destroy GL resources
     if (this.gl) {
       if (this.texture) {
         this.gl.deleteTexture(this.texture);
@@ -936,6 +1013,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     }
 
     this.texture = null;
+    this.textureUniformLocation = null;
+    this.textureWidth = 0;
+    this.textureHeight = 0;
     this.vao = null;
     this.program = null;
     this.gl = null;
@@ -956,6 +1036,22 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     console.info(
       "[nvidia-vsr] Native backend destroyed",
     );
+  }
+
+  /**
+   * Release the client lease obtained during initialization.
+   * Idempotent. Does NOT globally stop the helper.
+   */
+  private releaseClient(): void {
+    if (!this.clientId) return;
+    const api = getVideoApi();
+    const cid = this.clientId;
+    this.clientId = null;
+    api?.videoHelperReleaseClient?.(cid).catch(() => {});
+    lifecycleLog("NvidiaBackend", "clientReleased", {
+      instanceId: this.instanceId,
+      clientId: cid,
+    });
   }
 
   private calculateOutputDimensions(
@@ -1098,22 +1194,37 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
 
-    gl.texImage2D(
-      gl.TEXTURE_2D,
-      0,
-      gl.RGBA,
-      width,
-      height,
-      0,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      pixels,
-    );
+    // Use texSubImage2D for same-size frames to avoid full reallocation;
+    // use texImage2D on first frame or when dimensions change.
+    if (this.textureWidth === width && this.textureHeight === height) {
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        width,
+        height,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        pixels,
+      );
+    } else {
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        width,
+        height,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        pixels,
+      );
+      this.textureWidth = width;
+      this.textureHeight = height;
+    }
 
-    const textureLocation =
-      gl.getUniformLocation(program, "uTexture");
-
-    gl.uniform1i(textureLocation, 0);
+    gl.uniform1i(this.textureUniformLocation ?? 0, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     gl.bindVertexArray(null);

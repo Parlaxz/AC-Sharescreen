@@ -675,11 +675,45 @@ export function registerIpcHandlers(
     }
   });
 
+  // ── Video helper client leases (Phase 5/6) ────────────────────────────────────
+
+  ipcMain.handle("video-helper:acquire-client", async () => {
+    const manager = ensureVideoHelperManager();
+    const clientId = manager.acquireClient();
+    return { clientId };
+  });
+
+  ipcMain.handle("video-helper:release-client", async (_event, clientId: string) => {
+    const manager = ensureVideoHelperManager();
+    manager.releaseClient(clientId);
+    return { success: true };
+  });
+
+  ipcMain.handle("video-helper:is-client-active", async (_event, clientId: string) => {
+    const mgr = videoHelperManager;
+    return mgr ? mgr.isClientActive(clientId) : false;
+  });
+
   // ── Video helper (Phase 5: MessagePort frame IPC) ─────────────────────────────
 
   ipcMain.handle("request-frame-port", async (event) => {
     const manager = ensureVideoHelperManager();
-    const port = manager.createFramePort();
+    // Legacy path: acquire an anonymous client for backward compatibility
+    const clientId = manager.acquireClient();
+    const port = manager.createFramePort(clientId);
+    if (!port) {
+      return { success: false, error: "Failed to create frame port" };
+    }
+    event.sender.postMessage("frame:port", null, [port]);
+    return { success: true, clientId };
+  });
+
+  ipcMain.handle("video-helper:request-frame-port", async (event, clientId: string) => {
+    const manager = ensureVideoHelperManager();
+    const port = manager.createFramePort(clientId);
+    if (!port) {
+      return { success: false, error: "Invalid or inactive client" };
+    }
     event.sender.postMessage("frame:port", null, [port]);
     return { success: true };
   });

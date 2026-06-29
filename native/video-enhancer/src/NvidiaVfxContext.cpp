@@ -183,6 +183,17 @@ NvVfxResult NvidiaVfxContext::Initialize(const NvVfxConfig& config) {
         config_.modelDir = FindModelDir(FindSdkRoot());
     }
 
+    // Create persistent CUDA stream for upload/run/download sequencing
+    if (!cudaStream_) {
+        NvCV_Status streamStatus = NvVFX_CudaStreamCreate(
+            reinterpret_cast<CUstream*>(&cudaStream_));
+        if (streamStatus != NVCV_SUCCESS) {
+            lastError_ = StatusMessage("NvVFX_CudaStreamCreate", streamStatus);
+            // Nonfatal — will use default stream if unavailable
+            cudaStream_ = nullptr;
+        }
+    }
+
     initialized_ = true;
     lastError_.clear();
     return NvVfxResult::kSuccess;
@@ -333,6 +344,16 @@ NvVfxResult NvidiaVfxContext::LoadConfiguredEffect() {
         return NvVfxResult::kErrorEffectLoad;
     }
 
+    // Bind the persistent CUDA stream to this effect
+    if (cudaStream_) {
+        status = NvVFX_SetCudaStream(effect, NVVFX_CUDA_STREAM,
+            reinterpret_cast<CUstream>(cudaStream_));
+        if (status != NVCV_SUCCESS) {
+            lastError_ = StatusMessage("NvVFX_SetCudaStream", status);
+            return NvVfxResult::kErrorEffectLoad;
+        }
+    }
+
     effectLoaded_ = true;
     return NvVfxResult::kSuccess;
 }
@@ -345,9 +366,6 @@ NvVfxResult NvidiaVfxContext::AllocateInput(const NvVfxImage& desc) {
 
     inputDesc_ = desc;
     inputDesc_.stride = inputDesc_.width * 4;
-    inputBuffer_.assign(
-        static_cast<size_t>(inputDesc_.stride) * inputDesc_.height,
-        0);
 
     effectLoaded_ = false;
 
@@ -395,44 +413,16 @@ NvVfxResult NvidiaVfxContext::UploadInput(
         return NvVfxResult::kErrorInvalidInput;
     }
 
-    const auto* src = static_cast<const uint8_t*>(srcPixels);
-    auto* dst = inputBuffer_.data();
-    const uint32_t dstStride = inputDesc_.stride;
-
-    if (srcFormat == inputDesc_.format) {
-        for (uint32_t y = 0; y < srcHeight; ++y) {
-            std::memcpy(
-                dst + static_cast<size_t>(y) * dstStride,
-                src + static_cast<size_t>(y) * srcStride,
-                static_cast<size_t>(srcWidth) * 4);
-        }
-    }
-    else {
-        for (uint32_t y = 0; y < srcHeight; ++y) {
-            for (uint32_t x = 0; x < srcWidth; ++x) {
-                const size_t srcOffset =
-                    static_cast<size_t>(y) * srcStride +
-                    static_cast<size_t>(x) * 4;
-                const size_t dstOffset =
-                    static_cast<size_t>(y) * dstStride +
-                    static_cast<size_t>(x) * 4;
-
-                dst[dstOffset + 0] = src[srcOffset + 2];
-                dst[dstOffset + 1] = src[srcOffset + 1];
-                dst[dstOffset + 2] = src[srcOffset + 0];
-                dst[dstOffset + 3] = src[srcOffset + 3];
-            }
-        }
-    }
-
+    // Direct-wrap the incoming RGBA CPU buffer. The backing storage must
+    // remain valid until stream sync completes (via the sync point in RunFrame).
     NvCVImage cpuInput;
     NvCV_Status status = NvCVImage_Init(
         &cpuInput,
-        inputDesc_.width,
-        inputDesc_.height,
-        inputDesc_.stride,
-        inputBuffer_.data(),
-        ToNvFormat(inputDesc_.format),
+        srcWidth,
+        srcHeight,
+        srcStride,
+        const_cast<void*>(srcPixels),
+        ToNvFormat(srcFormat),
         NVCV_U8,
         NVCV_INTERLEAVED,
         NVCV_CPU);
@@ -446,7 +436,7 @@ NvVfxResult NvidiaVfxContext::UploadInput(
         &cpuInput,
         static_cast<NvCVImage*>(inputImage_),
         1.0f,
-        nullptr,
+        reinterpret_cast<CUstream>(cudaStream_),
         nullptr);
 
     if (status != NVCV_SUCCESS) {
@@ -465,8 +455,11 @@ NvVfxResult NvidiaVfxContext::RunFrame() {
         return NvVfxResult::kErrorRun;
     }
 
+    // Use the persistent CUDA stream for the run (parameter = 1 means streamed).
+    // The stream sequences upload (from UploadInput's NvCVImage_Transfer) then
+    // this GPU effect run. Synchronization happens after download transfer completes.
     const NvCV_Status status =
-        NvVFX_Run(reinterpret_cast<NvVFX_Handle>(effect_), 0);
+        NvVFX_Run(reinterpret_cast<NvVFX_Handle>(effect_), 1);
 
     if (status != NVCV_SUCCESS) {
         lastError_ = StatusMessage(
@@ -510,11 +503,12 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
         return NvVfxResult::kErrorInvalidOutput;
     }
 
+    // Download GPU→CPU on the persistent CUDA stream
     status = NvCVImage_Transfer(
         static_cast<NvCVImage*>(outputImage_),
         &cpuOutput,
         1.0f,
-        nullptr,
+        reinterpret_cast<CUstream>(cudaStream_),
         nullptr);
 
     if (status != NVCV_SUCCESS) {
@@ -524,6 +518,17 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
         return NvVfxResult::kErrorInvalidOutput;
     }
 
+    // Synchronize the CUDA stream to ensure upload → run → download all complete
+    // before CPU reads the output pixel buffer.
+    if (cudaStream_) {
+        NvCV_Status syncStatus = NvVFX_CudaStreamSynchronize(
+            reinterpret_cast<CUstream>(cudaStream_));
+        if (syncStatus != NVCV_SUCCESS) {
+            lastError_ = StatusMessage("NvVFX_CudaStreamSynchronize", syncStatus);
+            return NvVfxResult::kErrorRun;
+        }
+    }
+
     outWidth = outputDesc_.width;
     outHeight = outputDesc_.height;
     return NvVfxResult::kSuccess;
@@ -531,6 +536,11 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
 
 void NvidiaVfxContext::Destroy() {
     effectLoaded_ = false;
+
+    if (cudaStream_) {
+        NvVFX_CudaStreamDestroy(reinterpret_cast<CUstream>(cudaStream_));
+        cudaStream_ = nullptr;
+    }
 
     if (effect_) {
         NvVFX_DestroyEffect(reinterpret_cast<NvVFX_Handle>(effect_));

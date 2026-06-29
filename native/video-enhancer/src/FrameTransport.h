@@ -61,12 +61,14 @@ struct FrameHeader {
     uint32_t resultCode = 0; // 0=pending, 1=success, 2=error
 
     // Native per-stage timing (microseconds, filled by helper after processing)
+    // Only pre-write known timings are included. nativeOutputWriteUs is always 0
+    // in the per-frame header; it is available only in aggregate diagnostics.
     uint32_t nativeInputReceiveUs = 0;
     uint32_t nativeUploadUs = 0;
     uint32_t nativeEffectUs = 0;
     uint32_t nativeDownloadUs = 0;
-    uint32_t nativeOutputWriteUs = 0;
-    uint32_t nativeTotalUs = 0;
+    uint32_t nativeOutputWriteUs = 0; // always 0 in per-frame header; use aggregate diagnostics
+    uint32_t nativeTotalUs = 0;       // pre-write total (inputReceive+upload+effect+download)
 };
 
 /// Named-pipe transport for control (JSON) and frame (binary) channels.

@@ -79,19 +79,19 @@ export interface ProcessorStats {
   /** Number of native processing failures */
   nativeFailures: number;
 
-  // ─── Main-process per-frame timings (averaged over processed frames) ──
+  // ─── Main-process per-frame timings (truthful labels, averaged) ─────
   mainInputHandlingTimeMs: number | null;
-  pipeWriteTimeMs: number | null;
-  pipeWaitAndReadTimeMs: number | null;
-  mainOutputPostTimeMs: number | null;
+  requestWriteTimeMs: number | null;
+  responseWaitTimeMs: number | null;
+  mainHandlerTotalTimeMs: number | null;
 
   // ─── Native per-stage timings (from frame header, μs→ms) ────────────
+  // Only pre-write known stages; output-write NOT included per-frame.
   nativeInputReceiveTimeMs: number | null;
   nativeUploadTimeMs: number | null;
   nativeEffectTimeMs: number | null;
   nativeDownloadTimeMs: number | null;
-  nativeOutputWriteTimeMs: number | null;
-  nativeTotalTimeMs: number | null;
+  nativePreWriteTotalTimeMs: number | null;
 
   // ─── Phase 6: Bounded-window rolling statistics ───────────────────────
   /** Rolling average renderer total time (ms) over bounded window */
@@ -201,17 +201,18 @@ export class ViewerImageProcessor {
   private rendererTotalTotalMs = 0;
   private rendererTotalCount = 0;
 
-  // Main-process per-frame timing accumulators
+  // Main-process per-frame timing accumulators (truthful labels)
   private mainInputHandlingTotalMs = 0;
   private mainInputHandlingCount = 0;
-  private pipeWriteTotalMs = 0;
-  private pipeWriteCount = 0;
-  private pipeWaitAndReadTotalMs = 0;
-  private pipeWaitAndReadCount = 0;
-  private mainOutputPostTotalMs = 0;
-  private mainOutputPostCount = 0;
+  private requestWriteTotalMs = 0;
+  private requestWriteCount = 0;
+  private responseWaitTotalMs = 0;
+  private responseWaitCount = 0;
+  private mainHandlerTotalTotalMs = 0;
+  private mainHandlerTotalCount = 0;
 
   // Native per-stage timing accumulators (from frame header, μs→ms)
+  // Only pre-write known stages
   private nativeInputReceiveTotalMs = 0;
   private nativeInputReceiveCount = 0;
   private nativeUploadTotalMs = 0;
@@ -220,10 +221,8 @@ export class ViewerImageProcessor {
   private nativeEffectCount = 0;
   private nativeDownloadTotalMs = 0;
   private nativeDownloadCount = 0;
-  private nativeOutputWriteTotalMs = 0;
-  private nativeOutputWriteCount = 0;
-  private nativeTotalTotalMs = 0;
-  private nativeTotalCount = 0;
+  private nativePreWriteTotalTotalMs = 0;
+  private nativePreWriteTotalCount = 0;
 
   // Phase 6: Bounded-window rolling stats (capacity=250 samples)
   private rendererTotalStats = new BoundedWindowStats(250);
@@ -503,21 +502,22 @@ export class ViewerImageProcessor {
       schedulerDrops: this.schedulerDropCount,
       nativeFailures: this.nativeFailureCount,
 
-      // ─── Main-process per-frame timing averages ─────────────────────────
+      // ─── Main-process per-frame timing averages (truthful labels) ─────
       mainInputHandlingTimeMs: this.mainInputHandlingCount > 0
         ? this.mainInputHandlingTotalMs / this.mainInputHandlingCount
         : null,
-      pipeWriteTimeMs: this.pipeWriteCount > 0
-        ? this.pipeWriteTotalMs / this.pipeWriteCount
+      requestWriteTimeMs: this.requestWriteCount > 0
+        ? this.requestWriteTotalMs / this.requestWriteCount
         : null,
-      pipeWaitAndReadTimeMs: this.pipeWaitAndReadCount > 0
-        ? this.pipeWaitAndReadTotalMs / this.pipeWaitAndReadCount
+      responseWaitTimeMs: this.responseWaitCount > 0
+        ? this.responseWaitTotalMs / this.responseWaitCount
         : null,
-      mainOutputPostTimeMs: this.mainOutputPostCount > 0
-        ? this.mainOutputPostTotalMs / this.mainOutputPostCount
+      mainHandlerTotalTimeMs: this.mainHandlerTotalCount > 0
+        ? this.mainHandlerTotalTotalMs / this.mainHandlerTotalCount
         : null,
 
       // ─── Native per-stage timing averages (from frame header) ──────────
+      // Only pre-write known stages; output-write NOT included per-frame.
       nativeInputReceiveTimeMs: this.nativeInputReceiveCount > 0
         ? this.nativeInputReceiveTotalMs / this.nativeInputReceiveCount
         : null,
@@ -530,11 +530,8 @@ export class ViewerImageProcessor {
       nativeDownloadTimeMs: this.nativeDownloadCount > 0
         ? this.nativeDownloadTotalMs / this.nativeDownloadCount
         : null,
-      nativeOutputWriteTimeMs: this.nativeOutputWriteCount > 0
-        ? this.nativeOutputWriteTotalMs / this.nativeOutputWriteCount
-        : null,
-      nativeTotalTimeMs: this.nativeTotalCount > 0
-        ? this.nativeTotalTotalMs / this.nativeTotalCount
+      nativePreWriteTotalTimeMs: this.nativePreWriteTotalCount > 0
+        ? this.nativePreWriteTotalTotalMs / this.nativePreWriteTotalCount
         : null,
 
       // Phase 6: Bounded-window rolling statistics
@@ -792,24 +789,25 @@ export class ViewerImageProcessor {
         this.displayUploadTotalMs += tb.displayUploadMs;
         this.displayUploadCount++;
       }
-      // Accumulate main-process per-frame timings
+      // Accumulate main-process per-frame timings (truthful labels)
       if (tb.mainInputHandlingMs != null) {
         this.mainInputHandlingTotalMs += tb.mainInputHandlingMs;
         this.mainInputHandlingCount++;
       }
-      if (tb.pipeWriteMs != null) {
-        this.pipeWriteTotalMs += tb.pipeWriteMs;
-        this.pipeWriteCount++;
+      if (tb.requestWriteMs != null) {
+        this.requestWriteTotalMs += tb.requestWriteMs;
+        this.requestWriteCount++;
       }
-      if (tb.pipeWaitAndReadMs != null) {
-        this.pipeWaitAndReadTotalMs += tb.pipeWaitAndReadMs;
-        this.pipeWaitAndReadCount++;
+      if (tb.responseWaitMs != null) {
+        this.responseWaitTotalMs += tb.responseWaitMs;
+        this.responseWaitCount++;
       }
-      if (tb.mainOutputPostMs != null) {
-        this.mainOutputPostTotalMs += tb.mainOutputPostMs;
-        this.mainOutputPostCount++;
+      if (tb.mainHandlerTotalMs != null) {
+        this.mainHandlerTotalTotalMs += tb.mainHandlerTotalMs;
+        this.mainHandlerTotalCount++;
       }
       // Accumulate native per-stage timings (from frame header)
+      // Only pre-write known stages; output-write NOT accumulated per-frame
       if (tb.nativeInputReceiveMs != null) {
         this.nativeInputReceiveTotalMs += tb.nativeInputReceiveMs;
         this.nativeInputReceiveCount++;
@@ -826,13 +824,9 @@ export class ViewerImageProcessor {
         this.nativeDownloadTotalMs += tb.nativeDownloadMs;
         this.nativeDownloadCount++;
       }
-      if (tb.nativeOutputWriteMs != null) {
-        this.nativeOutputWriteTotalMs += tb.nativeOutputWriteMs;
-        this.nativeOutputWriteCount++;
-      }
-      if (tb.nativeTotalMs != null) {
-        this.nativeTotalTotalMs += tb.nativeTotalMs;
-        this.nativeTotalCount++;
+      if (tb.nativePreWriteTotalMs != null) {
+        this.nativePreWriteTotalTotalMs += tb.nativePreWriteTotalMs;
+        this.nativePreWriteTotalCount++;
       }
       // Push to bounded-window rolling stats
       if (tb.rendererTotalMs != null) {

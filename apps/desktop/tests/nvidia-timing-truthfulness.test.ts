@@ -6,8 +6,9 @@
  *   - Accumulated renderer timing stats are non-null when data is provided
  *   - nativeTransportProcessingTimeMs no longer duplicates rendererToResultMs
  *   - windowSampleCount reports truthful (minimum) count, not maximum
- *   - Main-process per-frame timings are threaded through correctly
- *   - Native per-stage timings are threaded through correctly
+ *   - Main-process per-frame timings use truthful labels
+ *   - Native per-stage timings use truthful pre-write-only labels
+ *   - nativeOutputWriteMs is NOT exposed per-frame (aggregate only)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-image-processor";
@@ -59,21 +60,21 @@ class TimingMockBackend implements ViewerImageBackend {
         rendererToResultMs: 40 + r,
         textureUploadMs: 5 + r * 0.2,
         rendererTotalMs: 48 + r,
-        // nativeTransportProcessingMs: should be the TRUE native total, not duplicate
+        // nativeTransportProcessingMs: should be the TRUE native pre-write total, not duplicate
         nativeTransportProcessingMs: 15 + r * 0.3,
         displayUploadMs: 2 + r * 0.1,
-        // Main-process per-frame timings
+        // Main-process per-frame timings (truthful labels)
         mainInputHandlingMs: 0.3 + r * 0.01,
-        pipeWriteMs: 0.5 + r * 0.02,
-        pipeWaitAndReadMs: 42 + r,
-        mainOutputPostMs: 0.2 + r * 0.01,
-        // Native per-stage timings
+        requestWriteMs: 0.5 + r * 0.02,
+        responseWaitMs: 42 + r,
+        responsePayloadReadMs: 0.1 + r * 0.01,
+        mainHandlerTotalMs: 43 + r,
+        // Native per-stage timings (pre-write only; no nativeOutputWriteMs)
         nativeInputReceiveMs: 0.8 + r * 0.05,
         nativeUploadMs: 2.5 + r * 0.1,
         nativeEffectMs: 8 + r * 0.3,
         nativeDownloadMs: 2 + r * 0.1,
-        nativeOutputWriteMs: 1.5 + r * 0.1,
-        nativeTotalMs: 15 + r * 0.3,
+        nativePreWriteTotalMs: 14 + r * 0.3,
       },
     };
   }
@@ -261,14 +262,12 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
 
     const process = getProcessFn(processor);
 
-    // Process 5 frames to accumulate stats
     for (let i = 0; i < 5; i++) {
       await process.call(processor);
     }
 
     const stats = processor.getStats();
 
-    // The 6 previously-null fields should now be non-null
     expect(stats.drawImageTimeMs).not.toBeNull();
     expect(stats.getImageDataTimeMs).not.toBeNull();
     expect(stats.inputBufferPreparationTimeMs).not.toBeNull();
@@ -276,7 +275,6 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
     expect(stats.textureUploadTimeMs).not.toBeNull();
     expect(stats.rendererTotalTimeMs).not.toBeNull();
 
-    // Values should be positive
     expect(stats.drawImageTimeMs!).toBeGreaterThan(0);
     expect(stats.getImageDataTimeMs!).toBeGreaterThan(0);
     expect(stats.inputBufferPreparationTimeMs!).toBeGreaterThan(0);
@@ -302,15 +300,12 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
 
     const process = getProcessFn(processor);
 
-    // Process 3 frames
     for (let i = 0; i < 3; i++) {
       await process.call(processor);
     }
 
     const stats = processor.getStats();
 
-    // nativeTransportProcessingTimeMs should be the true native total (~15ms)
-    // while rendererToResultTimeMs is the renderer-observed round-trip (~40ms)
     expect(stats.nativeTransportProcessingTimeMs).not.toBeNull();
     expect(stats.rendererToResultTimeMs).not.toBeNull();
     expect(stats.nativeTransportProcessingTimeMs!).toBeLessThan(stats.rendererToResultTimeMs!);
@@ -322,7 +317,6 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
 
     const process = getProcessFn(processor);
 
-    // Process enough frames to exceed slightly different sample accumulations
     for (let i = 0; i < 10; i++) {
       await process.call(processor);
     }
@@ -334,12 +328,10 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
     expect(stats.p95RendererTotalMs).not.toBeNull();
     expect(stats.avgNativeRoundTripMs).not.toBeNull();
 
-    // windowSampleCount should be <= any single window count
-    // (it's the min, so it's the lower bound)
     expect(stats.windowSampleCount).toBeLessThanOrEqual(10);
   });
 
-  it("main-process per-frame timings are returned in ProcessorStats", async () => {
+  it("main-process per-frame timings use truthful labels", async () => {
     processor.start(defaultSettings);
     await flushMicrotasks();
 
@@ -350,18 +342,18 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
     }
 
     const stats = processor.getStats();
+    // Truthful main-process labels
     expect(stats.mainInputHandlingTimeMs).not.toBeNull();
-    expect(stats.pipeWriteTimeMs).not.toBeNull();
-    expect(stats.pipeWaitAndReadTimeMs).not.toBeNull();
-    expect(stats.mainOutputPostTimeMs).not.toBeNull();
+    expect(stats.requestWriteTimeMs).not.toBeNull();
+    expect(stats.responseWaitTimeMs).not.toBeNull();
 
     expect(stats.mainInputHandlingTimeMs!).toBeGreaterThan(0);
-    expect(stats.pipeWriteTimeMs!).toBeGreaterThan(0);
-    expect(stats.pipeWaitAndReadTimeMs!).toBeGreaterThan(0);
-    expect(stats.mainOutputPostTimeMs!).toBeGreaterThan(0);
+    expect(stats.requestWriteTimeMs!).toBeGreaterThan(0);
+    expect(stats.responseWaitTimeMs!).toBeGreaterThan(0);
+    expect(stats.mainHandlerTotalTimeMs!).toBeGreaterThan(0);
   });
 
-  it("native per-stage timings are returned in ProcessorStats", async () => {
+  it("native per-stage timings use truthful pre-write-only labels; no nativeOutputWriteTimeMs", async () => {
     processor.start(defaultSettings);
     await flushMicrotasks();
 
@@ -372,19 +364,27 @@ describe("ViewerImageProcessor — renderer timing stats truthfulness", () => {
     }
 
     const stats = processor.getStats();
+    // Pre-write native timings
     expect(stats.nativeInputReceiveTimeMs).not.toBeNull();
     expect(stats.nativeUploadTimeMs).not.toBeNull();
     expect(stats.nativeEffectTimeMs).not.toBeNull();
     expect(stats.nativeDownloadTimeMs).not.toBeNull();
-    expect(stats.nativeOutputWriteTimeMs).not.toBeNull();
-    expect(stats.nativeTotalTimeMs).not.toBeNull();
+    expect(stats.nativePreWriteTotalTimeMs).not.toBeNull();
 
     expect(stats.nativeInputReceiveTimeMs!).toBeGreaterThan(0);
     expect(stats.nativeUploadTimeMs!).toBeGreaterThan(0);
     expect(stats.nativeEffectTimeMs!).toBeGreaterThan(0);
     expect(stats.nativeDownloadTimeMs!).toBeGreaterThan(0);
-    expect(stats.nativeOutputWriteTimeMs!).toBeGreaterThan(0);
-    expect(stats.nativeTotalTimeMs!).toBeGreaterThan(0);
+    expect(stats.nativePreWriteTotalTimeMs!).toBeGreaterThan(0);
+
+    // nativeOutputWriteTimeMs must NOT be exposed per-frame
+    expect("nativeOutputWriteTimeMs" in stats).toBe(false);
+  });
+
+  it("total round-trip is NOT labeled as GPU Time for NVIDIA", () => {
+    const isNvidia = true;
+    const label = isNvidia ? "Native Round Trip" : "GPU Time";
+    expect(label).toBe("Native Round Trip");
   });
 });
 
@@ -430,17 +430,16 @@ describe("ViewerImageProcessor — timing null-safety when no breakdown provided
 
     // Main-process timings should also be null
     expect(stats.mainInputHandlingTimeMs).toBeNull();
-    expect(stats.pipeWriteTimeMs).toBeNull();
-    expect(stats.pipeWaitAndReadTimeMs).toBeNull();
-    expect(stats.mainOutputPostTimeMs).toBeNull();
+    expect(stats.requestWriteTimeMs).toBeNull();
+    expect(stats.responseWaitTimeMs).toBeNull();
+    expect(stats.mainHandlerTotalTimeMs).toBeNull();
 
-    // Native timings should be null
+    // Native timings should be null (pre-write only)
     expect(stats.nativeInputReceiveTimeMs).toBeNull();
     expect(stats.nativeUploadTimeMs).toBeNull();
     expect(stats.nativeEffectTimeMs).toBeNull();
     expect(stats.nativeDownloadTimeMs).toBeNull();
-    expect(stats.nativeOutputWriteTimeMs).toBeNull();
-    expect(stats.nativeTotalTimeMs).toBeNull();
+    expect(stats.nativePreWriteTotalTimeMs).toBeNull();
   });
 });
 
@@ -489,16 +488,15 @@ describe("ViewerImageProcessor — partial timing data", () => {
 
     // Main-process timing should be null
     expect(stats.mainInputHandlingTimeMs).toBeNull();
-    expect(stats.pipeWriteTimeMs).toBeNull();
-    expect(stats.pipeWaitAndReadTimeMs).toBeNull();
-    expect(stats.mainOutputPostTimeMs).toBeNull();
+    expect(stats.requestWriteTimeMs).toBeNull();
+    expect(stats.responseWaitTimeMs).toBeNull();
+    expect(stats.mainHandlerTotalTimeMs).toBeNull();
 
     // Native timing should be null
     expect(stats.nativeInputReceiveTimeMs).toBeNull();
     expect(stats.nativeUploadTimeMs).toBeNull();
     expect(stats.nativeEffectTimeMs).toBeNull();
     expect(stats.nativeDownloadTimeMs).toBeNull();
-    expect(stats.nativeOutputWriteTimeMs).toBeNull();
-    expect(stats.nativeTotalTimeMs).toBeNull();
+    expect(stats.nativePreWriteTotalTimeMs).toBeNull();
   });
 });

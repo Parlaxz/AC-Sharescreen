@@ -93,6 +93,8 @@ private:
     NvVfxImage inputDesc_;
     NvVfxImage outputDesc_;
     std::vector<uint8_t> inputBuffer_;
+    /// Persistent CUDA stream for upload/run/download sequencing
+    void* cudaStream_ = nullptr;
 
     NvVfxResult CreateSuperResEffect();
     NvVfxResult LoadConfiguredEffect();

@@ -47,18 +47,20 @@ export interface VideoEnhancerDiagnostics {
   minProcessingTimeUs: number;
 
   // Phase 6: Native timing breakdown (microseconds, process-local)
+  // Per-frame native timings ONLY include stages knowable before transmission:
   /** Time to receive input frame data over the pipe */
   nativeInputReceiveUs?: number;
   /** Time to upload pixels to GPU (CPU→GPU transfer) */
   nativeUploadUs?: number;
-  /** Time for NVIDIA VFX processing (RunFrame) */
+  /** Time for NVIDIA VFX processing (NvVFX_Run interval only) */
   nativeEffectUs?: number;
   /** Time to download processed pixels from GPU (GPU→CPU transfer) */
   nativeDownloadUs?: number;
-  /** Time to write output frame back over the pipe */
+  /** Total pre-write native processing time (inputReceive + upload + effect + download).
+   *  Does NOT include output write time, which is only available in aggregate diagnostics. */
+  nativePreWriteTotalUs?: number;
+  /** Output write time — aggregate-only; NOT per-frame. Kept here for diagnostics query. */
   nativeOutputWriteUs?: number;
-  /** Total native processing time (sum of above) */
-  nativeTotalUs?: number;
 }
 
 export interface VideoEnhancerStats {

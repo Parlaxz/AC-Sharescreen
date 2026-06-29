@@ -135,6 +135,9 @@ const api: ScreenLinkAPI = {
   },
 
   // Video helper
+  videoHelperAcquireClient: () => ipcRenderer.invoke("video-helper:acquire-client"),
+  videoHelperReleaseClient: (clientId) => ipcRenderer.invoke("video-helper:release-client", clientId),
+  videoHelperIsClientActive: (clientId) => ipcRenderer.invoke("video-helper:is-client-active", clientId),
   videoHelperStart: (config) => ipcRenderer.invoke("video-helper:start", config),
   videoHelperStop: (shutdown) => ipcRenderer.invoke("video-helper:stop", shutdown),
   videoHelperReconfigure: (config) => ipcRenderer.invoke("video-helper:reconfigure", config),
@@ -143,6 +146,7 @@ const api: ScreenLinkAPI = {
   videoHelperFlush: () => ipcRenderer.invoke("video-helper:flush"),
   videoHelperGetState: () => ipcRenderer.invoke("video-helper:get-state"),
   requestFramePort: () => ipcRenderer.invoke("request-frame-port"),
+  requestFramePortForClient: (clientId) => ipcRenderer.invoke("video-helper:request-frame-port", clientId),
 
   // Discord shortcut simulation
   sendShortcut: (binding) => ipcRenderer.invoke("send-shortcut", binding),

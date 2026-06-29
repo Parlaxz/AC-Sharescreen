@@ -141,6 +141,9 @@ export interface ScreenLinkAPI {
   sendShortcut: (binding: ShortcutBinding) => Promise<{ success: boolean; error?: string }>;
 
   // Video helper
+  videoHelperAcquireClient: () => Promise<{ clientId: string }>;
+  videoHelperReleaseClient: (clientId: string) => Promise<{ success: boolean }>;
+  videoHelperIsClientActive: (clientId: string) => Promise<boolean>;
   videoHelperStart: (config: Record<string, unknown>) => Promise<boolean>;
   videoHelperStop: (shutdown?: boolean) => Promise<void>;
   videoHelperReconfigure: (config: Record<string, unknown>) => Promise<boolean>;
@@ -150,6 +153,8 @@ export interface ScreenLinkAPI {
   /** Phase 5: Request a dedicated MessagePort for zero-copy frame data transfer.
    *  The port arrives asynchronously via window `message` event with type `frame:port`. */
   requestFramePort: () => Promise<{ success: boolean }>;
+  /** Phase 6: Request a frame port bound to a specific clientId lease. */
+  requestFramePortForClient: (clientId: string) => Promise<{ success: boolean; error?: string }>;
 
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;

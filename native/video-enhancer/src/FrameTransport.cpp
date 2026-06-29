@@ -133,7 +133,7 @@ static bool ReadExact(HANDLE pipe, void* buf, size_t bytes) {
     auto* dst = static_cast<uint8_t*>(buf);
     while (total < bytes) {
         DWORD chunk = 0;
-        DWORD toRead = static_cast<DWORD>((bytes - total) < (64 * 1024) ? (bytes - total) : (64 * 1024));
+        DWORD toRead = static_cast<DWORD>((bytes - total) < (128 * 1024 * 1024) ? (bytes - total) : (128 * 1024 * 1024));
         BOOL ok = ReadFile(pipe, dst + total, toRead, &chunk, nullptr);
         if (!ok) {
             DWORD err = GetLastError();
@@ -159,7 +159,7 @@ static bool WriteAll(HANDLE pipe, const void* buf, size_t bytes) {
     auto* src = static_cast<const uint8_t*>(buf);
     while (total < bytes) {
         DWORD chunk = 0;
-        DWORD toWrite = static_cast<DWORD>((bytes - total) < (64 * 1024) ? (bytes - total) : (64 * 1024));
+        DWORD toWrite = static_cast<DWORD>((bytes - total) < (128 * 1024 * 1024) ? (bytes - total) : (128 * 1024 * 1024));
         BOOL ok = WriteFile(pipe, src + total, toWrite, &chunk, nullptr);
         if (!ok) {
             fprintf(stderr, "[FrameTransport] WriteFile error: %lu\n", GetLastError());

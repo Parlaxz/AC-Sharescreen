@@ -48,18 +48,20 @@ export interface FrameProcessResult {
     displayUploadMs?: number;
 
     // Main-process per-frame timings (captured in VideoHelperManager.submitFrame)
+    // Truthful labels distinguishing capture/readback, renderer submission-to-result,
+    // main request write, response wait, response payload read.
     mainInputHandlingMs?: number;
-    pipeWriteMs?: number;
-    pipeWaitAndReadMs?: number;
-    mainOutputPostMs?: number;
+    requestWriteMs?: number;
+    responseWaitMs?: number;
+    mainHandlerTotalMs?: number;
 
     // Native per-stage timings from frame header (μs→ms conversion)
+    // Only includes stages knowable-before-write. nativeOutputWriteMs NOT exposed per-frame.
     nativeInputReceiveMs?: number;
     nativeUploadMs?: number;
     nativeEffectMs?: number;
     nativeDownloadMs?: number;
-    nativeOutputWriteMs?: number;
-    nativeTotalMs?: number;
+    nativePreWriteTotalMs?: number;
   };
   /** Total latency from capture to displayed frame */
   totalLatencyMs?: number;

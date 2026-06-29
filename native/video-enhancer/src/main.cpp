@@ -459,7 +459,7 @@ static int RunServe(const std::vector<std::string>& args) {
             bool ok = false;
             sv::FrameHeader outHeader = header;
             std::vector<uint8_t> outData;
-            uint64_t uploadUs = 0, effectUs = 0, downloadUs = 0, outputWriteUs = 0;
+            uint64_t uploadUs = 0, effectUs = 0, downloadUs = 0;
 
             if (g_nvidiaAvailable && g_nvidiaVfx) {
                 // Upload input pixels to NVIDIA (CPU→GPU)
@@ -520,27 +520,32 @@ static int RunServe(const std::vector<std::string>& args) {
             // Every accepted frame returns exactly one result, whether it
             // succeeded or failed. Never drop a frame silently.
 
-            // Measure output write time
-            auto t_ow_start = std::chrono::high_resolution_clock::now();
+            // Pre-write total: knowable timings before transmission
+            auto t_prewrite_end = std::chrono::high_resolution_clock::now();
+            uint64_t preWriteTotalUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(t_prewrite_end - t0_total).count());
 
-            auto t_total_end = std::chrono::high_resolution_clock::now();
-            uint64_t totalUs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(t_total_end - t0_total).count());
+            // Measure output write time separately for aggregate diagnostics
+            auto t_ow_start = std::chrono::high_resolution_clock::now();
+            uint64_t outputWriteUsAggregate = 0;
 
             if (ok) {
                 outHeader.resultCode = 1;
-                // Fill native timing fields into output header
+                // Fill native timing fields into output header (pre-write known timings only)
                 outHeader.nativeInputReceiveUs = static_cast<uint32_t>(inputReceiveUs);
                 outHeader.nativeUploadUs = static_cast<uint32_t>(uploadUs);
                 outHeader.nativeEffectUs = static_cast<uint32_t>(effectUs);
                 outHeader.nativeDownloadUs = static_cast<uint32_t>(downloadUs);
-                outHeader.nativeOutputWriteUs = static_cast<uint32_t>(outputWriteUs); // updated below
-                outHeader.nativeTotalUs = static_cast<uint32_t>(totalUs);
+                outHeader.nativeOutputWriteUs = 0; // not known pre-write; kept only in aggregate
+                outHeader.nativeTotalUs = static_cast<uint32_t>(preWriteTotalUs);
 
                 // Write back the processed frame
                 if (!transport.WriteFrame(outHeader, outData.data(), outData.size())) {
                     fprintf(stderr, "[FrameWorker] Failed to write output frame\n");
                 }
+                auto t_ow_end = std::chrono::high_resolution_clock::now();
+                outputWriteUsAggregate = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t_ow_end - t_ow_start).count());
             } else {
                 // Write back a failure result with resultCode=2
                 // so the Electron side never hangs waiting for a timeout.
@@ -548,7 +553,11 @@ static int RunServe(const std::vector<std::string>& args) {
                 outHeader.resultCode = 2; // error
                 outHeader.payloadBytes = 0; // no pixel data on failure
                 outHeader.nativeInputReceiveUs = static_cast<uint32_t>(inputReceiveUs);
-                outHeader.nativeTotalUs = static_cast<uint32_t>(totalUs);
+                outHeader.nativeTotalUs = static_cast<uint32_t>(preWriteTotalUs);
+                outHeader.nativeOutputWriteUs = 0;
+                auto t_ow_end = std::chrono::high_resolution_clock::now();
+                outputWriteUsAggregate = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t_ow_end - t_ow_start).count());
                 if (!transport.WriteFrame(outHeader, nullptr, 0)) {
                     fprintf(stderr, "[FrameWorker] Failed to write failure result\n");
                 }
@@ -557,13 +566,10 @@ static int RunServe(const std::vector<std::string>& args) {
                         g_nvidiaVfx ? g_nvidiaVfx->GetLastError().c_str() : "NVIDIA unavailable");
             }
 
-            auto t_ow_end = std::chrono::high_resolution_clock::now();
-            outputWriteUs = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(t_ow_end - t_ow_start).count());
-
             // Record detailed per-stage timing breakdown (Phase 6)
-            diag.RecordFrameDetails(totalUs, ok,
-                                     inputReceiveUs, uploadUs, effectUs, downloadUs, outputWriteUs);
+            // outputWriteUsAggregate is kept ONLY in aggregate diagnostics, never per-frame header
+            diag.RecordFrameDetails(preWriteTotalUs, ok,
+                                     inputReceiveUs, uploadUs, effectUs, downloadUs, outputWriteUsAggregate);
         }
     });
 
