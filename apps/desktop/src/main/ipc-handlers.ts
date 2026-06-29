@@ -675,6 +675,15 @@ export function registerIpcHandlers(
     }
   });
 
+  // ── Video helper (Phase 5: MessagePort frame IPC) ─────────────────────────────
+
+  ipcMain.handle("request-frame-port", async (event) => {
+    const manager = ensureVideoHelperManager();
+    const port = manager.createFramePort();
+    event.sender.postMessage("frame:port", null, [port]);
+    return { success: true };
+  });
+
   // ── Video helper ──────────────────────────────────────────────────────────────
 
   ipcMain.handle("video-helper:start", async (_event, config: VideoEnhancerConfig) => {

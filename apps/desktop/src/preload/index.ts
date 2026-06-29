@@ -142,6 +142,7 @@ const api: ScreenLinkAPI = {
     ipcRenderer.invoke("video-helper:submit-frame", generation, frameSequence, frameData, inputWidth, inputHeight),
   videoHelperFlush: () => ipcRenderer.invoke("video-helper:flush"),
   videoHelperGetState: () => ipcRenderer.invoke("video-helper:get-state"),
+  requestFramePort: () => ipcRenderer.invoke("request-frame-port"),
 
   // Discord shortcut simulation
   sendShortcut: (binding) => ipcRenderer.invoke("send-shortcut", binding),
@@ -160,5 +161,13 @@ ipcRenderer.on('pcm:port', (_event: Electron.IpcRendererEvent) => {
   const port = evt.ports?.[0];
   if (port) {
     window.postMessage({ type: 'pcm:port' }, '*', [port]);
+  }
+});
+
+ipcRenderer.on('frame:port', (_event: Electron.IpcRendererEvent) => {
+  const evt = _event as unknown as { ports?: MessagePort[] };
+  const port = evt.ports?.[0];
+  if (port) {
+    window.postMessage({ type: 'frame:port' }, '*', [port]);
   }
 });

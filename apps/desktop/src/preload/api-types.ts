@@ -147,6 +147,9 @@ export interface ScreenLinkAPI {
   videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: Uint8Array, inputWidth: number, inputHeight: number) => Promise<boolean>;
   videoHelperFlush: () => Promise<boolean>;
   videoHelperGetState: () => Promise<string>;
+  /** Phase 5: Request a dedicated MessagePort for zero-copy frame data transfer.
+   *  The port arrives asynchronously via window `message` event with type `frame:port`. */
+  requestFramePort: () => Promise<{ success: boolean }>;
 
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;

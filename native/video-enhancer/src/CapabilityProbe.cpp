@@ -7,6 +7,12 @@ CapabilityResult ProbeCapability() {
     CapabilityResult result;
     result.available = false;
 
+    // Always set supported modes/qualities so the application knows
+    // what the native helper is designed to handle, even when the
+    // NVIDIA runtime is not present on this machine.
+    result.supportedModes = "vsr,denoise,deblur,high-bitrate";
+    result.supportedQualities = "low,medium,high,ultra";
+
 #ifdef SCREENLINK_NVIDIA_VFX_ENABLED
     NvidiaVfxContext context;
     NvVfxConfig config;
@@ -25,8 +31,6 @@ CapabilityResult ProbeCapability() {
 
     result.available = true;
     result.reason = "available";
-    result.supportedModes = "nvidia-vsr";
-    result.supportedQualities = "0,1,2,3,4";
 #else
     result.reason = "sdk-not-built";
 #endif

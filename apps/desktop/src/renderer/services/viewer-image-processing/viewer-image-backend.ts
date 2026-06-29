@@ -32,6 +32,14 @@ export interface FrameProcessResult {
   transient?: boolean;
   /** true when the frame was dropped due to backpressure */
   backpressureDrop?: boolean;
+  /** Timing breakdown for Phase 1 truthful statistics */
+  timingBreakdown?: {
+    captureReadbackMs?: number;
+    nativeTransportProcessingMs?: number;
+    displayUploadMs?: number;
+  };
+  /** Total latency from capture to displayed frame */
+  totalLatencyMs?: number;
 }
 
 // ─── Frame metadata passed alongside each frame ──────────────────────────────
@@ -60,6 +68,8 @@ export interface BackendStats {
   backpressureDrops: number;
   /** Current stream generation */
   generation?: number;
+  /** Canonical NVIDIA QualityLevel when backend is nvidia-vsr */
+  nativeQualityLevel?: number | null;
 
   // ── Extended fields (populated by WebGL2 backend, undefined for others) ──
   scalingAlgorithm?: ScalingAlgorithm;

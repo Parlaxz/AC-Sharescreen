@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
+import { MessageChannelMain } from "electron";
 import { VIDEO_ENHANCER_PROTOCOL_VERSION } from "./video-enhancer-protocol.js";
 import type { VideoEnhancerConfig } from "./video-enhancer-protocol.js";
 import { getVideoEnhancerHelperPath } from "./helper-path.js";
@@ -141,7 +142,7 @@ export class VideoHelperManager {
  inputWidth,
  inputHeight,
  inputStride: inputWidth * 4,
- pixelFormat: 1, // BGRA8
+ pixelFormat: 2, // RGBA8
  requestedOutputWidth: outW,
  requestedOutputHeight: outH,
  processingMode: modeNum,
@@ -661,28 +662,47 @@ export class VideoHelperManager {
  return;
  }
 
- const payloadBytes = resultBuf.readUInt32LE(60); // payloadBytes in the 80-byte FrameHeader
+ const resultCode = resultBuf.readUInt32LE(76);
+
+ if (resultCode !== 1) {
+   settled = true;
+   clearTimeout(timeout);
+   socket.removeListener("data", onResultData);
+
+   console.error(
+     `[VideoHelper] Native frame failed: resultCode=${resultCode} generation=${header.generation} sequence=${header.frameSequence}`,
+   );
+
+   resolve(null);
+   return;
+ }
+
+ const payloadBytes = resultBuf.readUInt32LE(60);
+
  if (payloadBytes === 0) {
- // No payload ‚€ success with empty output
- settled = true;
- clearTimeout(timeout);
- socket.removeListener("data", onResultData);
- resolve({ generation: header.generation, sequence: header.frameSequence, pixels: Buffer.alloc(0), width: header.requestedOutputWidth, height: header.requestedOutputHeight });
- return;
- }
+   settled = true;
+   clearTimeout(timeout);
+   socket.removeListener("data", onResultData);
 
- if (payloadBytes > 200 * 1024 * 1024) {
- // Too large ‚€ protocol error
- settled = true;
- clearTimeout(timeout);
- socket.removeListener("data", onResultData);
- socket.destroy();
- this.framePipeConnected = false;
- resolve(null);
- return;
- }
+   console.error(
+     `[VideoHelper] Native frame succeeded with an empty payload: generation=${header.generation} sequence=${header.frameSequence}`,
+   );
 
- resultPayload = Buffer.alloc(payloadBytes);
+   resolve(null);
+   return;
+ }
+  if (payloadBytes > 200 * 1024 * 1024) {
+    // Too large — protocol error
+    settled = true;
+    clearTimeout(timeout);
+    socket.removeListener("data", onResultData);
+    socket.destroy();
+    this.framePipeConnected = false;
+    resolve(null);
+    return;
+  }
+
+  resultPayload = Buffer.alloc(payloadBytes);
  // Copy any payload bytes already in resultBuf after the header
  const extra = resultBuf.length - HEADER_SIZE;
  if (extra > 0) {
@@ -835,8 +855,101 @@ export class VideoHelperManager {
  }
  }
 
- destroy(): void {
- this.shuttingDown_ = true;
- this.stop(true).catch(() => {});
- }
+  destroy(): void {
+  this.shuttingDown_ = true;
+  this.stop(true).catch(() => {});
+  }
+
+  // ── Phase 5: MessagePort frame IPC ──────────────────────────────────────
+
+  /**
+   * Create a MessageChannel for zero-copy frame data transfer.
+   * Returns one port to send to the renderer; the other port stays in
+   * the main process and forwards submissions to submitFrame().
+   */
+  createFramePort(): Electron.MessagePortMain {
+    this.closeFramePort();
+
+    const { port1: rendererPort, port2: mainPort } = new MessageChannelMain();
+
+    mainPort.on("message", async (evt: Electron.MessageEvent) => {
+      const msg = evt.data as {
+        generation: number;
+        frameSequence: number;
+        inputWidth: number;
+        inputHeight: number;
+        frameData?: ArrayBuffer;
+      };
+
+      if (
+        typeof msg.generation !== "number" ||
+        typeof msg.frameSequence !== "number" ||
+        typeof msg.inputWidth !== "number" ||
+        typeof msg.inputHeight !== "number"
+      ) {
+        mainPort.postMessage({ error: "Invalid frame message" });
+        return;
+      }
+
+      // The pixel buffer arrives transferred in msg.frameData (ArrayBuffer)
+      const ab = msg.frameData;
+      if (!ab || ab.byteLength === 0) {
+        mainPort.postMessage({ error: "No frame data" });
+        return;
+      }
+
+      const frameData = Buffer.from(ab);
+
+      try {
+        const result = await this.submitFrame(
+          msg.generation,
+          msg.frameSequence,
+          frameData,
+          msg.inputWidth,
+          msg.inputHeight,
+        );
+
+        if (!result) {
+          mainPort.postMessage({ error: "Native processing failed" });
+          return;
+        }
+
+        // Send result back. Note: Electron's MessagePortMain only supports
+        // MessagePortMain[] in the transfer list (not ArrayBuffer), so we
+        // send pixels as a regular cloned buffer. The critical zero-copy
+        // path is renderer→main (frame submission), not the return path.
+        mainPort.postMessage({
+          generation: result.generation,
+          sequence: result.sequence,
+          width: result.width,
+          height: result.height,
+          // Convert Buffer → Uint8Array for structured clone compatibility
+          pixels: new Uint8Array(result.pixels),
+        });
+      } catch (err) {
+        mainPort.postMessage({
+          error: err instanceof Error ? err.message : "Frame processing error",
+        });
+      }
+    });
+
+    // Keep mainPort alive — it won't GC while referenced
+    // MessagePortMain queues renderer messages until start() is called.
+    mainPort.start();
+    this.framePort = mainPort;
+
+    return rendererPort;
+  }
+
+  private framePort: Electron.MessagePortMain | null = null;
+
+  /**
+   * Close the current frame port if open.
+   */
+  closeFramePort(): void {
+    if (this.framePort) {
+      this.framePort.close();
+      this.framePort = null;
+    }
+  }
 }

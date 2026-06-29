@@ -301,8 +301,21 @@ NvVfxResult NvidiaVfxContext::LoadConfiguredEffect() {
         return NvVfxResult::kErrorEffectLoad;
     }
 
-    const unsigned int quality =
-        static_cast<unsigned int>(std::clamp(config_.strength, 0, 4));
+    // Validate canonical QualityLevel: 1..4, 8..11, 12..15, 16..19
+    const int32_t ql = config_.qualityLevel;
+    const bool valid =
+        (ql >= 1 && ql <= 4) ||
+        (ql >= 8 && ql <= 11) ||
+        (ql >= 12 && ql <= 15) ||
+        (ql >= 16 && ql <= 19);
+    if (!valid) {
+        lastError_ = "Invalid canonical QualityLevel: " + std::to_string(ql) +
+                     ". Valid ranges: 1..4 (VSR), 8..11 (Denoise), "
+                     "12..15 (Deblur), 16..19 (High-Bitrate)";
+        return NvVfxResult::kErrorEffectLoad;
+    }
+
+    const unsigned int quality = static_cast<unsigned int>(ql);
 
     status = NvVFX_SetU32(effect, NVVFX_QUALITY_LEVEL, quality);
     if (status != NVCV_SUCCESS) {

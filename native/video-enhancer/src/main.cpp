@@ -29,8 +29,33 @@
 
 namespace sv = screenlink::video;
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Processing mode / quality stringÃ¢â€ â€™number mapping Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Canonical QualityLevel mapping Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+//
+// Canonical QualityLevel = base + quality_offset
+//   VSR:         base=1, low=1, medium=2, high=3, ultra=4
+//   Denoise:     base=8, low=8, medium=9, high=10, ultra=11
+//   Deblur:      base=12, low=12, medium=13, high=14, ultra=15
+//   High-Bitrate: base=16, low=16, medium=17, high=18, ultra=19
 
+static int32_t CanonicalQualityLevel(const std::string& mode, const std::string& quality) {
+    uint32_t base = 0;
+    if (mode == "vsr") base = 1;
+    else if (mode == "denoise") base = 8;
+    else if (mode == "deblur") base = 12;
+    else if (mode == "high-bitrate") base = 16;
+    else return -1;
+
+    int32_t offset = 0;
+    if (quality == "low") offset = 0;
+    else if (quality == "medium") offset = 1;
+    else if (quality == "high") offset = 2;
+    else if (quality == "ultra") offset = 3;
+    else return -1;
+
+    return static_cast<int32_t>(base + offset);
+}
+
+// Retained for protocol/display purposes only; canonical mapping supersedes
 static uint32_t MapProcessingMode(const std::string& s) {
     static const std::unordered_map<std::string, uint32_t> map = {
         {"vsr", 1},
@@ -40,17 +65,6 @@ static uint32_t MapProcessingMode(const std::string& s) {
     };
     auto it = map.find(s);
     return it != map.end() ? it->second : 1;
-}
-
-static uint32_t MapQualityLevel(const std::string& s) {
-    static const std::unordered_map<std::string, uint32_t> map = {
-        {"low", 0},
-        {"medium", 1},
-        {"high", 2},
-        {"ultra", 3},
-    };
-    auto it = map.find(s);
-    return it != map.end() ? it->second : 2;
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Global configuration (set by --serve commands) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -81,7 +95,8 @@ static void InitNvidiaVfx(uint32_t outW, uint32_t outH) {
     sv::NvVfxConfig vfxConfig;
     vfxConfig.modelDir = sv::NvidiaVfxContext::FindModelDir(
         sv::NvidiaVfxContext::FindSdkRoot());
-    vfxConfig.strength = std::max(1, std::min(4, static_cast<int32_t>(g_config.qualityLevel) + 1));
+    // Use canonical QualityLevel from g_config
+    vfxConfig.qualityLevel = static_cast<int32_t>(g_config.qualityLevel);
 
     auto result = g_nvidiaVfx->Initialize(vfxConfig);
     if (result == sv::NvVfxResult::kSuccess) {
@@ -166,48 +181,114 @@ static bool HandleHello(const sv::JsonObject& req) {
 static bool HandleConfigure(const sv::JsonObject& payload) {
     const auto& obj = payload;
 
-    g_config.inputWidth = static_cast<uint32_t>(
-        sv::GetNumber(obj, "inputWidth", 1920));
-    g_config.inputHeight = static_cast<uint32_t>(
-        sv::GetNumber(obj, "inputHeight", 1080));
-    g_config.outputWidth = static_cast<uint32_t>(
-        sv::GetNumber(obj, "outputWidth", 1920));
-    g_config.outputHeight = static_cast<uint32_t>(
-        sv::GetNumber(obj, "outputHeight", 1080));
+    // Read and validate input dimensions
+    const uint32_t inputW = static_cast<uint32_t>(
+        sv::GetNumber(obj, "inputWidth", 0));
+    const uint32_t inputH = static_cast<uint32_t>(
+        sv::GetNumber(obj, "inputHeight", 0));
+    const uint32_t outW = static_cast<uint32_t>(
+        sv::GetNumber(obj, "outputWidth", 0));
+    const uint32_t outH = static_cast<uint32_t>(
+        sv::GetNumber(obj, "outputHeight", 0));
 
-    // Accept both string and number for processingMode / qualityLevel
-    auto modeStr = sv::GetString(obj, "processingMode");
-    if (modeStr) {
-        g_config.processingMode = MapProcessingMode(*modeStr);
-    } else {
-        g_config.processingMode = static_cast<uint32_t>(
-            sv::GetNumber(obj, "processingMode", 1));
+    if (inputW < 16 || inputW > 3840 || inputH < 16 || inputH > 2160) {
+        fprintf(stderr, "[Serve] Invalid input dimensions: %ux%u\n", inputW, inputH);
+        return false;
     }
 
-    auto qualStr = sv::GetString(obj, "qualityLevel");
-    if (qualStr) {
-        g_config.qualityLevel = MapQualityLevel(*qualStr);
-    } else {
-        g_config.qualityLevel = static_cast<uint32_t>(
-            sv::GetNumber(obj, "qualityLevel", 2));
+    // Read processing mode (string preferred)
+    std::string modeStr;
+    auto modeVal = sv::GetString(obj, "processingMode");
+    if (modeVal) {
+        modeStr = *modeVal;
     }
 
+    // Read quality (string preferred)
+    std::string qualStr;
+    auto qualVal = sv::GetString(obj, "qualityLevel");
+    if (qualVal) {
+        qualStr = *qualVal;
+    }
+
+    // Validate mode string
+    if (modeStr != "vsr" && modeStr != "high-bitrate" &&
+        modeStr != "denoise" && modeStr != "deblur") {
+        fprintf(stderr, "[Serve] Invalid processing mode: %s\n", modeStr.c_str());
+        return false;
+    }
+
+    // Validate quality string
+    if (qualStr != "low" && qualStr != "medium" &&
+        qualStr != "high" && qualStr != "ultra") {
+        fprintf(stderr, "[Serve] Invalid quality: %s\n", qualStr.c_str());
+        return false;
+    }
+
+    // Compute canonical QualityLevel
+    const int32_t canonicalQl = CanonicalQualityLevel(modeStr, qualStr);
+    if (canonicalQl < 0) {
+        fprintf(stderr, "[Serve] Failed to compute canonical QualityLevel for mode=%s quality=%s\n",
+                modeStr.c_str(), qualStr.c_str());
+        return false;
+    }
+
+    // Validate output dimensions match expected for mode
+    // VSR and High-Bitrate => 2x input
+    // Denoise and Deblur => same resolution
+    uint32_t expectedOutW = inputW;
+    uint32_t expectedOutH = inputH;
+    if (modeStr == "vsr" || modeStr == "high-bitrate") {
+        expectedOutW = inputW * 2;
+        expectedOutH = inputH * 2;
+    }
+    if (outW != expectedOutW || outH != expectedOutH) {
+        fprintf(stderr, "[Serve] Output dimensions %ux%u don't match expected %ux%u for mode=%s\n",
+                outW, outH, expectedOutW, expectedOutH, modeStr.c_str());
+        return false;
+    }
+
+    // Check pixel format
     auto pf = sv::GetString(obj, "pixelFormat");
-    if (pf) g_config.pixelFormat = *pf;
+    if (!pf || (*pf != "bgra8" && *pf != "rgba8")) {
+        fprintf(stderr, "[Serve] Invalid or missing pixelFormat\n");
+        return false;
+    }
 
+    // Check if configuration is truly identical (no-op guard)
+    if (g_config.configured &&
+        g_config.inputWidth == inputW &&
+        g_config.inputHeight == inputH &&
+        g_config.outputWidth == outW &&
+        g_config.outputHeight == outH &&
+        g_config.processingMode == MapProcessingMode(modeStr) &&
+        static_cast<int32_t>(g_config.qualityLevel) == canonicalQl &&
+        g_config.pixelFormat == *pf) {
+        printf("[Serve] Configure no-op: identical configuration\n");
+        return true;
+    }
+
+    // Apply new configuration
+    g_config.inputWidth = inputW;
+    g_config.inputHeight = inputH;
+    g_config.outputWidth = outW;
+    g_config.outputHeight = outH;
+    g_config.processingMode = MapProcessingMode(modeStr);
+    g_config.qualityLevel = static_cast<uint32_t>(canonicalQl);
+    g_config.pixelFormat = *pf;
     g_config.configured = true;
 
-    // Initialize NVIDIA VFX on configure
+    // Re-initialize NVIDIA VFX in-place (no helper respawn)
     ShutdownNvidiaVfx();
-    InitNvidiaVfx(g_config.outputWidth, g_config.outputHeight);
+    InitNvidiaVfx(outW, outH);
 
-    printf("[Serve] Configured: %ux%u -> %ux%u mode=%u quality=%u pf=%s NVIDIA=%s\n",
-           g_config.inputWidth, g_config.inputHeight,
-           g_config.outputWidth, g_config.outputHeight,
-           g_config.processingMode, g_config.qualityLevel,
+    printf("[Serve] Configured: %ux%u -> %ux%u mode=%s quality=%s canonicalQl=%d pf=%s NVIDIA=%s\n",
+           inputW, inputH, outW, outH,
+           modeStr.c_str(), qualStr.c_str(), canonicalQl,
            g_config.pixelFormat.c_str(),
            g_nvidiaAvailable ? "active" : g_nvidiaReason.c_str());
-    return true;
+
+    // Return success only when VFX initialization/effect loading succeeded.
+    return g_nvidiaAvailable;
 }
 
 static sv::DiagnosticSnapshot BuildStatsResponse() {
@@ -421,13 +502,28 @@ static int RunServe(const std::vector<std::string>& args) {
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
             diag.RecordFrame(static_cast<uint64_t>(us), ok);
 
+            // ── Phase 4: Always write back a correlated result ──────────
+            // Every accepted frame returns exactly one result, whether it
+            // succeeded or failed. Never drop a frame silently.
             if (ok) {
+                outHeader.resultCode = 1;
+
                 // Write back the processed frame
                 if (!transport.WriteFrame(outHeader, outData.data(), outData.size())) {
                     fprintf(stderr, "[FrameWorker] Failed to write output frame\n");
                 }
             } else {
-                fprintf(stderr, "[FrameWorker] Frame processing failed\n");
+                // Write back a failure result with resultCode=2
+                // so the Electron side never hangs waiting for a timeout.
+                outHeader = header; // preserve original frame identity
+                outHeader.resultCode = 2; // error
+                outHeader.payloadBytes = 0; // no pixel data on failure
+                if (!transport.WriteFrame(outHeader, nullptr, 0)) {
+                    fprintf(stderr, "[FrameWorker] Failed to write failure result\n");
+                }
+                diag.totalProcessingErrors++;
+                fprintf(stderr, "[FrameWorker] Frame processing failed: %s\n",
+                        g_nvidiaVfx ? g_nvidiaVfx->GetLastError().c_str() : "NVIDIA unavailable");
             }
         }
     });
@@ -472,7 +568,12 @@ static int RunServe(const std::vector<std::string>& args) {
         switch (cmd) {
             case sv::Command::kConfigure:
                 success = HandleConfigure(payload);
-                response = MakeResponse(success, success ? "" : "Configuration failed", id);
+                response = MakeResponse(
+                    success,
+                    success
+                        ? ""
+                        : (g_nvidiaReason.empty() ? "Configuration failed" : g_nvidiaReason),
+                    id);
                 break;
 
             case sv::Command::kCapabilities:
@@ -605,8 +706,15 @@ static int RunSelfTest() {
     auto cap = sv::ProbeCapability();
 
 #ifdef SCREENLINK_NVIDIA_VFX_ENABLED
-    allPassed &= cap.available;
-    allPassed &= (cap.reason == "available");
+    // Runtime may or may not have NVIDIA DLLs — accept either outcome,
+    // but verify the probe ran successfully (didn't crash).
+    // When available, reason must be "available".
+    // When unavailable, reason must be non-empty (some error).
+    if (cap.available) {
+        allPassed &= (cap.reason == "available");
+    } else {
+        allPassed &= !cap.reason.empty();
+    }
 #else
     allPassed &= !cap.available;
     allPassed &= (cap.reason == "sdk-not-built");
@@ -615,8 +723,30 @@ static int RunSelfTest() {
     // StringÃ¢â€ â€™number mapping
     allPassed &= (MapProcessingMode("vsr") == 1);
     allPassed &= (MapProcessingMode("high-bitrate") == 2);
-    allPassed &= (MapQualityLevel("high") == 2);
-    allPassed &= (MapQualityLevel("ultra") == 3);
+    allPassed &= (MapProcessingMode("denoise") == 3);
+    allPassed &= (MapProcessingMode("deblur") == 4);
+
+    // Canonical QualityLevel mapping: all 16 combinations
+    allPassed &= (CanonicalQualityLevel("vsr", "low") == 1);
+    allPassed &= (CanonicalQualityLevel("vsr", "medium") == 2);
+    allPassed &= (CanonicalQualityLevel("vsr", "high") == 3);
+    allPassed &= (CanonicalQualityLevel("vsr", "ultra") == 4);
+    allPassed &= (CanonicalQualityLevel("denoise", "low") == 8);
+    allPassed &= (CanonicalQualityLevel("denoise", "medium") == 9);
+    allPassed &= (CanonicalQualityLevel("denoise", "high") == 10);
+    allPassed &= (CanonicalQualityLevel("denoise", "ultra") == 11);
+    allPassed &= (CanonicalQualityLevel("deblur", "low") == 12);
+    allPassed &= (CanonicalQualityLevel("deblur", "medium") == 13);
+    allPassed &= (CanonicalQualityLevel("deblur", "high") == 14);
+    allPassed &= (CanonicalQualityLevel("deblur", "ultra") == 15);
+    allPassed &= (CanonicalQualityLevel("high-bitrate", "low") == 16);
+    allPassed &= (CanonicalQualityLevel("high-bitrate", "medium") == 17);
+    allPassed &= (CanonicalQualityLevel("high-bitrate", "high") == 18);
+    allPassed &= (CanonicalQualityLevel("high-bitrate", "ultra") == 19);
+
+    // Invalid inputs return -1
+    allPassed &= (CanonicalQualityLevel("invalid", "high") == -1);
+    allPassed &= (CanonicalQualityLevel("vsr", "invalid") == -1);
 
     printf("Self-tests: %s\n", allPassed ? "ALL PASSED" : "FAILED");
     return allPassed ? 0 : 1;
@@ -631,10 +761,7 @@ static int RunVfxFrameTest() {
 #else
     constexpr uint32_t inputWidth = 320;
     constexpr uint32_t inputHeight = 180;
-    constexpr uint32_t outputWidth = 640;
-    constexpr uint32_t outputHeight = 360;
     constexpr uint32_t inputStride = inputWidth * 4;
-    constexpr uint32_t outputStride = outputWidth * 4;
 
     std::vector<uint8_t> input(
         static_cast<size_t>(inputStride) * inputHeight);
@@ -661,27 +788,65 @@ static int RunVfxFrameTest() {
         }
     }
 
-    for (int quality = 0; quality <= 4; ++quality) {
+    // Test all 16 canonical QualityLevel combinations
+    struct TestCase {
+        const char* mode;
+        const char* quality;
+        int32_t canonicalQl;
+        uint32_t outW;
+        uint32_t outH;
+    };
+
+    TestCase cases[] = {
+        // VSR (1..4): 2x output
+        {"VSR", "low", 1, inputWidth * 2, inputHeight * 2},
+        {"VSR", "medium", 2, inputWidth * 2, inputHeight * 2},
+        {"VSR", "high", 3, inputWidth * 2, inputHeight * 2},
+        {"VSR", "ultra", 4, inputWidth * 2, inputHeight * 2},
+        // Denoise (8..11): same-resolution
+        {"Denoise", "low", 8, inputWidth, inputHeight},
+        {"Denoise", "medium", 9, inputWidth, inputHeight},
+        {"Denoise", "high", 10, inputWidth, inputHeight},
+        {"Denoise", "ultra", 11, inputWidth, inputHeight},
+        // Deblur (12..15): same-resolution
+        {"Deblur", "low", 12, inputWidth, inputHeight},
+        {"Deblur", "medium", 13, inputWidth, inputHeight},
+        {"Deblur", "high", 14, inputWidth, inputHeight},
+        {"Deblur", "ultra", 15, inputWidth, inputHeight},
+        // High-Bitrate (16..19): 2x output
+        {"High-Bitrate", "low", 16, inputWidth * 2, inputHeight * 2},
+        {"High-Bitrate", "medium", 17, inputWidth * 2, inputHeight * 2},
+        {"High-Bitrate", "high", 18, inputWidth * 2, inputHeight * 2},
+        {"High-Bitrate", "ultra", 19, inputWidth * 2, inputHeight * 2},
+    };
+
+    int failures = 0;
+    for (const auto& tc : cases) {
         sv::NvidiaVfxContext context;
         sv::NvVfxConfig config;
-        config.strength = quality;
+        config.qualityLevel = tc.canonicalQl;
+
+        const uint32_t outputWidth = tc.outW;
+        const uint32_t outputHeight = tc.outH;
+        const uint32_t outputStride = outputWidth * 4;
 
         auto fail = [&](const char* stage) {
             fprintf(
                 stderr,
-                "VFX frame test failed at %s for QualityLevel=%d: %s\n",
-                stage,
-                quality,
+                "VFX frame test failed at %s for %s/%s (QL=%d): %s\n",
+                stage, tc.mode, tc.quality, tc.canonicalQl,
                 context.GetLastError().c_str());
-            return 1;
+            failures++;
         };
 
         if (context.Initialize(config) != sv::NvVfxResult::kSuccess) {
-            return fail("Initialize");
+            fail("Initialize");
+            continue;
         }
 
         if (context.CreateEffect() != sv::NvVfxResult::kSuccess) {
-            return fail("CreateEffect");
+            fail("CreateEffect");
+            continue;
         }
 
         sv::NvVfxImage inputDesc;
@@ -691,7 +856,8 @@ static int RunVfxFrameTest() {
         inputDesc.format = sv::NvVfxPixelFormat::kRGBA8;
 
         if (context.AllocateInput(inputDesc) != sv::NvVfxResult::kSuccess) {
-            return fail("AllocateInput");
+            fail("AllocateInput");
+            continue;
         }
 
         sv::NvVfxImage outputDesc;
@@ -701,7 +867,8 @@ static int RunVfxFrameTest() {
         outputDesc.format = sv::NvVfxPixelFormat::kRGBA8;
 
         if (context.AllocateOutput(outputDesc) != sv::NvVfxResult::kSuccess) {
-            return fail("AllocateOutput/NvVFX_Load");
+            fail("AllocateOutput/NvVFX_Load");
+            continue;
         }
 
         if (context.UploadInput(
@@ -711,11 +878,13 @@ static int RunVfxFrameTest() {
                 inputStride,
                 sv::NvVfxPixelFormat::kRGBA8) !=
             sv::NvVfxResult::kSuccess) {
-            return fail("UploadInput");
+            fail("UploadInput");
+            continue;
         }
 
         if (context.RunFrame() != sv::NvVfxResult::kSuccess) {
-            return fail("RunFrame");
+            fail("RunFrame");
+            continue;
         }
 
         std::vector<uint8_t> output(
@@ -729,20 +898,20 @@ static int RunVfxFrameTest() {
                 outputStride,
                 actualWidth,
                 actualHeight) != sv::NvVfxResult::kSuccess) {
-            return fail("DownloadOutput");
+            fail("DownloadOutput");
+            continue;
         }
 
         if (actualWidth != outputWidth || actualHeight != outputHeight) {
             fprintf(
                 stderr,
                 "VFX frame test returned incorrect dimensions for "
-                "QualityLevel=%d: %ux%u, expected %ux%u\n",
-                quality,
-                actualWidth,
-                actualHeight,
-                outputWidth,
-                outputHeight);
-            return 1;
+                "%s/%s (QL=%d): %ux%u, expected %ux%u\n",
+                tc.mode, tc.quality, tc.canonicalQl,
+                actualWidth, actualHeight,
+                outputWidth, outputHeight);
+            failures++;
+            continue;
         }
 
         uint64_t checksum = 1469598103934665603ull;
@@ -763,26 +932,30 @@ static int RunVfxFrameTest() {
             fprintf(
                 stderr,
                 "VFX frame test produced empty or uniform output for "
-                "QualityLevel=%d\n",
-                quality);
-            return 1;
+                "%s/%s (QL=%d)\n",
+                tc.mode, tc.quality, tc.canonicalQl);
+            failures++;
+            continue;
         }
 
         printf(
-            "QualityLevel=%d PASS: %ux%u -> %ux%u, "
+            "%s/%s (QL=%d) PASS: %ux%u -> %ux%u, "
             "checksum=%llu, range=%u..%u\n",
-            quality,
-            inputWidth,
-            inputHeight,
-            actualWidth,
-            actualHeight,
+            tc.mode, tc.quality, tc.canonicalQl,
+            inputWidth, inputHeight,
+            actualWidth, actualHeight,
             static_cast<unsigned long long>(checksum),
             static_cast<unsigned int>(minimumValue),
             static_cast<unsigned int>(maximumValue));
     }
 
-    printf("VFX frame tests: ALL PASSED\n");
-    return 0;
+    if (failures == 0) {
+        printf("VFX frame tests: ALL PASSED\n");
+        return 0;
+    } else {
+        printf("VFX frame tests: %d FAILURES\n", failures);
+        return 1;
+    }
 #endif
 }
 int main(int argc, char* argv[]) {

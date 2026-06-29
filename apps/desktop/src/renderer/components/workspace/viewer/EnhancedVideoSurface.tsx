@@ -6,6 +6,9 @@
  * When the environment does not support WebGL2 or the pipeline encounters
  * an unrecoverable error, the component renders nothing (null), allowing
  * the parent to fall back to a native <video> element.
+ *
+ * DEV-only feature: holding the B key hides the enhanced canvas to reveal
+ * the original video beneath (A/B compare). Release B to restore.
  */
 
 import {
@@ -25,7 +28,6 @@ import type {
 import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-image-processor";
 import { getImageProcessingCapabilities, augmentWithNvidiaCapability } from "@/services/viewer-image-processing/viewer-image-capabilities";
 import { createImageProcessingBackend } from "@/services/viewer-image-processing/viewer-image-backend-factory";
-import { WebGL2ViewerImageBackend } from "@/services/viewer-image-processing/webgl2-viewer-image-backend";
 import { FallbackChainController } from "@/services/viewer-image-processing/fallback-chain-controller";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -79,7 +81,6 @@ export function EnhancedVideoSurface({
   const [processorState, setProcessorState] = useState<ProcessorState>("idle");
   const [fallback, setFallback] = useState<boolean>(false);
   const [firstFrameReceived, setFirstFrameReceived] = useState(false);
-  const [retryAttempt, setRetryAttempt] = useState(0);
 
   // ─── Capabilities check on mount (async IPC probe) ────────────────────
 
@@ -116,7 +117,6 @@ export function EnhancedVideoSurface({
 
   useEffect(() => {
     setFirstFrameReceived(false);
-    setRetryAttempt(0);
     if (enabled) {
       setFallback(false);
     }
@@ -148,24 +148,13 @@ export function EnhancedVideoSurface({
 
     (async () => {
       try {
-        // Create the appropriate backend based on settings + capabilities
-        // On retry attempts, force-create a WebGL2 backend directly
-        let backend: ViewerImageBackend;
-        let effective: string;
-        let fallbackReason: string | undefined;
-        let chainController: FallbackChainController | null = null;
-
-        if (retryAttempt === 0) {
-          const result = createImageProcessingBackend(settings);
-          backend = result.backend;
-          effective = result.effective;
-          fallbackReason = result.fallbackReason;
-          chainController = result.chainController ?? null;
-        } else {
-          backend = new WebGL2ViewerImageBackend();
-          effective = "webgl2";
-          fallbackReason = "NVIDIA VSR unavailable, fell back to WebGL2";
-        }
+        // Create the appropriate backend based on settings + capabilities.
+        // No retry loop: a single failure immediately falls back.
+        const result = createImageProcessingBackend(settings);
+        const backend = result.backend;
+        const effective = result.effective;
+        const fallbackReason = result.fallbackReason;
+        const chainController = result.chainController ?? null;
 
         chainRef.current = chainController;
         backendSignalledRef.current = false;
@@ -187,13 +176,31 @@ export function EnhancedVideoSurface({
         const handleError = (reason: string) => {
           setFirstFrameReceived(false);
           // Try advancing the fallback chain if available (audit item 19)
-          if (chainRef.current) {
-            chainRef.current.advance(reason).catch(() => {});
-            const stage = chainRef.current.activeStage;
-            onBackendChange?.(stage === "nvidia-vsr" ? "nvidia-vsr" : "webgl2", reason);
+          if (chainRef.current && chainRef.current.activeStage !== "original") {
+            chainRef.current.advance(reason).then(() => {
+              const stage = chainRef.current!.activeStage;
+              const nextBackend = chainRef.current!.activeBackend;
+              onBackendChange?.(
+                stage === "nvidia-vsr" ? "nvidia-vsr" : "webgl2",
+                reason,
+              );
+              // Swap the processor's backend to the fallback (NVIDIA → WebGL2)
+              if (processorRef.current && nextBackend) {
+                processorRef.current
+                  .setBackend(nextBackend)
+                  .catch(() => {
+                    setFallback(true);
+                    onProcessingError?.(reason);
+                  });
+              }
+            }).catch(() => {
+              setFallback(true);
+              onProcessingError?.(reason);
+            });
+          } else {
+            setFallback(true);
+            onProcessingError?.(reason);
           }
-          setFallback(true);
-          onProcessingError?.(reason);
         };
 
         processor.setCallbacks({
@@ -212,16 +219,12 @@ export function EnhancedVideoSurface({
         processorRef.current = processor;
       } catch (err) {
         if (!cancelled) {
-          if (retryAttempt < 1) {
-            setRetryAttempt((n) => n + 1);
-          } else {
-            setFallback(true);
-            onProcessingError?.(
-              err instanceof Error
-                ? err.message
-                : "Failed to create processing backend",
-            );
-          }
+          setFallback(true);
+          onProcessingError?.(
+            err instanceof Error
+              ? err.message
+              : "Failed to create processing backend",
+          );
         }
       }
     })();
@@ -233,7 +236,7 @@ export function EnhancedVideoSurface({
         processorRef.current = null;
       }
     };
-  }, [enabled, fallback, videoElement, retryAttempt]); // intentionally limited deps
+  }, [enabled, fallback, videoElement]); // intentionally limited deps — no retryAttempt
 
   // ─── Backend switching on processingBackend change ────────────────────
 
@@ -321,13 +324,45 @@ export function EnhancedVideoSurface({
     };
   }, [handleResize]);
 
+  // ─── DEV-only hold-B compare (Phase 1) ──────────────────────────────────
+  // Holding B hides only the enhanced canvas to reveal original video beneath.
+  // Must not pause, reconfigure, recreate, destroy, or restart processor/backend.
+  const [holdBCompare, setHoldBCompare] = useState(false);
+
+  useEffect(() => {
+    // Guard: only active in DEV mode
+    if (typeof import.meta !== "undefined" && !import.meta.env.DEV) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === "KeyB" && !e.repeat) {
+        setHoldBCompare(true);
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "KeyB") {
+        setHoldBCompare(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
+
+  const isDevCompare =
+    typeof import.meta !== "undefined" && import.meta.env.DEV && holdBCompare;
+
   // ─── Render ───────────────────────────────────────────────────────────
 
   const canvasVisible =
     enabled &&
     !fallback &&
     firstFrameReceived &&
-    (processorState === "running" || processorState === "paused");
+    (processorState === "running" || processorState === "paused") &&
+    !isDevCompare;
 
   return (
     <div
@@ -342,6 +377,14 @@ export function EnhancedVideoSurface({
           display: canvasVisible ? "block" : "none",
         }}
       />
+      {/* DEV-only hold-B indicator — does not affect lifecycle */}
+      {isDevCompare && (
+        <div
+          className="absolute top-2 left-2 bg-black/70 text-white text-[11px] px-2 py-1 rounded pointer-events-none z-50"
+        >
+          Hold B: Original
+        </div>
+      )}
     </div>
   );
 }

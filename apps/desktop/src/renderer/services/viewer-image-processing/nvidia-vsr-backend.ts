@@ -13,6 +13,8 @@ import type {
   ViewerImageEnhancementSettings,
 } from "./viewer-image-settings";
 
+import { canonicalQualityLevel } from "@screenlink/shared";
+
 type NativeVideoConfig = {
   inputWidth: number;
   inputHeight: number;
@@ -59,6 +61,9 @@ type ScreenLinkVideoApi = {
   ) => Promise<NativeFrameResult | null>;
 
   videoHelperFlush?: () => Promise<boolean>;
+
+  /** Phase 5: Request a dedicated MessagePort for zero-copy frame transfer */
+  requestFramePort?: () => Promise<{ success: boolean }>;
 };
 
 const EMPTY_STATS: BackendStats = {
@@ -245,6 +250,152 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     ...EMPTY_STATS,
   };
 
+  private currentQualityLevel: number | null = null;
+
+  // Phase 5: MessagePort frame IPC
+  private framePort: MessagePort | null = null;
+  private framePortRequested = false;
+  private pendingFramePort: Promise<boolean> | null = null;
+
+  /**
+   * Acquire the dedicated frame MessagePort from the main process.
+   * Returns true when the port is ready, false if unavailable.
+   */
+  private async acquireFramePort(): Promise<boolean> {
+    if (this.framePort) return true;
+    if (this.framePortRequested && this.pendingFramePort) {
+      return this.pendingFramePort;
+    }
+
+    const api = getVideoApi();
+    if (!api?.requestFramePort) return false;
+
+    this.framePortRequested = true;
+
+    this.pendingFramePort = new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("message", onMessage);
+        console.warn("[nvidia-vsr] Frame port acquisition timed out");
+        resolve(false);
+      }, 5000);
+
+      const onMessage = (evt: MessageEvent) => {
+        if (settled) return;
+        if (evt.data?.type !== "frame:port") return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener("message", onMessage);
+        const port = evt.ports?.[0];
+        if (!port) {
+          resolve(false);
+          return;
+        }
+        this.framePort = port;
+        port.start();
+        resolve(true);
+      };
+
+      window.addEventListener("message", onMessage);
+
+      // Trigger port creation in the main process
+      api.requestFramePort!().then((result) => {
+        if (!result.success && !settled) {
+          settled = true;
+          clearTimeout(timeout);
+          window.removeEventListener("message", onMessage);
+          resolve(false);
+        }
+      });
+    });
+
+    const ok = await this.pendingFramePort;
+    this.pendingFramePort = null;
+    return ok;
+  }
+
+  /**
+   * Submit a frame via the MessagePort (zero-copy) instead of IPC invoke.
+   */
+  private submitFrameViaPort(
+    generation: number,
+    frameSequence: number,
+    frameData: Uint8Array,
+    inputWidth: number,
+    inputHeight: number,
+  ): Promise<NativeFrameResult | null> {
+    return new Promise((resolve) => {
+      const port = this.framePort;
+      if (!port) {
+        resolve(null);
+        return;
+      }
+
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(null);
+      }, 5000);
+
+      port.onmessage = (evt: MessageEvent) => {
+        if (settled) return;
+        const msg = evt.data as {
+          generation?: number;
+          sequence?: number;
+          width?: number;
+          height?: number;
+          error?: string;
+        };
+
+        if (msg.error) {
+          settled = true;
+          clearTimeout(timeout);
+          port.onmessage = null;
+
+          console.error(
+            "[nvidia-vsr] Frame port processing error:",
+            msg.error,
+          );
+
+          resolve(null);
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        port.onmessage = null;
+
+        // Pixels arrive as Uint8Array (structured clone, not transferred)
+        const rawPixels = (msg as any).pixels;
+        if (!rawPixels || !(rawPixels instanceof Uint8Array) || rawPixels.byteLength === 0) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          generation,
+          sequence: frameSequence,
+          pixels: rawPixels,
+          width: msg.width ?? 0,
+          height: msg.height ?? 0,
+        });
+      };
+
+      // Transfer the pixel buffer (zero-copy)
+      const buffer = frameData.buffer.slice(
+        frameData.byteOffset,
+        frameData.byteOffset + frameData.byteLength,
+      );
+      port.postMessage(
+        { generation, frameSequence, inputWidth, inputHeight, frameData: buffer },
+        [buffer],
+      );
+    });
+  }
+
   async initialize(
     canvas?: HTMLCanvasElement,
   ): Promise<BackendInitResult> {
@@ -365,6 +516,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       this.stats = {
         ...EMPTY_STATS,
         generation: this.generation,
+        nativeQualityLevel: this.currentQualityLevel,
       };
 
       console.info(
@@ -542,19 +694,42 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       const frameSequence =
         metadata?.frameSequence ?? 0;
 
-      const startedAt = performance.now();
+      // Phase 1: Truthful timing breakdown
+      // Phase A: Capture + readback time
+      const captureStart = performance.now();
 
-      const result =
-        await api.videoHelperSubmitFrame(
+      // Phase B: Native transport + processing time (submission + result)
+      // Phase C: Display upload time
+
+      let result: NativeFrameResult | null = null;
+
+      // Phase A completed — measure capture time
+      const afterCapture = performance.now();
+      const captureReadbackMs = afterCapture - captureStart;
+
+      if (this.framePort || await this.acquireFramePort()) {
+        result = await this.submitFrameViaPort(
           generation,
           frameSequence,
           new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength),
           inputWidth,
           inputHeight,
         );
+      } else {
+        // Fall back to invoke-based submission
+        result =
+          await api.videoHelperSubmitFrame(
+            generation,
+            frameSequence,
+            new Uint8Array(source.data.buffer, source.data.byteOffset, source.data.byteLength),
+            inputWidth,
+            inputHeight,
+          );
+      }
 
-      const elapsedMs =
-        performance.now() - startedAt;
+      // Phase B completed — measure native transport + processing time
+      const afterSubmit = performance.now();
+      const nativeTransportProcessingMs = afterSubmit - afterCapture;
 
       if (!result) {
         console.error(
@@ -602,11 +777,14 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         return { success: false };
       }
 
-      this.renderOutput(
-        pixels,
-        result.width,
-        result.height,
-      );
+      // Phase C: Display upload (texImage2D + drawArrays)
+      this.renderOutput(pixels, result.width, result.height);
+
+      const afterDisplay = performance.now();
+      const displayUploadMs = afterDisplay - afterSubmit;
+
+      // Total latency from capture start to display complete
+      const totalLatencyMs = afterDisplay - captureStart;
 
       this.stats = {
         inputWidth,
@@ -616,7 +794,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         enhancedScalingActive:
           result.width > inputWidth ||
           result.height > inputHeight,
-        lastGpuTimeMs: elapsedMs,
+        lastGpuTimeMs: nativeTransportProcessingMs,
         backend: "nvidia-vsr",
         framesProcessed:
           this.stats.framesProcessed + 1,
@@ -624,11 +802,18 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         backpressureDrops:
           this.stats.backpressureDrops,
         generation,
+        nativeQualityLevel: this.currentQualityLevel,
       };
 
       return {
         success: true,
-        gpuTimeMs: elapsedMs,
+        gpuTimeMs: nativeTransportProcessingMs,
+        totalLatencyMs,
+        timingBreakdown: {
+          captureReadbackMs,
+          nativeTransportProcessingMs,
+          displayUploadMs,
+        },
       };
     }
     catch (error) {
@@ -693,6 +878,15 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     this.captureCanvas = null;
     this.canvas = null;
 
+    // Clean up frame port
+    if (this.framePort) {
+      this.framePort.onmessage = null;
+      this.framePort.close();
+      this.framePort = null;
+    }
+    this.framePortRequested = false;
+    this.pendingFramePort = null;
+
     console.info(
       "[nvidia-vsr] Native backend destroyed",
     );
@@ -737,6 +931,10 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         this.settings?.nvidiaQuality ?? "high",
       pixelFormat: "rgba8",
     };
+
+    // Compute canonical QualityLevel via shared mapping
+    const ql = canonicalQualityLevel(config.processingMode, config.qualityLevel);
+    this.currentQualityLevel = ql >= 0 ? ql : 3; // default to VSR high (3)
 
     const nextConfigKey = JSON.stringify(config);
 

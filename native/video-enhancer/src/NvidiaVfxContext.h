@@ -34,7 +34,12 @@ struct NvVfxImage {
 
 struct NvVfxConfig {
     std::string modelDir;
-    int32_t strength = 1;
+    /// Canonical QualityLevel encoding mode+quality:
+    ///   VSR         1..4   (low..ultra)
+    ///   Denoise     8..11
+    ///   Deblur     12..15
+    ///   High-Bitrate 16..19
+    int32_t qualityLevel = 3;
     float sharpness = 0.5f;
 };
 

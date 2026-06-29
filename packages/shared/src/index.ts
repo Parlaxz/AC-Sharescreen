@@ -138,3 +138,17 @@ export type {
   GroupControlEnvelopeInput,
   GroupControlPayloadMap,
 } from "./group-control-messages.js";
+
+// Phase 2: NVIDIA Quality Level Canonical Mapping
+export {
+  canonicalQualityLevel,
+  decomposeQualityLevel,
+  isValidQualityLevel,
+  nvidiaOutputDimensions,
+  NVIDIA_PROCESSING_MODES,
+  NVIDIA_QUALITIES,
+} from "./nvidia-quality.js";
+export type {
+  NvidiaProcessingMode,
+  NvidiaQuality,
+} from "./nvidia-quality.js";

@@ -41,6 +41,29 @@ export interface ProcessorStats {
   activePasses: string[];
   backpressureDrops: number;
   generation: number;
+
+  // ─── Phase 1: Truthful live statistics ─────────────────────────────────
+  /** Count of frames successfully displayed */
+  framesDisplayed: number;
+  /** Rolling completed frames-per-second over last ~2s interval */
+  completedFps: number;
+  /** Time to capture + readback pixels from video element (ms) */
+  captureReadbackTimeMs: number | null;
+  /** Native transport + processing time (ms) */
+  nativeTransportProcessingTimeMs: number | null;
+  /** Time to upload processed pixels to display texture (ms) */
+  displayUploadTimeMs: number | null;
+  /** Total latency from capture to displayed frame (ms) */
+  totalEnhancedFrameLatencyMs: number | null;
+  /** Native output resolution from the enhancer */
+  nativeOutputWidth: number;
+  nativeOutputHeight: number;
+  /** Canonical NVIDIA QualityLevel (integer) when backend is nvidia-vsr */
+  nativeQualityLevel: number | null;
+  /** Number of frames dropped due to scheduler backpressure */
+  schedulerDrops: number;
+  /** Number of native processing failures */
+  nativeFailures: number;
 }
 
 // ─── Processor ───────────────────────────────────────────────────────────────
@@ -68,9 +91,30 @@ export class ViewerImageProcessor {
   private generation = 0;
   private frameSequence = 0;
 
+  // Source dimension tracking (for onSourceResize)
+  private lastSourceWidth = 0;
+  private lastSourceHeight = 0;
+
   // Stats
   private framesProcessed = 0;
   private lastStatsTime = 0;
+
+  // Phase 1: Truthful statistics
+  private framesDisplayed = 0;
+  private completedFps = 0;
+  private completedTimestamps: number[] = [];
+  private captureReadbackTotalMs = 0;
+  private captureReadbackCount = 0;
+  private nativeTransportProcessingTotalMs = 0;
+  private nativeTransportProcessingCount = 0;
+  private displayUploadTotalMs = 0;
+  private displayUploadCount = 0;
+  private totalLatencySumMs = 0;
+  private totalLatencyCount = 0;
+  private schedulerDropCount = 0;
+  private nativeFailureCount = 0;
+  private lastNativeOutputWidth = 0;
+  private lastNativeOutputHeight = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -87,23 +131,30 @@ export class ViewerImageProcessor {
   /**
    * Start processing with the given settings.
    * Initialises the backend and begins the render loop.
-   *
-   * Note: initialisation is internally async. Errors are reported through
-   * the onError callback.
+   * Returns a promise that resolves when initialisation completes
+   * (or rejects on failure, which is also reported through onError).
    */
-  start(settings: ViewerImageEnhancementSettings): void {
-    this.startAsync(settings).catch((err) => {
+  async start(settings: ViewerImageEnhancementSettings): Promise<void> {
+    try {
+      await this.startAsync(settings);
+    } catch (err) {
       this.emitError(
         err instanceof Error
           ? err.message
           : "Backend initialization failed",
       );
-    });
+      throw err;
+    }
   }
 
   private async startAsync(
     settings: ViewerImageEnhancementSettings,
   ): Promise<void> {
+    // Idempotent: if already running or paused, do nothing
+    if (this.state === "running" || this.state === "paused") {
+      return;
+    }
+
     if (this.state === "destroyed") {
       this.emitError("Cannot start a destroyed processor");
       return;
@@ -146,21 +197,26 @@ export class ViewerImageProcessor {
    * Awaits old backend destruction before initialising the new one (audit item 39).
    */
   async setBackend(backend: ViewerImageBackend): Promise<void> {
-    const wasRunning = this.state === "running";
-    if (wasRunning) {
+    const needsRestart =
+      this.state === "running" ||
+      this.state === "error" ||
+      this.state === "paused";
+    if (needsRestart) {
       this.cancelFrame();
     }
 
     // Await old backend destruction before proceeding
     await this.backend.destroy().catch(() => {});
     this.backend = backend;
+    // Reset state to idle so that start() can re-initialize
+    this.state = "idle";
     this.frameInFlight = false;
     this.pendingFrame = false;
     this.generation++;
     this.frameSequence = 0;
 
-    if (wasRunning && this.settings) {
-      await this.start(this.settings);
+    if (needsRestart && this.settings) {
+      await this.startAsync(this.settings);
     }
   }
 
@@ -210,8 +266,10 @@ export class ViewerImageProcessor {
 
   /**
    * Tear down the processor and release all GPU resources.
+   * Idempotent: safe to call multiple times or before start().
    */
   async destroy(): Promise<void> {
+    if (this.state === "destroyed") return;
     this.cancelFrame();
     try {
       await this.backend.destroy();
@@ -254,6 +312,27 @@ export class ViewerImageProcessor {
       activePasses: backendStats?.activePasses ?? [],
       backpressureDrops: backendStats?.backpressureDrops ?? 0,
       generation: this.generation,
+
+      // Phase 1: Truthful live statistics
+      framesDisplayed: this.framesDisplayed,
+      completedFps: this.completedFps,
+      captureReadbackTimeMs: this.captureReadbackCount > 0
+        ? this.captureReadbackTotalMs / this.captureReadbackCount
+        : null,
+      nativeTransportProcessingTimeMs: this.nativeTransportProcessingCount > 0
+        ? this.nativeTransportProcessingTotalMs / this.nativeTransportProcessingCount
+        : null,
+      displayUploadTimeMs: this.displayUploadCount > 0
+        ? this.displayUploadTotalMs / this.displayUploadCount
+        : null,
+      totalEnhancedFrameLatencyMs: this.totalLatencyCount > 0
+        ? this.totalLatencySumMs / this.totalLatencyCount
+        : null,
+      nativeOutputWidth: this.lastNativeOutputWidth || (backendStats?.outputWidth ?? 0),
+      nativeOutputHeight: this.lastNativeOutputHeight || (backendStats?.outputHeight ?? 0),
+      nativeQualityLevel: backendStats?.nativeQualityLevel ?? null,
+      schedulerDrops: this.schedulerDropCount,
+      nativeFailures: this.nativeFailureCount,
     };
   }
 
@@ -366,6 +445,15 @@ export class ViewerImageProcessor {
     const seq = ++this.frameSequence;
     const gen = this.generation;
 
+    // Notify backend when source dimensions change (so native config re-evaluates)
+    const vw = this.videoElement.videoWidth;
+    const vh = this.videoElement.videoHeight;
+    if (vw > 0 && vh > 0 && (vw !== this.lastSourceWidth || vh !== this.lastSourceHeight)) {
+      this.lastSourceWidth = vw;
+      this.lastSourceHeight = vh;
+      this.backend.onSourceResize?.(vw, vh);
+    }
+
     const result = await this.backend.processFrame(this.videoElement, {
       generation: gen,
       frameSequence: seq,
@@ -380,17 +468,51 @@ export class ViewerImageProcessor {
     // Backpressure drops from the backend — skip
     if (result.backpressureDrop) return;
 
-    this.framesProcessed++;
-
     if (!result.success) {
       // Don't count failures in the processed count
       this.framesProcessed--;
+      this.nativeFailureCount++;
       this.callbacks.onError?.("Frame processing failed");
       // Transition to error state so the parent can fall back to native video
       this.state = "error";
       this.cancelFrame();
       this.callbacks.onStateChange?.("error");
       return;
+    }
+
+    this.framesProcessed++;
+    this.framesDisplayed++;
+
+    // Track completed FPS over rolling interval
+    const now = performance.now();
+    this.completedTimestamps.push(now);
+    // Keep only timestamps within last 2s window
+    const cutoff = now - 2000;
+    while (this.completedTimestamps.length > 0 && this.completedTimestamps[0]! < cutoff) {
+      this.completedTimestamps.shift();
+    }
+    this.completedFps = this.completedTimestamps.length / 2;
+
+    // Track timing breakdowns from backend
+    if (result.timingBreakdown) {
+      const tb = result.timingBreakdown;
+      if (tb.captureReadbackMs != null) {
+        this.captureReadbackTotalMs += tb.captureReadbackMs;
+        this.captureReadbackCount++;
+      }
+      if (tb.nativeTransportProcessingMs != null) {
+        this.nativeTransportProcessingTotalMs += tb.nativeTransportProcessingMs;
+        this.nativeTransportProcessingCount++;
+      }
+      if (tb.displayUploadMs != null) {
+        this.displayUploadTotalMs += tb.displayUploadMs;
+        this.displayUploadCount++;
+      }
+    }
+
+    if (result.totalLatencyMs != null) {
+      this.totalLatencySumMs += result.totalLatencyMs;
+      this.totalLatencyCount++;
     }
 
     // Fire first-frame callback once
@@ -400,9 +522,9 @@ export class ViewerImageProcessor {
     }
 
     // Throttle stats updates to every 500 ms
-    const now = performance.now();
-    if (now - this.lastStatsTime > 500) {
-      this.lastStatsTime = now;
+    const statsNow = performance.now();
+    if (statsNow - this.lastStatsTime > 500) {
+      this.lastStatsTime = statsNow;
       this.callbacks.onStatsUpdate?.(this.getStats());
     }
   }

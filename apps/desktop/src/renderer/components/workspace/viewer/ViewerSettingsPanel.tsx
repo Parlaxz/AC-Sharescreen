@@ -91,7 +91,7 @@ function NvidiaCapabilityStatus() {
   return (
     <p className="text-[10px] text-emerald-500">
       NVIDIA RTX Video available
-      {capability.adapterName ? `  ${capability.adapterName}` : "N/A"}.
+      {capability.adapterName ? `  ${capability.adapterName}` : ""}
     </p>
   );
 }
@@ -177,6 +177,19 @@ interface ViewerSettingsPanelProps {
     activePasses?: string[];
     backpressureDrops?: number;
     generation?: number;
+    framesProcessed?: number;
+    // Phase 1: Truthful live statistics
+    framesDisplayed?: number;
+    completedFps?: number;
+    captureReadbackTimeMs?: number | null;
+    nativeTransportProcessingTimeMs?: number | null;
+    displayUploadTimeMs?: number | null;
+    totalEnhancedFrameLatencyMs?: number | null;
+    nativeOutputWidth?: number;
+    nativeOutputHeight?: number;
+    nativeQualityLevel?: number | null;
+    schedulerDrops?: number;
+    nativeFailures?: number;
   } | null;
   children: React.ReactNode;
   /** When true, render only the content tabs without Popover wrappers */
@@ -706,99 +719,174 @@ export function ViewerSettingsPanel({
             </div>
           </div>
 
-          <hr className="border-border-subtle" />
+          {/* WebGL-only controls — hidden when NVIDIA backend is selected */}
+          {enhancementSettings.processingBackend !== "nvidia-vsr" && (
+            <>
+              <hr className="border-border-subtle" />
 
-          {/* Sliders in a 2-column grid */}
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-            <EnhancementSliderControl
-              label="Sharpness"
-              value={enhancementSettings.sharpeningStrength}
-              disabled={!enhancementSettings.enabled}
-              onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
-            />
+              {/* Sliders in a 2-column grid */}
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                <EnhancementSliderControl
+                  label="Sharpness"
+                  value={enhancementSettings.sharpeningStrength}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
+                />
 
-            <EnhancementSliderControl
-              label="Noise Protection"
-              value={enhancementSettings.noiseProtection}
-              disabled={!enhancementSettings.enabled}
-              onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
-            />
+                <EnhancementSliderControl
+                  label="Noise Protection"
+                  value={enhancementSettings.noiseProtection}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
+                />
 
-            <EnhancementSliderControl
-              label="Compression Cleanup"
-              value={enhancementSettings.compressionCleanup}
-              disabled={!enhancementSettings.enabled}
-              onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
-            />
+                <EnhancementSliderControl
+                  label="Compression Cleanup"
+                  value={enhancementSettings.compressionCleanup}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
+                />
 
-            <EnhancementSliderControl
-              label="Debanding"
-              value={enhancementSettings.debanding}
-              disabled={!enhancementSettings.enabled}
-              onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
-            />
-          </div>
-
-          {/* FSR Target Scale  only when FSR 1 EASU is selected */}
-          {isFsr && (
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Target Scale</span>
+                <EnhancementSliderControl
+                  label="Debanding"
+                  value={enhancementSettings.debanding}
+                  disabled={!enhancementSettings.enabled}
+                  onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
+                />
               </div>
-              <select
-                className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                value={enhancementSettings.fsrTargetScale}
-                onChange={(e) =>
-                  onEnhancementChange({
-                    ...enhancementSettings,
-                    fsrTargetScale: parseFsrTargetScale(e.target.value),
-                  })
-                }
-                disabled={!enhancementSettings.enabled}
-                aria-label="FSR Target Scale"
-              >
-                {FSR_TARGET_SCALES.map((s) => (
-                  <option key={s} value={s}>
-                    {FSR_TARGET_SCALE_LABELS[s]}
-                  </option>
-                ))}
-              </select>
-            </div>
+
+              {/* FSR Target Scale  only when FSR 1 EASU is selected */}
+              {isFsr && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Target Scale</span>
+                  </div>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                    value={enhancementSettings.fsrTargetScale}
+                    onChange={(e) =>
+                      onEnhancementChange({
+                        ...enhancementSettings,
+                        fsrTargetScale: parseFsrTargetScale(e.target.value),
+                      })
+                    }
+                    disabled={!enhancementSettings.enabled}
+                    aria-label="FSR Target Scale"
+                  >
+                    {FSR_TARGET_SCALES.map((s) => (
+                      <option key={s} value={s}>
+                        {FSR_TARGET_SCALE_LABELS[s]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* FSR Final Scaler  only when FSR is selected */}
+              {isFsr && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Final Scaler</span>
+                  </div>
+                  <select
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                    value={enhancementSettings.fsrFinalScaler}
+                    onChange={(e) =>
+                      onEnhancementChange({
+                        ...enhancementSettings,
+                        fsrFinalScaler: e.target.value as FsrFinalScaler,
+                      })
+                    }
+                    disabled={!enhancementSettings.enabled}
+                    aria-label="FSR Final Scaler"
+                  >
+                    {FSR_FINAL_SCALERS.map((s) => (
+                      <option key={s} value={s}>
+                        {FSR_FINAL_SCALER_LABELS[s]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </>
           )}
 
-          {/* FSR Final Scaler  only when FSR is selected */}
-          {isFsr && (
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[10px] text-text-muted uppercase tracking-wide">FSR Final Scaler</span>
+          {/* NVIDIA RTX Video Settings */}
+          {enhancementSettings.processingBackend === "nvidia-vsr" && (
+            <>
+              <hr className="border-border-subtle" />
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
+              <NvidiaCapabilityStatus />
+
+              {/* Processing Mode */}
+              <div className="mb-2">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-text-muted uppercase tracking-wide">Processing Mode</span>
+                </div>
+                <select
+                  className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                  value={enhancementSettings.nvidiaMode ?? "vsr"}
+                  onChange={(e) =>
+                    onEnhancementChange({
+                      ...enhancementSettings,
+                      nvidiaMode: e.target.value as NvidiaProcessingMode,
+                    })
+                  }
+                  disabled={!enhancementSettings.enabled}
+                  aria-label="NVIDIA Processing Mode"
+                >
+                  {NVIDIA_PROCESSING_MODES.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {NVIDIA_PROCESSING_MODE_LABELS[mode]}
+                    </option>
+                  ))}
+                </select>
               </div>
-              <select
-                className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
-                value={enhancementSettings.fsrFinalScaler}
-                onChange={(e) =>
-                  onEnhancementChange({
-                    ...enhancementSettings,
-                    fsrFinalScaler: e.target.value as FsrFinalScaler,
-                  })
-                }
-                disabled={!enhancementSettings.enabled}
-                aria-label="FSR Final Scaler"
-              >
-                {FSR_FINAL_SCALERS.map((s) => (
-                  <option key={s} value={s}>
-                    {FSR_FINAL_SCALER_LABELS[s]}
-                  </option>
-                ))}
-              </select>
-            </div>
+
+              {/* Quality Level */}
+              <div className="mb-2">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-text-muted uppercase tracking-wide">Quality</span>
+                </div>
+                <select
+                  className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                  value={enhancementSettings.nvidiaQuality ?? "high"}
+                  onChange={(e) =>
+                    onEnhancementChange({
+                      ...enhancementSettings,
+                      nvidiaQuality: e.target.value as NvidiaQuality,
+                    })
+                  }
+                  disabled={!enhancementSettings.enabled}
+                  aria-label="NVIDIA Quality Level"
+                >
+                  {NVIDIA_QUALITIES.map((q) => (
+                    <option key={q} value={q}>
+                      {NVIDIA_QUALITY_LABELS[q]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Output policy (read-only) */}
+              <div className="text-[10px] text-text-muted mb-2">
+                Output:{' '}
+                {(enhancementSettings.nvidiaMode === "vsr" || enhancementSettings.nvidiaMode === "high-bitrate")
+                  ? "2× source resolution"
+                  : "Same-resolution processing"}
+              </div>
+
+              {/* Active QualityLevel display */}
+              {(enhancementSettings.enabled && enhancementStats) && (
+                <div className="text-[10px] text-text-muted mb-2">
+                  Active QualityLevel:{' '}
+                  <span className="font-mono text-text-secondary">
+                    {enhancementStats.nativeQualityLevel ?? "—"}
+                  </span>
+                </div>
+              )}
+            </>
           )}
-
-          {/* NVIDIA RTX Video Settings  disabled until renderer pipeline exists */}
-          <hr className="border-border-subtle" />
-          <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">NVIDIA RTX Video</p>
-          <NvidiaCapabilityStatus />
-
-          {/* Reset button */}
           <div className="pt-1">
             <Button
               variant="outline"
@@ -887,12 +975,26 @@ export function ViewerSettingsPanel({
                     </span>
                   </>
                 )}
-                <span className="text-text-muted">Native Round Trip</span>
-                <span className="text-text-secondary font-mono text-right">
-                  {enhancementStats.processingTimeMs != null
-                    ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
-                    : "N/A"}
-                </span>
+                {/* Honest timing labels—never label native round-trip as GPU Time */}
+                {enhancementStats.backend === "nvidia-vsr" ? (
+                  <>
+                    <span className="text-text-muted">Native Round Trip</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.processingTimeMs != null
+                        ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
+                        : "N/A"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-text-muted">GPU Time</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.processingTimeMs != null
+                        ? `${enhancementStats.processingTimeMs.toFixed(2)} ms`
+                        : "N/A"}
+                    </span>
+                  </>
+                )}
                 <span className="text-text-muted">Algorithm</span>
                 <span className="text-text-secondary font-mono text-right">
                   {enhancementStats.backend === "nvidia-vsr"
@@ -901,6 +1003,81 @@ export function ViewerSettingsPanel({
                       ? SCALING_ALGORITHM_LABELS[enhancementStats.scalingAlgorithm] ?? enhancementStats.scalingAlgorithm
                       : enhancementStats.enhancedScalingActive ? "Enhanced" : "Native"}
                 </span>
+
+                {/* Phase 1: Expanded NVIDIA statistics */}
+                {enhancementStats.backend === "nvidia-vsr" && (
+                  <>
+                    <span className="text-text-muted">Frames Displayed</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {enhancementStats.framesDisplayed ?? enhancementStats.framesProcessed}
+                    </span>
+
+                    <span className="text-text-muted">Completed FPS</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"completedFps" in enhancementStats
+                        ? `${(enhancementStats as Record<string, unknown>).completedFps as number}`
+                        : "—"}
+                    </span>
+
+                    <span className="text-text-muted">Capture/Readback</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"captureReadbackTimeMs" in enhancementStats
+                        ? `${((enhancementStats as Record<string, unknown>).captureReadbackTimeMs as number)?.toFixed(2) ?? "—"} ms`
+                        : "—"}
+                    </span>
+
+                    <span className="text-text-muted">Native Transport+Process</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"nativeTransportProcessingTimeMs" in enhancementStats
+                        ? `${((enhancementStats as Record<string, unknown>).nativeTransportProcessingTimeMs as number)?.toFixed(2) ?? "—"} ms`
+                        : "—"}
+                    </span>
+
+                    <span className="text-text-muted">Display Upload</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"displayUploadTimeMs" in enhancementStats
+                        ? `${((enhancementStats as Record<string, unknown>).displayUploadTimeMs as number)?.toFixed(2) ?? "—"} ms`
+                        : "—"}
+                    </span>
+
+                    <span className="text-text-muted">Total Latency</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"totalEnhancedFrameLatencyMs" in enhancementStats
+                        ? `${((enhancementStats as Record<string, unknown>).totalEnhancedFrameLatencyMs as number)?.toFixed(2) ?? "—"} ms`
+                        : "—"}
+                    </span>
+
+                    <span className="text-text-muted">Native Output</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"nativeOutputWidth" in enhancementStats
+                        ? `${(enhancementStats as Record<string, unknown>).nativeOutputWidth as number}x${(enhancementStats as Record<string, unknown>).nativeOutputHeight as number}`
+                        : `${enhancementStats.outputWidth}x${enhancementStats.outputHeight}`}
+                    </span>
+
+                    {"nativeQualityLevel" in enhancementStats && (enhancementStats as Record<string, unknown>).nativeQualityLevel != null && (
+                      <>
+                        <span className="text-text-muted">QualityLevel</span>
+                        <span className="text-text-secondary font-mono text-right">
+                          {(enhancementStats as Record<string, unknown>).nativeQualityLevel as number}
+                        </span>
+                      </>
+                    )}
+
+                    <span className="text-text-muted">Scheduler Drops</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"schedulerDrops" in enhancementStats
+                        ? `${(enhancementStats as Record<string, unknown>).schedulerDrops as number}`
+                        : "0"}
+                    </span>
+
+                    <span className="text-text-muted">Native Failures</span>
+                    <span className="text-text-secondary font-mono text-right">
+                      {"nativeFailures" in enhancementStats
+                        ? `${(enhancementStats as Record<string, unknown>).nativeFailures as number}`
+                        : "0"}
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           )}
