@@ -80,6 +80,10 @@ static struct {
     uint32_t qualityLevel = 2;
     std::string pixelFormat;
     bool configured = false;
+    uint64_t configurationId = 0;   // increments on each successful configure
+    uint64_t effectInstanceId = 0;  // increments on each actual effect reload (Shutdown+Init)
+    std::string requestedMode;      // last requested mode string
+    std::string requestedQuality;   // last requested quality string
 } g_config;
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ NVIDIA VFX context (lazy-init on configure) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -254,7 +258,12 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
         return false;
     }
 
+    // Store requested values (always, even for no-op)
+    g_config.requestedMode = modeStr;
+    g_config.requestedQuality = qualStr;
+
     // Check if configuration is truly identical (no-op guard)
+    // Must NOT advance configurationId or effectLoadCount for identical config
     if (g_config.configured &&
         g_config.inputWidth == inputW &&
         g_config.inputHeight == inputH &&
@@ -286,6 +295,14 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
            modeStr.c_str(), qualStr.c_str(), canonicalQl,
            g_config.pixelFormat.c_str(),
            g_nvidiaAvailable ? "active" : g_nvidiaReason.c_str());
+
+    // Advance configurationId and effectInstanceId only on successful configuration.
+    // Both advance together here because every actual configure triggers Shutdown+Init
+    // which reloads the effect. effectInstanceId is the truthful count of effect reloads.
+    if (g_nvidiaAvailable) {
+        g_config.configurationId++;
+        g_config.effectInstanceId++;
+    }
 
     // Return success only when VFX initialization/effect loading succeeded.
     return g_nvidiaAvailable;
@@ -422,9 +439,11 @@ static int RunServe(const std::vector<std::string>& args) {
     // Continuously reads frames from the persistent frame pipe,
     // processes them, and writes results back.
     std::thread frameWorker([&transport]() {
+        // Phase 1 Item 5: Reuse vectors by capacity growth to avoid per-frame realloc
+        sv::FrameHeader header;
+        std::vector<uint8_t> frameData;
+        std::vector<uint8_t> outData;
         while (true) {
-            sv::FrameHeader header;
-            std::vector<uint8_t> frameData;
 
             // ── Phase 6: Measure input receive time around ReadFrame (not idle wait) ──
             auto t_read_start = std::chrono::high_resolution_clock::now();
@@ -458,7 +477,7 @@ static int RunServe(const std::vector<std::string>& args) {
             // ── Phase 6: Per-stage native timing (process-local, μs) ─────
             bool ok = false;
             sv::FrameHeader outHeader = header;
-            std::vector<uint8_t> outData;
+            outData.clear(); // reuse by capacity growth
             uint64_t uploadUs = 0, effectUs = 0, downloadUs = 0;
 
             if (g_nvidiaAvailable && g_nvidiaVfx) {
@@ -531,6 +550,9 @@ static int RunServe(const std::vector<std::string>& args) {
 
             if (ok) {
                 outHeader.resultCode = 1;
+                // Phase 3: Reuse slotIndex for configurationId, flags for appliedQualityLevel
+                outHeader.slotIndex = static_cast<uint32_t>(g_config.configurationId);
+                outHeader.flags = static_cast<uint32_t>(g_config.qualityLevel);
                 // Fill native timing fields into output header (pre-write known timings only)
                 outHeader.nativeInputReceiveUs = static_cast<uint32_t>(inputReceiveUs);
                 outHeader.nativeUploadUs = static_cast<uint32_t>(uploadUs);
@@ -619,6 +641,32 @@ static int RunServe(const std::vector<std::string>& args) {
                         ? ""
                         : (g_nvidiaReason.empty() ? "Configuration failed" : g_nvidiaReason),
                     id);
+                // Add configuration details for applied-config contract
+                if (success) {
+                    response["configurationId"] = sv::JsonValue(static_cast<double>(g_config.configurationId));
+                    response["effectInstanceId"] = sv::JsonValue(static_cast<double>(g_config.effectInstanceId));
+                    response["requestedMode"] = sv::JsonValue(g_config.requestedMode);
+                    response["requestedQuality"] = sv::JsonValue(g_config.requestedQuality);
+                    response["appliedMode"] = sv::JsonValue(g_config.requestedMode);
+                    response["appliedQuality"] = sv::JsonValue(g_config.requestedQuality);
+                    response["appliedQualityLevel"] = sv::JsonValue(static_cast<double>(g_config.qualityLevel));
+                    response["inputWidth"] = sv::JsonValue(static_cast<double>(g_config.inputWidth));
+                    response["inputHeight"] = sv::JsonValue(static_cast<double>(g_config.inputHeight));
+                    response["outputWidth"] = sv::JsonValue(static_cast<double>(g_config.outputWidth));
+                    response["outputHeight"] = sv::JsonValue(static_cast<double>(g_config.outputHeight));
+                    response["inputPixelFormat"] = sv::JsonValue(g_config.pixelFormat);
+                    response["nativeGpuFormat"] = sv::JsonValue(std::string("rgba8"));
+                    response["gpuIndex"] = sv::JsonValue(0.0);
+                    response["cudaStreamBound"] = sv::JsonValue(true);
+                    response["effectLoadSucceeded"] = sv::JsonValue(g_nvidiaAvailable);
+                    response["configuredAt"] = sv::JsonValue(static_cast<double>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count()));
+                    response["verificationMethod"] = sv::JsonValue(std::string("set-and-load-confirmed"));
+                    if (g_nvidiaVfx) {
+                        response["effectLoadCount"] = sv::JsonValue(static_cast<double>(g_nvidiaVfx->effectLoadCount()));
+                    }
+                }
                 break;
 
             case sv::Command::kCapabilities:

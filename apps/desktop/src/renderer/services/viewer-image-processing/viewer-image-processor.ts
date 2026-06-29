@@ -74,6 +74,8 @@ export interface ProcessorStats {
   nativeOutputHeight: number;
   /** Canonical NVIDIA QualityLevel (integer) when backend is nvidia-vsr */
   nativeQualityLevel: number | null;
+  /** Config application state when backend is nvidia-vsr */
+  nvidiaConfigState?: "idle" | "applying" | "applied" | "error";
   /** Number of frames dropped due to scheduler backpressure */
   schedulerDrops: number;
   /** Number of native processing failures */
@@ -120,6 +122,8 @@ export interface ProcessorStats {
   coalescedFrames: number;
   /** Number of stale-generation results discarded after backend swap/restart */
   staleGenerationDrops: number;
+  /** Number of stale-configuration results discarded */
+  staleConfigDrops: number;
 
   // ─── Phase 6: Processor-level counters ──────────────────────────────────
   /** Number of frames submitted for processing */
@@ -499,6 +503,7 @@ export class ViewerImageProcessor {
       nativeOutputWidth: this.lastNativeOutputWidth || (backendStats?.outputWidth ?? 0),
       nativeOutputHeight: this.lastNativeOutputHeight || (backendStats?.outputHeight ?? 0),
       nativeQualityLevel: backendStats?.nativeQualityLevel ?? null,
+      nvidiaConfigState: backendStats?.configState,
       schedulerDrops: this.schedulerDropCount,
       nativeFailures: this.nativeFailureCount,
 
@@ -567,6 +572,7 @@ export class ViewerImageProcessor {
       processingAttempts: this._processingAttempts,
       coalescedFrames: this._coalescedFrames,
       staleGenerationDrops: this._staleGenerationDrops,
+      staleConfigDrops: backendStats?.staleConfigDrops ?? 0,
 
       // Phase 6: Processor-level counters
       processingAttemptsTotal: this._processingAttempts,
@@ -654,22 +660,21 @@ export class ViewerImageProcessor {
 
     const currentTime = this.videoElement.currentTime;
     if (currentTime === this.rafLastTime) {
-      this.rafHandle = requestAnimationFrame(this.onRafFrame);
       return;
     }
     this.rafLastTime = currentTime;
 
     // Backpressure: if a frame is currently being processed async, mark
     // the newest available frame as pending and drop this invocation.
+    // Do NOT re-register rAF here — beginFrameProcessing.finally is the
+    // only re-arm point after busy processing completes.
     if (this.frameInFlight) {
       this._coalescedFrames++;
       this.pendingFrame = true;
-      this.rafHandle = requestAnimationFrame(this.onRafFrame);
       return;
     }
 
     this.beginFrameProcessing();
-    this.rafHandle = requestAnimationFrame(this.onRafFrame);
   };
 
   // ─── Async frame processing ────────────────────────────────────────────
@@ -746,7 +751,12 @@ export class ViewerImageProcessor {
     while (this.completedTimestamps.length > 0 && this.completedTimestamps[0]! < cutoff) {
       this.completedTimestamps.shift();
     }
-    this.completedFps = this.completedTimestamps.length / 2;
+    // Use actual elapsed for young window (<2s), fall back to 2s divisor for full window
+    const windowDuration = this.completedTimestamps.length > 0
+      ? Math.max(now - this.completedTimestamps[0]!, 1) // prevent division by zero
+      : 2000;
+    const effectiveWindow = Math.min(windowDuration, 2000);
+    this.completedFps = Math.round((this.completedTimestamps.length / effectiveWindow) * 1000);
 
     // Track timing breakdowns from backend
     if (result.timingBreakdown) {

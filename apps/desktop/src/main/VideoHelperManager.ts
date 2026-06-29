@@ -3,7 +3,9 @@ import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { MessageChannelMain } from "electron";
 import { VIDEO_ENHANCER_PROTOCOL_VERSION } from "./video-enhancer-protocol.js";
-import type { VideoEnhancerConfig } from "./video-enhancer-protocol.js";
+import type { VideoEnhancerConfig, VideoEnhancerConfigureResult } from "./video-enhancer-protocol.js";
+import { createAppliedNvidiaConfig } from "@screenlink/shared";
+import type { AppliedNvidiaConfig } from "@screenlink/shared";
 import { getVideoEnhancerHelperPath } from "./helper-path.js";
 
 // --- Types ──────────────────────────────────────────────────────────
@@ -29,6 +31,8 @@ interface FrameResponse {
   pixels: Uint8Array;
   width: number;
   height: number;
+  configurationId?: number;
+  appliedQualityLevel?: number;
   nativeInputReceiveMs?: number;
   nativeUploadMs?: number;
   nativeEffectMs?: number;
@@ -88,6 +92,10 @@ class FramePipeParser {
     payloadBytes: number;
     width: number;
     height: number;
+    /** Reuses slotIndex field in wire header for configurationId */
+    configurationId: number;
+    /** Reuses flags field in wire header for appliedQualityLevel */
+    appliedQualityLevel: number;
     nativeInputReceiveUs: number;
     nativeUploadUs: number;
     nativeEffectUs: number;
@@ -162,6 +170,8 @@ class FramePipeParser {
           payloadBytes,
           width: this.headerBuf.readUInt32LE(32),
           height: this.headerBuf.readUInt32LE(36),
+          configurationId: this.headerBuf.readUInt32LE(56),  // slotIndex field, reused
+          appliedQualityLevel: this.headerBuf.readUInt32LE(72), // flags field, reused
           nativeInputReceiveUs: this.headerBuf.readUInt32LE(80),
           nativeUploadUs: this.headerBuf.readUInt32LE(84),
           nativeEffectUs: this.headerBuf.readUInt32LE(88),
@@ -264,6 +274,8 @@ class FramePipeParser {
       pixels: this.payloadBuf,
       width: h.width,
       height: h.height,
+      configurationId: h.configurationId > 0 ? h.configurationId : undefined,
+      appliedQualityLevel: h.appliedQualityLevel > 0 ? h.appliedQualityLevel : undefined,
       nativeInputReceiveMs: h.nativeInputReceiveUs > 0 ? h.nativeInputReceiveUs / 1000 : undefined,
       nativeUploadMs: h.nativeUploadUs > 0 ? h.nativeUploadUs / 1000 : undefined,
       nativeEffectMs: h.nativeEffectUs > 0 ? h.nativeEffectUs / 1000 : undefined,
@@ -314,6 +326,11 @@ export class VideoHelperManager {
 
   // Last config for restart
   private lastConfig: VideoEnhancerConfig | null = null;
+
+  // Phase 2: Applied config contract
+  private appliedConfig: AppliedNvidiaConfig | null = null;
+  private configurationId = 0;
+  private effectInstanceId = 0;
 
   // All callers share one in-progress helper startup.
   private startPromise: Promise<boolean> | null = null;
@@ -405,9 +422,70 @@ export class VideoHelperManager {
     }
   }
 
+  // ── Applied config access ────────────────────────────────────────────
+
+  /** Get the latest applied configuration, or null if not yet configured. */
+  getAppliedConfig(): AppliedNvidiaConfig | null {
+    return this.appliedConfig;
+  }
+
+  /**
+   * Parse the native configure response and build the internal AppliedNvidiaConfig.
+   * Called after a successful native configure/start.
+   */
+  private buildAppliedConfig(
+    config: VideoEnhancerConfig,
+    nativeResponse: Record<string, unknown>,
+    success: boolean,
+  ): AppliedNvidiaConfig {
+    const now = Date.now();
+    // Prefer response fields when available (native side now returns them),
+    // fall back to our own tracking for backward compat.
+    const cfgId = typeof nativeResponse.configurationId === "number"
+      ? nativeResponse.configurationId
+      : this.configurationId;
+    const effId = typeof nativeResponse.effectInstanceId === "number"
+      ? nativeResponse.effectInstanceId
+      : this.effectInstanceId;
+    const ql = this.lastConfig
+      ? this.lastConfig.qualityLevel
+      : config.qualityLevel;
+    const mode = this.lastConfig
+      ? this.lastConfig.processingMode
+      : config.processingMode;
+
+    const qualNum: Record<string, number> = { low: 0, medium: 1, high: 2, ultra: 3 };
+    const canonicalQlBase: Record<string, number> = { vsr: 1, denoise: 8, deblur: 12, "high-bitrate": 16 };
+    const appliedQl = typeof nativeResponse.appliedQualityLevel === "number"
+      ? nativeResponse.appliedQualityLevel
+      : ((canonicalQlBase[mode] ?? 1) + (qualNum[ql] ?? 2));
+
+    return createAppliedNvidiaConfig({
+      configurationId: cfgId,
+      effectInstanceId: effId,
+      requestedMode: (typeof nativeResponse.requestedMode === "string" ? nativeResponse.requestedMode : config.processingMode),
+      requestedQuality: (typeof nativeResponse.requestedQuality === "string" ? nativeResponse.requestedQuality : config.qualityLevel),
+      appliedMode: (typeof nativeResponse.appliedMode === "string" ? nativeResponse.appliedMode : mode),
+      appliedQuality: (typeof nativeResponse.appliedQuality === "string" ? nativeResponse.appliedQuality : ql),
+      appliedQualityLevel: appliedQl,
+      inputWidth: typeof nativeResponse.inputWidth === "number" ? nativeResponse.inputWidth : config.inputWidth,
+      inputHeight: typeof nativeResponse.inputHeight === "number" ? nativeResponse.inputHeight : config.inputHeight,
+      outputWidth: typeof nativeResponse.outputWidth === "number" ? nativeResponse.outputWidth : config.outputWidth,
+      outputHeight: typeof nativeResponse.outputHeight === "number" ? nativeResponse.outputHeight : config.outputHeight,
+      inputPixelFormat: typeof nativeResponse.inputPixelFormat === "string" ? nativeResponse.inputPixelFormat : config.pixelFormat,
+      effectLoadSucceeded: success && (nativeResponse.effectLoadSucceeded !== false),
+      effectLoadCount: typeof nativeResponse.effectLoadCount === "number"
+        ? nativeResponse.effectLoadCount
+        : (success ? 1 : 0),
+      configuredAt: typeof nativeResponse.configuredAt === "number"
+        ? nativeResponse.configuredAt
+        : now,
+    });
+  }
+
   // ── Public API ──────────────────────────────────────────────────────
 
-  async start(config: VideoEnhancerConfig): Promise<boolean> {
+  async start(config: VideoEnhancerConfig): Promise<VideoEnhancerConfigureResult> {
     if (this.state === "ready" || this.state === "processing") {
       const current = this.lastConfig;
 
@@ -425,7 +503,7 @@ export class VideoHelperManager {
         helperLifecycleLog("start (idempotent)", {
           lifecycleGeneration: this.lifecycleGeneration,
         });
-        return true;
+        return { success: true, appliedConfig: this.appliedConfig ?? undefined };
       }
 
       helperLifecycleLog("reconfigure via start", {
@@ -441,14 +519,16 @@ export class VideoHelperManager {
       console.log(
         `[VideoHelper] Joining startup already in progress (${this.state})`,
       );
-      return this.startPromise;
+      const ok = await this.startPromise;
+      return { success: ok, appliedConfig: ok ? (this.appliedConfig ?? undefined) : undefined };
     }
 
     const pendingStartup = this.startHelper(config);
     this.startPromise = pendingStartup;
 
     try {
-      return await pendingStartup;
+      const ok = await pendingStartup;
+      return { success: ok, appliedConfig: ok ? (this.appliedConfig ?? undefined) : undefined };
     }
     finally {
       if (this.startPromise === pendingStartup) {
@@ -478,6 +558,10 @@ export class VideoHelperManager {
     requestWriteMs?: number;
     responseWaitMs?: number;
     mainHandlerTotalMs?: number;
+    /** Phase 3: configurationId from output header (slotIndex field reused) */
+    configurationId?: number;
+    /** Phase 3: appliedQualityLevel from output header (flags field reused) */
+    appliedQualityLevel?: number;
     nativeInputReceiveMs?: number;
     nativeUploadMs?: number;
     nativeEffectMs?: number;
@@ -583,6 +667,8 @@ export class VideoHelperManager {
         requestWriteMs: actualRequestWriteMs,
         responseWaitMs: actualResponseWaitMs,
         mainHandlerTotalMs,
+        configurationId: result.configurationId,
+        appliedQualityLevel: result.appliedQualityLevel,
         nativeInputReceiveMs: result.nativeInputReceiveMs,
         nativeUploadMs: result.nativeUploadMs,
         nativeEffectMs: result.nativeEffectMs,
@@ -680,6 +766,9 @@ export class VideoHelperManager {
           width: result.width,
           height: result.height,
           pixels: new Uint8Array(result.pixels),
+          // Phase 3: Frame correlation
+          configurationId: result.configurationId,
+          appliedQualityLevel: result.appliedQualityLevel,
           // Main-process per-frame timings
           mainInputHandlingMs: result.mainInputHandlingMs,
           requestWriteMs: result.requestWriteMs,
@@ -742,13 +831,31 @@ export class VideoHelperManager {
       await this.sendCommand("shutdown", {}).catch(() => {});
     }
 
+    this.appliedConfig = null;
     await this.cleanup();
     this.state = "disconnected";
     this.callbacks.onStateChange?.("disconnected");
   }
 
-  async reconfigure(config: VideoEnhancerConfig): Promise<boolean> {
-    if (this.state !== "ready" && this.state !== "processing") return false;
+  async reconfigure(config: VideoEnhancerConfig): Promise<VideoEnhancerConfigureResult> {
+    if (this.state !== "ready" && this.state !== "processing") {
+      return { success: false, error: "Helper not in ready/processing state" };
+    }
+
+    // No-op guard: check if config is identical
+    if (this.lastConfig &&
+        this.lastConfig.inputWidth === config.inputWidth &&
+        this.lastConfig.inputHeight === config.inputHeight &&
+        this.lastConfig.outputWidth === config.outputWidth &&
+        this.lastConfig.outputHeight === config.outputHeight &&
+        this.lastConfig.processingMode === config.processingMode &&
+        this.lastConfig.qualityLevel === config.qualityLevel &&
+        this.lastConfig.pixelFormat === config.pixelFormat) {
+      helperLifecycleLog("reconfigure (idempotent)", {
+        lifecycleGeneration: this.lifecycleGeneration,
+      });
+      return { success: true, appliedConfig: this.appliedConfig ?? undefined };
+    }
 
     helperLifecycleLog("helperReconfigure", {
       lifecycleGeneration: this.lifecycleGeneration,
@@ -769,11 +876,18 @@ export class VideoHelperManager {
         pixelFormat: config.pixelFormat,
       });
       if (response?.success === true) {
+        this.configurationId++;
+        this.effectInstanceId++;
         this.lastConfig = { ...config };
+        this.appliedConfig = this.buildAppliedConfig(config, response, true);
       }
-      return response?.success === true;
-    } catch {
-      return false;
+      return {
+        success: response?.success === true,
+        error: response?.success === true ? undefined : (response?.error as string ?? "Reconfigure failed"),
+        appliedConfig: response?.success === true ? (this.appliedConfig ?? undefined) : undefined,
+      };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : "Reconfigure error" };
     }
   }
 
@@ -897,9 +1011,14 @@ export class VideoHelperManager {
         return false;
       }
 
+      // Build and retain applied config from native response
+      this.configurationId++;
+      this.effectInstanceId++;
+      this.lastConfig = { ...config };
+      this.appliedConfig = this.buildAppliedConfig(config, configReply, true);
+
       this.state = "ready";
       this.restartAttempts = 0;
-      this.lastConfig = { ...config };
       this.callbacks.onStateChange?.("ready");
       helperLifecycleLog("helperReady", {
         lifecycleGeneration: gen,

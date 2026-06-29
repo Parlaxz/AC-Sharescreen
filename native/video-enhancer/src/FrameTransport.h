@@ -43,6 +43,7 @@ struct FrameHeader {
     uint32_t requestedOutputHeight = 0;
 
     // Slot index in the shared frame ring
+    // Phase 3: Reused in output header to carry configurationId for stale-frame rejection.
     uint32_t slotIndex = 0;
 
     // Payload size
@@ -55,6 +56,7 @@ struct FrameHeader {
     uint32_t qualityLevel = 0;
 
     // Flags
+    // Phase 3: Reused in output header to carry the canonical appliedQualityLevel.
     uint32_t flags = 0;
 
     // Result (set by helper after processing)

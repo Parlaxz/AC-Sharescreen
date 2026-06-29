@@ -144,12 +144,30 @@ export interface ScreenLinkAPI {
   videoHelperAcquireClient: () => Promise<{ clientId: string }>;
   videoHelperReleaseClient: (clientId: string) => Promise<{ success: boolean }>;
   videoHelperIsClientActive: (clientId: string) => Promise<boolean>;
-  videoHelperStart: (config: Record<string, unknown>) => Promise<boolean>;
+  videoHelperStart: (config: Record<string, unknown>) => Promise<{ success: boolean; error?: string; appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig }>;
   videoHelperStop: (shutdown?: boolean) => Promise<void>;
-  videoHelperReconfigure: (config: Record<string, unknown>) => Promise<boolean>;
-  videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: Uint8Array, inputWidth: number, inputHeight: number) => Promise<boolean>;
+  videoHelperReconfigure: (config: Record<string, unknown>) => Promise<{ success: boolean; error?: string; appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig }>;
+  videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: Uint8Array, inputWidth: number, inputHeight: number) => Promise<{
+    generation: number;
+    sequence: number;
+    pixels: Uint8Array;
+    width: number;
+    height: number;
+    configurationId?: number;
+    appliedQualityLevel?: number;
+    mainInputHandlingMs?: number;
+    requestWriteMs?: number;
+    responseWaitMs?: number;
+    mainHandlerTotalMs?: number;
+    nativeInputReceiveMs?: number;
+    nativeUploadMs?: number;
+    nativeEffectMs?: number;
+    nativeDownloadMs?: number;
+    nativePreWriteTotalMs?: number;
+  } | null>;
   videoHelperFlush: () => Promise<boolean>;
   videoHelperGetState: () => Promise<string>;
+  videoHelperGetAppliedConfig: () => Promise<import("@screenlink/shared").AppliedNvidiaConfig | null>;
   /** Phase 5: Request a dedicated MessagePort for zero-copy frame data transfer.
    *  The port arrives asynchronously via window `message` event with type `frame:port`. */
   requestFramePort: () => Promise<{ success: boolean }>;

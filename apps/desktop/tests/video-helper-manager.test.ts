@@ -116,7 +116,7 @@ describe("VideoHelperManager — disconnected state", () => {
       qualityLevel: "high",
       pixelFormat: "bgra8",
     });
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
   });
 
   it("flush returns false when helper not running", async () => {
@@ -244,5 +244,320 @@ describe("VideoHelperManager — frame port lifecycle", () => {
 
     // Port should be closed
     expect((manager as any).framePorts.has(clientId)).toBe(false);
+  });
+});
+
+// ─── Phase 2 Gate A: Structured result parsing and idempotent reconfigure ────
+
+describe("VideoHelperManager — configure/start/reconfigure structured results", () => {
+  let manager: VideoHelperManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    manager = new VideoHelperManager();
+  });
+
+  afterEach(() => {
+    manager.destroy();
+  });
+
+  it("reconfigure returns { success: false } when helper not running", async () => {
+    const result = await manager.reconfigure({
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 1920,
+      outputHeight: 1080,
+      processingMode: "vsr",
+      qualityLevel: "high",
+      pixelFormat: "bgra8",
+    });
+    expect(result).toEqual({
+      success: false,
+      error: "Helper not in ready/processing state",
+    });
+  });
+
+  it("getAppliedConfig returns null when never configured", () => {
+    expect(manager.getAppliedConfig()).toBeNull();
+  });
+
+  it("buildAppliedConfig produces correct structure from native response", () => {
+    const config = {
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      processingMode: "vsr" as const,
+      qualityLevel: "high" as const,
+      pixelFormat: "rgba8" as const,
+    };
+    const nativeResponse = {
+      success: true,
+      configurationId: 1,
+      effectInstanceId: 1,
+      requestedMode: "vsr",
+      requestedQuality: "high",
+      appliedQualityLevel: 3,
+      effectLoadCount: 1,
+      effectLoadSucceeded: true,
+      configuredAt: 1000000,
+    };
+
+    // Access private method for testing
+    const result = (manager as any).buildAppliedConfig(config, nativeResponse, true);
+
+    expect(result.configurationId).toBe(1);
+    expect(result.effectInstanceId).toBe(1);
+    expect(result.requestedMode).toBe("vsr");
+    expect(result.requestedQuality).toBe("high");
+    expect(result.appliedQualityLevel).toBe(3);
+    expect(result.effectLoadCount).toBe(1);
+    expect(result.effectLoadSucceeded).toBe(true);
+    expect(result.configuredAt).toBe(1000000); // consumed from native response
+    expect(result.verificationMethod).toBe("set-and-load-confirmed");
+    expect(result.nativeGpuFormat).toBe("rgba8");
+    expect(result.cudaStreamBound).toBe(true);
+    expect(result.gpuIndex).toBe(0);
+  });
+
+  it("buildAppliedConfig falls back to internal tracking when native response sparse", () => {
+    const config = {
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      processingMode: "vsr" as const,
+      qualityLevel: "high" as const,
+      pixelFormat: "rgba8" as const,
+    };
+    // Empty native response — should fall back to internal tracking
+    const result = (manager as any).buildAppliedConfig(config, { success: true }, true);
+
+    expect(result.requestedMode).toBe("vsr");
+    expect(result.requestedQuality).toBe("high");
+    expect(result.configuredAt).toBeGreaterThan(0);
+    expect(Number.isFinite(result.configuredAt)).toBe(true);
+    expect(typeof result.configurationId).toBe("number");
+  });
+
+  it("buildAppliedConfig handles effectLoadCount 0 when success is false", () => {
+    const config = {
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      processingMode: "vsr" as const,
+      qualityLevel: "high" as const,
+      pixelFormat: "rgba8" as const,
+    };
+    const result = (manager as any).buildAppliedConfig(config, { success: false }, false);
+    expect(result.effectLoadCount).toBe(0);
+    expect(result.effectLoadSucceeded).toBe(false);
+  });
+});
+
+describe("VideoHelperManager — identical-config no-op", () => {
+  let manager: VideoHelperManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    manager = new VideoHelperManager();
+    // Set state to ready with a lastConfig so no-op detection works
+    (manager as any).state = "ready";
+    (manager as any).lastConfig = {
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      processingMode: "vsr" as const,
+      qualityLevel: "high" as const,
+      pixelFormat: "rgba8" as const,
+    };
+    (manager as any).appliedConfig = {
+      configurationId: 1,
+      effectInstanceId: 1,
+      requestedMode: "vsr",
+      requestedQuality: "high",
+      appliedMode: "vsr",
+      appliedQuality: "high",
+      appliedQualityLevel: 3,
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      inputPixelFormat: "rgba8",
+      nativeGpuFormat: "rgba8",
+      gpuIndex: 0,
+      cudaStreamBound: true,
+      effectLoadSucceeded: true,
+      effectLoadCount: 1,
+      configuredAt: Date.now(),
+      verificationMethod: "set-and-load-confirmed",
+    };
+  });
+
+  afterEach(() => {
+    manager.destroy();
+  });
+
+  it("reconfigure with identical config returns success without advancing configurationId", async () => {
+    const spy = vi.spyOn(manager as any, "sendCommand");
+
+    const result = await manager.reconfigure({
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      processingMode: "vsr",
+      qualityLevel: "high",
+      pixelFormat: "rgba8",
+    });
+
+    // No IPC call should have been made (no-op guard)
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.appliedConfig).toBeDefined();
+  });
+
+  it("start with identical config returns success without advancing configurationId", async () => {
+    const spy = vi.spyOn(manager as any, "sendCommand");
+
+    const result = await manager.start({
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      processingMode: "vsr",
+      qualityLevel: "high",
+      pixelFormat: "rgba8",
+    });
+
+    // No IPC call should have been made (no-op guard via identical config match)
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.appliedConfig).toBeDefined();
+  });
+
+  it("reconfigure with different config attempts actual call", async () => {
+    // sendCommand will fail because manager isn't fully connected
+    const result = await manager.reconfigure({
+      inputWidth: 640,
+      inputHeight: 480,
+      outputWidth: 1280,
+      outputHeight: 960,
+      processingMode: "vsr",
+      qualityLevel: "low",
+      pixelFormat: "rgba8",
+    });
+
+    expect(result.success).toBe(false); // sendCommand returns null for not-connected
+  });
+});
+
+describe("VideoHelperManager — legacy request-frame-port lease cleanup", () => {
+  let manager: VideoHelperManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    manager = new VideoHelperManager();
+  });
+
+  afterEach(() => {
+    manager.destroy();
+  });
+
+  it("releases anon client when createFramePort returns null", () => {
+    const clientId = manager.acquireClient();
+    expect(manager.isClientActive(clientId)).toBe(true);
+
+    // Simulate port creation failure (e.g. client already has a port that fails)
+    // releaseClient should still be safe and not leak
+    manager.releaseClient(clientId);
+    expect(manager.isClientActive(clientId)).toBe(false);
+
+    // Even without explicit release, the port close handler should not crash
+    const clientId2 = manager.acquireClient();
+    const port = (manager as any).createFramePort(clientId2);
+    if (port && port.close) {
+      port.close(); // simulate renderer closing port
+    }
+  });
+
+  it("stale release after port close does not throw", () => {
+    const clientId = manager.acquireClient();
+    manager.releaseClient(clientId);
+
+    // After release, releasing again is a no-op
+    expect(() => manager.releaseClient(clientId)).not.toThrow();
+  });
+});
+
+describe("VideoHelperManager — applied config fields parsing", () => {
+  it("createAppliedNvidiaConfig produces all required fields", async () => {
+    const { createAppliedNvidiaConfig } = await import("@screenlink/shared");
+
+    const config = createAppliedNvidiaConfig({
+      configurationId: 5,
+      effectInstanceId: 3,
+      requestedMode: "vsr",
+      requestedQuality: "ultra",
+      appliedMode: "vsr",
+      appliedQuality: "ultra",
+      appliedQualityLevel: 4,
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      inputPixelFormat: "rgba8",
+      effectLoadSucceeded: true,
+      effectLoadCount: 2,
+    });
+
+    // Verify every field is present and correctly typed
+    expect(config.configurationId).toBe(5);
+    expect(config.effectInstanceId).toBe(3);
+    expect(config.requestedMode).toBe("vsr");
+    expect(config.requestedQuality).toBe("ultra");
+    expect(config.appliedMode).toBe("vsr");
+    expect(config.appliedQuality).toBe("ultra");
+    expect(config.appliedQualityLevel).toBe(4);
+    expect(config.inputWidth).toBe(1920);
+    expect(config.inputHeight).toBe(1080);
+    expect(config.outputWidth).toBe(3840);
+    expect(config.outputHeight).toBe(2160);
+    expect(config.inputPixelFormat).toBe("rgba8");
+    expect(config.nativeGpuFormat).toBe("rgba8");
+    expect(config.gpuIndex).toBe(0);
+    expect(config.cudaStreamBound).toBe(true);
+    expect(config.effectLoadSucceeded).toBe(true);
+    expect(config.effectLoadCount).toBe(2);
+    expect(typeof config.configuredAt).toBe("number");
+    expect(config.configuredAt).toBeGreaterThan(0);
+    expect(Number.isFinite(config.configuredAt)).toBe(true);
+    expect(config.verificationMethod).toBe("set-and-load-confirmed");
+  });
+
+  it("createAppliedNvidiaConfig uses provided configuredAt when given", async () => {
+    const { createAppliedNvidiaConfig } = await import("@screenlink/shared");
+
+    const config = createAppliedNvidiaConfig({
+      configurationId: 1,
+      effectInstanceId: 1,
+      requestedMode: "vsr",
+      requestedQuality: "high",
+      appliedMode: "vsr",
+      appliedQuality: "high",
+      appliedQualityLevel: 3,
+      inputWidth: 1920,
+      inputHeight: 1080,
+      outputWidth: 3840,
+      outputHeight: 2160,
+      inputPixelFormat: "rgba8",
+      effectLoadSucceeded: true,
+      effectLoadCount: 1,
+      configuredAt: 123456789,
+    });
+
+    expect(config.configuredAt).toBe(123456789);
   });
 });

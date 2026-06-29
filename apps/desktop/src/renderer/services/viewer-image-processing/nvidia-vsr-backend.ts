@@ -14,6 +14,7 @@ import type {
 } from "./viewer-image-settings";
 
 import { canonicalQualityLevel } from "@screenlink/shared";
+import type { AppliedNvidiaConfig } from "@screenlink/shared";
 import { nextMonotonicId, lifecycleLog } from "./lifecycle-id";
 
 type NativeVideoConfig = {
@@ -33,6 +34,8 @@ type NativeFrameResult = {
   pixels: Uint8Array | Uint8ClampedArray;
   width: number;
   height: number;
+  configurationId?: number;
+  appliedQualityLevel?: number;
 };
 
 type ScreenLinkVideoApi = {
@@ -46,7 +49,7 @@ type ScreenLinkVideoApi = {
 
   videoHelperStart?: (
     config: NativeVideoConfig,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | { success: boolean; appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig }>;
 
   videoHelperStop?: (
     shutdown?: boolean,
@@ -54,7 +57,7 @@ type ScreenLinkVideoApi = {
 
   videoHelperReconfigure?: (
     config: NativeVideoConfig,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | { success: boolean; appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig }>;
 
   videoHelperSubmitFrame?: (
     generation: number,
@@ -90,6 +93,8 @@ const EMPTY_STATS: BackendStats = {
   backendDrops: 0,
   staleGenerationResults: 0,
   failures: 0,
+  configState: "idle",
+  staleConfigDrops: 0,
 };
 
 const VERTEX_SHADER = `#version 300 es
@@ -271,6 +276,12 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   private frameInFlight = false;
   private helperStarted = false;
 
+  // Phase 2: Requested/Applied config contract
+  private requestedConfig: import("./viewer-image-settings").ViewerImageEnhancementSettings | null = null;
+  private pendingConfig: Record<string, unknown> | null = null;
+  private appliedConfig: AppliedNvidiaConfig | null = null;
+  private configState: "idle" | "applying" | "applied" | "error" = "idle";
+
   private configKey: string | null = null;
   private generation = 0;
 
@@ -282,6 +293,10 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   };
 
   private currentQualityLevel: number | null = null;
+
+  // Phase 3: Config identity for stale-frame rejection
+  private expectedConfigurationId = 0;
+  private staleConfigDrops = 0;
 
   // Phase 5: MessagePort frame IPC with clientId lease
   private clientId: string | null = null;
@@ -451,6 +466,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           pixels: rawPixels,
           width: msg.width ?? 0,
           height: msg.height ?? 0,
+          configurationId: (msg as any).configurationId,
+          appliedQualityLevel: (msg as any).appliedQualityLevel,
         });
       };
 
@@ -846,10 +863,27 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         result.frameSequence ??
         frameSequence;
 
+      // Phase 3: Check generation/sequence match
       if (result.generation !== generation || resultSequence !== frameSequence) {
         this.stats = {
           ...this.stats,
           staleGenerationResults: (this.stats.staleGenerationResults ?? 0) + 1,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        };
+        return {
+          success: false,
+          transient: true,
+        };
+      }
+
+      // Phase 3: Reject stale frames by configurationId
+      // Counts as staleConfigDrops (NOT staleGenerationResults, which is for backend swaps)
+      if (result.configurationId != null && result.configurationId > 0 &&
+          result.configurationId !== this.expectedConfigurationId) {
+        this.staleConfigDrops++;
+        this.stats = {
+          ...this.stats,
+          staleConfigDrops: this.staleConfigDrops,
           processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
         };
         return {
@@ -973,6 +1007,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     return {
       ...this.stats,
       backend: "nvidia-vsr",
+      configState: this.configState,
+      staleConfigDrops: this.staleConfigDrops,
     };
   }
 
@@ -1108,25 +1144,63 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       return true;
     }
 
+    // Phase 2: Track requested/pending/applied state
+    this.requestedConfig = this.settings;
+    this.pendingConfig = config as unknown as Record<string, unknown>;
+    this.configState = "applying";
+
+    // Capture the config key at start of apply for drift check
+    const applyConfigKey = nextConfigKey;
+
+    // Helper function to extract applied config from various return formats
+    const parseResult = (result: unknown): { ok: boolean; appliedConfig?: AppliedNvidiaConfig } => {
+      if (result === null || result === undefined) return { ok: false };
+      // Structured result with success + appliedConfig
+      if (typeof result === "object" && "success" in (result as any)) {
+        const r = result as any;
+        return { ok: r.success === true, appliedConfig: r.appliedConfig ?? undefined };
+      }
+      // Legacy boolean return
+      return { ok: result === true };
+    };
+
     // If already started, reconfigure in place
     if (this.helperStarted) {
-      const reconfigured = await api.videoHelperReconfigure?.(config);
+      const reconfigureResult = await api.videoHelperReconfigure?.(config);
+      const { ok: reconfigured, appliedConfig: reconfigureConfig } = parseResult(reconfigureResult);
       if (reconfigured) {
-        this.configKey = nextConfigKey;
+        // Phase 2: Post-IPC drift check — if a newer config was set while applying,
+        // invalidate configKey so the next frame re-applies.
+        if (this.configKey !== null && this.configKey !== applyConfigKey) {
+          // A newer configuration was set during our apply — re-apply next frame
+          this.configKey = null;
+        } else {
+          this.configKey = applyConfigKey;
+        }
+        if (reconfigureConfig) {
+          this.appliedConfig = reconfigureConfig;
+          this.currentQualityLevel = reconfigureConfig.appliedQualityLevel;
+          this.expectedConfigurationId = reconfigureConfig.configurationId;
+        }
+        this.configState = "applied";
         return true;
       }
-      // Reconfigure failed: flush and restart
-      console.warn("[nvidia-vsr] In-place reconfigure failed, restarting helper");
+      // Reconfigure failed: flush and mark local state for main process to handle lifecycle
+      console.warn("[nvidia-vsr] In-place reconfigure failed, flushing");
       await api.videoHelperFlush?.().catch(() => false);
-      await api.videoHelperStop(true).catch(() => {});
+      // Note: deliberately NOT calling videoHelperStop(true) from renderer on ordinary
+      // failure — main process owns lifecycle management. Just mark local state stale.
       this.helperStarted = false;
       this.configKey = null;
+      this.configState = "error";
     }
 
     // First start or restart after failed reconfigure
-    const started = await api.videoHelperStart(config);
+    const startResult = await api.videoHelperStart(config);
+    const { ok: started, appliedConfig: startConfig } = parseResult(startResult);
 
     if (this.destroyed) {
+      this.configState = "error";
       return false;
     }
 
@@ -1135,11 +1209,23 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         "[nvidia-vsr] Native helper startup failed:",
         JSON.stringify(config),
       );
+      this.configState = "error";
       return false;
     }
 
     this.helperStarted = true;
-    this.configKey = nextConfigKey;
+    // Phase 2: Post-IPC drift check
+    if (this.configKey !== null && this.configKey !== applyConfigKey) {
+      this.configKey = null;
+    } else {
+      this.configKey = nextConfigKey;
+    }
+    if (startConfig) {
+      this.appliedConfig = startConfig;
+      this.currentQualityLevel = startConfig.appliedQualityLevel;
+      this.expectedConfigurationId = startConfig.configurationId;
+    }
+    this.configState = "applied";
 
     console.info(
       "[nvidia-vsr] Native helper configured",

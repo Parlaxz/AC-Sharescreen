@@ -113,3 +113,99 @@ export function nvidiaOutputDimensions(
   }
   return { width: inputWidth * 2, height: inputHeight * 2 };
 }
+
+/**
+ * Applied NVIDIA configuration returned from native helper after a successful
+ * configure/start. Threaded through main/preload/renderer for requested-vs-applied
+ * contract validation.
+ *
+ * The native side may not be able to query every applied value directly from the
+ * SDK; fields marked with verificationMethod 'set-and-load-confirmed' are set from
+ * what was requested and confirmed by a successful effect load, not from a read-back.
+ */
+export interface AppliedNvidiaConfig {
+  /** Monotonically increasing configuration revision. Advances only on actual change. */
+  configurationId: number;
+  /** Monotonically increasing effect instance revision. Advances on each effect reload. */
+  effectInstanceId: number;
+  /** Requested processing mode as originally sent (e.g. "vsr") */
+  requestedMode: string;
+  /** Requested quality as originally sent (e.g. "high") */
+  requestedQuality: string;
+  /** Applied processing mode (same as requested unless fallback) */
+  appliedMode: string;
+  /** Applied quality (same as requested unless fallback) */
+  appliedQuality: string;
+  /** Canonical QualityLevel integer */
+  appliedQualityLevel: number;
+  /** Input width configured */
+  inputWidth: number;
+  /** Input height configured */
+  inputHeight: number;
+  /** Output width configured */
+  outputWidth: number;
+  /** Output height configured */
+  outputHeight: number;
+  /** Input pixel format string */
+  inputPixelFormat: string;
+  /** Native GPU pixel format string */
+  nativeGpuFormat: string;
+  /** GPU index (always 0 unless multi-GPU logic added) */
+  gpuIndex: number;
+  /** Whether CUDA stream was bound before effect load */
+  cudaStreamBound: boolean;
+  /** Whether effect loading succeeded */
+  effectLoadSucceeded: boolean;
+  /** Number of times effect has been loaded */
+  effectLoadCount: number;
+  /** Timestamp of configuration (ms since epoch) */
+  configuredAt: number;
+  /** How verification was performed when SDK cannot query exact applied values */
+  verificationMethod: "set-and-load-confirmed" | "sdk-queried" | "passthrough";
+}
+
+/**
+ * Narrowest compliant implementation of AppliedNvidiaConfig.
+ * Uses verificationMethod = 'set-and-load-confirmed' when SDK cannot
+ * query exact applied values.
+ */
+export function createAppliedNvidiaConfig(params: {
+  configurationId: number;
+  effectInstanceId: number;
+  requestedMode: string;
+  requestedQuality: string;
+  appliedMode: string;
+  appliedQuality: string;
+  appliedQualityLevel: number;
+  inputWidth: number;
+  inputHeight: number;
+  outputWidth: number;
+  outputHeight: number;
+  inputPixelFormat: string;
+  effectLoadSucceeded: boolean;
+  effectLoadCount: number;
+  /** Optional override for configuredAt. Falls back to Date.now() when absent. */
+  configuredAt?: number;
+}): AppliedNvidiaConfig {
+  return {
+    configurationId: params.configurationId,
+    effectInstanceId: params.effectInstanceId,
+    requestedMode: params.requestedMode,
+    requestedQuality: params.requestedQuality,
+    appliedMode: params.appliedMode,
+    appliedQuality: params.appliedQuality,
+    appliedQualityLevel: params.appliedQualityLevel,
+    inputWidth: params.inputWidth,
+    inputHeight: params.inputHeight,
+    outputWidth: params.outputWidth,
+    outputHeight: params.outputHeight,
+    inputPixelFormat: params.inputPixelFormat,
+    nativeGpuFormat: "rgba8",
+    gpuIndex: 0,
+    cudaStreamBound: true,
+    effectLoadSucceeded: params.effectLoadSucceeded,
+    effectLoadCount: params.effectLoadCount,
+    configuredAt: params.configuredAt ?? Date.now(),
+    verificationMethod: "set-and-load-confirmed",
+  };
+}

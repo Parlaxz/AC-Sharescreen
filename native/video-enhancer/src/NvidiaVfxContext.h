@@ -78,10 +78,15 @@ public:
 
     void Destroy();
 
+    /// Number of times effect has been (re)loaded via LoadConfiguredEffect.
+    /// Monotonically increasing; resets to 0 on Destroy.
+    uint32_t effectLoadCount() const { return effectLoadCount_; }
+
 private:
     bool initialized_ = false;
     bool effectCreated_ = false;
     bool effectLoaded_ = false;
+    uint32_t effectLoadCount_ = 0;
     std::string lastError_;
 
 #ifdef SCREENLINK_NVIDIA_VFX_ENABLED

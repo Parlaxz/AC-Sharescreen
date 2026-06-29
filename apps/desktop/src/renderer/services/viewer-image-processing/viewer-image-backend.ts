@@ -119,6 +119,12 @@ export interface BackendStats {
   finalBicubicActive?: boolean;
   fsrFinalScaler?: FsrFinalScaler | null;
   rcasActive?: boolean;
+
+  // ── Phase 2: Requested/Applied config state ────────────────────────────
+  /** Current config application state */
+  configState?: "idle" | "applying" | "applied" | "error";
+  /** Number of stale config drops */
+  staleConfigDrops?: number;
 }
 
 // ─── Backend interface ───────────────────────────────────────────────────────

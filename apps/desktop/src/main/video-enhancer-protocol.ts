@@ -1,5 +1,7 @@
 export const VIDEO_ENHANCER_PROTOCOL_VERSION = "0.1.0";
 
+import type { AppliedNvidiaConfig } from "@screenlink/shared";
+
 // ─── Capability probing ─────────────────────────────────────────────────────
 
 export interface VideoEnhancerCapability {
@@ -19,6 +21,17 @@ export interface VideoEnhancerConfig {
   processingMode: "vsr" | "high-bitrate" | "denoise" | "deblur";
   qualityLevel: "low" | "medium" | "high" | "ultra";
   pixelFormat: "bgra8" | "rgba8";
+}
+
+/**
+ * Result of a configure/start operation with applied config details.
+ * If success is false, the other fields may be undefined/incomplete.
+ */
+export interface VideoEnhancerConfigureResult {
+  success: boolean;
+  error?: string;
+  /** Full applied config when successful */
+  appliedConfig?: AppliedNvidiaConfig;
 }
 
 // ─── Frame submission ───────────────────────────────────────────────────────

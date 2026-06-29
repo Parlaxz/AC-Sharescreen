@@ -168,6 +168,7 @@ void NvidiaVfxContext::Destroy() {
     initialized_ = false;
     effectCreated_ = false;
     effectLoaded_ = false;
+    effectLoadCount_ = 0;
 }
 
 #else
@@ -336,15 +337,7 @@ NvVfxResult NvidiaVfxContext::LoadConfiguredEffect() {
         return NvVfxResult::kErrorEffectLoad;
     }
 
-    status = NvVFX_Load(effect);
-    if (status != NVCV_SUCCESS) {
-        lastError_ = StatusMessage(
-            "NvVFX_Load(VideoSuperRes)",
-            status);
-        return NvVfxResult::kErrorEffectLoad;
-    }
-
-    // Bind the persistent CUDA stream to this effect
+    // Bind the persistent CUDA stream to this effect BEFORE NvVFX_Load
     if (cudaStream_) {
         status = NvVFX_SetCudaStream(effect, NVVFX_CUDA_STREAM,
             reinterpret_cast<CUstream>(cudaStream_));
@@ -354,7 +347,16 @@ NvVfxResult NvidiaVfxContext::LoadConfiguredEffect() {
         }
     }
 
+    status = NvVFX_Load(effect);
+    if (status != NVCV_SUCCESS) {
+        lastError_ = StatusMessage(
+            "NvVFX_Load(VideoSuperRes)",
+            status);
+        return NvVfxResult::kErrorEffectLoad;
+    }
+
     effectLoaded_ = true;
+    effectLoadCount_++;
     return NvVfxResult::kSuccess;
 }
 
@@ -536,6 +538,7 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
 
 void NvidiaVfxContext::Destroy() {
     effectLoaded_ = false;
+    effectLoadCount_ = 0;
 
     if (cudaStream_) {
         NvVFX_CudaStreamDestroy(reinterpret_cast<CUstream>(cudaStream_));

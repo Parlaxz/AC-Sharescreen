@@ -147,8 +147,10 @@ export {
   nvidiaOutputDimensions,
   NVIDIA_PROCESSING_MODES,
   NVIDIA_QUALITIES,
+  createAppliedNvidiaConfig,
 } from "./nvidia-quality.js";
 export type {
   NvidiaProcessingMode,
   NvidiaQuality,
+  AppliedNvidiaConfig,
 } from "./nvidia-quality.js";

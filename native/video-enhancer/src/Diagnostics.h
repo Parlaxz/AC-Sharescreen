@@ -63,6 +63,9 @@ struct DiagnosticSnapshot {
     uint64_t lastEffectUs{0};
     uint64_t lastDownloadUs{0};
     uint64_t lastOutputWriteUs{0};
+
+    /// Number of times the NVIDIA VFX effect has been loaded/reloaded.
+    uint32_t effectLoadCount{0};
 };
 
 /// Get a snapshot of current diagnostics.

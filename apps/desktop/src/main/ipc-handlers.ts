@@ -702,8 +702,15 @@ export function registerIpcHandlers(
     const clientId = manager.acquireClient();
     const port = manager.createFramePort(clientId);
     if (!port) {
+      // Release acquired client on failure
+      manager.releaseClient(clientId);
       return { success: false, error: "Failed to create frame port" };
     }
+    // Self-cleaning: when port closes (renderer releases or navigates away),
+    // release the anonymous client lease to prevent leaks.
+    port.on("close", () => {
+      manager.releaseClient(clientId);
+    });
     event.sender.postMessage("frame:port", null, [port]);
     return { success: true, clientId };
   });
@@ -723,6 +730,11 @@ export function registerIpcHandlers(
   ipcMain.handle("video-helper:start", async (_event, config: VideoEnhancerConfig) => {
     const manager = ensureVideoHelperManager();
     return await manager.start(config);
+  });
+
+  ipcMain.handle("video-helper:get-applied-config", async () => {
+    const mgr = videoHelperManager;
+    return mgr?.getAppliedConfig() ?? null;
   });
 
   ipcMain.handle("video-helper:stop", async (_event, shutdown?: boolean) => {
