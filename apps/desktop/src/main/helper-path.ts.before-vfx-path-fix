@@ -1,0 +1,28 @@
+import { app } from "electron";
+import path from "node:path";
+
+const HELPER_EXE = "screenlink-video-enhancer.exe";
+
+/**
+ * Resolve the video-enhancer helper binary path.
+ * In packaged builds: {resourcesPath}/screenlink-video-enhancer.exe
+ * In development: {repo-root}/native/video-enhancer/build/Release/screenlink-video-enhancer.exe
+ */
+export function getVideoEnhancerHelperPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, HELPER_EXE);
+  }
+
+  // In development, app.getAppPath() resolves to apps/desktop.
+  // Walk to the repository root, then use the canonical native build output.
+  return path.resolve(
+    app.getAppPath(),
+    "..",
+    "..",
+    "native",
+    "video-enhancer",
+    "build",
+    "Release",
+    HELPER_EXE,
+  );
+}

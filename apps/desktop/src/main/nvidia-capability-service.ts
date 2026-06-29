@@ -26,7 +26,7 @@ export async function probeNvidiaVsrCapability(): Promise<NvidiaCapabilityResult
     if (!fs.existsSync(helperPath)) {
       const result: NvidiaCapabilityResult = {
         available: false,
-        reason: "Video-enhancer helper not found. Build native/video-enhancer first.",
+        reason: `Video-enhancer helper not found: ${helperPath}`,
       };
       cachedResult = result;
       return result;

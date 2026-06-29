@@ -74,15 +74,7 @@ if(SCREENLINK_ENABLE_NVIDIA_VFX)
       SCREENLINK_NVIDIA_VFX_MODEL_DIR="$ENV{NVIDIA_VFX_MODEL_DIR}")
   endif()
 
-  # Link NVIDIA VFX libraries
-  if(WIN32)
-    # The NVIDIA VFX SDK provides NvVFX.dll / NvVFX.lib
-    # Use LoadLibrary-based proxy to avoid import library dependency
-    # (NvVfxContext.cpp loads symbols at runtime)
-    target_link_libraries(${PROJECT_NAME} PRIVATE
-      "${NVIDIA_VFX_SDK_ROOT}/lib/NvVFX.lib"
-    )
-  endif()
+
 endif()
 
 # Regenerate build provenance at every build (not just configure)
@@ -122,3 +114,16 @@ target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_BINARY_DIR}/generate
 
 # Install (not for production installer yet, just for development)
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
+# NVIDIA Video Effects SDK proxy integration.
+# These proxy sources load the runtime DLLs dynamically, so no NvVFX.lib is required.
+if(SCREENLINK_ENABLE_NVIDIA_VFX)
+  target_sources(${PROJECT_NAME} PRIVATE
+    "${NVIDIA_VFX_SDK_ROOT}/nvvfx/src/nvVideoEffectsProxy.cpp"
+    "${NVIDIA_VFX_SDK_ROOT}/nvvfx/src/nvCVImageProxy.cpp"
+  )
+
+  target_include_directories(${PROJECT_NAME} PRIVATE
+    "${NVIDIA_VFX_SDK_ROOT}/nvvfx/include"
+    "${NVIDIA_VFX_SDK_ROOT}/features/nvvfxvideosuperres/include"
+  )
+endif()

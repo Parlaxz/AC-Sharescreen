@@ -29,7 +29,7 @@
 
 namespace sv = screenlink::video;
 
-// ─── Processing mode / quality string→number mapping ──────────────────
+// â”€â”€â”€ Processing mode / quality stringâ†’number mapping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static uint32_t MapProcessingMode(const std::string& s) {
     static const std::unordered_map<std::string, uint32_t> map = {
@@ -53,7 +53,7 @@ static uint32_t MapQualityLevel(const std::string& s) {
     return it != map.end() ? it->second : 2;
 }
 
-// ─── Global configuration (set by --serve commands) ───────────────────
+// â”€â”€â”€ Global configuration (set by --serve commands) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static struct {
     std::string sessionId;
@@ -68,7 +68,7 @@ static struct {
     bool configured = false;
 } g_config;
 
-// ─── NVIDIA VFX context (lazy-init on configure) ─────────────────────
+// â”€â”€â”€ NVIDIA VFX context (lazy-init on configure) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static std::unique_ptr<sv::NvidiaVfxContext> g_nvidiaVfx;
 static bool g_nvidiaAvailable = false;
@@ -130,7 +130,7 @@ static void ShutdownNvidiaVfx() {
     g_nvidiaAvailable = false;
 }
 
-// ─── Helper: create JSON response ─────────────────────────────────────
+// â”€â”€â”€ Helper: create JSON response â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static sv::JsonObject MakeResponse(bool success, const std::string& errorMsg = "", const std::string& id = "") {
     sv::JsonObject resp;
@@ -142,7 +142,7 @@ static sv::JsonObject MakeResponse(bool success, const std::string& errorMsg = "
     return resp;
 }
 
-// ─── Command handlers ─────────────────────────────────────────────────
+// â”€â”€â”€ Command handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static bool HandleHello(const sv::JsonObject& req) {
     auto proto = sv::GetString(req, "protocolVersion");
@@ -214,7 +214,7 @@ static sv::DiagnosticSnapshot BuildStatsResponse() {
     return sv::GetDiagnostics();
 }
 
-// ─── Capabilities command ─────────────────────────────────────────────
+// â”€â”€â”€ Capabilities command â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void HandleCapabilities(const sv::JsonObject& /*payload*/,
                                 sv::FrameTransport& transport,
@@ -234,7 +234,7 @@ static void HandleCapabilities(const sv::JsonObject& /*payload*/,
     transport.WriteControlResponse(sv::SerializeJson(resp));
 }
 
-// ─── Serve mode main loop ─────────────────────────────────────────────
+// â”€â”€â”€ Serve mode main loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static int RunServe(const std::vector<std::string>& args) {
     std::string ctrlPipe, framePipe, sessionId, authToken;
@@ -339,13 +339,13 @@ static int RunServe(const std::vector<std::string>& args) {
             std::vector<uint8_t> frameData;
 
             if (!transport.ReadFrame(header, frameData)) {
-                // Pipe closed or error — exit worker
+                // Pipe closed or error â€” exit worker
                 fprintf(stderr, "[FrameWorker] Frame pipe read failed, stopping\n");
                 break;
             }
 
             if (!g_config.configured) {
-                // Configuration required first — skip
+                // Configuration required first â€” skip
                 continue;
             }
 
@@ -516,7 +516,7 @@ static int RunServe(const std::vector<std::string>& args) {
     return 0;
 }
 
-// ─── CLI subcommands ──────────────────────────────────────────────────
+// â”€â”€â”€ CLI subcommands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 static void PrintVersion() {
     printf("{\n");
@@ -595,12 +595,17 @@ static int RunSelfTest() {
         allPassed = false;
     }
 
-    // Capability probe (non-VFX build always returns sdk-not-built)
     auto cap = sv::ProbeCapability();
-    allPassed &= (!cap.available);
-    allPassed &= (!cap.reason.empty());
 
-    // String→number mapping
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+    allPassed &= cap.available;
+    allPassed &= (cap.reason == "available");
+#else
+    allPassed &= !cap.available;
+    allPassed &= (cap.reason == "sdk-not-built");
+#endif
+
+    // Stringâ†’number mapping
     allPassed &= (MapProcessingMode("vsr") == 1);
     allPassed &= (MapProcessingMode("high-bitrate") == 2);
     allPassed &= (MapQualityLevel("high") == 2);
@@ -610,8 +615,169 @@ static int RunSelfTest() {
     return allPassed ? 0 : 1;
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────
+// â”€â”€â”€ Entry point â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+static int RunVfxFrameTest() {
+#ifndef SCREENLINK_NVIDIA_VFX_ENABLED
+    fprintf(stderr, "VFX frame test unavailable: sdk-not-built\n");
+    return 2;
+#else
+    constexpr uint32_t inputWidth = 320;
+    constexpr uint32_t inputHeight = 180;
+    constexpr uint32_t outputWidth = 640;
+    constexpr uint32_t outputHeight = 360;
+    constexpr uint32_t inputStride = inputWidth * 4;
+    constexpr uint32_t outputStride = outputWidth * 4;
+
+    std::vector<uint8_t> input(
+        static_cast<size_t>(inputStride) * inputHeight);
+
+    // High-frequency checkerboard plus gradients, so the output cannot
+    // legitimately be uniformly zero or a single constant value.
+    for (uint32_t y = 0; y < inputHeight; ++y) {
+        for (uint32_t x = 0; x < inputWidth; ++x) {
+            const size_t offset =
+                static_cast<size_t>(y) * inputStride +
+                static_cast<size_t>(x) * 4;
+
+            const bool checker = ((x / 8) + (y / 8)) % 2 == 0;
+
+            input[offset + 0] = checker
+                ? static_cast<uint8_t>((x * 255) / (inputWidth - 1))
+                : static_cast<uint8_t>(255 - ((x * 255) / (inputWidth - 1)));
+
+            input[offset + 1] =
+                static_cast<uint8_t>((y * 255) / (inputHeight - 1));
+
+            input[offset + 2] = checker ? 240 : 16;
+            input[offset + 3] = 255;
+        }
+    }
+
+    for (int quality = 0; quality <= 4; ++quality) {
+        sv::NvidiaVfxContext context;
+        sv::NvVfxConfig config;
+        config.strength = quality;
+
+        auto fail = [&](const char* stage) {
+            fprintf(
+                stderr,
+                "VFX frame test failed at %s for QualityLevel=%d: %s\n",
+                stage,
+                quality,
+                context.GetLastError().c_str());
+            return 1;
+        };
+
+        if (context.Initialize(config) != sv::NvVfxResult::kSuccess) {
+            return fail("Initialize");
+        }
+
+        if (context.CreateEffect() != sv::NvVfxResult::kSuccess) {
+            return fail("CreateEffect");
+        }
+
+        sv::NvVfxImage inputDesc;
+        inputDesc.width = inputWidth;
+        inputDesc.height = inputHeight;
+        inputDesc.stride = inputStride;
+        inputDesc.format = sv::NvVfxPixelFormat::kRGBA8;
+
+        if (context.AllocateInput(inputDesc) != sv::NvVfxResult::kSuccess) {
+            return fail("AllocateInput");
+        }
+
+        sv::NvVfxImage outputDesc;
+        outputDesc.width = outputWidth;
+        outputDesc.height = outputHeight;
+        outputDesc.stride = outputStride;
+        outputDesc.format = sv::NvVfxPixelFormat::kRGBA8;
+
+        if (context.AllocateOutput(outputDesc) != sv::NvVfxResult::kSuccess) {
+            return fail("AllocateOutput/NvVFX_Load");
+        }
+
+        if (context.UploadInput(
+                input.data(),
+                inputWidth,
+                inputHeight,
+                inputStride,
+                sv::NvVfxPixelFormat::kRGBA8) !=
+            sv::NvVfxResult::kSuccess) {
+            return fail("UploadInput");
+        }
+
+        if (context.RunFrame() != sv::NvVfxResult::kSuccess) {
+            return fail("RunFrame");
+        }
+
+        std::vector<uint8_t> output(
+            static_cast<size_t>(outputStride) * outputHeight);
+
+        uint32_t actualWidth = 0;
+        uint32_t actualHeight = 0;
+
+        if (context.DownloadOutput(
+                output.data(),
+                outputStride,
+                actualWidth,
+                actualHeight) != sv::NvVfxResult::kSuccess) {
+            return fail("DownloadOutput");
+        }
+
+        if (actualWidth != outputWidth || actualHeight != outputHeight) {
+            fprintf(
+                stderr,
+                "VFX frame test returned incorrect dimensions for "
+                "QualityLevel=%d: %ux%u, expected %ux%u\n",
+                quality,
+                actualWidth,
+                actualHeight,
+                outputWidth,
+                outputHeight);
+            return 1;
+        }
+
+        uint64_t checksum = 1469598103934665603ull;
+        uint8_t minimumValue = 255;
+        uint8_t maximumValue = 0;
+        bool anyNonZero = false;
+
+        for (uint8_t value : output) {
+            checksum ^= value;
+            checksum *= 1099511628211ull;
+
+            minimumValue = std::min(minimumValue, value);
+            maximumValue = std::max(maximumValue, value);
+            anyNonZero = anyNonZero || value != 0;
+        }
+
+        if (!anyNonZero || minimumValue == maximumValue) {
+            fprintf(
+                stderr,
+                "VFX frame test produced empty or uniform output for "
+                "QualityLevel=%d\n",
+                quality);
+            return 1;
+        }
+
+        printf(
+            "QualityLevel=%d PASS: %ux%u -> %ux%u, "
+            "checksum=%llu, range=%u..%u\n",
+            quality,
+            inputWidth,
+            inputHeight,
+            actualWidth,
+            actualHeight,
+            static_cast<unsigned long long>(checksum),
+            static_cast<unsigned int>(minimumValue),
+            static_cast<unsigned int>(maximumValue));
+    }
+
+    printf("VFX frame tests: ALL PASSED\n");
+    return 0;
+#endif
+}
 int main(int argc, char* argv[]) {
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
@@ -623,6 +789,7 @@ int main(int argc, char* argv[]) {
 
     if (args[0] == "--version") { PrintVersion(); return 0; }
     if (args[0] == "--capabilities") { return RunCapabilities(); }
+    if (args[0] == "--vfx-frame-test") { return RunVfxFrameTest(); }
     if (args[0] == "--self-test") { return RunSelfTest(); }
     if (args[0] == "--serve") { return RunServe(args); }
 

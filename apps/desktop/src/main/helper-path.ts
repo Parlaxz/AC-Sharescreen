@@ -1,21 +1,66 @@
-import { app } from "electron";
+import { existsSync } from "node:fs";
 import path from "node:path";
+import { app } from "electron";
 
 const HELPER_EXE = "screenlink-video-enhancer.exe";
 
+function findDevelopmentHelper(): string {
+  const startDirectories = [
+    app.getAppPath(),
+    process.cwd(),
+  ];
+
+  for (const startDirectory of startDirectories) {
+    let currentDirectory = path.resolve(startDirectory);
+
+    for (let depth = 0; depth < 8; depth += 1) {
+      const candidate = path.join(
+        currentDirectory,
+        "native",
+        "video-enhancer",
+        "build",
+        "Release",
+        HELPER_EXE,
+      );
+
+      if (existsSync(candidate)) {
+        console.log(
+          `[nvidia-capability] Using video enhancer helper: ${candidate}`,
+        );
+
+        return candidate;
+      }
+
+      const parentDirectory = path.dirname(currentDirectory);
+
+      if (parentDirectory === currentDirectory) {
+        break;
+      }
+
+      currentDirectory = parentDirectory;
+    }
+  }
+
+  // Deterministic fallback used for the resulting diagnostic message.
+  return path.resolve(
+    app.getAppPath(),
+    "..",
+    "..",
+    "native",
+    "video-enhancer",
+    "build",
+    "Release",
+    HELPER_EXE,
+  );
+}
+
 /**
- * Resolve the video-enhancer helper binary path.
- * In packaged builds: {resourcesPath}/screenlink-video-enhancer.exe
- * In development: {repo-root}/native/video-enhancer/build/Release/screenlink-video-enhancer.exe
+ * Resolve the native video-enhancer helper.
  */
 export function getVideoEnhancerHelperPath(): string {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, HELPER_EXE);
   }
 
-  // Development: from dist/main/, go up to repo root, then to native build output
-  return path.join(
-    __dirname, "..", "..", "..", "..",
-    "native", "video-enhancer", "build", "Release", HELPER_EXE,
-  );
+  return findDevelopmentHelper();
 }
