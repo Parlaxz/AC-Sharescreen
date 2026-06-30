@@ -385,6 +385,7 @@ export function CompareViewerSurface({
       onPointerLeave={handlePointerUp}
       onWheel={handleWheel}
       onKeyDown={handleKeyDown}
+      onContextMenu={(e) => { e.preventDefault(); handleToggleFullscreen(); }}
       tabIndex={0}
       role="application"
       aria-label="Video comparison viewer"

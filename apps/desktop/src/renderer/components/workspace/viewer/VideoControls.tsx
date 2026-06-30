@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Play,
   Pause,
@@ -31,6 +31,7 @@ import type { ViewerRequestState } from "./ViewerSettingsPanel.js";
 import { StreamSwitcher } from "./StreamSwitcher.js";
 import type { StreamAnnouncement } from "@/stores/main-store";
 import type { ActivePanel } from "./ViewerPanelShell.js";
+import { estimateHourlyBytes, fmtHourlyUsage } from "@/services/bandwidth-telemetry-types";
 
 // ─── Connection state indicator ──────────────────────────────────────────
 
@@ -114,6 +115,8 @@ interface VideoControlsProps {
   currentBandwidthBps?: number;
   /** Total bytes received in this session (for bandwidth display) */
   totalBytesReceived?: number;
+  /** Active duration in ms (for hourly estimate) */
+  activeDurationMs?: number;
   /** Discord mute shortcut binding */
   discordMuteBinding?: ShortcutBinding;
   /** Discord deafen shortcut binding */
@@ -180,6 +183,7 @@ export function VideoControls({
   onToggleScreenLinkDeafen,
   currentBandwidthBps = 0,
   totalBytesReceived = 0,
+  activeDurationMs = 0,
   discordMuteBinding = { modifiers: ["alt"], key: "M" },
   discordDeafenBinding = { modifiers: ["alt"], key: "D" },
   syncScreenLinkDeafen = true,
@@ -271,12 +275,12 @@ export function VideoControls({
 
   // ── Bandwidth formatting ──
   const formatBandwidth = useCallback((bps: number): string => {
-    if (bps <= 0) return "0 kB/s";
+    if (bps <= 0) return "0 K";
     const Bps = bps / 8;
-    if (Bps < 1000) return `${Math.round(Bps)} B/s`;
+    if (Bps < 1000) return `${Math.round(Bps)} B`;
     const kBps = Bps / 1000;
-    if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
-    return `${(kBps / 1000).toFixed(2)} MB/s`;
+    if (kBps < 1000) return `${kBps.toFixed(1)} K`;
+    return `${(kBps / 1000).toFixed(2)} M`;
   }, []);
 
   const formatTotalBytes = useCallback((bytes: number): string => {
@@ -286,6 +290,11 @@ export function VideoControls({
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }, []);
+
+  const hourlyEstimate = useMemo(
+    () => estimateHourlyBytes(totalBytesReceived, activeDurationMs),
+    [totalBytesReceived, activeDurationMs],
+  );
 
   return (
     <motion.div
@@ -457,12 +466,15 @@ export function VideoControls({
           {currentBandwidthBps > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
-                <span className="text-[10px] text-white/50 font-mono px-1.5 cursor-pointer select-none tabular-nums" onClick={() => onActivePanelChange(activePanel === "bandwidth" ? null : "bandwidth")}>
+                <span className="text-sm font-bold text-white font-mono px-1.5 cursor-pointer select-none tabular-nums" onClick={() => onActivePanelChange(activePanel === "bandwidth" ? null : "bandwidth")}>
                   {formatBandwidth(currentBandwidthBps)}
                 </span>
               </TooltipTrigger>
-              <TooltipContent side="top">
-                Total received: {formatTotalBytes(totalBytesReceived)}
+              <TooltipContent side="top" className="space-y-0.5">
+                <div>Total: {formatTotalBytes(totalBytesReceived)}</div>
+                <div>
+                  Est/hr: {hourlyEstimate > 0 ? fmtHourlyUsage(hourlyEstimate) : "\u2014"}
+                </div>
               </TooltipContent>
             </Tooltip>
           )}

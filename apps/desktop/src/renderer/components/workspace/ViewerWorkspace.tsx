@@ -429,6 +429,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Bandwidth tracking ──
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
+  const [activeDurationMs, setActiveDurationMs] = useState(0);
   const unregisterMetricsRef = useRef<(() => void) | null>(null);
   const metricsSubscriptionRef = useRef<(() => void) | null>(null);
 
@@ -438,6 +439,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     if (!sessionRef.current || sessionState === "ended" || sessionState === "error") {
       setCurrentBandwidthBps(0);
       setTotalBytesReceived(0);
+      setActiveDurationMs(0);
       // Unregister metrics connection
       if (unregisterMetricsRef.current) { unregisterMetricsRef.current(); unregisterMetricsRef.current = null; }
       if (metricsSubscriptionRef.current) { metricsSubscriptionRef.current(); metricsSubscriptionRef.current = null; }
@@ -491,12 +493,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           const snapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
           setCurrentBandwidthBps(snapshot.aggregate.currentBitsPerSecond);
           setTotalBytesReceived(snapshot.aggregate.totalBytes);
+          setActiveDurationMs(snapshot.aggregate.activeDurationMs);
         });
         metricsSubscriptionRef.current = unsub;
 
         // Initial read
         const snapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
         setTotalBytesReceived(snapshot.aggregate.totalBytes);
+        setActiveDurationMs(snapshot.aggregate.activeDurationMs);
       }
     }
 
@@ -680,12 +684,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     try {
       await session.resume();
       if (viewerHistoryIdRef.current) {
-        StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "playing");
-        // Force counter rebaseline so paused bytes aren't measured across the gap
         const svc = StreamMetricsService.getInstance();
-        (svc as unknown as { forceRebaseline?: (id: string) => void }).forceRebaseline?.(
-          viewerHistoryIdRef.current,
-        );
+        svc.setSessionState(viewerHistoryIdRef.current, "playing");
+        const newPc = session.getPeerConnection();
+        if (newPc) {
+          svc.replaceConnectionPeer(
+            viewerHistoryIdRef.current,
+            `viewer-${viewerHistoryIdRef.current}`,
+            newPc,
+          );
+        }
       }
     } catch (err) {
       console.error("[ViewerWorkspace] resume failed:", err);
@@ -1832,6 +1840,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
             totalBytesReceived={totalBytesReceived}
+            activeDurationMs={activeDurationMs}
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
@@ -1903,6 +1912,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
             currentBandwidthBps={currentBandwidthBps}
             totalBytesReceived={totalBytesReceived}
+            activeDurationMs={activeDurationMs}
             discordMuteBinding={discordMuteBinding}
             discordDeafenBinding={discordDeafenBinding}
             syncScreenLinkDeafen={syncScreenLinkDeafen}
@@ -2076,6 +2086,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 onFirstFrame={handleEnhancementFirstFrame}
                 onStatsUpdate={handleEnhancementStatsUpdate}
                 processorApiRef={processorApiRef}
+                onContextMenu={(e) => { e.preventDefault(); handleToggleFullscreen(); }}
               />
 
               {/* ── Paused overlay ── */}
@@ -2227,6 +2238,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
               currentBandwidthBps={currentBandwidthBps}
               totalBytesReceived={totalBytesReceived}
+              activeDurationMs={activeDurationMs}
               discordMuteBinding={discordMuteBinding}
               discordDeafenBinding={discordDeafenBinding}
               syncScreenLinkDeafen={syncScreenLinkDeafen}
@@ -2293,6 +2305,7 @@ function VideoControlsOverlay({
   onToggleScreenLinkDeafen,
   currentBandwidthBps,
   totalBytesReceived,
+  activeDurationMs,
   discordMuteBinding,
   discordDeafenBinding,
   syncScreenLinkDeafen,
@@ -2323,6 +2336,7 @@ function VideoControlsOverlay({
   onToggleScreenLinkDeafen?: () => void;
   currentBandwidthBps?: number;
   totalBytesReceived?: number;
+  activeDurationMs?: number;
   discordMuteBinding?: ShortcutBinding;
   discordDeafenBinding?: ShortcutBinding;
   syncScreenLinkDeafen?: boolean;
@@ -2354,6 +2368,7 @@ function VideoControlsOverlay({
       onToggleScreenLinkDeafen={onToggleScreenLinkDeafen}
       currentBandwidthBps={currentBandwidthBps}
       totalBytesReceived={totalBytesReceived}
+      activeDurationMs={activeDurationMs}
       discordMuteBinding={discordMuteBinding}
       discordDeafenBinding={discordDeafenBinding}
       syncScreenLinkDeafen={syncScreenLinkDeafen}

@@ -98,6 +98,8 @@ export interface EnhancedVideoSurfaceProps {
    */
   processorApiRef?: React.MutableRefObject<ProcessorAPI | null>;
   presentationMode?: "default" | "dom-only";
+  /** Right-click handler (e.g. toggle fullscreen) */
+  onContextMenu?: React.MouseEventHandler<HTMLDivElement>;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -115,6 +117,7 @@ export function EnhancedVideoSurface({
   onBackendChange,
   processorApiRef,
   presentationMode = "default",
+  onContextMenu,
 }: EnhancedVideoSurfaceProps): ReactElement | null {
   const instanceId = useRef<number>(nextMonotonicId());
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -531,6 +534,7 @@ export function EnhancedVideoSurface({
     <div
       ref={containerRef}
       className={cn("absolute inset-0 overflow-hidden", className)}
+      onContextMenu={onContextMenu}
     >
       <canvas
         ref={canvasRef}

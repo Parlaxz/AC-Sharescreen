@@ -2,6 +2,35 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { StreamMetricsService, type StreamHistoryRecord } from "../src/renderer/services/stream-metrics-service.js";
 import type { PersistenceRecordV2 } from "../src/renderer/services/bandwidth-telemetry-types.js";
 
+function makeMockPC(videoBytes: number, ssrc: number): RTCPeerConnection {
+  const pc = createMockPC();
+  const stats = (pc as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+  stats.set("rtp-video", {
+    type: "inbound-rtp",
+    kind: "video",
+    bytesReceived: videoBytes,
+    ssrc,
+    mid: "0",
+    codecId: "codec-vp9",
+    frameWidth: 1920,
+    frameHeight: 1080,
+    framesPerSecond: 60,
+  });
+  stats.set("codec-vp9", { type: "codec", mimeType: "video/VP9" });
+  stats.set("cp", {
+    type: "candidate-pair",
+    state: "succeeded",
+    selected: true,
+    bytesReceived: videoBytes,
+    currentRoundTripTime: 0.01,
+    localCandidateId: "lc",
+    remoteCandidateId: "rc",
+  });
+  stats.set("lc", { type: "local-candidate", candidateType: "host" });
+  stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+  return pc;
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function createMockScreenlink() {
@@ -209,6 +238,58 @@ describe("StreamMetricsService", () => {
       mock._setStore([v1]);
       const history = await svc.getHistory();
       expect(history.length).toBe(1);
+    });
+  });
+
+  describe("replaceConnectionPeer", () => {
+    it("regression: updates the polled peer connection after pause/resume so KB/s counter recovers", async () => {
+      const historyId = svc.startViewerSession("ms1", "ls1", "g1", "G1");
+
+      const oldPc = makeMockPC(500_000, 1);
+      svc.registerConnection({
+        historyId,
+        connectionId: "viewer-conn",
+        viewerDeviceId: null,
+        displayName: null,
+        peerConnection: oldPc,
+        direction: "inbound",
+      });
+
+      await advanceTime(1000);
+      expect(oldPc.getStats).toHaveBeenCalledTimes(1);
+
+      vi.clearAllMocks();
+
+      svc.setSessionState(historyId, "paused");
+
+      await advanceTime(1000);
+      expect(oldPc.getStats).not.toHaveBeenCalled();
+      vi.clearAllMocks();
+
+      svc.setSessionState(historyId, "playing");
+
+      await advanceTime(1000);
+      expect(oldPc.getStats).toHaveBeenCalled();
+
+      let snapshot = svc.getSnapshot(historyId);
+      const oldCallCountAfterResume = (oldPc.getStats as ReturnType<typeof vi.fn>).mock.calls.length;
+
+      const newPc = makeMockPC(1_000_000, 2);
+      svc.replaceConnectionPeer(historyId, "viewer-conn", newPc);
+
+      const conn = (svc as unknown as { connections: Map<string, { generation: number }> }).connections.get("viewer-conn");
+      expect(conn?.generation).toBe(1);
+      expect(oldCallCountAfterResume).toBeGreaterThan(0);
+
+      vi.clearAllMocks();
+
+      await advanceTime(1000);
+      expect(newPc.getStats).toHaveBeenCalled();
+      expect(oldPc.getStats).not.toHaveBeenCalled();
+
+      snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.aggregate.currentBitsPerSecond).toBeGreaterThanOrEqual(0);
+      expect(snapshot.connections.length).toBe(1);
     });
   });
 });
