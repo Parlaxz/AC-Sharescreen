@@ -16,6 +16,13 @@ static const std::unordered_map<std::string_view, Command> kCommandMap = {
     {"stats", Command::kStats},
     {"ping", Command::kPing},
     {"shutdown", Command::kShutdown},
+    {"getDiagnostics", Command::kGetDiagnostics},
+    {"resetDiagnostics", Command::kResetDiagnostics},
+    {"benchmarkRun", Command::kBenchmarkRun},
+    {"benchmarkStatus", Command::kBenchmarkStatus},
+    {"processSlot", Command::kProcessSlot},
+    {"slotComplete", Command::kSlotComplete},
+    {"sharedMemoryReady", Command::kSharedMemoryReady},
 };
 
 Command ParseCommand(std::string_view name) {
@@ -36,6 +43,18 @@ std::string_view CommandName(Command cmd) {
         case Command::kStats: return "stats";
         case Command::kPing: return "ping";
         case Command::kShutdown: return "shutdown";
+        case Command::kGetDiagnostics: return "getDiagnostics";
+        case Command::kResetDiagnostics: return "resetDiagnostics";
+        case Command::kBenchmarkRun: return "benchmarkRun";
+        case Command::kBenchmarkStatus: return "benchmarkStatus";
+        case Command::kPresenterAttach: return "presenterAttach";
+        case Command::kPresenterDetach: return "presenterDetach";
+        case Command::kPresenterUpdateBounds: return "presenterUpdateBounds";
+        case Command::kPresenterSetVisible: return "presenterSetVisible";
+        case Command::kPresenterGetDiagnostics: return "presenterGetDiagnostics";
+        case Command::kProcessSlot: return "processSlot";
+        case Command::kSlotComplete: return "slotComplete";
+        case Command::kSharedMemoryReady: return "sharedMemoryReady";
         default: return "unknown";
     }
 }

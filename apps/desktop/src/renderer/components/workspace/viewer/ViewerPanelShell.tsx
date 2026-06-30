@@ -9,6 +9,7 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { BandwidthGraphModal } from "../BandwidthGraphModal.js";
 import type { ViewerSession } from "@/services/viewer-session.js";
 import type { ViewerImageEnhancementSettings, FsrFinalScaler, ScalingAlgorithm } from "@/services/viewer-image-processing/viewer-image-settings";
+import type { BenchmarkProgress } from "@/services/viewer-image-processing/nvidia-benchmark-service";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,13 @@ interface ViewerPanelShellProps {
   // BandwidthGraphModal props
   mediaSessionId: string | null;
   viewerHistoryId?: string | null;
+
+  // ── Benchmark props ─────────────────────────────────────────────────
+  benchmarkRunning?: boolean;
+  benchmarkProgress?: BenchmarkProgress | null;
+  onRunBenchmark?: () => void;
+  onCancelBenchmark?: () => void;
+  onApplyBenchmarkRecommendation?: () => void;
 }
 
 // ─── ViewerPanelShell ───────────────────────────────────────────────────────
@@ -83,6 +91,11 @@ export function ViewerPanelShell({
   enhancementStats = null,
   mediaSessionId,
   viewerHistoryId = null,
+  benchmarkRunning = false,
+  benchmarkProgress = null,
+  onRunBenchmark = () => {},
+  onCancelBenchmark = () => {},
+  onApplyBenchmarkRecommendation = () => {},
 }: ViewerPanelShellProps) {
   const width =
     activePanel === "bandwidth" ? "w-[950px] max-w-[calc(100vw-32px)]" : "w-[750px] max-w-[calc(100vw-32px)]";
@@ -125,6 +138,11 @@ export function ViewerPanelShell({
               fallbackReason={fallbackReason}
               enhancementStats={enhancementStats}
               hideQuality
+              benchmarkRunning={benchmarkRunning}
+              benchmarkProgress={benchmarkProgress}
+              onRunBenchmark={onRunBenchmark}
+              onCancelBenchmark={onCancelBenchmark}
+              onApplyBenchmarkRecommendation={onApplyBenchmarkRecommendation}
             >
               <span />
             </ViewerSettingsPanel>

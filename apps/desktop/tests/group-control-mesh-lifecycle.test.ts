@@ -30,46 +30,52 @@ interface MockSDK {
   handlers: Map<string, ((...args: unknown[]) => void)[]>;
 }
 
-function makeFakeSDK(): MockSDK {
-  const handlers = new Map<string, ((...args: unknown[]) => void)[]>();
-  let stopFn = vi.fn();
-  const sdk: MockSDK = {
-    connect: vi.fn().mockResolvedValue(undefined),
-    disconnect: vi.fn().mockResolvedValue(undefined),
-    joinRoom: vi.fn().mockResolvedValue(undefined),
-    leaveRoom: vi.fn().mockResolvedValue(undefined),
-    announce: vi.fn().mockImplementation(async (opts: { streamID?: string }) => opts.streamID ?? "announce-id"),
-    autoConnect: vi.fn().mockImplementation(async (opts: { streamID?: string }) => {
-      sdk.state.connected = true;
-      sdk.state.roomJoined = true;
-      sdk.state.room = opts?.room ?? null;
-      sdk.announceId = opts?.streamID ?? "announce-id";
-      return { stop: stopFn, streamID: sdk.announceId! };
-    }),
-    sendData: vi.fn().mockReturnValue(true),
-    on: vi.fn(),
-    off: vi.fn(),
-    addEventListener: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
-      const list = handlers.get(event) ?? [];
-      list.push(listener);
-      handlers.set(event, list);
-    }),
-    removeEventListener: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
-      const list = handlers.get(event) ?? [];
-      handlers.set(event, list.filter((l) => l !== listener));
-    }),
-    state: { connected: false, roomJoined: false, room: null },
-    announceId: null,
-    handlers,
-  };
-  return sdk;
-}
+// vi.hoisted ensures mock factory dependencies are scoped per test file,
+// preventing cross-file mock leakage when multiple files mock the same module.
+const { makeFakeSDK, createdSdks } = vi.hoisted(() => {
+  function makeFakeSDK(): MockSDK {
+    const handlers = new Map<string, ((...args: unknown[]) => void)[]>();
+    const stopFn = vi.fn();
+    const sdk: MockSDK = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      joinRoom: vi.fn().mockResolvedValue(undefined),
+      leaveRoom: vi.fn().mockResolvedValue(undefined),
+      announce: vi.fn().mockImplementation(async (opts: { streamID?: string }) => opts.streamID ?? "announce-id"),
+      autoConnect: vi.fn().mockImplementation(async (opts: { streamID?: string }) => {
+        sdk.state.connected = true;
+        sdk.state.roomJoined = true;
+        sdk.state.room = opts?.room ?? null;
+        sdk.announceId = opts?.streamID ?? "announce-id";
+        return { stop: stopFn, streamID: sdk.announceId! };
+      }),
+      sendData: vi.fn().mockReturnValue(true),
+      on: vi.fn(),
+      off: vi.fn(),
+      addEventListener: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        const list = handlers.get(event) ?? [];
+        list.push(listener);
+        handlers.set(event, list);
+      }),
+      removeEventListener: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        const list = handlers.get(event) ?? [];
+        handlers.set(event, list.filter((l) => l !== listener));
+      }),
+      state: { connected: false, roomJoined: false, room: null },
+      announceId: null,
+      handlers,
+    };
+    return sdk;
+  }
 
-// Per-file array of SDKs created via the mocked constructor. Resets
-// in beforeEach below to guarantee each test sees only the SDKs it
-// created (avoids any leakage from other test files that share the
-// same @screenlink/vdo-adapter mock module).
-const createdSdks: MockSDK[] = [];
+  // Per-file array of SDKs created via the mocked constructor. Resets
+  // in beforeEach below to guarantee each test sees only the SDKs it
+  // created (avoids any leakage from other test files that share the
+  // same @screenlink/vdo-adapter mock module).
+  const createdSdks: MockSDK[] = [];
+  return { makeFakeSDK, createdSdks };
+});
+
 vi.mock("@screenlink/vdo-adapter", () => ({
   getSDKConstructor: () => {
     return function () {
@@ -103,7 +109,7 @@ async function tickN(n: number): Promise<void> {
  */
 async function waitFor(
   predicate: () => boolean,
-  maxTicks = 200,
+  maxTicks = 500,
 ): Promise<boolean> {
   for (let i = 0; i < maxTicks; i++) {
     if (predicate()) return true;

@@ -41,9 +41,9 @@
     "electron-updater": "^6.3.0",
     "lucide-react": "^0.468.0",
     "motion": "^11.15.0",
-    "recharts": "^2.15.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "recharts": "^2.15.0",
     "semver": "^7.6.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^2.6.0",
@@ -60,14 +60,16 @@
     "@testing-library/jest-dom": "^6.4.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^26.0.0",
-    "@types/semver": "^7.5.8",
-    "happy-dom": "^15.0.0",
-    "react-dom": "^19.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/semver": "^7.5.8",
     "@vitejs/plugin-react": "^4.3.0",
+    "cmake-js": "^8.0.0",
     "electron": "42.4.1",
     "electron-builder": "^25.0.0",
+    "happy-dom": "^15.0.0",
+    "node-addon-api": "^8.9.0",
+    "react-dom": "^19.0.0",
     "tailwindcss": "^4.0.0",
     "tailwindcss-animate": "^1.0.7",
     "tw-animate-css": "^1.1.2",
@@ -78,14 +80,35 @@
   "build": {
     "appId": "app.screenlink.desktop",
     "productName": "ScreenLink",
-    "directories": { "output": "out" },
-    "files": ["dist/**/*", "public/**/*"],
+    "directories": {
+      "output": "out"
+    },
+    "files": [
+      "dist/**/*",
+      "public/**/*"
+    ],
     "afterPack": "../../scripts/after-pack.cjs",
-    "win": { "target": ["nsis", "portable"], "icon": "assets/icon.png" },
-    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
     "extraResources": [
-      { "from": "public/vendor", "to": "vendor" },
-      { "from": "assets/tray-icon.png", "to": "tray-icon.png" }
+      {
+        "from": "public/vendor",
+        "to": "vendor"
+      },
+      {
+        "from": "assets/tray-icon.png",
+        "to": "tray-icon.png"
+      }
     ]
   }
 }

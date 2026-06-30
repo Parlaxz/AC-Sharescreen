@@ -128,27 +128,51 @@ function Start-ViteDevServer {
         return $true
     }
 
-    Write-Log "Building native helper (C++)..."
+    Write-Log "Building native helpers (C++)..."
     Push-Location $ProjectRoot
     try {
-        $cmakeOpts = @("--build", (Join-Path (Join-Path $ProjectRoot "native") (Join-Path "audio-helper" "build")), "--config", "Release")
         # Try cmake.exe from PATH; fall back to full Program Files path
         $cmakePath = (Get-Command "cmake.exe" -ErrorAction SilentlyContinue).Source
         if (-not $cmakePath) {
             $cmakePath = "C:\Program Files\CMake\bin\cmake.exe"
         }
-        if (Test-Path $cmakePath) {
+
+        if (-not (Test-Path $cmakePath)) {
+            Write-Log "WARNING: cmake.exe not found — skipping C++ builds"
+        } else {
+            # Audio helper
+            $audioBuildDir = Join-Path (Join-Path $ProjectRoot "native") (Join-Path "audio-helper" "build")
+            $cmakeOpts = @("--build", $audioBuildDir, "--config", "Release")
             $proc = Start-Process -FilePath $cmakePath -ArgumentList $cmakeOpts -NoNewWindow -Wait -PassThru
             if ($proc.ExitCode -ne 0) {
-                Write-Log "WARNING: C++ build failed (exit: $($proc.ExitCode)) — audio helper may be stale"
+                Write-Log "WARNING: audio-helper build failed (exit: $($proc.ExitCode)) — audio helper may be stale"
             } else {
-                Write-Log "C++ helper built successfully"
+                Write-Log "Audio helper built successfully"
             }
-        } else {
-            Write-Log "WARNING: cmake.exe not found — skipping C++ build"
+
+            # Video enhancer (built without NVIDIA VFX in dev mode)
+            $videoBuildDir = Join-Path (Join-Path $ProjectRoot "native") (Join-Path "video-enhancer" "build")
+            if (-not (Test-Path (Join-Path $videoBuildDir "CMakeCache.txt"))) {
+                Write-Log "Configuring video enhancer..."
+                $videoConfigOpts = @("-S", (Join-Path (Join-Path $ProjectRoot "native") "video-enhancer"),
+                                     "-B", $videoBuildDir,
+                                     "-G", "Visual Studio 17 2022",
+                                     "-A", "x64")
+                $configProc = Start-Process -FilePath $cmakePath -ArgumentList $videoConfigOpts -NoNewWindow -Wait -PassThru
+                if ($configProc.ExitCode -ne 0) {
+                    Write-Log "WARNING: video-enhancer CMake configure failed (exit: $($configProc.ExitCode))"
+                }
+            }
+            $videoBuildOpts = @("--build", $videoBuildDir, "--config", "Release")
+            $buildProc = Start-Process -FilePath $cmakePath -ArgumentList $videoBuildOpts -NoNewWindow -Wait -PassThru
+            if ($buildProc.ExitCode -ne 0) {
+                Write-Log "WARNING: video-enhancer build failed (exit: $($buildProc.ExitCode)) — video enhancer may be stale"
+            } else {
+                Write-Log "Video enhancer built successfully"
+            }
         }
     } catch {
-        Write-Log "WARNING: C++ build skipped: $_"
+        Write-Log "WARNING: C++ builds skipped: $_"
     } finally { Pop-Location }
 
     Write-Log "Building workspace packages..."

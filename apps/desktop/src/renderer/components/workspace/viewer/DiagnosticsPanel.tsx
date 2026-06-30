@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import {
   Popover,
   PopoverTrigger,
@@ -11,8 +11,13 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
-import { Info, Copy, Check } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Info, Copy, Check, FolderOpen, BarChart3 } from "lucide-react";
 import type { ViewerSession } from "@/services/viewer-session.js";
+import {
+  getNvidiaCapabilitySnapshot,
+  subscribeToNvidiaCapability,
+} from "@/services/nvidia-capability-store";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -212,6 +217,90 @@ function useDiagnosticsPoller(
   }, [session, extraQuality]);
 
   return snapshot;
+}
+
+// ─── NVIDIA Diagnostics Mini Section ──────────────────────────────────────
+
+/**
+ * Compact NVIDIA RTX Video diagnostics section.
+ * Shows capability status, active adapter/driver info, and quick actions.
+ * Only renders meaningful content when the capability has been probed.
+ */
+function NvidiaDiagnosticsSection() {
+  const capability = useSyncExternalStore(
+    subscribeToNvidiaCapability,
+    getNvidiaCapabilitySnapshot,
+    getNvidiaCapabilitySnapshot,
+  );
+
+  // Don't render anything if not yet probed or not NVIDIA-capable
+  if (!capability.probed) return null;
+
+  const isAvailable = capability.available;
+
+  const handleOpenFolder = useCallback(async () => {
+    try {
+      const api = (window as unknown as { screenlink?: { nvidiaOpenBenchmarkFolder: () => Promise<boolean> } }).screenlink;
+      await api?.nvidiaOpenBenchmarkFolder();
+    } catch {
+      // Best-effort
+    }
+  }, []);
+
+  return (
+    <div>
+      <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
+        NVIDIA RTX Video
+      </p>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+        <span className="text-text-muted">Status</span>
+        <span className="text-text-primary text-right">
+          {isAvailable ? (
+            <span className="text-emerald-500">Available</span>
+          ) : (
+            <span className="text-amber-500">{capability.reason.split("-").join(" ")}</span>
+          )}
+        </span>
+        {capability.adapterName && (
+          <>
+            <span className="text-text-muted">Adapter</span>
+            <span className="text-text-primary text-right truncate text-[10px]" title={capability.adapterName}>
+              {capability.adapterName}
+            </span>
+          </>
+        )}
+        {capability.driverVersion && (
+          <>
+            <span className="text-text-muted">Driver</span>
+            <span className="text-text-primary text-right text-[10px]">{capability.driverVersion}</span>
+          </>
+        )}
+        {capability.supportedModes && capability.supportedModes.length > 0 && (
+          <>
+            <span className="text-text-muted">Modes</span>
+            <span className="text-text-primary text-right text-[10px]">{capability.supportedModes.join(", ")}</span>
+          </>
+        )}
+        {capability.supportedQualities && capability.supportedQualities.length > 0 && (
+          <>
+            <span className="text-text-muted">Qualities</span>
+            <span className="text-text-primary text-right text-[10px]">{capability.supportedQualities.join(", ")}</span>
+          </>
+        )}
+      </div>
+      <div className="mt-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-full text-[10px] h-7"
+          onClick={handleOpenFolder}
+        >
+          <FolderOpen className="h-3 w-3 mr-1.5" />
+          Open Benchmark Results Folder
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 // ─── Sanitized diagnostics copy ───────────────────────────────────────────
@@ -428,28 +517,55 @@ export function DiagnosticsPanel({
         </div>
       </div>
 
+      {/* NVIDIA RTX Video section – only shown when capability has been probed */}
+      <NvidiaDiagnosticsSection />
+
       <Separator />
 
-      {/* Copy diagnostics */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full"
-            onClick={handleCopy}
-          >
-            {copied ? (
-              <><Check className="h-3.5 w-3.5 mr-1.5" />Copied</>
-            ) : (
-              <><Copy className="h-3.5 w-3.5 mr-1.5" />Copy diagnostics</>
-            )}
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          Copy sanitized connection info to clipboard
-        </TooltipContent>
-      </Tooltip>
+      {/* Action buttons row */}
+      <div className="grid grid-cols-2 gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={handleCopy}
+            >
+              {copied ? (
+                <><Check className="h-3.5 w-3.5 mr-1.5" />Copied</>
+              ) : (
+                <><Copy className="h-3.5 w-3.5 mr-1.5" />Copy diagnostics</>
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            Copy sanitized connection info to clipboard
+          </TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={async () => {
+                try {
+                  const api = (window as unknown as { screenlink?: { nvidiaOpenBenchmarkFolder: () => Promise<boolean> } }).screenlink;
+                  await api?.nvidiaOpenBenchmarkFolder();
+                } catch { /* best-effort */ }
+              }}
+            >
+              <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
+              Results folder
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            Open NVIDIA benchmark results folder (if any)
+          </TooltipContent>
+        </Tooltip>
+      </div>
     </div>
   );
 

@@ -29,10 +29,12 @@ set(SOURCES
   src/main.cpp
   src/Protocol.cpp
   src/FrameTransport.cpp
+  src/SharedFrameRing.cpp
   src/Diagnostics.cpp
   src/SimpleJson.cpp
   src/CapabilityProbe.cpp
   src/NvidiaVfxContext.cpp
+  src/NativePresenter.cpp
 )
 
 # NVIDIA VFX integration (disabled by default)
@@ -96,6 +98,9 @@ add_custom_command(
 
 # Link dwmapi.lib for DpiAwareness
 target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi)
+
+# D3D11 native presenter
+target_link_libraries(${PROJECT_NAME} PRIVATE d3d11 dxgi)
 
 # Pass Windows SDK version to C++ code for compile-time checks
 if(MSVC AND CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)

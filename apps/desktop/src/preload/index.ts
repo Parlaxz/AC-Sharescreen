@@ -149,6 +149,18 @@ const api: ScreenLinkAPI = {
   requestFramePort: () => ipcRenderer.invoke("request-frame-port"),
   requestFramePortForClient: (clientId) => ipcRenderer.invoke("video-helper:request-frame-port", clientId),
 
+  // Native presenter operations
+  nativePresenterAttach: (width, height) => ipcRenderer.invoke("video-helper:attach-presenter", width, height),
+  nativePresenterDetach: () => ipcRenderer.invoke("video-helper:detach-presenter"),
+  nativePresenterUpdateBounds: (x, y, width, height) => ipcRenderer.invoke("video-helper:update-presenter-bounds", x, y, width, height),
+  nativePresenterSetVisible: (visible) => ipcRenderer.invoke("video-helper:set-presenter-visible", visible),
+  nativePresenterGetDiagnostics: () => ipcRenderer.invoke("video-helper:get-presenter-diagnostics"),
+
+  // NVIDIA benchmark operations
+  nvidiaOpenBenchmarkFolder: () => ipcRenderer.invoke("nvidia:open-benchmark-folder"),
+  nvidiaExportBenchmarkResult: (resultId) => ipcRenderer.invoke("nvidia:export-benchmark-result", resultId),
+  nvidiaGetBenchmarkResults: () => ipcRenderer.invoke("nvidia:get-benchmark-results"),
+
   // Discord shortcut simulation
   sendShortcut: (binding) => ipcRenderer.invoke("send-shortcut", binding),
 

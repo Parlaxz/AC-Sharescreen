@@ -1,4 +1,4 @@
-﻿import { ipcMain, app, BrowserWindow, clipboard } from "electron";
+﻿import { ipcMain, app, shell, BrowserWindow, clipboard } from "electron";
 import { enumerateSources, getSourceFingerprint } from "./capture-source-manager.js";
 import { setApprovedSource } from "./display-media-handler.js";
 import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.js";
@@ -763,7 +763,107 @@ export function registerIpcHandlers(
     return mgr ? mgr.getState() : "disconnected";
   });
 
-  // â”€â”€ Tray state updates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Video helper typed diagnostics ──────────────────────────────────────
+
+  ipcMain.handle("video-helper:get-diagnostics", async () => {
+    const mgr = videoHelperManager;
+    if (!mgr) return null;
+    return await mgr.getDiagnostics();
+  });
+
+  // ── Native presenter IPC ──────────────────────────────────────────────────
+
+  ipcMain.handle("video-helper:attach-presenter", async (_event, width: number, height: number) => {
+    const manager = ensureVideoHelperManager();
+    return { success: await manager.attachPresenter(window, width, height) };
+  });
+
+  ipcMain.handle("video-helper:detach-presenter", async () => {
+    const manager = ensureVideoHelperManager();
+    return { success: await manager.detachPresenter() };
+  });
+
+  ipcMain.handle(
+    "video-helper:update-presenter-bounds",
+    async (_event, x: number, y: number, width: number, height: number) => {
+      const manager = ensureVideoHelperManager();
+      return { success: await manager.updatePresenterBounds(x, y, width, height) };
+    },
+  );
+
+  ipcMain.handle("video-helper:set-presenter-visible", async (_event, visible: boolean) => {
+    const manager = ensureVideoHelperManager();
+    return { success: await manager.setPresenterVisible(visible) };
+  });
+
+  ipcMain.handle("video-helper:get-presenter-diagnostics", async () => {
+    const mgr = videoHelperManager;
+    if (!mgr) return { success: false, error: "no-helper" };
+    return { success: true, diagnostics: await mgr.getPresenterDiagnostics() };
+  });
+
+  // ── NVIDIA benchmark operations ─────────────────────────────────────────
+
+  /**
+   * Open the userData benchmark results folder in the OS file manager.
+   */
+  ipcMain.handle("nvidia:open-benchmark-folder", async () => {
+    const benchmarkDir = path.join(app.getPath("userData"), "nvidia-benchmarks");
+    try {
+      await fs.mkdir(benchmarkDir, { recursive: true });
+      await shell.openPath(benchmarkDir);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  /**
+   * Export a benchmark result to a JSON file in the benchmark folder.
+   * Returns the file path on success, null on failure.
+   */
+  ipcMain.handle("nvidia:export-benchmark-result", async (_event, resultId: string) => {
+    if (typeof resultId !== "string" || !resultId) return null;
+    const benchmarkDir = path.join(app.getPath("userData"), "nvidia-benchmarks");
+    try {
+      await fs.mkdir(benchmarkDir, { recursive: true });
+      const resultsFile = path.join(benchmarkDir, "results.json");
+      // Read existing results, find the one with matching id, export it
+      let results: unknown[] = [];
+      try {
+        const raw = await fs.readFile(resultsFile, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) results = parsed;
+      } catch { /* file doesn't exist yet */ }
+      const record = results.find((r: unknown) => {
+        const obj = r as Record<string, unknown>;
+        return obj.id === resultId;
+      });
+      if (!record) return null;
+      const exportPath = path.join(benchmarkDir, `benchmark-${resultId}.json`);
+      await fs.writeFile(exportPath, JSON.stringify(record, null, 2), "utf-8");
+      return exportPath;
+    } catch {
+      return null;
+    }
+  });
+
+  /**
+   * Return all stored benchmark results.
+   */
+  ipcMain.handle("nvidia:get-benchmark-results", async () => {
+    const benchmarkDir = path.join(app.getPath("userData"), "nvidia-benchmarks");
+    try {
+      const resultsFile = path.join(benchmarkDir, "results.json");
+      const raw = await fs.readFile(resultsFile, "utf-8");
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // ── Tray state updates ──────────────────────────────────────────────────
 
   ipcMain.on("tray-set-sharing", (_event, sharing: boolean) => {
     trayManager.setSharing(sharing);

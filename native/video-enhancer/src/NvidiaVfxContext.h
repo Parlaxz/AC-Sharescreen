@@ -70,6 +70,10 @@ public:
         uint32_t& outWidth,
         uint32_t& outHeight);
 
+    /// Get pointer to GPU-resident output buffer (for native presenter path).
+    /// Returns nullptr if output image is not GPU-resident or not allocated.
+    void* GetOutputGpuPointer();
+
     std::string GetLastError() const { return lastError_; }
 
     static bool IsCompiled();

@@ -1,0 +1,17 @@
+{
+  "name": "@screenlink/video-frame-ring",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native Win32 named file-mapping ring buffer for ScreenLink frame transport",
+  "main": "build/Release/screenlink-video-frame-ring.node",
+  "scripts": {
+    "configure": "cmake-js configure --runtime=electron --runtime-version=42.4.1 --arch=x64",
+    "build": "cmake-js build --runtime=electron --runtime-version=42.4.1 --arch=x64",
+    "rebuild": "cmake-js rebuild --runtime=electron --runtime-version=42.4.1 --arch=x64",
+    "clean": "powershell -NoProfile -Command \"if (Test-Path 'build') { Remove-Item -Recurse -Force 'build' }; if (Test-Path 'node_modules') { Remove-Item -Recurse -Force 'node_modules' }\""
+  },
+  "devDependencies": {
+    "cmake-js": "^7.3.0",
+    "node-addon-api": "^8.3.0"
+  }
+}

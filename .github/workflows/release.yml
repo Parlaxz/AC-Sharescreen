@@ -163,20 +163,20 @@ jobs:
           }
           Write-Host "All package versions match: $expected"
 
-      # ── 5. Build native audio helper ─────────────────────────────────
-      - name: Configure native helper (CMake)
+      # ── 5. Build native helpers ──────────────────────────────────────
+      - name: Configure audio helper (CMake)
         shell: pwsh
         run: |
           cmake -S native/audio-helper -B native/audio-helper/build `
             -G "Visual Studio 17 2022" -A x64
 
-      - name: Build native helper (Release)
+      - name: Build audio helper (Release)
         shell: pwsh
         run: |
           cmake --build native/audio-helper/build --config Release
 
-      - name: Run native helper self-test
-        id: helper-self-test
+      - name: Run audio helper self-test
+        id: audio-helper-self-test
         shell: pwsh
         run: |
           $helper = "native/audio-helper/build/Release/screenlink-audio-helper.exe"
@@ -190,6 +190,33 @@ jobs:
             exit 1
           }
           Write-Host "Audio helper self-test passed."
+
+      - name: Configure video enhancer (CMake, no VFX SDK in CI)
+        shell: pwsh
+        run: |
+          cmake -S native/video-enhancer -B native/video-enhancer/build `
+            -G "Visual Studio 17 2022" -A x64
+
+      - name: Build video enhancer (Release)
+        shell: pwsh
+        run: |
+          cmake --build native/video-enhancer/build --config Release
+
+      - name: Run video enhancer self-test
+        id: video-enhancer-self-test
+        shell: pwsh
+        run: |
+          $helper = "native/video-enhancer/build/Release/screenlink-video-enhancer.exe"
+          if (-not (Test-Path $helper)) {
+            Write-Host "::error::Video enhancer binary not found at $helper"
+            exit 1
+          }
+          & $helper --self-test
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Video enhancer self-test failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "Video enhancer self-test passed."
 
       # ── 6. TypeScript checks and tests ───────────────────────────────
       - name: Type check all packages
@@ -290,9 +317,14 @@ jobs:
           }
 
           # Packaged resources (win-unpacked)
-          $unpackedHelper = "$releaseDir/win-unpacked/resources/screenlink-audio-helper.exe"
-          if (-not (Test-Path $unpackedHelper)) {
+          $unpackedAudioHelper = "$releaseDir/win-unpacked/resources/screenlink-audio-helper.exe"
+          if (-not (Test-Path $unpackedAudioHelper)) {
             $errors += "Packaged audio helper is missing from win-unpacked"
+          }
+
+          $unpackedVideoHelper = "$releaseDir/win-unpacked/resources/screenlink-video-enhancer.exe"
+          if (-not (Test-Path $unpackedVideoHelper)) {
+            $errors += "Packaged video enhancer is missing from win-unpacked"
           }
 
           $unpackedTray = "$releaseDir/win-unpacked/resources/tray-icon.png"

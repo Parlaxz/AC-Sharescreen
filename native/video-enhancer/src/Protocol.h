@@ -23,6 +23,24 @@ enum class Command : int {
     kStats,
     kPing,
     kShutdown,
+
+    // Diagnostics / benchmark commands (Phase 7)
+    kGetDiagnostics,
+    kResetDiagnostics,
+    kBenchmarkRun,
+    kBenchmarkStatus,
+
+    // Shared memory ring coordination (Phase 9+)
+    kProcessSlot,       // main -> helper: "slot N has input data ready"
+    kSlotComplete,      // helper -> main: "slot N output is ready"
+    kSharedMemoryReady, // helper caps field: "shm is available at path"
+
+    // Native presenter commands (GPU-resident display path)
+    kPresenterAttach,
+    kPresenterDetach,
+    kPresenterUpdateBounds,
+    kPresenterSetVisible,
+    kPresenterGetDiagnostics,
 };
 
 /// Command exit codes

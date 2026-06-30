@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { useState, useCallback, useEffect, useMemo, useSyncExternalStore, useRef } from "react";
 import {
   Popover,
   PopoverTrigger,
@@ -9,7 +9,11 @@ import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
+import { Copy, Check, FolderOpen } from "lucide-react";
 import { loadSettings } from "@/services/settings-actions";
 import { useStore } from "@/stores/main-store";
 import type { ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
@@ -50,8 +54,313 @@ import {
   probeNvidiaCapability,
   subscribeToNvidiaCapability,
 } from "@/services/nvidia-capability-store";
+import {
+  nvidiaBenchmarkService,
+  getBenchmarkProgressSnapshot,
+  subscribeToBenchmarkProgress,
+  type BenchmarkProgress,
+  type BenchmarkScenarioResult,
+} from "@/services/viewer-image-processing/nvidia-benchmark-service";
 
 //  Viewer quality request state 
+
+// ─── Benchmark section ──────────────────────────────────────────────────────
+
+function formatMs(value: number | null | undefined): string {
+  if (value == null) return "—";
+  return `${value.toFixed(2)} ms`;
+}
+
+function formatFps(value: number | null | undefined): string {
+  if (value == null) return "—";
+  return `${value.toFixed(1)} fps`;
+}
+
+function formatDimensions(w: number, h: number): string {
+  if (w <= 0 || h <= 0) return "—";
+  return `${w}×${h}`;
+}
+
+/**
+ * Phase label for the benchmark progress bar, based on the current state.
+ */
+function benchmarkPhaseLabel(progress: BenchmarkProgress): string {
+  if (progress.phaseLabel) return progress.phaseLabel;
+  const labels: Record<string, string> = {
+    idle: "Idle",
+    validating: "Validating configuration…",
+    stabilizing: "Stabilizing pipeline…",
+    "collecting-environment": "Gathering environment info…",
+    "running-scenarios": "Running scenarios…",
+    aggregating: "Aggregating results…",
+    exporting: "Finalizing results…",
+    completed: "Complete",
+    cancelled: "Cancelled",
+    failed: "Failed",
+  };
+  return labels[progress.state] ?? progress.state;
+}
+
+function BenchmarkScenarioRow({ result }: { result: BenchmarkScenarioResult }) {
+  const isTimedOut = result.timedOut;
+  return (
+    <div className={cn(
+      "grid grid-cols-4 gap-x-2 gap-y-0.5 text-[10px] py-1 border-b border-border-subtle/40 last:border-b-0",
+      isTimedOut && "opacity-50",
+    )}>
+      <span className="col-span-4 font-medium text-text-primary text-[10px] truncate">
+        {result.label}
+        {isTimedOut && (
+          <Badge variant="warning" className="ml-1.5 text-[8px] px-1 py-0">partial</Badge>
+        )}
+      </span>
+      <span className="text-text-muted">Process</span>
+      <span className="text-text-secondary font-mono text-right">
+        {formatMs(result.avgProcessingTimeMs)}
+      </span>
+      <span className="text-text-muted">Latency</span>
+      <span className="text-text-secondary font-mono text-right">
+        {formatMs(result.avgLatencyMs)}
+      </span>
+      <span className="text-text-muted">p95</span>
+      <span className="text-text-secondary font-mono text-right">
+        {formatMs(result.p95ProcessingTimeMs)}
+      </span>
+      <span className="text-text-muted">FPS</span>
+      <span className="text-text-secondary font-mono text-right">
+        {formatFps(result.achievedFps)}
+      </span>
+      <span className="text-text-muted">Output</span>
+      <span className="text-text-secondary font-mono text-right">
+        {formatDimensions(result.nativeOutputWidth, result.nativeOutputHeight)}
+      </span>
+      {result.nativeQualityLevel != null && (
+        <>
+          <span className="text-text-muted">QL</span>
+          <span className="text-text-secondary font-mono text-right">{result.nativeQualityLevel}</span>
+        </>
+      )}
+      <span className="text-text-muted">Frames</span>
+      <span className="text-text-secondary font-mono text-right">
+        {result.framesCollected}/{result.framesRequested}
+      </span>
+    </div>
+  );
+}
+
+interface BenchmarkSectionProps {
+  benchmarkRunning: boolean;
+  benchmarkProgress: BenchmarkProgress | null;
+  onRunBenchmark: () => void;
+  onCancelBenchmark: () => void;
+  onApplyBenchmarkRecommendation: () => void;
+  enhancementSettings: ViewerImageEnhancementSettings;
+  onEnhancementChange: (settings: ViewerImageEnhancementSettings) => void;
+}
+
+function BenchmarkSection({
+  benchmarkRunning,
+  benchmarkProgress,
+  onRunBenchmark,
+  onCancelBenchmark,
+  onApplyBenchmarkRecommendation,
+}: BenchmarkSectionProps) {
+  const [summaryCopied, setSummaryCopied] = useState(false);
+  const progress = benchmarkProgress;
+  const isRunning = benchmarkRunning && progress != null;
+  const isTerminal = progress?.state === "completed" || progress?.state === "cancelled" || progress?.state === "failed";
+  const hasResults = progress?.results && progress.results.length > 0;
+  const isCompleted = progress?.state === "completed";
+
+  const handleCopySummary = useCallback(async () => {
+    if (!progress?.results || progress.results.length === 0) return;
+    const lines: string[] = [
+      "ScreenLink NVIDIA Benchmark Results",
+      "==================================",
+      `State: ${progress.state}`,
+      `Completed: ${progress.completedScenarios}/${progress.totalScenarios} scenarios`,
+      `Timestamp: ${new Date().toISOString()}`,
+      "",
+    ];
+    for (const r of progress.results) {
+      lines.push(`[${r.label}]`);
+      lines.push(`  Process:   ${formatMs(r.avgProcessingTimeMs)}  (p50: ${formatMs(r.p50ProcessingTimeMs)}  p95: ${formatMs(r.p95ProcessingTimeMs)})`);
+      lines.push(`  Latency:   ${formatMs(r.avgLatencyMs)}`);
+      lines.push(`  FPS:       ${formatFps(r.achievedFps)}`);
+      lines.push(`  Output:    ${formatDimensions(r.nativeOutputWidth, r.nativeOutputHeight)}`);
+      if (r.nativeQualityLevel != null) lines.push(`  QL:        ${r.nativeQualityLevel}`);
+      lines.push(`  Frames:    ${r.framesCollected}/${r.framesRequested}${r.timedOut ? " (partial)" : ""}`);
+      lines.push("");
+    }
+    // Include recommendation if available
+    const agg = nvidiaBenchmarkService.aggregate;
+    if (agg?.bestLatency) {
+      lines.push(`Best latency: ${agg.bestLatency.label} (${formatMs(agg.bestLatency.avgMs)})`);
+    }
+    if (agg?.highestQuality) {
+      lines.push(`Highest quality: ${agg.highestQuality.label} (${formatMs(agg.highestQuality.avgMs)})`);
+    }
+    if (agg?.recommendedSettings) {
+      lines.push(`Recommended: ${JSON.stringify(agg.recommendedSettings)}`);
+    }
+    if (agg?.totalDurationMs != null) {
+      lines.push(`Total duration: ${(agg.totalDurationMs / 1000).toFixed(1)}s`);
+    }
+
+    const text = lines.join("\n");
+    try {
+      const api = (window as unknown as { screenlink?: { clipboardWriteText: (text: string) => Promise<{ success: boolean; length: number }> } }).screenlink;
+      if (api) {
+        await api.clipboardWriteText(text);
+      } else {
+        await navigator.clipboard.writeText(text);
+      }
+      setSummaryCopied(true);
+      setTimeout(() => setSummaryCopied(false), 2000);
+    } catch {
+      // Clipboard write failed
+    }
+  }, [progress]);
+
+  const handleOpenFolder = useCallback(async () => {
+    try {
+      const api = (window as unknown as { screenlink?: { nvidiaOpenBenchmarkFolder: () => Promise<boolean> } }).screenlink;
+      await api?.nvidiaOpenBenchmarkFolder();
+    } catch {
+      // Best-effort
+    }
+  }, []);
+
+  return (
+    <div className="pt-2 border-t border-border-subtle">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] text-text-muted uppercase tracking-wide">Benchmark</span>
+        {!isRunning && !isTerminal && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-[10px] h-7 px-2"
+            onClick={onRunBenchmark}
+          >
+            Run Full Benchmark
+          </Button>
+        )}
+      </div>
+
+      {isRunning && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="text-text-secondary truncate mr-2">
+              {benchmarkPhaseLabel(progress!)}
+            </span>
+            <span className="text-text-muted font-mono">
+              {progress!.percent.toFixed(0)}%
+            </span>
+          </div>
+          <Progress value={progress!.percent} className="h-1.5" />
+          {progress!.currentScenario && (
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-text-muted">
+                Scenario {progress!.completedScenarios + 1}/{progress!.totalScenarios}
+              </span>
+              <span className="text-text-secondary font-mono">
+                {progress!.currentSamples.length}/{progress!.currentTargetFrames} frames
+              </span>
+            </div>
+          )}
+          <Button
+            variant="destructive"
+            size="sm"
+            className="w-full text-[10px] h-7"
+            onClick={onCancelBenchmark}
+          >
+            Cancel Benchmark
+          </Button>
+        </div>
+      )}
+
+      {/* Result summary card */}
+      {isTerminal && hasResults && (
+        <Card className="mt-2">
+          <CardContent className="p-2 space-y-2">
+            {/* Header */}
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-medium text-text-primary uppercase tracking-wide">
+                {progress!.state === "completed" ? "Results" : "Benchmark Stopped"}
+              </span>
+              {isCompleted && (
+                <Badge variant="success" className="text-[8px] px-1.5 py-0">Complete</Badge>
+              )}
+              {progress!.state === "cancelled" && (
+                <Badge variant="warning" className="text-[8px] px-1.5 py-0">Cancelled</Badge>
+              )}
+              {progress!.state === "failed" && (
+                <Badge variant="destructive" className="text-[8px] px-1.5 py-0">Failed</Badge>
+              )}
+            </div>
+
+            {/* Scenario rows */}
+            <div className="max-h-48 overflow-y-auto">
+              {progress!.results.map((result) => (
+                <BenchmarkScenarioRow key={result.scenario} result={result} />
+              ))}
+            </div>
+
+            {/* Apply recommendation or dismiss */}
+            <div className="flex gap-2 pt-1">
+              {isCompleted && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="flex-1 text-[10px] h-7"
+                  onClick={onApplyBenchmarkRecommendation}
+                >
+                  Apply Recommended
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-7"
+                onClick={handleCopySummary}
+              >
+                {summaryCopied ? (
+                  <><Check className="h-3 w-3 mr-1" />Copied</>
+                ) : (
+                  <><Copy className="h-3 w-3 mr-1" />Copy Summary</>
+                )}
+              </Button>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-7"
+                onClick={handleOpenFolder}
+              >
+                <FolderOpen className="h-3 w-3 mr-1" />
+                Open Folder
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-7"
+                onClick={onRunBenchmark}
+              >
+                {isCompleted ? "Run Again" : "Retry"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Error display */}
+      {progress?.error && (
+        <p className="text-[10px] text-danger mt-1">{progress.error}</p>
+      )}
+    </div>
+  );
+}
 
 /**
  * The viewer's requested quality values. These map directly to the
@@ -173,6 +482,18 @@ interface ViewerSettingsPanelProps {
   children: React.ReactNode;
   /** When true, render only the content tabs without Popover wrappers */
   contentOnly?: boolean;
+
+  // ── Benchmark props ─────────────────────────────────────────────────
+  /** True while the benchmark service is running scenarios. */
+  benchmarkRunning?: boolean;
+  /** Current benchmark progress snapshot (when running / completed). */
+  benchmarkProgress?: BenchmarkProgress | null;
+  /** Called when the user clicks "Run Full Benchmark". */
+  onRunBenchmark?: () => void;
+  /** Called when the user clicks "Cancel". */
+  onCancelBenchmark?: () => void;
+  /** Called when the user clicks "Apply Recommended Settings". */
+  onApplyBenchmarkRecommendation?: () => void;
 }
 
 //  Helpers 
@@ -294,6 +615,11 @@ export function ViewerSettingsPanel({
   enhancementStats = null,
   children,
   contentOnly = false,
+  benchmarkRunning = false,
+  benchmarkProgress = null,
+  onRunBenchmark = () => {},
+  onCancelBenchmark = () => {},
+  onApplyBenchmarkRecommendation = () => {},
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
   const [effectiveMaxBitrate, setEffectiveMaxBitrate] = useState(maxSliderBitrateKbps);
@@ -654,7 +980,7 @@ export function ViewerSettingsPanel({
                     processingBackend: e.target.value as ProcessingBackend,
                   })
                 }
-                disabled={!enhancementSettings.enabled}
+                disabled={!enhancementSettings.enabled || benchmarkRunning}
                 aria-label="Processing Backend"
               >
                 {PROCESSING_BACKENDS.map((backend) => (
@@ -686,7 +1012,7 @@ export function ViewerSettingsPanel({
                     webglScalingAlgorithm: e.target.value as ScalingAlgorithm,
                   })
                 }
-                disabled={!enhancementSettings.enabled}
+                disabled={!enhancementSettings.enabled || benchmarkRunning}
                 aria-label="WebGL Scaler"
               >
                 {SCALING_ALGORITHMS.map((algo) => (
@@ -708,28 +1034,28 @@ export function ViewerSettingsPanel({
                 <EnhancementSliderControl
                   label="Sharpness"
                   value={enhancementSettings.sharpeningStrength}
-                  disabled={!enhancementSettings.enabled}
+                  disabled={!enhancementSettings.enabled || benchmarkRunning}
                   onChange={(v) => onEnhancementChange({ ...enhancementSettings, sharpeningStrength: v })}
                 />
 
                 <EnhancementSliderControl
                   label="Noise Protection"
                   value={enhancementSettings.noiseProtection}
-                  disabled={!enhancementSettings.enabled}
+                  disabled={!enhancementSettings.enabled || benchmarkRunning}
                   onChange={(v) => onEnhancementChange({ ...enhancementSettings, noiseProtection: v })}
                 />
 
                 <EnhancementSliderControl
                   label="Compression Cleanup"
                   value={enhancementSettings.compressionCleanup}
-                  disabled={!enhancementSettings.enabled}
+                  disabled={!enhancementSettings.enabled || benchmarkRunning}
                   onChange={(v) => onEnhancementChange({ ...enhancementSettings, compressionCleanup: v })}
                 />
 
                 <EnhancementSliderControl
                   label="Debanding"
                   value={enhancementSettings.debanding}
-                  disabled={!enhancementSettings.enabled}
+                  disabled={!enhancementSettings.enabled || benchmarkRunning}
                   onChange={(v) => onEnhancementChange({ ...enhancementSettings, debanding: v })}
                 />
               </div>
@@ -749,7 +1075,7 @@ export function ViewerSettingsPanel({
                         fsrTargetScale: parseFsrTargetScale(e.target.value),
                       })
                     }
-                    disabled={!enhancementSettings.enabled}
+                    disabled={!enhancementSettings.enabled || benchmarkRunning}
                     aria-label="FSR Target Scale"
                   >
                     {FSR_TARGET_SCALES.map((s) => (
@@ -776,7 +1102,7 @@ export function ViewerSettingsPanel({
                         fsrFinalScaler: e.target.value as FsrFinalScaler,
                       })
                     }
-                    disabled={!enhancementSettings.enabled}
+                    disabled={!enhancementSettings.enabled || benchmarkRunning}
                     aria-label="FSR Final Scaler"
                   >
                     {FSR_FINAL_SCALERS.map((s) => (
@@ -811,7 +1137,7 @@ export function ViewerSettingsPanel({
                       nvidiaMode: e.target.value as NvidiaProcessingMode,
                     })
                   }
-                  disabled={!enhancementSettings.enabled}
+                  disabled={!enhancementSettings.enabled || benchmarkRunning}
                   aria-label="NVIDIA Processing Mode"
                 >
                   {NVIDIA_PROCESSING_MODES.map((mode) => (
@@ -836,7 +1162,7 @@ export function ViewerSettingsPanel({
                       nvidiaQuality: e.target.value as NvidiaQuality,
                     })
                   }
-                  disabled={!enhancementSettings.enabled}
+                  disabled={!enhancementSettings.enabled || benchmarkRunning}
                   aria-label="NVIDIA Quality Level"
                 >
                   {NVIDIA_QUALITIES.map((q) => (
@@ -866,12 +1192,24 @@ export function ViewerSettingsPanel({
               )}
             </>
           )}
+          {/*  Benchmark trigger / progress / results  */}
+          <BenchmarkSection
+            benchmarkRunning={benchmarkRunning}
+            benchmarkProgress={benchmarkProgress}
+            onRunBenchmark={onRunBenchmark}
+            onCancelBenchmark={onCancelBenchmark}
+            onApplyBenchmarkRecommendation={onApplyBenchmarkRecommendation}
+            enhancementSettings={enhancementSettings}
+            onEnhancementChange={onEnhancementChange}
+          />
+
           <div className="pt-1">
             <Button
               variant="outline"
               size="sm"
               className="w-full text-xs"
               onClick={onEnhancementReset}
+              disabled={benchmarkRunning}
             >
               Reset to Defaults
             </Button>

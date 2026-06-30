@@ -1,4 +1,4 @@
-﻿import type { AudioMode, GroupSharedState, HybridTimestamp } from "@screenlink/shared";
+﻿import type { AudioMode, GroupSharedState, HybridTimestamp, NativePresenterDiagnostics } from "@screenlink/shared";
 
 export type ShortcutBinding = {
   modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
@@ -96,6 +96,11 @@ export interface ScreenLinkAPI {
     driverVersion?: string;
   }>;
 
+  // NVIDIA benchmark operations
+  nvidiaOpenBenchmarkFolder: () => Promise<boolean>;
+  nvidiaExportBenchmarkResult: (resultId: string) => Promise<string | null>;
+  nvidiaGetBenchmarkResults: () => Promise<NvidiaBenchmarkResultRecord[]>;
+
   // Audio capabilities
   getAudioCapabilities: () => Promise<{
     success: boolean;
@@ -144,9 +149,9 @@ export interface ScreenLinkAPI {
   videoHelperAcquireClient: () => Promise<{ clientId: string }>;
   videoHelperReleaseClient: (clientId: string) => Promise<{ success: boolean }>;
   videoHelperIsClientActive: (clientId: string) => Promise<boolean>;
-  videoHelperStart: (config: Record<string, unknown>) => Promise<{ success: boolean; error?: string; appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig }>;
+  videoHelperStart: (config: VideoHelperConfig) => Promise<VideoHelperStartResult>;
   videoHelperStop: (shutdown?: boolean) => Promise<void>;
-  videoHelperReconfigure: (config: Record<string, unknown>) => Promise<{ success: boolean; error?: string; appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig }>;
+  videoHelperReconfigure: (config: VideoHelperConfig) => Promise<VideoHelperStartResult>;
   videoHelperSubmitFrame: (generation: number, frameSequence: number, frameData: Uint8Array, inputWidth: number, inputHeight: number) => Promise<{
     generation: number;
     sequence: number;
@@ -173,6 +178,15 @@ export interface ScreenLinkAPI {
   requestFramePort: () => Promise<{ success: boolean }>;
   /** Phase 6: Request a frame port bound to a specific clientId lease. */
   requestFramePortForClient: (clientId: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Native presenter operations
+  nativePresenterAttach: (width: number, height: number) => Promise<{ success: boolean }>;
+  nativePresenterDetach: () => Promise<{ success: boolean }>;
+  nativePresenterUpdateBounds: (x: number, y: number, width: number, height: number) => Promise<{ success: boolean }>;
+  nativePresenterSetVisible: (visible: boolean) => Promise<{ success: boolean }>;
+  nativePresenterGetDiagnostics: () => Promise<{ success: boolean; diagnostics?: NativePresenterDiagnostics | null; error?: string }>;
+
+  // NativePresenterDiagnostics is imported from @screenlink/shared above
 
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;
@@ -234,6 +248,68 @@ export interface QuickShareConfigDTO {
   lastGroupId: string | null;
   lastSourceKind: "screen" | "window" | null;
   lastPresetId: string | null;
+}
+
+// ── Video helper typed config and result (replaces Record<string, unknown>) ──
+
+export type VideoHelperProcessingMode = "vsr" | "high-bitrate" | "denoise" | "deblur";
+export type VideoHelperQualityLevel = "low" | "medium" | "high" | "ultra";
+export type VideoHelperPixelFormat = "bgra8" | "rgba8";
+
+export interface VideoHelperConfig {
+  inputWidth: number;
+  inputHeight: number;
+  outputWidth: number;
+  outputHeight: number;
+  processingMode: VideoHelperProcessingMode;
+  qualityLevel: VideoHelperQualityLevel;
+  pixelFormat: VideoHelperPixelFormat;
+}
+
+export interface VideoHelperStartResult {
+  success: boolean;
+  error?: string;
+  appliedConfig?: import("@screenlink/shared").AppliedNvidiaConfig;
+}
+
+// ── NVIDIA benchmark types ───────────────────────────────────────────────────
+
+export type NvidiaBenchmarkStatus = "idle" | "running" | "completed" | "failed";
+
+export interface NvidiaBenchmarkConfig {
+  processingMode: VideoHelperProcessingMode;
+  qualityLevel: VideoHelperQualityLevel;
+  inputWidth: number;
+  inputHeight: number;
+  frames: number;
+  /** Maximum time per frame in ms before the frame is considered dropped */
+  frameTimeoutMs?: number;
+}
+
+export interface NvidiaBenchmarkResultRecord {
+  id: string;
+  config: NvidiaBenchmarkConfig;
+  status: NvidiaBenchmarkStatus;
+  startedAt: number;
+  completedAt?: number;
+  framesProcessed: number;
+  framesDropped: number;
+  framesFailed: number;
+  avgProcessingTimeMs: number;
+  minProcessingTimeMs: number;
+  maxProcessingTimeMs: number;
+  p50ProcessingTimeMs: number;
+  p95ProcessingTimeMs: number;
+  p99ProcessingTimeMs: number;
+  avgFps: number;
+  avgNativeInputReceiveMs?: number;
+  avgNativeUploadMs?: number;
+  avgNativeEffectMs?: number;
+  avgNativeDownloadMs?: number;
+  /** Path to the exported result file, if exported */
+  exportedPath?: string;
+  /** Error message if status is "failed" */
+  error?: string;
 }
 
 // ── Per-group shortcut config types ──────────────────────────────────────────
@@ -399,6 +475,14 @@ export interface PersistedSettings {
 
   /** Maximum volume percentage for the viewer slider (default 100; allows boost up to 200+) */
   viewerMaxVolumePercent: number;
+
+  // ── NVIDIA enhancement settings persistence (Phase 6+) ─────────────────
+  /** Viewer image enhancement settings, stored as opaque JSON blob */
+  viewerImageEnhancementSettings: Record<string, unknown> | null;
+  /** Last selected NVIDIA processing mode for quick recall */
+  lastNvidiaProcessingMode: string;
+  /** Last selected NVIDIA quality level for quick recall */
+  lastNvidiaQuality: string;
 }
 
 /** Protocol response envelope for helper IPC calls */

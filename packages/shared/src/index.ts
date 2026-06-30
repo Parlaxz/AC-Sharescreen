@@ -153,4 +153,5 @@ export type {
   NvidiaProcessingMode,
   NvidiaQuality,
   AppliedNvidiaConfig,
+  NativePresenterDiagnostics,
 } from "./nvidia-quality.js";

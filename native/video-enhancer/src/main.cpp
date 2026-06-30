@@ -1,10 +1,12 @@
 #include "BuildInfo.h"
 #include "Protocol.h"
 #include "FrameTransport.h"
+#include "SharedFrameRing.h"
 #include "Diagnostics.h"
 #include "CapabilityProbe.h"
 #include "SimpleJson.h"
 #include "NvidiaVfxContext.h"
+#include "NativePresenter.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +19,7 @@
 #include <algorithm>
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 // Undef Windows min/max macros
@@ -91,6 +94,14 @@ static struct {
 static std::unique_ptr<sv::NvidiaVfxContext> g_nvidiaVfx;
 static bool g_nvidiaAvailable = false;
 static std::string g_nvidiaReason;
+
+// Native presenter (GPU-resident display path)
+static std::unique_ptr<sv::NativePresenter> g_presenter;
+static std::mutex g_presenterMutex;
+
+// Shared memory ring (3-slot, file-backed)
+static std::unique_ptr<sv::SharedFrameRing> g_sharedRing;
+static bool g_sharedMemoryAvailable = false;
 
 static void InitNvidiaVfx(uint32_t outW, uint32_t outH) {
     if (g_nvidiaVfx) return;
@@ -302,6 +313,10 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
     if (g_nvidiaAvailable) {
         g_config.configurationId++;
         g_config.effectInstanceId++;
+        // Sync effect load count to global diagnostics counters
+        if (g_nvidiaVfx) {
+            sv::GetDiagnosticsCounters().effectLoadCount = g_nvidiaVfx->effectLoadCount();
+        }
     }
 
     // Return success only when VFX initialization/effect loading succeeded.
@@ -329,10 +344,168 @@ static void HandleCapabilities(const sv::JsonObject& /*payload*/,
         resp["supportedModes"] = sv::JsonValue(result.supportedModes);
     if (!result.supportedQualities.empty())
         resp["supportedQualities"] = sv::JsonValue(result.supportedQualities);
+    // Advertise shared memory ring availability
+    resp["sharedMemoryAvailable"] = sv::JsonValue(g_sharedMemoryAvailable);
+    if (g_sharedMemoryAvailable && g_sharedRing) {
+        resp["sharedMemoryPath"] = sv::JsonValue(g_sharedRing->FilePath());
+        resp["sharedMemorySlotCount"] = sv::JsonValue(static_cast<double>(sv::kRingSlotCount));
+        resp["sharedMemorySlotSize"] = sv::JsonValue(static_cast<double>(sv::kSlotSize));
+        resp["sharedMemoryTotalSize"] = sv::JsonValue(static_cast<double>(sv::kRingTotalSize));
+    }
     transport.WriteControlResponse(sv::SerializeJson(resp));
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Serve mode main loop Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// ─── Shared memory slot processing ────────────────────────────────────
+// Called from the control loop when a processSlot command is received.
+static bool ProcessSlotFromShm(uint32_t slotIndex) {
+    if (!g_sharedMemoryAvailable || !g_sharedRing) return false;
+    auto* slot = g_sharedRing->Slot(slotIndex);
+    if (!slot) return false;
+
+    // Atomically claim slot: SUBMITTED → PROCESSING
+    uint32_t expected = static_cast<uint32_t>(sv::SlotState::kSubmitted);
+    uint32_t desired = static_cast<uint32_t>(sv::SlotState::kProcessing);
+    if (InterlockedCompareExchange(
+            reinterpret_cast<volatile LONG*>(&slot->control),
+            static_cast<LONG>(desired),
+            static_cast<LONG>(expected)) != static_cast<LONG>(expected)) {
+        fprintf(stderr, "[SlotProc] Slot %u not SUBMITTED (control=%u)\n",
+                slotIndex, slot->control);
+        return false;
+    }
+
+    auto t0_total = std::chrono::high_resolution_clock::now();
+    sv::FrameHeader& header = slot->header;
+    uint8_t* inputPixels = slot->inputPixels;
+    uint8_t* outputPixels = slot->outputPixels;
+
+    if (!g_config.configured) {
+        slot->control = static_cast<uint32_t>(sv::SlotState::kError);
+        return false;
+    }
+
+    auto& diag = sv::GetDiagnosticsCounters();
+    bool ok = false;
+    sv::FrameHeader outHeader = header;
+    uint64_t uploadUs = 0, effectUs = 0, downloadUs = 0;
+
+    if (g_nvidiaAvailable && g_nvidiaVfx) {
+        auto t_up_start = std::chrono::high_resolution_clock::now();
+        ok = g_nvidiaVfx->UploadInput(inputPixels, header.inputWidth, header.inputHeight,
+                                       header.inputStride, sv::NvVfxPixelFormat::kRGBA8)
+             == sv::NvVfxResult::kSuccess;
+        auto t_up_end = std::chrono::high_resolution_clock::now();
+        uploadUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_up_end - t_up_start).count());
+
+        if (ok) {
+            auto t_eff_start = std::chrono::high_resolution_clock::now();
+            ok = g_nvidiaVfx->RunFrame() == sv::NvVfxResult::kSuccess;
+            auto t_eff_end = std::chrono::high_resolution_clock::now();
+            effectUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(t_eff_end - t_eff_start).count());
+        }
+
+        if (ok) {
+            auto t_dl_start = std::chrono::high_resolution_clock::now();
+            bool presented = false;
+            {
+                std::lock_guard<std::mutex> lock(g_presenterMutex);
+                if (g_presenter && g_presenter->IsActive()) {
+                    void* gpuOutputPtr = g_nvidiaVfx->GetOutputGpuPointer();
+                    if (gpuOutputPtr)
+                        presented = g_presenter->PresentFrameFromCudaGpuBuffer(
+                            gpuOutputPtr, g_config.outputWidth, g_config.outputHeight,
+                            g_config.outputWidth * 4);
+                    if (!presented && gpuOutputPtr)
+                        presented = g_presenter->PresentFrameFromCudaBuffer(
+                            gpuOutputPtr, g_config.outputWidth, g_config.outputHeight,
+                            g_config.outputWidth * 4);
+                }
+            }
+            if (!presented) {
+                uint32_t outW = 0, outH = 0;
+                outHeader.payloadBytes = g_config.outputWidth * g_config.outputHeight * 4;
+                ok = g_nvidiaVfx->DownloadOutput(outputPixels, g_config.outputWidth * 4, outW, outH)
+                     == sv::NvVfxResult::kSuccess;
+                auto t_dl_end = std::chrono::high_resolution_clock::now();
+                downloadUs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t_dl_end - t_dl_start).count());
+                if (ok) {
+                    outHeader.inputWidth = outW;
+                    outHeader.inputHeight = outH;
+                    outHeader.inputStride = outW * 4;
+                }
+            } else {
+                auto t_dl_end = std::chrono::high_resolution_clock::now();
+                downloadUs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t_dl_end - t_dl_start).count());
+                outHeader.inputWidth = g_config.outputWidth;
+                outHeader.inputHeight = g_config.outputHeight;
+                outHeader.inputStride = g_config.outputWidth * 4;
+                outHeader.payloadBytes = 0;
+            }
+        }
+    } else {
+        // CPU fallback: copy input to output
+        outHeader.inputWidth = header.inputWidth;
+        outHeader.inputHeight = header.inputHeight;
+        outHeader.inputStride = header.inputWidth * 4;
+        outHeader.payloadBytes = header.inputWidth * header.inputHeight * 4;
+        if (outHeader.payloadBytes <= sv::kRingOutputSize)
+            memcpy(outputPixels, inputPixels, outHeader.payloadBytes);
+        else {
+            outHeader.payloadBytes = sv::kRingOutputSize;
+            memcpy(outputPixels, inputPixels, sv::kRingOutputSize);
+        }
+        ok = true;
+    }
+
+    auto t_prewrite_end = std::chrono::high_resolution_clock::now();
+    uint64_t preWriteTotalUs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t_prewrite_end - t0_total).count());
+
+    if (ok) {
+        outHeader.resultCode = 1;
+        outHeader.slotIndex = static_cast<uint32_t>(g_config.configurationId);
+        outHeader.flags = static_cast<uint32_t>(g_config.qualityLevel);
+        outHeader.nativeInputReceiveUs = 0;
+        outHeader.nativeUploadUs = static_cast<uint32_t>(uploadUs);
+        outHeader.nativeEffectUs = static_cast<uint32_t>(effectUs);
+        outHeader.nativeDownloadUs = static_cast<uint32_t>(downloadUs);
+        outHeader.nativeOutputWriteUs = 0;
+        outHeader.nativeTotalUs = static_cast<uint32_t>(preWriteTotalUs);
+        slot->header = outHeader;
+    } else {
+        outHeader = header;
+        outHeader.resultCode = 2;
+        outHeader.payloadBytes = 0;
+        outHeader.nativeTotalUs = static_cast<uint32_t>(preWriteTotalUs);
+        slot->header = outHeader;
+        diag.totalProcessingErrors++;
+    }
+
+    slot->control = static_cast<uint32_t>(
+        ok ? sv::SlotState::kDone : sv::SlotState::kError);
+
+    diag.RecordFrameDetails(preWriteTotalUs, ok, 0, uploadUs, effectUs, downloadUs, 0);
+
+    if (diag.benchmarkActive.load()) {
+        diag.benchmarkFramesCompleted++;
+        diag.benchmarkTotalTimeUs.fetch_add(preWriteTotalUs);
+        uint64_t target = diag.benchmarkTargetFrames.load();
+        uint64_t done = diag.benchmarkFramesCompleted.load();
+        if (done >= target && target > 0) {
+            diag.benchmarkActive = false;
+            printf("[Benchmark] COMPLETE: %llu frames in %llu us\n",
+                   static_cast<unsigned long long>(done),
+                   static_cast<unsigned long long>(diag.benchmarkTotalTimeUs.load()));
+        }
+    }
+    return ok;
+}
+
+// ─── Serve mode main loop
 
 static int RunServe(const std::vector<std::string>& args) {
     std::string ctrlPipe, framePipe, sessionId, authToken;
@@ -425,6 +598,38 @@ static int RunServe(const std::vector<std::string>& args) {
         }
     }
 
+    // Probe and cache GPU info for diagnostics
+    {
+        auto capResult = sv::ProbeCapability();
+        if (capResult.available) {
+            sv::SetGpuInfo(
+                capResult.adapterName,
+                capResult.driverVersion,
+                "NVIDIA Video Effects SDK");
+        } else {
+            sv::SetGpuInfo(
+                "unknown",
+                "",
+                capResult.reason == "sdk-not-built" ? "not-built" : "unavailable");
+        }
+    }
+
+    // ── Shared memory ring ─────────────────────────────────────────────
+    // Create the 3-slot file-backed ring for zero-copy frame transport.
+    // On failure, fall back to named-pipe frame transport transparently.
+    {
+        g_sharedRing = std::make_unique<sv::SharedFrameRing>();
+        if (g_sharedRing->Create(sessionId)) {
+            g_sharedMemoryAvailable = true;
+            printf("[Serve] Shared memory ring ready: %s\n",
+                   g_sharedRing->FilePath().c_str());
+        } else {
+            g_sharedRing.reset();
+            g_sharedMemoryAvailable = false;
+            printf("[Serve] Shared memory ring unavailable, falling back to pipe\n");
+        }
+    }
+
     // Now accept persistent frame pipe (after handshake, Electron knows we're alive)
     printf("[Serve] Waiting for persistent frame pipe client...\n");
     if (!transport.WaitForClient(transport.GetFramePipe())) {
@@ -503,21 +708,68 @@ static int RunServe(const std::vector<std::string>& args) {
                 }
 
                 if (ok) {
-                    // Download output (GPU→CPU)
                     auto t_dl_start = std::chrono::high_resolution_clock::now();
-                    uint32_t outW = 0, outH = 0;
-                    outHeader.payloadBytes = g_config.outputWidth * g_config.outputHeight * 4;
-                    outData.resize(outHeader.payloadBytes);
-                    ok = g_nvidiaVfx->DownloadOutput(
-                        outData.data(), g_config.outputWidth * 4, outW, outH
-                    ) == sv::NvVfxResult::kSuccess;
-                    auto t_dl_end = std::chrono::high_resolution_clock::now();
-                    downloadUs = static_cast<uint64_t>(
-                        std::chrono::duration_cast<std::chrono::microseconds>(t_dl_end - t_dl_start).count());
-                    if (ok) {
-                        outHeader.inputWidth = outW;
-                        outHeader.inputHeight = outH;
-                        outHeader.inputStride = outW * 4;
+
+                    // ── Native presenter path (GPU-resident, no CPU download) ──
+                    // When the native presenter is active, skip the CPU download
+                    // and present directly from GPU memory. Fall back to CPU
+                    // download if the presenter is not available or fails.
+                    bool presented = false;
+                    {
+                        std::lock_guard<std::mutex> lock(g_presenterMutex);
+                        if (g_presenter && g_presenter->IsActive()) {
+                            // Get GPU output pointer from NVIDIA context
+                            void* gpuOutputPtr = g_nvidiaVfx->GetOutputGpuPointer();
+                            if (gpuOutputPtr) {
+                                // GPU-to-GPU present via CUDA→D3D11 interop
+                                presented = g_presenter->PresentFrameFromCudaGpuBuffer(
+                                    gpuOutputPtr,
+                                    g_config.outputWidth,
+                                    g_config.outputHeight,
+                                    g_config.outputWidth * 4);
+                            }
+
+                            if (!presented) {
+                                // GPU-to-GPU fallback: copy through the CUDA
+                                // staging buffer (no CPU roundtrip — both ends
+                                // are GPU-resident on the same adapter)
+                                // Uses CUDA-D3D11 interop or driver-mediated copy.
+                                presented = g_presenter->PresentFrameFromCudaBuffer(
+                                    gpuOutputPtr,
+                                    g_config.outputWidth,
+                                    g_config.outputHeight,
+                                    g_config.outputWidth * 4);
+                            }
+                        }
+                    }
+
+                    if (!presented) {
+                        // Fall back to CPU download (existing path)
+                        uint32_t outW = 0, outH = 0;
+                        outHeader.payloadBytes = g_config.outputWidth * g_config.outputHeight * 4;
+                        outData.resize(outHeader.payloadBytes);
+                        ok = g_nvidiaVfx->DownloadOutput(
+                            outData.data(), g_config.outputWidth * 4, outW, outH
+                        ) == sv::NvVfxResult::kSuccess;
+                        auto t_dl_end = std::chrono::high_resolution_clock::now();
+                        downloadUs = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(t_dl_end - t_dl_start).count());
+                        if (ok) {
+                            outHeader.inputWidth = outW;
+                            outHeader.inputHeight = outH;
+                            outHeader.inputStride = outW * 4;
+                        }
+                    } else {
+                        // Presenter path succeeded — no CPU download needed.
+                        // Still set output dimensions for correlation.
+                        auto t_dl_end = std::chrono::high_resolution_clock::now();
+                        downloadUs = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::microseconds>(t_dl_end - t_dl_start).count());
+                        outHeader.inputWidth = g_config.outputWidth;
+                        outHeader.inputHeight = g_config.outputHeight;
+                        outHeader.inputStride = g_config.outputWidth * 4;
+                        // Payload is empty (no pixel data returned to pipe)
+                        outHeader.payloadBytes = 0;
                     }
                 }
 
@@ -592,6 +844,22 @@ static int RunServe(const std::vector<std::string>& args) {
             // outputWriteUsAggregate is kept ONLY in aggregate diagnostics, never per-frame header
             diag.RecordFrameDetails(preWriteTotalUs, ok,
                                      inputReceiveUs, uploadUs, effectUs, downloadUs, outputWriteUsAggregate);
+
+            // Phase 7: Benchmark tracking
+            if (diag.benchmarkActive.load()) {
+                diag.benchmarkFramesCompleted++;
+                diag.benchmarkTotalTimeUs.fetch_add(preWriteTotalUs + outputWriteUsAggregate);
+                uint64_t target = diag.benchmarkTargetFrames.load();
+                uint64_t done = diag.benchmarkFramesCompleted.load();
+                if (done >= target && target > 0) {
+                    diag.benchmarkActive = false;
+                    uint64_t totalBenchUs = diag.benchmarkTotalTimeUs.load();
+                    printf("[Benchmark] COMPLETE: %llu frames in %llu us (avg %llu us/frame)\n",
+                           static_cast<unsigned long long>(done),
+                           static_cast<unsigned long long>(totalBenchUs),
+                           static_cast<unsigned long long>(done > 0 ? totalBenchUs / done : 0));
+                }
+            }
         }
     });
 
@@ -696,13 +964,237 @@ static int RunServe(const std::vector<std::string>& args) {
                 break;
             }
 
+            case sv::Command::kGetDiagnostics: {
+                auto stats = BuildStatsResponse();
+                sv::JsonObject resp;
+                resp["id"] = sv::JsonValue(id);
+                resp["success"] = sv::JsonValue(true);
+                resp["totalFramesSubmitted"] = sv::JsonValue(static_cast<double>(stats.totalFramesSubmitted));
+                resp["totalFramesCompleted"] = sv::JsonValue(static_cast<double>(stats.totalFramesCompleted));
+                resp["totalFramesDropped"] = sv::JsonValue(static_cast<double>(stats.totalFramesDropped));
+                resp["totalProcessingErrors"] = sv::JsonValue(static_cast<double>(stats.totalProcessingErrors));
+                resp["totalBytesProcessed"] = sv::JsonValue(static_cast<double>(stats.totalBytesProcessed));
+                resp["lastProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.lastProcessingTimeUs));
+                resp["maxProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.maxProcessingTimeUs));
+                resp["minProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.minProcessingTimeUs));
+                resp["avgProcessingTimeUs"] = sv::JsonValue(static_cast<double>(stats.avgProcessingTimeUs));
+                resp["currentFps"] = sv::JsonValue(stats.currentFps);
+                resp["uptimeMs"] = sv::JsonValue(static_cast<double>(stats.uptimeMs));
+                if (!stats.gpuName.empty()) resp["gpuName"] = sv::JsonValue(stats.gpuName);
+                if (!stats.driverVersion.empty()) resp["driverVersion"] = sv::JsonValue(stats.driverVersion);
+                if (!stats.sdkVersion.empty()) resp["sdkVersion"] = sv::JsonValue(stats.sdkVersion);
+                resp["lastInputReceiveUs"] = sv::JsonValue(static_cast<double>(stats.lastInputReceiveUs));
+                resp["lastUploadUs"] = sv::JsonValue(static_cast<double>(stats.lastUploadUs));
+                resp["lastEffectUs"] = sv::JsonValue(static_cast<double>(stats.lastEffectUs));
+                resp["lastDownloadUs"] = sv::JsonValue(static_cast<double>(stats.lastDownloadUs));
+                resp["lastOutputWriteUs"] = sv::JsonValue(static_cast<double>(stats.lastOutputWriteUs));
+                resp["effectLoadCount"] = sv::JsonValue(static_cast<double>(stats.effectLoadCount));
+                resp["benchmarkActive"] = sv::JsonValue(stats.benchmarkActive);
+                resp["benchmarkTargetFrames"] = sv::JsonValue(static_cast<double>(stats.benchmarkTargetFrames));
+                resp["benchmarkFramesCompleted"] = sv::JsonValue(static_cast<double>(stats.benchmarkFramesCompleted));
+                resp["benchmarkTotalTimeUs"] = sv::JsonValue(static_cast<double>(stats.benchmarkTotalTimeUs));
+                if (stats.benchmarkActive && stats.benchmarkFramesCompleted > 0) {
+                    resp["benchmarkAvgTimeUs"] = sv::JsonValue(static_cast<double>(
+                        stats.benchmarkTotalTimeUs / stats.benchmarkFramesCompleted));
+                }
+
+                // Native presenter diagnostics
+                resp["presenterFramesPresented"] = sv::JsonValue(static_cast<double>(stats.presenterFramesPresented));
+                resp["presenterFramesDropped"] = sv::JsonValue(static_cast<double>(stats.presenterFramesDropped));
+                resp["presenterErrors"] = sv::JsonValue(static_cast<double>(stats.presenterErrors));
+                resp["presenterLastPresentUs"] = sv::JsonValue(static_cast<double>(stats.presenterLastPresentUs));
+                resp["presenterAvgPresentUs"] = sv::JsonValue(static_cast<double>(stats.presenterAvgPresentUs));
+                resp["presenterMaxPresentUs"] = sv::JsonValue(static_cast<double>(stats.presenterMaxPresentUs));
+                resp["presenterResizes"] = sv::JsonValue(static_cast<double>(stats.presenterResizes));
+                resp["presenterActive"] = sv::JsonValue(stats.presenterActive);
+
+                response = resp;
+                break;
+            }
+
+            case sv::Command::kResetDiagnostics: {
+                sv::ResetDiagnostics();
+                // Also reset the VFX context effect load counter tracking
+                sv::GetDiagnosticsCounters().effectLoadCount =
+                    g_nvidiaVfx ? g_nvidiaVfx->effectLoadCount() : 0;
+                printf("[Serve] Diagnostics reset\n");
+                response = MakeResponse(true, "", id);
+                break;
+            }
+
+            case sv::Command::kBenchmarkRun: {
+                auto targetFrames = static_cast<uint64_t>(
+                    sv::GetNumber(payload, "targetFrames", 100.0));
+                if (targetFrames == 0) targetFrames = 100;
+                auto& diag = sv::GetDiagnosticsCounters();
+                // Reset benchmark counters only, keep existing frame stats
+                diag.benchmarkActive = true;
+                diag.benchmarkTargetFrames = targetFrames;
+                diag.benchmarkFramesCompleted = 0;
+                diag.benchmarkTotalTimeUs = 0;
+                printf("[Serve] Benchmark started: targetFrames=%llu\n",
+                       static_cast<unsigned long long>(targetFrames));
+                response = MakeResponse(true, "", id);
+                response["targetFrames"] = sv::JsonValue(static_cast<double>(targetFrames));
+                break;
+            }
+
+            case sv::Command::kBenchmarkStatus: {
+                auto& diag = sv::GetDiagnosticsCounters();
+                sv::JsonObject resp;
+                resp["id"] = sv::JsonValue(id);
+                resp["success"] = sv::JsonValue(true);
+                resp["benchmarkActive"] = sv::JsonValue(diag.benchmarkActive.load());
+                resp["benchmarkTargetFrames"] = sv::JsonValue(static_cast<double>(diag.benchmarkTargetFrames.load()));
+                resp["benchmarkFramesCompleted"] = sv::JsonValue(static_cast<double>(diag.benchmarkFramesCompleted.load()));
+                resp["benchmarkTotalTimeUs"] = sv::JsonValue(static_cast<double>(diag.benchmarkTotalTimeUs.load()));
+                uint64_t completed = diag.benchmarkFramesCompleted.load();
+                uint64_t totalTime = diag.benchmarkTotalTimeUs.load();
+                if (completed > 0) {
+                    resp["benchmarkAvgTimeUs"] = sv::JsonValue(static_cast<double>(totalTime / completed));
+                }
+                if (!diag.benchmarkActive.load() && completed > 0) {
+                    resp["benchmarkComplete"] = sv::JsonValue(true);
+                }
+                response = resp;
+                break;
+            }
+
+            case sv::Command::kPresenterAttach: {
+                // Attach native presenter to owner HWND
+                uint64_t hwndVal = static_cast<uint64_t>(
+                    sv::GetNumber(payload, "ownerHwnd", 0));
+                uint32_t pWidth = static_cast<uint32_t>(
+                    sv::GetNumber(payload, "width", g_config.outputWidth));
+                uint32_t pHeight = static_cast<uint32_t>(
+                    sv::GetNumber(payload, "height", g_config.outputHeight));
+                HWND ownerHwnd = reinterpret_cast<HWND>(static_cast<uintptr_t>(hwndVal));
+
+                if (!ownerHwnd || !IsWindow(ownerHwnd)) {
+                    response = MakeResponse(false, "Invalid owner HWND", id);
+                    break;
+                }
+
+                std::lock_guard<std::mutex> lock(g_presenterMutex);
+                if (!g_presenter) {
+                    g_presenter = std::make_unique<sv::NativePresenter>();
+                }
+                bool attached = g_presenter->Attach(ownerHwnd, pWidth, pHeight);
+                response = MakeResponse(attached, attached ? "" : "Presenter attach failed", id);
+                if (attached) {
+                    response["surfaceWidth"] = sv::JsonValue(static_cast<double>(g_presenter->SurfaceWidth()));
+                    response["surfaceHeight"] = sv::JsonValue(static_cast<double>(g_presenter->SurfaceHeight()));
+                    printf("[Serve] Native presenter attached to HWND 0x%llx\n",
+                           static_cast<unsigned long long>(hwndVal));
+                }
+                break;
+            }
+
+            case sv::Command::kPresenterDetach: {
+                std::lock_guard<std::mutex> lock(g_presenterMutex);
+                if (g_presenter) {
+                    g_presenter->Detach();
+                    g_presenter.reset();
+                }
+                response = MakeResponse(true, "", id);
+                printf("[Serve] Native presenter detached\n");
+                break;
+            }
+
+            case sv::Command::kPresenterUpdateBounds: {
+                int32_t bx = static_cast<int32_t>(
+                    sv::GetNumber(payload, "x", 0));
+                int32_t by = static_cast<int32_t>(
+                    sv::GetNumber(payload, "y", 0));
+                uint32_t bw = static_cast<uint32_t>(
+                    sv::GetNumber(payload, "width", g_config.outputWidth));
+                uint32_t bh = static_cast<uint32_t>(
+                    sv::GetNumber(payload, "height", g_config.outputHeight));
+
+                std::lock_guard<std::mutex> lock(g_presenterMutex);
+                if (g_presenter && g_presenter->IsActive()) {
+                    g_presenter->UpdateBounds(bx, by, bw, bh);
+                }
+                response = MakeResponse(true, "", id);
+                break;
+            }
+
+            case sv::Command::kPresenterSetVisible: {
+                bool visible = sv::GetBool(payload, "visible", true);
+                std::lock_guard<std::mutex> lock(g_presenterMutex);
+                if (g_presenter && g_presenter->IsActive()) {
+                    g_presenter->SetVisible(visible);
+                }
+                response = MakeResponse(true, "", id);
+                break;
+            }
+
+            case sv::Command::kPresenterGetDiagnostics: {
+                sv::PresenterSnapshot pstats;
+                {
+                    std::lock_guard<std::mutex> lock(g_presenterMutex);
+                    if (g_presenter) {
+                        pstats = g_presenter->GetSnapshot();
+                    }
+                }
+                sv::JsonObject resp;
+                resp["id"] = sv::JsonValue(id);
+                resp["success"] = sv::JsonValue(true);
+                resp["active"] = sv::JsonValue(pstats.active);
+                resp["framesPresented"] = sv::JsonValue(static_cast<double>(pstats.framesPresented));
+                resp["framesDropped"] = sv::JsonValue(static_cast<double>(pstats.framesDropped));
+                resp["presentErrors"] = sv::JsonValue(static_cast<double>(pstats.presentErrors));
+                resp["lastPresentUs"] = sv::JsonValue(static_cast<double>(pstats.lastPresentUs));
+                resp["avgPresentUs"] = sv::JsonValue(static_cast<double>(pstats.avgPresentUs));
+                resp["maxPresentUs"] = sv::JsonValue(static_cast<double>(pstats.maxPresentUs));
+                resp["presenterResizes"] = sv::JsonValue(static_cast<double>(pstats.presenterResizes));
+                response = resp;
+                break;
+            }
+
+            case sv::Command::kProcessSlot: {
+                uint32_t slotIdx = static_cast<uint32_t>(
+                    sv::GetNumber(payload, "slotIndex", 999));
+                if (slotIdx >= sv::kRingSlotCount) {
+                    response = MakeResponse(false, "Invalid slotIndex", id);
+                    break;
+                }
+                bool procOk = ProcessSlotFromShm(slotIdx);
+                if (procOk) {
+                    response = MakeResponse(true, "", id);
+                    response["slotIndex"] = sv::JsonValue(static_cast<double>(slotIdx));
+                    response["resultCode"] = sv::JsonValue(1.0);
+                    response["configurationId"] = sv::JsonValue(
+                        static_cast<double>(g_config.configurationId));
+                    response["appliedQualityLevel"] = sv::JsonValue(
+                        static_cast<double>(g_config.qualityLevel));
+                } else {
+                    response = MakeResponse(false, "Slot processing failed", id);
+                    response["slotIndex"] = sv::JsonValue(static_cast<double>(slotIdx));
+                    response["resultCode"] = sv::JsonValue(2.0);
+                }
+                break;
+            }
+
             case sv::Command::kShutdown:
                 printf("[Serve] Shutdown requested\n");
                 transport.WriteControlResponse(sv::SerializeJson(MakeResponse(true, "", id)));
                 // Disconnect pipes to wake the frame worker
                 transport.CloseFramePipe();
                 transport.CloseControlPipe();
+                {
+                    std::lock_guard<std::mutex> lock(g_presenterMutex);
+                    if (g_presenter) {
+                        g_presenter->Detach();
+                        g_presenter.reset();
+                    }
+                }
                 ShutdownNvidiaVfx();
+                if (g_sharedRing) {
+                    g_sharedRing->Close();
+                    g_sharedRing.reset();
+                    g_sharedMemoryAvailable = false;
+                }
                 if (frameWorker.joinable()) frameWorker.join();
                 return 0;
 
@@ -717,7 +1209,19 @@ static int RunServe(const std::vector<std::string>& args) {
     // Cleanup control pipe and join frame worker
     transport.CloseFramePipe();
     transport.CloseControlPipe();
+    {
+        std::lock_guard<std::mutex> lock(g_presenterMutex);
+        if (g_presenter) {
+            g_presenter->Detach();
+            g_presenter.reset();
+        }
+    }
     ShutdownNvidiaVfx();
+    if (g_sharedRing) {
+        g_sharedRing->Close();
+        g_sharedRing.reset();
+        g_sharedMemoryAvailable = false;
+    }
     if (frameWorker.joinable()) frameWorker.join();
 
     return 0;
@@ -846,6 +1350,50 @@ static int RunSelfTest() {
     // Invalid inputs return -1
     allPassed &= (CanonicalQualityLevel("invalid", "high") == -1);
     allPassed &= (CanonicalQualityLevel("vsr", "invalid") == -1);
+
+    // ── Phase 7: New command parsing tests ────────────────────────────
+    cmd = sv::ParseCommand("getDiagnostics");
+    allPassed &= (cmd == sv::Command::kGetDiagnostics);
+    cmd = sv::ParseCommand("resetDiagnostics");
+    allPassed &= (cmd == sv::Command::kResetDiagnostics);
+    cmd = sv::ParseCommand("benchmarkRun");
+    allPassed &= (cmd == sv::Command::kBenchmarkRun);
+    cmd = sv::ParseCommand("benchmarkStatus");
+    allPassed &= (cmd == sv::Command::kBenchmarkStatus);
+
+    name = sv::CommandName(sv::Command::kGetDiagnostics);
+    allPassed &= (name == "getDiagnostics");
+    name = sv::CommandName(sv::Command::kResetDiagnostics);
+    allPassed &= (name == "resetDiagnostics");
+    name = sv::CommandName(sv::Command::kBenchmarkRun);
+    allPassed &= (name == "benchmarkRun");
+    name = sv::CommandName(sv::Command::kBenchmarkStatus);
+    allPassed &= (name == "benchmarkStatus");
+
+    // ── Phase 7: Diagnostics API tests ────────────────────────────────
+    // GetDiagnostics should return a valid snapshot without crashing
+    auto diagSnap = sv::GetDiagnostics();
+    allPassed &= (diagSnap.uptimeMs > 0); // uptime must be ticking
+    allPassed &= (diagSnap.avgProcessingTimeUs == 0); // no frames yet
+    allPassed &= (diagSnap.effectLoadCount == 0);
+
+    // ResetDiagnostics should clear counters
+    sv::GetDiagnosticsCounters().totalFramesSubmitted++;
+    sv::GetDiagnosticsCounters().totalFramesCompleted++;
+    sv::GetDiagnosticsCounters().totalProcessingErrors++;
+    sv::ResetDiagnostics();
+    auto resetSnap = sv::GetDiagnostics();
+    allPassed &= (resetSnap.totalFramesSubmitted == 0);
+    allPassed &= (resetSnap.totalFramesCompleted == 0);
+    allPassed &= (resetSnap.totalProcessingErrors == 0);
+    allPassed &= (resetSnap.benchmarkActive == false);
+
+    // SetGpuInfo round-trip
+    sv::SetGpuInfo("Test GPU", "555.55", "SDK 3.0");
+    auto gpuSnap = sv::GetDiagnostics();
+    allPassed &= (gpuSnap.gpuName == "Test GPU");
+    allPassed &= (gpuSnap.driverVersion == "555.55");
+    allPassed &= (gpuSnap.sdkVersion == "SDK 3.0");
 
     printf("Self-tests: %s\n", allPassed ? "ALL PASSED" : "FAILED");
     return allPassed ? 0 : 1;

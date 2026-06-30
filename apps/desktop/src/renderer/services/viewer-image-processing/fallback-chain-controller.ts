@@ -61,6 +61,15 @@ export class FallbackChainController {
   get reason(): string | null { return this.state.reason; }
 
   /**
+   * Record a successfully processed frame. Resets the consecutive-failure
+   * counter so that only clustered failures (not sporadic ones spread across
+   * many successful frames) trigger stage advancement.
+   */
+  recordSuccess(): void {
+    this.consecutiveFailures = 0;
+  }
+
+  /**
    * Advance to the next fallback stage after a failure.
    */
   async advance(reason: string): Promise<FallbackStage> {
@@ -113,8 +122,8 @@ export class FallbackChainController {
       attempts: { "nvidia-vsr": 0, "webgl-fsr1": 0, "webgl-lanczos3": 0, "original": 0 },
     };
 
-    // NVIDIA VSR requested and available? Try it first (item 18 stub)
-    if (requestedKind === "nvidia-vsr" || (requestedKind === "webgl2" && capabilities.nvidiaVsrAvailable)) {
+    // Only select NVIDIA when explicitly requested.
+    if (requestedKind === "nvidia-vsr") {
       const nvidiaAvailable = isNvidiaVsrAvailable();
       if (nvidiaAvailable) {
         base.activeStage = "nvidia-vsr";

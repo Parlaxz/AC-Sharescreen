@@ -70,7 +70,8 @@ vi.mock("../src/main/helper-path", () => ({
 
 // ─── Import after mocks are set up ──────────────────────────────────────────
 
-import { VideoHelperManager } from "../src/main/VideoHelperManager";
+import { VideoHelperManager, FramePipeParser } from "../src/main/VideoHelperManager";
+import { Buffer } from "node:buffer";
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -559,5 +560,274 @@ describe("VideoHelperManager — applied config fields parsing", () => {
     });
 
     expect(config.configuredAt).toBe(123456789);
+  });
+});
+
+describe("VideoHelperManager — restart policy", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("uses 1s/4s/15s backoff schedule", () => {
+    const manager = new VideoHelperManager();
+
+    expect((manager as any).getRestartDelayMs(1)).toBe(1000);
+    expect((manager as any).getRestartDelayMs(2)).toBe(4000);
+    expect((manager as any).getRestartDelayMs(3)).toBe(15000);
+    expect((manager as any).getRestartDelayMs(4)).toBe(15000);
+
+    manager.destroy();
+  });
+
+  it("transitions to disconnected after max restart attempts", () => {
+    const manager = new VideoHelperManager();
+    const onStateChange = vi.fn();
+    const onError = vi.fn();
+    manager.setCallbacks({ onStateChange, onError });
+
+    (manager as any).lifecycleGeneration = 1;
+    (manager as any).restartAttempts = 3;
+
+    (manager as any).attemptRestart(1);
+
+    expect(manager.getState()).toBe("disconnected");
+    expect(onStateChange).toHaveBeenCalledWith("disconnected");
+    expect(onError).toHaveBeenCalledWith("Video helper reached max restart attempts");
+
+    manager.destroy();
+  });
+});
+
+// ─── FramePipeParser — re-entrancy & leftover handling ─────────────────────
+
+describe("FramePipeParser — re-entrancy / leftover data", () => {
+  const FRAME_MAGIC = 0x464C4156454D5246n;
+  const HEADER_SIZE = 104;
+
+  /** Build a valid frame header + payload in one Buffer. */
+  function buildFrame(
+    gen: number,
+    seq: number,
+    width: number,
+    height: number,
+    payloadBytes?: number,
+  ): { header: Buffer; payload: Buffer; frame: Buffer } {
+    const pb = payloadBytes ?? width * height * 4;
+    const payload = Buffer.alloc(pb);
+    // Fill payload with a detectable pattern
+    for (let i = 0; i < pb; i++) payload[i] = (i + gen + seq) & 0xFF;
+    const header = Buffer.alloc(HEADER_SIZE);
+    let off = 0;
+    header.writeBigUInt64LE(FRAME_MAGIC, off); off += 8;
+    header.writeUInt32LE(HEADER_SIZE, off); off += 4;
+    header.writeUInt32LE(1, off); off += 4; // wireVersion
+    header.writeUInt32LE(gen, off); off += 4;
+    header.writeUInt32LE(seq, off); off += 4;
+    header.writeBigUInt64LE(BigInt(0), off); off += 8; // timestamp
+    header.writeUInt32LE(width, off); off += 4;
+    header.writeUInt32LE(height, off); off += 4;
+    header.writeUInt32LE(width * 4, off); off += 4; // stride
+    header.writeUInt32LE(2, off); off += 4; // pixelFormat = RGBA8
+    header.writeUInt32LE(width, off); off += 4; // outW
+    header.writeUInt32LE(height, off); off += 4; // outH
+    header.writeUInt32LE(0, off); off += 4; // slotIndex → configurationId
+    header.writeUInt32LE(pb, off); off += 4; // payloadBytes
+    header.writeUInt32LE(0, off); off += 4; // modeNum
+    header.writeUInt32LE(0, off); off += 4; // qualNum
+    header.writeUInt32LE(0, off); off += 4; // flags
+    header.writeUInt32LE(1, off); off += 4; // resultCode = success
+    header.writeUInt32LE(0, off); off += 4; // nativeInputReceiveUs
+    header.writeUInt32LE(0, off); off += 4; // nativeUploadUs
+    header.writeUInt32LE(0, off); off += 4; // nativeEffectUs
+    header.writeUInt32LE(0, off); off += 4; // nativeDownloadUs
+    header.writeUInt32LE(0, off); off += 4; // nativeOutputWriteUs
+    header.writeUInt32LE(0, off);      // nativeTotalUs
+    const frame = Buffer.concat([header, payload]);
+    return { header, payload, frame };
+  }
+
+  it("processes a single complete frame", () => {
+    const parser = new FramePipeParser();
+    let resolved: FrameResponse | null = null;
+    parser.installPending(1, 1, (r: FrameResponse | null) => { resolved = r; }, 5000);
+
+    const { payload } = buildFrame(1, 1, 4, 4, 64);
+    const { frame } = buildFrame(1, 1, 4, 4, 64);
+    const result = parser.feed(frame);
+
+    expect(result).not.toBeNull();
+    expect(result!.generation).toBe(1);
+    expect(result!.sequence).toBe(1);
+    expect(result!.width).toBe(4);
+    expect(result!.height).toBe(4);
+    // Payload bytes should match
+    expect(Buffer.from(result!.pixels).equals(payload)).toBe(true);
+  });
+
+  it("processes partial frames split across multiple feed calls", () => {
+    const parser = new FramePipeParser();
+    let resolved: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved = r; }, 5000);
+
+    const { frame } = buildFrame(1, 1, 4, 4, 64);
+
+    // Feed first 50 bytes (partial header)
+    let result = parser.feed(frame.subarray(0, 50));
+    expect(result).toBeNull();
+
+    // Feed rest
+    result = parser.feed(frame.subarray(50));
+    expect(result).not.toBeNull();
+    expect(result!.generation).toBe(1);
+    expect(result!.sequence).toBe(1);
+  });
+
+  it("processes two complete frames in a single chunk (leftover forwarding)", () => {
+    const parser = new FramePipeParser();
+
+    // Install pending for frame 1
+    let resolved1: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved1 = r; }, 5000);
+
+    // Build two frames concatenated
+    const { frame: frame1 } = buildFrame(1, 1, 4, 4, 64);
+    const { frame: frame2 } = buildFrame(1, 2, 6, 6, 144);
+    const combined = Buffer.concat([frame1, frame2]);
+
+    // Feed both at once. The fix ensures leftover bytes after frame 1's
+    // payload are re-fed into the parser, so frame 2 is also processed.
+    // The recursive feed returns frame 2's result (the last one).
+    const result = parser.feed(combined);
+    expect(result).not.toBeNull();
+    // The recursive feed returns frame 2's result (last processed)
+    expect(result!.generation).toBe(1);
+    expect(result!.sequence).toBe(2);
+    expect(result!.width).toBe(6);
+    expect(result!.height).toBe(6);
+
+    // Frame 1's pending should have been resolved via emitResult
+    expect(resolved1).not.toBeNull();
+    expect(resolved1!.generation).toBe(1);
+    expect(resolved1!.sequence).toBe(1);
+    expect(resolved1!.width).toBe(4);
+    expect(resolved1!.height).toBe(4);
+  });
+
+  it("processes three complete frames in a single chunk", () => {
+    const parser = new FramePipeParser();
+
+    let resolved1: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved1 = r; }, 5000);
+
+    const { frame: frame1 } = buildFrame(1, 1, 2, 2, 16);
+    const { frame: frame2 } = buildFrame(1, 2, 4, 4, 64);
+    const { frame: frame3 } = buildFrame(1, 3, 8, 8, 256);
+    const combined = Buffer.concat([frame1, frame2, frame3]);
+
+    const result = parser.feed(combined);
+    expect(result).not.toBeNull();
+    expect(result!.generation).toBe(1);
+    expect(result!.sequence).toBe(3); // last frame returned
+    expect(result!.width).toBe(8);
+    expect(result!.height).toBe(8);
+
+    expect(resolved1).not.toBeNull();
+    expect(resolved1!.generation).toBe(1);
+    expect(resolved1!.sequence).toBe(1);
+  });
+
+  it("preserves leftover data when payload completes in header-to-payload transition", () => {
+    // This specifically tests the bug: when header carries extra bytes beyond
+    // current frame's payload AND the payload is fully contained in the header
+    // leftover, the remaining bytes (next frame header) must not be lost.
+    const parser = new FramePipeParser();
+
+    // Install pending for frame 1 with a small payload
+    let resolved1: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved1 = r; }, 5000);
+
+    const { frame: frame1 } = buildFrame(1, 1, 2, 2, 16); // 16 byte payload (2*2*4)
+    const { frame: frame2 } = buildFrame(1, 2, 4, 4, 64);
+
+    // Deliver frame1 header + frame1 payload + beginning of frame2 in one chunk
+    // header = 104, payload1 = 16, frame2 starts at offset 120
+    const chunk = frame1;
+    const result = parser.feed(chunk);
+    expect(result).not.toBeNull();
+    expect(result!.generation).toBe(1);
+    expect(result!.sequence).toBe(1);
+
+    // Now install pending for frame2
+    let resolved2: FrameResponse | null = null;
+    parser.installPending(1, 2, (r) => { resolved2 = r; }, 5000);
+
+    // Feed the rest of frame2
+    const restResult = parser.feed(frame2);
+    expect(restResult).not.toBeNull();
+    expect(restResult!.generation).toBe(1);
+    expect(restResult!.sequence).toBe(2);
+  });
+
+  it("handles resultCode !== 1 without leaking pending", () => {
+    const parser = new FramePipeParser();
+    let resolved: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved = r; }, 5000);
+
+    const { frame } = buildFrame(1, 1, 4, 4, 64);
+    // Overwrite resultCode with 0 (error)
+    frame.writeUInt32LE(0, 76);
+    const result = parser.feed(frame);
+
+    expect(result).toBeNull();
+    // Pending should be resolved with null
+    expect(resolved).toBeNull();
+    expect(parser.hasPending).toBe(false);
+  });
+
+  it("handles empty payload (payloadBytes === 0)", () => {
+    const parser = new FramePipeParser();
+    let resolved: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved = r; }, 5000);
+
+    const { frame } = buildFrame(1, 1, 4, 4, 0);
+    const result = parser.feed(frame);
+
+    expect(result).toBeNull();
+    expect(resolved).toBeNull();
+    expect(parser.hasPending).toBe(false);
+  });
+
+  it("rejects oversized payload (>200MB)", () => {
+    const parser = new FramePipeParser();
+    let resolved: FrameResponse | null = null;
+    parser.installPending(1, 1, (r) => { resolved = r; }, 5000);
+
+    const { frame } = buildFrame(1, 1, 4, 4, 201 * 1024 * 1024);
+    // Only feed the header (payload would be enormous)
+    const headerOnly = frame.subarray(0, HEADER_SIZE);
+    const result = parser.feed(headerOnly);
+
+    expect(result).toBeNull();
+    expect(resolved).toBeNull();
+    expect(parser.hasPending).toBe(false);
+  });
+
+  it("times out pending if no response arrives", async () => {
+    vi.useFakeTimers();
+    const parser = new FramePipeParser();
+    let resolved: FrameResponse | null = "not-called" as any;
+    parser.installPending(1, 1, (r) => { resolved = r; }, 100);
+
+    // Advance time past timeout
+    vi.advanceTimersByTime(150);
+    await vi.runAllTimersAsync();
+
+    expect(resolved).toBeNull();
+    expect(parser.hasPending).toBe(false);
+    vi.useRealTimers();
   });
 });

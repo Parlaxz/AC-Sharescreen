@@ -3,11 +3,13 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 
-set "HELPER=native\audio-helper\build\Release\screenlink-audio-helper.exe"
+set "AUDIO_HELPER=native\audio-helper\build\Release\screenlink-audio-helper.exe"
+set "VIDEO_HELPER=native\video-enhancer\build\Release\screenlink-video-enhancer.exe"
 set "TRAY_ICON=apps\desktop\assets\tray-icon.png"
 set "DESKTOP=apps\desktop"
 set "BUILD_OUTPUT=release"
-set "PACKAGED_HELPER=%BUILD_OUTPUT%\win-unpacked\resources\screenlink-audio-helper.exe"
+set "PACKAGED_AUDIO_HELPER=%BUILD_OUTPUT%\win-unpacked\resources\screenlink-audio-helper.exe"
+set "PACKAGED_VIDEO_HELPER=%BUILD_OUTPUT%\win-unpacked\resources\screenlink-video-enhancer.exe"
 set "PACKAGED_TRAY_ICON=%BUILD_OUTPUT%\win-unpacked\resources\tray-icon.png"
 
 echo.
@@ -35,7 +37,9 @@ if not exist "%TRAY_ICON%" (
     exit /b 1
 )
 
-echo [1/6] Configuring native audio helper (CMake)...
+:: ── Audio helper ────────────────────────────────────────────────────────────
+
+echo [1/9] Configuring native audio helper (CMake)...
 if not exist "native\audio-helper\build" (
     call pnpm audio-helper:configure
     if errorlevel 1 goto :fail
@@ -43,21 +47,73 @@ if not exist "native\audio-helper\build" (
     echo CMake build directory already exists, skipping configure.
 )
 
-echo [2/6] Building native audio helper...
+echo [2/9] Building native audio helper...
 call pnpm audio-helper:build
 if errorlevel 1 goto :fail
 
-if not exist "%HELPER%" (
+if not exist "%AUDIO_HELPER%" (
     echo ERROR: Audio helper was not created:
-    echo        %HELPER%
+    echo        %AUDIO_HELPER%
     goto :fail
 )
 
-echo [3/6] Running audio helper self-test...
+echo [3/9] Running audio helper self-test...
 call pnpm audio-helper:self-test
 if errorlevel 1 goto :fail
 
-echo [4/6] Building ScreenLink packages...
+:: ── Video enhancer (NVIDIA VFX) ─────────────────────────────────────────────
+
+echo [4/9] Configuring native video enhancer (CMake)...
+
+:: Detect NVIDIA VFX SDK: check env var first, then default Program Files path
+if not defined NVIDIA_VFX_SDK_ROOT (
+    if exist "C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects" (
+        set "NVIDIA_VFX_SDK_ROOT=C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects"
+    )
+)
+
+if defined NVIDIA_VFX_SDK_ROOT (
+    echo   NVIDIA VFX SDK found at: %NVIDIA_VFX_SDK_ROOT%
+
+    if not exist "native\video-enhancer\build" (
+        call pnpm video-enhancer:configure
+        if errorlevel 1 goto :fail
+    ) else (
+        echo CMake build directory already exists, skipping configure.
+    )
+) else (
+    echo   NVIDIA VFX SDK not found, building video enhancer without NVIDIA VFX.
+    echo   Set NVIDIA_VFX_SDK_ROOT environment variable to enable GPU-enhanced encoding.
+
+    if not exist "native\video-enhancer\build" (
+        cmake ^
+            -S native/video-enhancer ^
+            -B native/video-enhancer/build ^
+            -G "Visual Studio 17 2022" ^
+            -A x64
+        if errorlevel 1 goto :fail
+    ) else (
+        echo CMake build directory already exists, skipping configure.
+    )
+)
+
+echo [5/9] Building native video enhancer...
+cmake --build native/video-enhancer/build --config Release
+if errorlevel 1 goto :fail
+
+if not exist "%VIDEO_HELPER%" (
+    echo ERROR: Video enhancer was not created:
+    echo        %VIDEO_HELPER%
+    goto :fail
+)
+
+echo [6/9] Running video enhancer self-test...
+"%VIDEO_HELPER%" --self-test
+if errorlevel 1 goto :fail
+
+:: ── TypeScript packages ─────────────────────────────────────────────────────
+
+echo [7/9] Building ScreenLink packages...
 if exist "%DESKTOP%\dist\win-unpacked" (
     rmdir /s /q "%DESKTOP%\dist\win-unpacked"
 )
@@ -83,7 +139,7 @@ if not exist "%DESKTOP%\dist\renderer\index.html" (
     goto :fail
 )
 
-echo [5/6] Cleaning previous release output...
+echo [8/9] Cleaning previous release output...
 if exist "%BUILD_OUTPUT%" (
     echo Removing previous release output...
     rmdir /s /q "%BUILD_OUTPUT%"
@@ -94,7 +150,7 @@ if exist "%BUILD_OUTPUT%" (
     )
 )
 
-echo [6/6] Building Windows x64 installer...
+echo [9/9] Building Windows x64 installer...
 pushd "%DESKTOP%"
 call npx electron-builder --win --x64 --config electron-builder.config.cjs --publish never
 set "BUILD_RESULT=%ERRORLEVEL%"
@@ -102,9 +158,17 @@ popd
 
 if not "%BUILD_RESULT%"=="0" goto :fail
 
-if not exist "%PACKAGED_HELPER%" (
+:: ── Post-package validation ─────────────────────────────────────────────────
+
+if not exist "%PACKAGED_AUDIO_HELPER%" (
     echo ERROR: Build completed, but the packaged audio helper is missing:
-    echo        %PACKAGED_HELPER%
+    echo        %PACKAGED_AUDIO_HELPER%
+    goto :fail
+)
+
+if not exist "%PACKAGED_VIDEO_HELPER%" (
+    echo ERROR: Build completed, but the packaged video enhancer is missing:
+    echo        %PACKAGED_VIDEO_HELPER%
     goto :fail
 )
 
@@ -124,7 +188,10 @@ echo.
 echo === BUILD SUCCEEDED ===
 echo.
 echo Packaged audio helper:
-echo   %PACKAGED_HELPER%
+echo   %PACKAGED_AUDIO_HELPER%
+echo.
+echo Packaged video enhancer:
+echo   %PACKAGED_VIDEO_HELPER%
 echo.
 echo Packaged tray icon:
 echo   %PACKAGED_TRAY_ICON%

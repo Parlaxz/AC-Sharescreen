@@ -5,6 +5,34 @@ exports.default = async function (context) {
   const { appOutDir, electronPlatformName } = context;
   if (electronPlatformName !== "win32") return;
 
+  const resourcesDir = path.join(appOutDir, "resources");
+
+  // ── Validate required helpers are present ────────────────────────────────
+  const requiredResources = [
+    "screenlink-audio-helper.exe",
+    "screenlink-video-enhancer.exe",
+    "tray-icon.png",
+  ];
+
+  for (const resource of requiredResources) {
+    const resourcePath = path.join(resourcesDir, resource);
+    try {
+      const stat = await fs.stat(resourcePath);
+      if (!stat.isFile()) {
+        console.error(`  ERROR: ${resource} exists but is not a file`);
+        throw new Error(`Required resource ${resource} is not a file`);
+      }
+      console.log(`  verified ${resource} (${(stat.size / 1024).toFixed(0)} KB)`);
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        console.error(`  ERROR: Required resource ${resource} is missing from ${resourcesDir}`);
+        throw new Error(`Required resource ${resource} not found after packaging`);
+      }
+      throw err;
+    }
+  }
+
+  // ── Clean up unnecessary Chromium files ──────────────────────────────────
   const targets = [
     { pattern: "locales", keep: ["en-US.pak"] },
     "LICENSES.chromium.html",

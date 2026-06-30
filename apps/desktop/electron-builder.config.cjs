@@ -61,6 +61,10 @@ const config = {
       from: "../../native/video-enhancer/build/Release/screenlink-video-enhancer.exe",
       to: "screenlink-video-enhancer.exe",
     },
+    {
+      from: "../../native/video-frame-ring/build/Release/screenlink-video-frame-ring.node",
+      to: "screenlink-video-frame-ring.node",
+    },
   ],
   // Do not rebuild native modules unless specifically verified
   npmRebuild: false,

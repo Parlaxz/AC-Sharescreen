@@ -128,9 +128,11 @@ describe("Share again one-click (Issue 1)", () => {
 
     renderWithTooltip(<GroupOverview />);
 
+    // Use a generous timeout because React rendering under happy-dom in
+    // forked processes is slower when many test files run concurrently.
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /share again/i })).toBeInTheDocument();
-    });
+    }, { timeout: 5000 });
   });
 
   it("hides Share again button when no lastShareSettings", async () => {
@@ -174,7 +176,7 @@ describe("Share again one-click (Issue 1)", () => {
 
     renderWithTooltip(<GroupOverview />);
 
-    const btn = await screen.findByRole("button", { name: /share again/i });
+    const btn = await screen.findByRole("button", { name: /share again/i }, { timeout: 5000 });
     await act(async () => { fireEvent.click(btn); });
 
     // Confirmation dialog should appear

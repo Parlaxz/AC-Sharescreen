@@ -18,15 +18,22 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // attempts a real network call. The mock returns a fresh MockSDK per
 // call. We track all created instances in a shared registry so the
 // test can drive them.
-const createdSdks: import("./__mocks__/mock-vdo-sdk.js").MockSDK[] = [];
+//
+// vi.hoisted ensures mock factory dependencies are scoped per test file,
+// preventing cross-file mock leakage when multiple files mock the same module.
+const { MockSDK, createdSdks } = vi.hoisted(() => {
+  type DataHandler = (data: unknown, peerUuid: string) => void;
+  type PeerHandler = (uuid: string) => void;
+  type StateHandler = (state: string) => void;
 
-vi.mock("@screenlink/vdo-adapter", () => {
+  const createdSdks: unknown[] = [];
+
   class MockSDK {
-    private dataHandler: ((d: unknown, p: string) => void) | null = null;
-    private peerJoinedHandler: ((u: string) => void) | null = null;
-    private dataChannelOpenHandler: ((u: string) => void) | null = null;
-    private peerLeftHandler: ((u: string) => void) | null = null;
-    private stateHandler: ((s: string) => void) | null = null;
+    private dataHandler: DataHandler | null = null;
+    private peerJoinedHandler: PeerHandler | null = null;
+    private dataChannelOpenHandler: PeerHandler | null = null;
+    private peerLeftHandler: PeerHandler | null = null;
+    private stateHandler: StateHandler | null = null;
     public sent: { to: string; payload: Record<string, unknown> }[] = [];
     public onSend?: (data: unknown, to: string) => void;
     public state: { connected: boolean; roomJoined: boolean; room: string | null } = {
@@ -51,12 +58,12 @@ vi.mock("@screenlink/vdo-adapter", () => {
         this.eventListeners.set(event, new Set());
       }
       this.eventListeners.get(event)!.add(listener);
-      if (event === "dataReceived") this.dataHandler = listener as (d: unknown, p: string) => void;
-      if (event === "peerConnected") this.peerJoinedHandler = listener as (u: string) => void;
-      if (event === "dataChannelOpen") this.dataChannelOpenHandler = listener as (u: string) => void;
-      if (event === "peerDisconnected") this.peerLeftHandler = listener as (u: string) => void;
+      if (event === "dataReceived") this.dataHandler = listener as DataHandler;
+      if (event === "peerConnected") this.peerJoinedHandler = listener as PeerHandler;
+      if (event === "dataChannelOpen") this.dataChannelOpenHandler = listener as PeerHandler;
+      if (event === "peerDisconnected") this.peerLeftHandler = listener as PeerHandler;
       if (event === "disconnected" || event === "reconnected" || event === "reconnectFailed") {
-        this.stateHandler = listener as (s: string) => void;
+        this.stateHandler = listener as StateHandler;
       }
     }
     removeEventListener(event: string, listener: (...args: unknown[]) => void) {
@@ -114,17 +121,21 @@ vi.mock("@screenlink/vdo-adapter", () => {
     dataChannelOpened(u: string) { this.dataChannelOpenHandler?.(u); }
     peerLeft(u: string) { this.peerLeftHandler?.(u); }
   }
-  return {
-    getSDKConstructor: () => {
-      return function () {
-        const sdk = new MockSDK();
-        createdSdks.push(sdk as unknown as import("./__mocks__/mock-vdo-sdk.js").MockSDK);
-        return sdk;
-      };
-    },
-  };
+
+  return { MockSDK, createdSdks };
 });
 
+vi.mock("@screenlink/vdo-adapter", () => ({
+  getSDKConstructor: () => {
+    return function () {
+      const sdk = new MockSDK();
+      createdSdks.push(sdk);
+      return sdk;
+    };
+  },
+}));
+
+/** Type helper for SDK instances used by test code. */
 import { GroupControlConnection } from "../src/renderer/services/group-control-connection.js";
 import type { GroupControlEnvelope } from "@screenlink/shared";
 
@@ -146,14 +157,6 @@ function makeCallbacks(record: Rec) {
     onStateChange: () => {},
     onError: (e: Error) => { throw e; },
   };
-}
-
-interface MockSDKInstance {
-  sent: { to: string; payload: Record<string, unknown> }[];
-  onSend?: (data: unknown, to: string) => void;
-  deliver: (data: unknown, from: string) => void;
-  peerJoined: (uuid: string) => void;
-  dataChannelOpened: (uuid: string) => void;
 }
 
 async function tick(): Promise<void> {
@@ -242,7 +245,12 @@ describe("GroupControlConnection signed exchange (HMAC-only)", () => {
     bobSdk.peerJoined("alice");
     aliceSdk.dataChannelOpened("bob");
     bobSdk.dataChannelOpened("alice");
-    for (let i = 0; i < 5; i++) await tick();
+
+    // WebCrypto (subtle.digest/sign/verify) and libuv-backed promises may
+    // take an arbitrary number of event-loop cycles to resolve under load.
+    // Poll rather than assuming a fixed tick count is enough.
+    await waitFor(() => aliceRecord.online.includes("bob") ? "bob" : null);
+    await waitFor(() => bobRecord.online.includes("alice") ? "alice" : null);
 
     expect(aliceRecord.online).toContain("bob");
     expect(bobRecord.online).toContain("alice");

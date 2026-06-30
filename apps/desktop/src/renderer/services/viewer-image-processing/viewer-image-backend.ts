@@ -125,6 +125,16 @@ export interface BackendStats {
   configState?: "idle" | "applying" | "applied" | "error";
   /** Number of stale config drops */
   staleConfigDrops?: number;
+
+  // ── Native presenter diagnostics ───────────────────────────────────────
+  /** Current presentation path identifier */
+  presentationPath?: "native-presenter" | "webgl" | "fallback-cpu";
+  /** Presenter latency for the last frame (microseconds) */
+  presenterLatencyUs?: number;
+  /** Number of frames presented natively (cumulative) */
+  presenterFramesPresented?: number;
+  /** Number of frames dropped by the presenter (cumulative) */
+  presenterFramesDropped?: number;
 }
 
 // ─── Backend interface ───────────────────────────────────────────────────────

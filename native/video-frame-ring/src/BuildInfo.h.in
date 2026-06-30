@@ -1,0 +1,31 @@
+#ifndef SCREENLINK_FRAMERING_BUILD_INFO_H
+#define SCREENLINK_FRAMERING_BUILD_INFO_H
+
+#include <string_view>
+
+namespace screenlink::framering::build {
+
+/// Git commit SHA at build time.
+inline constexpr std::string_view kGitCommit = "@GIT_COMMIT@";
+
+/// True if the working tree had uncommitted changes at build time.
+inline constexpr std::string_view kGitDirty = "@GIT_DIRTY@";
+
+/// Git branch at build time.
+inline constexpr std::string_view kGitBranch = "@GIT_BRANCH@";
+
+/// UTC build timestamp.
+inline constexpr std::string_view kBuildTimestamp = "@BUILD_TIMESTAMP@";
+
+/// Target architecture.
+inline constexpr std::string_view kArchitecture = "@ARCHITECTURE@";
+
+/// Build configuration (Debug or Release).
+inline constexpr std::string_view kBuildConfig = "@BUILD_CONFIG@";
+
+/// Compiler identity.
+inline constexpr std::string_view kCompilerId = "@COMPILER_ID@";
+
+} // namespace screenlink::framering::build
+
+#endif // SCREENLINK_FRAMERING_BUILD_INFO_H

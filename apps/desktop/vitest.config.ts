@@ -6,6 +6,10 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "node",
+    // Use forked processes per file to prevent vi.mock module caching
+    // conflicts when multiple test files mock the same module
+    // (e.g. @screenlink/vdo-adapter).
+    pool: "forks",
   },
   resolve: {
     alias: {

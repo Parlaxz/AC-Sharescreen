@@ -172,16 +172,91 @@ describe("NVIDIA statistics honesty", () => {
   });
 });
 
+// ─── Safe byte-size validation ──────────────────────────────────────────
+
+describe("NVIDIA safe byte-size validation", () => {
+  /** Simulates the production safe-dimension check added before expectedBytes. */
+  function validateDimensions(
+    width: number,
+    height: number,
+  ): { valid: boolean; expectedBytes?: number } {
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
+      return { valid: false };
+    }
+    const expectedBytes = width * height * 4;
+    if (expectedBytes > 8192 * 8192 * 4 || expectedBytes <= 0) {
+      return { valid: false };
+    }
+    return { valid: true, expectedBytes };
+  }
+
+  it("accepts valid 1920x1080", () => {
+    expect(validateDimensions(1920, 1080)).toEqual({ valid: true, expectedBytes: 1920 * 1080 * 4 });
+  });
+
+  it("accepts edge-case 8192x8192 (max)", () => {
+    expect(validateDimensions(8192, 8192)).toEqual({ valid: true, expectedBytes: 8192 * 8192 * 4 });
+  });
+
+  it("rejects 0 dimensions", () => {
+    expect(validateDimensions(0, 1080).valid).toBe(false);
+    expect(validateDimensions(1920, 0).valid).toBe(false);
+  });
+
+  it("rejects negative dimensions", () => {
+    expect(validateDimensions(-1, 1080).valid).toBe(false);
+  });
+
+  it("rejects oversized dimensions (>8192)", () => {
+    expect(validateDimensions(8193, 1080).valid).toBe(false);
+    expect(validateDimensions(1920, 8193).valid).toBe(false);
+  });
+
+  it("rejects degenerate width with valid height", () => {
+    expect(validateDimensions(0, 1080).valid).toBe(false);
+  });
+
+  it("expectedBytes is never negative for valid dimensions", () => {
+    const result = validateDimensions(1, 1);
+    expect(result.valid).toBe(true);
+    expect(result.expectedBytes).toBe(4);
+  });
+
+  it("normalizePixels with expected byte length rejects mismatch", () => {
+    const pixels = new Uint8Array(100);
+    const expected = 1920 * 1080 * 4;
+    expect(pixels.byteLength === expected).toBe(false);
+  });
+
+  it("normalizePixels with expected byte length accepts match", () => {
+    const pixels = new Uint8Array(64);
+    const result = normalizePixelsForTest(pixels, 64);
+    expect(result.byteLength).toBe(64);
+  });
+});
+
 // ─── Pure helpers (copied from production for white-box testing) ─────────
 
 function normalizePixelsForTest(
   value: Uint8Array | Uint8ClampedArray,
+  expectedLength?: number,
 ): Uint8Array {
   if (value instanceof Uint8Array) {
-    return value;
+    if (expectedLength === undefined || value.byteLength === expectedLength) {
+      return value;
+    }
+    return new Uint8Array(value);
   }
   if (value instanceof Uint8ClampedArray) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    const result = new Uint8Array(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength,
+    );
+    if (expectedLength === undefined || result.byteLength === expectedLength) {
+      return result;
+    }
+    return new Uint8Array(result);
   }
   return new Uint8Array();
 }

@@ -1,12 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { MessageChannelMain } from "electron";
+import { BrowserWindow, MessageChannelMain } from "electron";
 import { VIDEO_ENHANCER_PROTOCOL_VERSION } from "./video-enhancer-protocol.js";
-import type { VideoEnhancerConfig, VideoEnhancerConfigureResult } from "./video-enhancer-protocol.js";
+import type { VideoEnhancerConfig, VideoEnhancerConfigureResult, VideoEnhancerDiagnosticsResponse, ConfigureNativeResponse } from "./video-enhancer-protocol.js";
 import { createAppliedNvidiaConfig } from "@screenlink/shared";
 import type { AppliedNvidiaConfig } from "@screenlink/shared";
 import { getVideoEnhancerHelperPath } from "./helper-path.js";
+import { SharedMemoryFrameRing, SlotState } from "./SharedMemoryFrameRing.js";
 
 // --- Types ──────────────────────────────────────────────────────────
 
@@ -79,7 +81,8 @@ interface PendingFrame {
   timeout: ReturnType<typeof setTimeout>;
 }
 
-class FramePipeParser {
+/** @internal exported for testing only */
+export class FramePipeParser {
   private state = ParserState.Header;
   private headerBuf = Buffer.alloc(0);
   private payloadBuf: Buffer | null = null;
@@ -222,7 +225,14 @@ class FramePipeParser {
 
         // Check if payload complete
         if (this.payloadRead >= payloadBytes) {
-          return this.emitResult();
+          // Capture leftover headerBuf data before emitResult() resets it
+          const leftover = this.headerBuf.length > 0 ? this.headerBuf : null;
+          const result = this.emitResult();
+          // Re-feed any remaining bytes (next frame header) after reset
+          if (leftover) {
+            return this.feed(leftover) ?? result;
+          }
+          return result;
         }
       }
       return null;
@@ -349,6 +359,11 @@ export class VideoHelperManager {
   private framePipeName = "";
   private frameParser: FramePipeParser | null = null;
 
+  // ── Shared memory ring (file-backed, zero-copy transport) ──────────
+  private shmRing: SharedMemoryFrameRing | null = null;
+  private shmAvailable = false;
+  private shmSlotNext = 0; // round-robin slot index
+
   // ── Frame port management ────────────────────────────────────────────
   private framePorts = new Map<string, Electron.MessagePortMain>();
 
@@ -435,7 +450,7 @@ export class VideoHelperManager {
    */
   private buildAppliedConfig(
     config: VideoEnhancerConfig,
-    nativeResponse: Record<string, unknown>,
+    nativeResponse: ConfigureNativeResponse,
     success: boolean,
   ): AppliedNvidiaConfig {
     const now = Date.now();
@@ -584,6 +599,17 @@ export class VideoHelperManager {
       const afterInputHandling = performance.now();
       const mainInputHandlingMs = afterInputHandling - mainStart;
 
+      // ── Shared memory ring path ────────────────────────────────────────
+      if (this.shmAvailable && this.shmRing) {
+        return this.submitFrameViaShm(
+          generation, frameSequence, frameData,
+          inputWidth, inputHeight,
+          outW, outH, modeNum, qualNum,
+          mainInputHandlingMs, mainStart,
+        );
+      }
+
+      // ── Named-pipe fallback path ───────────────────────────────────────
       // Ensure persistent frame pipe connection
       if (!this.framePipeConnected) {
         const connected = await this.connectFramePipe();
@@ -678,6 +704,126 @@ export class VideoHelperManager {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Submit a frame via the shared memory ring (file-backed zero-copy).
+   * Used as the primary path when shm is available. Falls back to pipe
+   * if any step fails.
+   */
+  private async submitFrameViaShm(
+    generation: number,
+    frameSequence: number,
+    frameData: Uint8Array,
+    inputWidth: number,
+    inputHeight: number,
+    outW: number,
+    outH: number,
+    modeNum: number,
+    qualNum: number,
+    mainInputHandlingMs: number,
+    mainStart: number,
+  ): Promise<{
+    generation: number;
+    sequence: number;
+    pixels: Uint8Array;
+    width: number;
+    height: number;
+    mainInputHandlingMs?: number;
+    requestWriteMs?: number;
+    responseWaitMs?: number;
+    mainHandlerTotalMs?: number;
+    configurationId?: number;
+    appliedQualityLevel?: number;
+    nativeInputReceiveMs?: number;
+    nativeUploadMs?: number;
+    nativeEffectMs?: number;
+    nativeDownloadMs?: number;
+    nativePreWriteTotalMs?: number;
+  } | null> {
+    const ring = this.shmRing;
+    if (!ring) return null;
+
+    // Find an empty slot (round-robin with retry)
+    let slotIndex = ring.findEmptySlot();
+    if (slotIndex < 0) {
+      // All slots busy — try round-robin with a brief wait
+      slotIndex = this.shmSlotNext % 3;
+      this.shmSlotNext = (this.shmSlotNext + 1) % 3;
+      // If the slot isn't Empty after a short wait, fall back to pipe
+      const ctrl = ring.readControl(slotIndex);
+      if (ctrl !== SlotState.Empty) return null;
+    }
+
+    const writeStart = performance.now();
+
+    // Write input data to the slot (header + pixels)
+    const writeOk = ring.writeInput(
+      slotIndex,
+      generation,
+      frameSequence,
+      inputWidth,
+      inputHeight,
+      inputWidth * 4,   // inputStride
+      2,                // pixelFormat = RGBA8
+      outW,
+      outH,
+      modeNum,
+      qualNum,
+      frameData,
+    );
+    if (!writeOk) return null;
+
+    // Commit the slot: Empty → Submitted
+    ring.writeControl(slotIndex, SlotState.Submitted);
+
+    const afterWrite = performance.now();
+    const requestWriteMs = afterWrite - writeStart;
+
+    // Signal the helper to process this slot via the control pipe
+    const raw = await this.sendCommand("processSlot", {
+      slotIndex,
+    });
+
+    const afterResponse = performance.now();
+    const responseWaitMs = afterResponse - afterWrite;
+    const mainHandlerTotalMs = afterResponse - mainStart;
+
+    const resp = (raw ?? {}) as { success?: boolean };
+    if (!resp.success) {
+      // Mark slot as Empty so it can be reused
+      ring.writeControl(slotIndex, SlotState.Empty);
+      return null;
+    }
+
+    // Read the processed output from the slot
+    const output = ring.readOutput(slotIndex);
+    if (!output || output.resultCode !== 1) {
+      ring.writeControl(slotIndex, SlotState.Empty);
+      return null;
+    }
+
+    // Release the slot
+    ring.writeControl(slotIndex, SlotState.Empty);
+
+    return {
+      generation: output.generation,
+      sequence: output.frameSequence,
+      pixels: output.pixels,
+      width: output.width,
+      height: output.height,
+      mainInputHandlingMs,
+      requestWriteMs,
+      responseWaitMs,
+      mainHandlerTotalMs,
+      configurationId: output.configurationId > 0 ? output.configurationId : undefined,
+      appliedQualityLevel: output.appliedQualityLevel > 0 ? output.appliedQualityLevel : undefined,
+      nativeInputReceiveMs: output.nativeInputReceiveUs > 0 ? output.nativeInputReceiveUs / 1000 : undefined,
+      nativeUploadMs: output.nativeUploadUs > 0 ? output.nativeUploadUs / 1000 : undefined,
+      nativeEffectMs: output.nativeEffectUs > 0 ? output.nativeEffectUs / 1000 : undefined,
+      nativeDownloadMs: output.nativeDownloadUs > 0 ? output.nativeDownloadUs / 1000 : undefined,
+      nativePreWriteTotalMs: output.nativeTotalUs > 0 ? output.nativeTotalUs / 1000 : undefined,
+    };
   }
 
   // ── Frame port management (clientId-gated) ─────────────────────────
@@ -866,7 +1012,7 @@ export class VideoHelperManager {
     });
 
     try {
-      const response = await this.sendCommand("configure", {
+      const raw = await this.sendCommand("configure", {
         inputWidth: config.inputWidth,
         inputHeight: config.inputHeight,
         outputWidth: config.outputWidth,
@@ -875,16 +1021,17 @@ export class VideoHelperManager {
         qualityLevel: config.qualityLevel,
         pixelFormat: config.pixelFormat,
       });
-      if (response?.success === true) {
+      const response = (raw ?? {}) as unknown as ConfigureNativeResponse;
+      if (response.success === true) {
         this.configurationId++;
         this.effectInstanceId++;
         this.lastConfig = { ...config };
         this.appliedConfig = this.buildAppliedConfig(config, response, true);
       }
       return {
-        success: response?.success === true,
-        error: response?.success === true ? undefined : (response?.error as string ?? "Reconfigure failed"),
-        appliedConfig: response?.success === true ? (this.appliedConfig ?? undefined) : undefined,
+        success: response.success === true,
+        error: response.success === true ? undefined : (response.error ?? "Reconfigure failed"),
+        appliedConfig: response.success === true ? (this.appliedConfig ?? undefined) : undefined,
       };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : "Reconfigure error" };
@@ -902,9 +1049,138 @@ export class VideoHelperManager {
     }
   }
 
-  async getDiagnostics(): Promise<Record<string, unknown> | null> {
+  async getDiagnostics(): Promise<VideoEnhancerDiagnosticsResponse | null> {
     try {
-      return await this.sendCommand("stats", {});
+      const raw = await this.sendCommand("stats", {});
+      if (!raw) return null;
+      return raw as unknown as VideoEnhancerDiagnosticsResponse;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Native presenter ──────────────────────────────────────────────────
+
+  /**
+   * Attach the native presenter window as a child of the given BrowserWindow.
+   * The owner HWND is extracted from the BrowserWindow and forwarded to the
+   * native helper process.
+   */
+  async attachPresenter(
+    window: BrowserWindow,
+    width: number,
+    height: number,
+  ): Promise<boolean> {
+    if (this.state !== "ready" && this.state !== "processing") return false;
+
+    const hwnd = window.getNativeWindowHandle();
+    if (!hwnd || hwnd.byteLength === 0) {
+      console.error("[VideoHelper] No native window handle available");
+      return false;
+    }
+
+    // Convert Buffer to uint64 HWND value
+    const hwndVal = hwnd.readBigUInt64LE(0);
+
+    try {
+      // Convert BigInt to number for JSON serialization (HWND is pointer-sized,
+      // but on x64 Windows only the lower 48 bits are used for user-mode addresses)
+      const hwndNum = Number(hwndVal);
+      if (!Number.isSafeInteger(hwndNum)) {
+        console.warn("[VideoHelper] HWND value exceeds safe integer range, may be truncated");
+      }
+      const response = await this.sendCommand("presenterAttach", {
+        ownerHwnd: hwndNum,
+        width,
+        height,
+      });
+      const ok = response?.success === true;
+      if (ok) {
+        helperLifecycleLog("presenterAttach", {
+          lifecycleGeneration: this.lifecycleGeneration,
+          hwnd: hwndVal.toString(16),
+          width,
+          height,
+        });
+      }
+      return ok;
+    } catch (err) {
+      console.error("[VideoHelper] presenterAttach failed:", err);
+      return false;
+    }
+  }
+
+  /**
+   * Detach and destroy the native presenter.
+   */
+  async detachPresenter(): Promise<boolean> {
+    try {
+      const response = await this.sendCommand("presenterDetach", {});
+      const ok = response?.success === true;
+      if (ok) {
+        helperLifecycleLog("presenterDetach", {
+          lifecycleGeneration: this.lifecycleGeneration,
+        });
+      }
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Update the presenter surface position and size relative to its owner window.
+   */
+  async updatePresenterBounds(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ): Promise<boolean> {
+    try {
+      const response = await this.sendCommand("presenterUpdateBounds", {
+        x,
+        y,
+        width,
+        height,
+      });
+      return response?.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Show or hide the presenter surface.
+   */
+  async setPresenterVisible(visible: boolean): Promise<boolean> {
+    try {
+      const response = await this.sendCommand("presenterSetVisible", {
+        visible,
+      });
+      return response?.success === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get presenter diagnostics.
+   */
+  async getPresenterDiagnostics(): Promise<import("./video-enhancer-protocol.js").NativePresenterDiagnostics | null> {
+    try {
+      const raw = await this.sendCommand("presenterGetDiagnostics", {});
+      if (!raw || !raw.success) return null;
+      return {
+        active: raw.active === true,
+        framesPresented: Number(raw.framesPresented ?? 0),
+        framesDropped: Number(raw.framesDropped ?? 0),
+        presentErrors: Number(raw.presentErrors ?? 0),
+        lastPresentUs: Number(raw.lastPresentUs ?? 0),
+        avgPresentUs: Number(raw.avgPresentUs ?? 0),
+        maxPresentUs: Number(raw.maxPresentUs ?? 0),
+        presenterResizes: Number(raw.presenterResizes ?? 0),
+      };
     } catch {
       return null;
     }
@@ -987,7 +1263,34 @@ export class VideoHelperManager {
         return false;
       }
 
+      // ── Detect shared memory ring availability ─────────────────────────
+      if (gen === this.lifecycleGeneration) {
+        const capsRaw = await this.sendCommand("capabilities", {});
+        if (capsRaw && capsRaw.sharedMemoryAvailable === true) {
+          const shmPath = capsRaw.sharedMemoryPath as string | undefined;
+          if (shmPath && typeof shmPath === "string") {
+            const validatorPath = shmPath;
+            // Verify the file exists and is accessible before opening
+            try {
+              fs.accessSync(validatorPath, fs.constants.R_OK | fs.constants.W_OK);
+              const ring = new SharedMemoryFrameRing();
+              if (ring.open(validatorPath)) {
+                this.shmRing = ring;
+                this.shmAvailable = true;
+                this.shmSlotNext = 0;
+                helperLifecycleLog("sharedMemoryReady", { path: validatorPath });
+              } else {
+                helperLifecycleLog("sharedMemoryOpenFailed", { path: validatorPath });
+              }
+            } catch {
+              helperLifecycleLog("sharedMemoryAccessFailed", { path: shmPath });
+            }
+          }
+        }
+      }
+
       // Connect frame pipe persistently once we're ready
+      // (still needed as fallback when shared memory is unavailable)
       if (gen === this.lifecycleGeneration) {
         this.framePipeName = `screenlink-video-${this.sessionId}-frame`;
         const fConnected = await this.connectFramePipe();
@@ -997,7 +1300,7 @@ export class VideoHelperManager {
         }
       }
 
-      const configReply = await this.sendCommand("configure", {
+      const configRaw = await this.sendCommand("configure", {
         inputWidth: config.inputWidth,
         inputHeight: config.inputHeight,
         outputWidth: config.outputWidth,
@@ -1006,7 +1309,8 @@ export class VideoHelperManager {
         qualityLevel: config.qualityLevel,
         pixelFormat: config.pixelFormat,
       });
-      if (configReply?.success !== true || gen !== this.lifecycleGeneration) {
+      const configReply = (configRaw ?? {}) as unknown as ConfigureNativeResponse;
+      if (configReply.success !== true || gen !== this.lifecycleGeneration) {
         this.handleHelperError("Configuration rejected by helper");
         return false;
       }
@@ -1299,13 +1603,16 @@ export class VideoHelperManager {
 
   private attemptRestart(gen: number): void {
     if (gen !== this.lifecycleGeneration) return;
+    this.clearRestartTimer();
     if (this.restartAttempts >= this.maxRestarts) {
+      this.state = "disconnected";
+      this.callbacks.onStateChange?.("disconnected");
       this.callbacks.onError?.("Video helper reached max restart attempts");
       return;
     }
 
     this.restartAttempts++;
-    const delay = Math.min(5000 * Math.pow(2, this.restartAttempts - 1), 20000);
+    const delay = this.getRestartDelayMs(this.restartAttempts);
 
     this.restartTimer = setTimeout(() => {
       if (gen !== this.lifecycleGeneration) return;
@@ -1321,6 +1628,17 @@ export class VideoHelperManager {
       };
       this.startHelper(config).catch(() => {});
     }, delay);
+  }
+
+  private getRestartDelayMs(attemptNumber: number): number {
+    switch (attemptNumber) {
+      case 1:
+        return 1000;
+      case 2:
+        return 4000;
+      default:
+        return 15000;
+    }
   }
 
   // ── Diagnostics ────────────────────────────────────────────────────
@@ -1374,6 +1692,13 @@ export class VideoHelperManager {
       this.framePipeClient = null;
     }
     this.framePipeConnected = false;
+
+    // Close shared memory ring
+    if (this.shmRing) {
+      this.shmRing.close();
+      this.shmRing = null;
+    }
+    this.shmAvailable = false;
 
     // Destroy control socket
     this.controlSocket?.destroy();

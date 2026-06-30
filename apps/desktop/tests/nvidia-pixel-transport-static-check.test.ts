@@ -59,6 +59,36 @@ const ALLOWED_BASE64_USES: AllowEntry[] = [
     linePattern: `Buffer.from(record.encryptedGroupSecret, "base64")`,
     reason: "Group-secret decryption from storage",
   },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"presenterUpdateBounds"`,
+    reason: "IPC command name (not base64)",
+  },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"presenterGetDiagnostics"`,
+    reason: "IPC command name (not base64)",
+  },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"sharedMemoryOpenFailed"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"sharedMemoryAccessFailed"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
+  {
+    file: "src/renderer/services/viewer-image-processing/nvidia-vsr-backend.ts",
+    linePattern: `"natvPresActivated"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
+  {
+    file: "src/renderer/services/viewer-image-processing/nvidia-vsr-backend.ts",
+    linePattern: `"natvPresDetached"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
 ];
 
 // ─── Base64 regex ───────────────────────────────────────────────────────────

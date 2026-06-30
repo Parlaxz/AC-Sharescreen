@@ -284,6 +284,9 @@ export function EnhancedVideoSurface({
           onError: handleError,
           onFirstFrame: handleFirstFrame,
           onStatsUpdate: (stats: ProcessorStats) => {
+            if (chainRef.current && stats.framesDisplayed > 0) {
+              chainRef.current.recordSuccess();
+            }
             onStatsUpdate?.(stats);
           },
         });

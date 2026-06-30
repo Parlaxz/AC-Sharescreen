@@ -165,6 +165,20 @@ export interface AppliedNvidiaConfig {
 }
 
 /**
+ * Diagnostics snapshot from the native D3D11 presenter.
+ */
+export interface NativePresenterDiagnostics {
+  active: boolean;
+  framesPresented: number;
+  framesDropped: number;
+  presentErrors: number;
+  lastPresentUs: number;
+  avgPresentUs: number;
+  maxPresentUs: number;
+  presenterResizes: number;
+}
+
+/**
  * Narrowest compliant implementation of AppliedNvidiaConfig.
  * Uses verificationMethod = 'set-and-load-confirmed' when SDK cannot
  * query exact applied values.

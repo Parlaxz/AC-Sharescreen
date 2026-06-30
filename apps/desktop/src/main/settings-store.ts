@@ -111,6 +111,14 @@ export interface PersistedSettings {
 
   /** Maximum volume percentage for the viewer slider (default 100; allows boost up to 200+) */
   viewerMaxVolumePercent: number;
+
+  // ── NVIDIA enhancement settings persistence (Phase 6+) ─────────────────
+  /** Viewer image enhancement settings, stored as opaque JSON blob */
+  viewerImageEnhancementSettings: Record<string, unknown> | null;
+  /** Last selected NVIDIA processing mode for quick recall */
+  lastNvidiaProcessingMode: string;
+  /** Last selected NVIDIA quality level for quick recall */
+  lastNvidiaQuality: string;
 }
 
 export type ShortcutBinding = {
@@ -118,7 +126,7 @@ export type ShortcutBinding = {
   key: string;
 };
 
-const CURRENT_VERSION = 3;
+const CURRENT_VERSION = 4;
 
 const DEFAULT_HOST_LIMITS: PersistedSettings["hostQualityLimits"] = {
   maxVideoBitrateKbps: 5000,
@@ -195,6 +203,9 @@ function getDefaults(): PersistedSettings {
     discordDeafenShortcut: { modifiers: ["alt"], key: "D" },
     discordDeafenScreenLink: true,
     viewerMaxVolumePercent: 200,
+    viewerImageEnhancementSettings: null,
+    lastNvidiaProcessingMode: "vsr",
+    lastNvidiaQuality: "high",
   };
 }
 
@@ -242,6 +253,13 @@ function applyMigrations(raw: unknown): PersistedSettings {
   // Add viewerMaxVolumePercent if missing
   if (s.viewerMaxVolumePercent === undefined) {
     s.viewerMaxVolumePercent = 200;
+  }
+
+  // v4 migration: add NVIDIA enhancement settings persistence fields
+  if (inputVersion < 4) {
+    s.viewerImageEnhancementSettings = s.viewerImageEnhancementSettings ?? null;
+    s.lastNvidiaProcessingMode = s.lastNvidiaProcessingMode ?? "vsr";
+    s.lastNvidiaQuality = s.lastNvidiaQuality ?? "high";
   }
 
   // Normalize audio mode for current version
@@ -372,6 +390,16 @@ export class SettingsStore {
     }
     if (s.viewerMaxVolumePercent === undefined) {
       s.viewerMaxVolumePercent = 200;
+    }
+    // Add NVIDIA enhancement fields if absent (v4 addition)
+    if (s.viewerImageEnhancementSettings === undefined) {
+      s.viewerImageEnhancementSettings = null;
+    }
+    if (s.lastNvidiaProcessingMode === undefined) {
+      s.lastNvidiaProcessingMode = "vsr";
+    }
+    if (s.lastNvidiaQuality === undefined) {
+      s.lastNvidiaQuality = "high";
     }
     // Normalise "Win" → "Super" in any stored Quick Share accelerator
     // (catches values saved before the IPC-level normalisation was added).

@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   Monitor,
@@ -54,6 +55,12 @@ import {
   saveImageEnhancementSettings,
   resetImageEnhancementSettings,
 } from "@/services/viewer-image-processing/viewer-image-settings";
+import {
+  nvidiaBenchmarkService,
+  getBenchmarkProgressSnapshot,
+  subscribeToBenchmarkProgress,
+  type BenchmarkHost,
+} from "@/services/viewer-image-processing/nvidia-benchmark-service";
 
 // ─── Reduced motion hook ──────────────────────────────────────────────────
 
@@ -271,8 +278,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   enhancementSettingsRef.current = enhancementSettings;
   const enhancementFallbackRef = useRef(enhancementFallback);
   enhancementFallbackRef.current = enhancementFallback;
+  const enhancementStatsRef = useRef<ProcessorStats | null>(null);
+  enhancementStatsRef.current = enhancementStats;
   /** Tracks whether the stored viewerRequest has been auto-sent for this session */
   const viewerRequestAutoSentRef = useRef(false);
+
+  // ── Benchmark service subscription ──────────────────────────────────
+  const benchmarkProgress = useSyncExternalStore(
+    subscribeToBenchmarkProgress,
+    getBenchmarkProgressSnapshot,
+    getBenchmarkProgressSnapshot,
+  );
 
   // ── Discord shortcut bindings (loaded from settings) ──
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
@@ -465,6 +481,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
     // 2) Clear visual stale state that destroy() does not own
     //    (React component state managed via useState).
+    // Cancel any running benchmark
+    if (nvidiaBenchmarkService.running) {
+      nvidiaBenchmarkService.cancel();
+    }
+    nvidiaBenchmarkService.reset();
     setEnhancementActive(false);
     setEnhancementFallback(false);
     setEnhancementStats(null);
@@ -626,6 +647,99 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   const handleEnhancementStatsUpdate = useCallback((stats: ProcessorStats) => {
     setEnhancementStats(stats);
+    enhancementStatsRef.current = stats;
+  }, []);
+
+  // ── Benchmark helpers and handlers ───────────────────────────────────
+
+  /**
+   * Build a BenchmarkHost from the current processor refs.
+   * applySettings maps to handleEnhancementChange; readStats maps to
+   * the latest ProcessorStats snapshot.
+   */
+  const buildBenchmarkHost = useCallback((): BenchmarkHost => ({
+    applySettings: (settings) => {
+      handleEnhancementChange(settings);
+    },
+    readStats: () => {
+      const stats = enhancementStatsRef.current;
+      if (!stats) return null;
+      return {
+        processingTimeMs: stats.processingTimeMs,
+        rendererToResultMs: stats.rendererToResultTimeMs,
+        nativeTransportProcessingTimeMs: stats.nativeTransportProcessingTimeMs,
+        totalEnhancedFrameLatencyMs: stats.totalEnhancedFrameLatencyMs,
+        nativeOutputWidth: stats.nativeOutputWidth,
+        nativeOutputHeight: stats.nativeOutputHeight,
+        nativeQualityLevel: stats.nativeQualityLevel,
+        framesDisplayed: stats.framesDisplayed,
+        completedFps: stats.completedFps,
+        backend: stats.backend,
+        backpressureDrops: stats.backpressureDrops,
+        nativeFailures: stats.nativeFailures,
+      };
+    },
+  }), [handleEnhancementChange]);
+
+  /**
+   * Start a full benchmark run.
+   * Saves current enhancement settings, builds a host from the current
+   * processor stats, and kicks off the service.
+   */
+  const handleRunBenchmark = useCallback(() => {
+    // Save current settings for later restoration
+    nvidiaBenchmarkService.saveSettings(enhancementSettingsRef.current);
+    // Build host from refs (closure-safe)
+    const host = buildBenchmarkHost();
+    // Use default scenarios
+    nvidiaBenchmarkService.setScenarios();
+    // Start the run
+    nvidiaBenchmarkService.start(host);
+  }, [buildBenchmarkHost]);
+
+  /** Cancel the running benchmark. */
+  const handleCancelBenchmark = useCallback(() => {
+    nvidiaBenchmarkService.cancel();
+  }, []);
+
+  /**
+   * Apply the benchmark's recommended settings to the enhancement pipeline.
+   * Called when the user clicks "Apply Recommended" in the results card.
+   */
+  const handleApplyBenchmarkRecommendation = useCallback(() => {
+    const aggregate = nvidiaBenchmarkService.aggregate;
+    if (aggregate?.recommendedSettings) {
+      handleEnhancementChange(aggregate.recommendedSettings);
+    }
+  }, [handleEnhancementChange]);
+
+  /**
+   * Restore original enhancement settings after a benchmark reaches a
+   * terminal state (completed / cancelled / failed).
+   */
+  const handleRestoreBenchmarkSettings = useCallback(() => {
+    if (benchmarkProgress.state === "completed" ||
+        benchmarkProgress.state === "cancelled" ||
+        benchmarkProgress.state === "failed") {
+      const restored = nvidiaBenchmarkService.buildRestoredSettings();
+      if (restored) {
+        handleEnhancementChange(restored);
+      }
+    }
+  }, [benchmarkProgress.state, handleEnhancementChange]);
+
+  // Restore settings when benchmark reaches a terminal state
+  useEffect(() => {
+    handleRestoreBenchmarkSettings();
+  }, [handleRestoreBenchmarkSettings]);
+
+  // Cancel benchmark on unmount
+  useEffect(() => {
+    return () => {
+      if (nvidiaBenchmarkService.running) {
+        nvidiaBenchmarkService.cancel();
+      }
+    };
   }, []);
 
   // ── Audio boost pipeline (Web Audio API GainNode) ────────────────
@@ -1685,6 +1799,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             enhancementStats={enhancementStats}
             mediaSessionId={watchedSessionId}
             viewerHistoryId={viewerHistoryId}
+            benchmarkRunning={nvidiaBenchmarkService.running}
+            benchmarkProgress={benchmarkProgress}
+            onRunBenchmark={handleRunBenchmark}
+            onCancelBenchmark={handleCancelBenchmark}
+            onApplyBenchmarkRecommendation={handleApplyBenchmarkRecommendation}
           >
             <VideoControlsOverlay
               isPaused={isPaused}

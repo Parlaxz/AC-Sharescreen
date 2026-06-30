@@ -160,6 +160,10 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
     return NvVfxResult::kErrorNotCompiled;
 }
 
+void* NvidiaVfxContext::GetOutputGpuPointer() {
+    return nullptr;
+}
+
 NvVfxResult NvidiaVfxContext::RunFrame() {
     return NvVfxResult::kErrorNotCompiled;
 }
@@ -534,6 +538,20 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
     outWidth = outputDesc_.width;
     outHeight = outputDesc_.height;
     return NvVfxResult::kSuccess;
+}
+
+void* NvidiaVfxContext::GetOutputGpuPointer() {
+    if (!effectLoaded_ || !outputImage_) {
+        return nullptr;
+    }
+    // NvCVImage allocated with NVCV_GPU has its pixels in CUDA device memory.
+    // The pixels field is a CUDA device pointer accessible from the same CUDA
+    // context used by the NVIDIA VFX SDK.
+    auto* image = static_cast<NvCVImage*>(outputImage_);
+    if (image->pixels) {
+        return image->pixels;
+    }
+    return nullptr;
 }
 
 void NvidiaVfxContext::Destroy() {

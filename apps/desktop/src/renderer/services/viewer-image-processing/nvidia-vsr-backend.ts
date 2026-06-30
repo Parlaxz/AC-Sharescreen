@@ -73,6 +73,13 @@ type ScreenLinkVideoApi = {
   requestFramePort?: () => Promise<{ success: boolean }>;
   /** Phase 6: Request a frame port bound to a specific clientId lease */
   requestFramePortForClient?: (clientId: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Native presenter operations
+  nativePresenterAttach?: (width: number, height: number) => Promise<{ success: boolean }>;
+  nativePresenterDetach?: () => Promise<{ success: boolean }>;
+  nativePresenterUpdateBounds?: (x: number, y: number, width: number, height: number) => Promise<{ success: boolean }>;
+  nativePresenterSetVisible?: (visible: boolean) => Promise<{ success: boolean }>;
+  nativePresenterGetDiagnostics?: () => Promise<{ success: boolean; diagnostics?: import("@screenlink/shared").NativePresenterDiagnostics | null; error?: string }>;
 };
 
 const EMPTY_STATS: BackendStats = {
@@ -303,6 +310,10 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   private framePort: MessagePort | null = null;
   private framePortRequested = false;
   private pendingFramePort: Promise<boolean> | null = null;
+
+  // Native presenter support (GPU-resident display)
+  private nativePresenterActive = false;
+  private nativePresenterSupported = false;
 
   /**
    * Acquire a client lease and then the dedicated frame MessagePort.
@@ -628,9 +639,34 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         nativeQualityLevel: this.currentQualityLevel,
       };
 
+      // Try to activate native presenter (GPU-resident display path)
+      // This is best-effort — failure here just means we fall back to WebGL
+      this.nativePresenterActive = false;
+      this.nativePresenterSupported = Boolean(api?.nativePresenterAttach && api?.nativePresenterDetach);
+      if (this.nativePresenterSupported) {
+        try {
+          // Use full window size as initial surface; will be refined via resizeOutput
+          const initWidth = this.displayPixelWidth || 1920;
+          const initHeight = this.displayPixelHeight || 1080;
+          const attachResult = await api.nativePresenterAttach!(initWidth, initHeight);
+          this.nativePresenterActive = attachResult.success;
+          if (this.nativePresenterActive) {
+            lifecycleLog("NvidiaBackend", "natvPresActivated", {
+              instanceId: this.instanceId,
+              width: initWidth,
+              height: initHeight,
+            });
+          }
+        } catch (err) {
+          this.nativePresenterActive = false;
+          console.warn("[nvidia-vsr] Native presenter activation failed:", err);
+        }
+      }
+
       lifecycleLog("NvidiaBackend", "initialize", {
         instanceId: this.instanceId,
         generation: this.generation,
+        nativePresenter: this.nativePresenterActive,
       });
 
       return { success: true };
@@ -688,6 +724,12 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       this.canvas.style.width = `${width}px`;
       this.canvas.style.height = `${height}px`;
     }
+
+    // Forward bounds to native presenter if active
+    if (this.nativePresenterActive) {
+      const api = getVideoApi();
+      api?.nativePresenterUpdateBounds?.(0, 0, Math.round(width), Math.round(height)).catch(() => {});
+    }
   }
 
   onSourceResize(
@@ -700,6 +742,27 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       sourceHeight !== this.stats.inputHeight
     ) {
       this.configKey = null;
+    }
+
+    // Forward size to native presenter
+    if (this.nativePresenterActive) {
+      const api = getVideoApi();
+      api?.nativePresenterUpdateBounds?.(
+        0, 0,
+        Math.round(sourceWidth * 2), // VSR doubles the resolution
+        Math.round(sourceHeight * 2),
+      ).catch(() => {});
+    }
+  }
+
+  /**
+   * Set native presenter visibility based on video element visibility.
+   * Should be called when the viewer container becomes visible/hidden.
+   */
+  setPresenterVisible(visible: boolean): void {
+    if (this.nativePresenterActive) {
+      const api = getVideoApi();
+      api?.nativePresenterSetVisible?.(visible).catch(() => {});
     }
   }
 
@@ -892,10 +955,89 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         };
       }
 
+      // ── Native presenter path (GPU-resident) ─────────────────────────
+      // When the native presenter is active, the native helper presents the
+      // frame directly to a D3D11 swapchain overlay window. No pixel data is
+      // returned — we skip texture upload entirely.
+      if (this.nativePresenterActive) {
+        // Check if pixel data is empty (expected for presenter path)
+        const noPixels = !result.pixels || result.pixels.byteLength === 0;
+
+        if (noPixels) {
+          // Frame was presented natively — no WebGL texture upload needed
+          this.stats = {
+            inputWidth,
+            inputHeight,
+            outputWidth: result.width || output.width,
+            outputHeight: result.height || output.height,
+            enhancedScalingActive: true,
+            lastGpuTimeMs: 0,
+            backend: "nvidia-vsr",
+            framesProcessed: this.stats.framesProcessed + 1,
+            activePasses: ["nvidia-vsr", "native-presenter"],
+            backpressureDrops: this.stats.backpressureDrops,
+            generation,
+            nativeQualityLevel: this.currentQualityLevel,
+            processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+            completedAttempts: (this.stats.completedAttempts ?? 0) + 1,
+            displayedCount: (this.stats.displayedCount ?? 0) + 1,
+            coalescedCount: this.stats.coalescedCount ?? 0,
+            backendDrops: this.stats.backpressureDrops,
+            staleGenerationResults: this.stats.staleGenerationResults ?? 0,
+            failures: this.stats.failures ?? 0,
+          };
+
+          return {
+            success: true,
+            gpuTimeMs: 0,
+            totalLatencyMs: 0,
+            timingBreakdown: {
+              captureReadbackMs: drawImageMs + getImageDataMs,
+              drawImageMs,
+              getImageDataMs,
+              inputBufferPreparationMs,
+              rendererToResultMs,
+              textureUploadMs: 0,
+              rendererTotalMs: performance.now() - frameStart,
+              nativeTransportProcessingMs: rendererToResultMs,
+              displayUploadMs: 0,
+              // Native presenter path: no CPU download
+              nativeDownloadMs: 0,
+              nativePreWriteTotalMs: rendererToResultMs,
+            },
+          };
+        }
+
+        // Presenter is active but pixel data was returned — this means the
+        // GPU-to-GPU path failed and we fell back to the CPU download path.
+        // Continue with normal WebGL texture upload.
+      }
+
+      // Safe frame byte-size validation before expectedBytes calculation
+      if (result.width <= 0 || result.height <= 0 || result.width > 8192 || result.height > 8192) {
+        this.stats = {
+          ...this.stats,
+          failures: (this.stats.failures ?? 0) + 1,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        };
+        return { success: false };
+      }
+
       const expectedBytes = result.width * result.height * 4;
+      // Guard against overflow: after dimension clamp above, this is safe for
+      // 8192 * 8192 * 4 = 268,435,456 which fits in Number's safe integer range.
+      if (expectedBytes > 8192 * 8192 * 4 || expectedBytes <= 0) {
+        this.stats = {
+          ...this.stats,
+          failures: (this.stats.failures ?? 0) + 1,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+        };
+        return { success: false };
+      }
+
       const pixels = normalizePixels(result.pixels, expectedBytes);
 
-      if (result.width <= 0 || result.height <= 0 || pixels.byteLength !== expectedBytes) {
+      if (pixels.byteLength !== expectedBytes) {
         this.stats = {
           ...this.stats,
           failures: (this.stats.failures ?? 0) + 1,
@@ -1009,6 +1151,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       backend: "nvidia-vsr",
       configState: this.configState,
       staleConfigDrops: this.staleConfigDrops,
+      presentationPath: this.nativePresenterActive ? "native-presenter" : "webgl",
     };
   }
 
@@ -1029,6 +1172,15 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     this.configKey = null;
 
     const api = getVideoApi();
+
+    // Detach native presenter (best-effort)
+    if (this.nativePresenterActive) {
+      api?.nativePresenterDetach?.().catch(() => {});
+      this.nativePresenterActive = false;
+      lifecycleLog("NvidiaBackend", "natvPresDetached", {
+        instanceId: this.instanceId,
+      });
+    }
 
     // Release client lease (does NOT globally stop the helper)
     this.releaseClient();
