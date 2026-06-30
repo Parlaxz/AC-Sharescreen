@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0 — 2026-06-30
+
+### New
+- Version bumped to 0.6.0.
+
 ## 0.5.0 — 2026-06-29
 
 ### New

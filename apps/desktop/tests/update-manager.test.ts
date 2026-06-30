@@ -387,7 +387,7 @@ describe("manual-only update checking", () => {
     const onCall = mockUpdater.on.mock.calls.find((c) => c[0] === "update-available");
     expect(onCall).toBeDefined();
     const handler = onCall![1] as (info: unknown) => void;
-    handler({ version: "0.5.0" });
+    handler({ version: "0.6.0" });
     expect(mockDownloadUpdate).not.toHaveBeenCalled();
   });
 
@@ -401,7 +401,7 @@ describe("manual-only update checking", () => {
     // Simulate update-available event from the mock
     const onCall = mockUpdater.on.mock.calls.find((c) => c[0] === "update-available");
     const handler = onCall![1] as (info: unknown) => void;
-    handler({ version: "0.5.0" });
+    handler({ version: "0.6.0" });
     // No automatic download
     expect(mockDownloadUpdate).not.toHaveBeenCalled();
     // User clicks Download update
@@ -418,7 +418,7 @@ describe("manual-only update checking", () => {
     );
     expect(onCall).toBeDefined();
     const handler = onCall![1] as (info: unknown) => void;
-    handler({ version: "0.5.0" });
+    handler({ version: "0.6.0" });
     expect(mockQuitAndInstall).not.toHaveBeenCalled();
   });
 
@@ -429,7 +429,7 @@ describe("manual-only update checking", () => {
     // Drive state to downloaded
     const dl = mockUpdater.on.mock.calls.find((c) => c[0] === "update-downloaded");
     const dlHandler = dl![1] as (info: unknown) => void;
-    dlHandler({ version: "0.5.0" });
+    dlHandler({ version: "0.6.0" });
     // No automatic install
     expect(mockQuitAndInstall).not.toHaveBeenCalled();
     // User clicks Restart and install

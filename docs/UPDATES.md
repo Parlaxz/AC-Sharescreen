@@ -307,7 +307,7 @@ Differential (delta) updates work by comparing the blockmap of the currently ins
 3. It uses the **currently installed version's blockmap** (already on disk at the install location) to compute which byte ranges differ.
 4. It downloads only those changed byte ranges from `B`'s installer.
 
-This means: **if a user is on version 0.1.1 and wants to update to 0.5.0, the updater needs the blockmap for 0.1.1 (which is on the user's disk) AND the blockmap for 0.5.0 (which must be available on the release).** But crucially, intermediate blockmaps are not needed — only the target version's blockmap.
+This means: **if a user is on version 0.1.1 and wants to update to 0.6.0, the updater needs the blockmap for 0.1.1 (which is on the user's disk) AND the blockmap for 0.6.0 (which must be available on the release).** But crucially, intermediate blockmaps are not needed — only the target version's blockmap.
 
 However, there is a subtle case: if the blockmap base URL override points to a specific release download URL, and that release's artifacts have been deleted, the blockmap resolution may fail and the updater may fall back to a full download. The `UpdateManager` sets `previousBlockmapBaseUrlOverride` dynamically based on the current version:
 

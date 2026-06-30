@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply the ScreenLink 0.5.0 viewer post-processing fixes.
+"""Apply the ScreenLink 0.6.0 viewer post-processing fixes.
 
 Run from the AC-Sharescreen repository root:
     python path/to/screenlink-postprocessing-fix.py
