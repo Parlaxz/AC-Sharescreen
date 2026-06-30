@@ -130,10 +130,24 @@ function buildSendKeysString(binding: ShortcutBinding): {
     HOME: "{HOME}", END: "{END}",
     PAGEUP: "{PGUP}", PAGEDOWN: "{PGDN}",
     UP: "{UP}", DOWN: "{DOWN}", LEFT: "{LEFT}", RIGHT: "{RIGHT}",
+    // Numpad keys — SendKeys can't distinguish numpad from regular keys,
+    // so we send the character equivalent. The native helper (SendInput
+    // with VK_NUMPAD0 etc.) is required for true numpad simulation.
+    NUMPAD0: "0", NUMPAD1: "1", NUMPAD2: "2", NUMPAD3: "3",
+    NUMPAD4: "4", NUMPAD5: "5", NUMPAD6: "6", NUMPAD7: "7",
+    NUMPAD8: "8", NUMPAD9: "9",
+    NUMPADADD: "{+}", NUMPADSUBTRACT: "-",
+    NUMPADMULTIPLY: "*", NUMPADDIVIDE: "/",
+    NUMPADDECIMAL: ".", NUMPADENTER: "{ENTER}",
   };
 
   const upperKey = binding.key.toUpperCase();
   const keyPart = keyMap[upperKey] ?? (upperKey.length === 1 ? upperKey : "");
+
+  // Record a note when the fallback can't truly send a numpad key
+  if (upperKey.startsWith("NUMPAD") && !keyPart.startsWith("{")) {
+    notes.push("SendKeys sends top-row equivalent, not true numpad key; native helper recommended");
+  }
 
   return {
     sendKeys: `${modifierParts.join("")}${keyPart}`,
@@ -149,6 +163,15 @@ export async function sendShortcutViaPowerShellSendInput(
 
   if (!sendKeys) {
     return { success: false, error: `unsupported-key:${normalized.key}` };
+  }
+
+  // SendKeys can't distinguish numpad from top-row keys, so fail early
+  // for numpad keys — the native helper (SendInput with VK_NUMPAD0 etc.)
+  // is required for proper numpad simulation.
+  const upperKey = normalized.key.trim().toUpperCase();
+  if (upperKey.startsWith("NUMPAD")) {
+    const note = notes.length > 0 ? ` (${notes.join("; ")})` : "";
+    return { success: false, error: `numpad-key-requires-helper${note}` };
   }
 
   // Escape single quotes for PowerShell string literal

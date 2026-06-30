@@ -146,6 +146,7 @@ const api: ScreenLinkAPI = {
   videoHelperFlush: () => ipcRenderer.invoke("video-helper:flush"),
   videoHelperGetState: () => ipcRenderer.invoke("video-helper:get-state"),
   videoHelperGetAppliedConfig: () => ipcRenderer.invoke("video-helper:get-applied-config"),
+  videoHelperGetDiagnostics: () => ipcRenderer.invoke("video-helper:get-diagnostics"),
   requestFramePort: () => ipcRenderer.invoke("request-frame-port"),
   requestFramePortForClient: (clientId) => ipcRenderer.invoke("video-helper:request-frame-port", clientId),
 

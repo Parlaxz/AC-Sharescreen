@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
 import { Info, Copy, Check, FolderOpen, BarChart3, Gauge } from "lucide-react";
+import { formatBitrateBps, formatBitrateKbps } from "@/lib/utils";
 import type { ViewerSession } from "@/services/viewer-session.js";
 import {
   getNvidiaCapabilitySnapshot,
@@ -368,9 +369,20 @@ function NvidiaDiagnosticsSection() {
   );
 }
 
+function fmtKbps(kbps: number): string {
+  return formatBitrateKbps(kbps);
+}
+
 // ─── Sanitized diagnostics copy ───────────────────────────────────────────
 
 function sanitizeDiagnostics(d: DiagnosticsSnapshot): string {
+  const fmtBpsInline = (bps: number): string => {
+    const Bps = bps / 8;
+    if (Bps < 1000) return `${Math.round(Bps)} B/s`;
+    const kBps = Bps / 1000;
+    if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
+    return `${(kBps / 1000).toFixed(2)} MB/s`;
+  };
   const lines = [
     "ScreenLink Viewer Diagnostics",
     "============================",
@@ -382,7 +394,7 @@ function sanitizeDiagnostics(d: DiagnosticsSnapshot): string {
     `  Codec: ${d.videoCodec ?? "unknown"}`,
     `  Resolution: ${d.videoWidth && d.videoHeight ? `${d.videoWidth}×${d.videoHeight}` : "unknown"}`,
     `  Frame rate: ${d.videoFrameRate ?? "unknown"} fps`,
-    `  Bitrate: ${d.videoBitrateBps !== null ? `${(d.videoBitrateBps / 1000).toFixed(1)} kbps` : "unknown"}`,
+    `  Bitrate: ${d.videoBitrateBps !== null ? fmtBpsInline(d.videoBitrateBps) : "unknown"}`,
     `  Packets: ${d.videoPacketsReceived} received, ${d.videoPacketsLost} lost`,
     `  Packet loss: ${d.videoPacketLossPercent !== null ? `${d.videoPacketLossPercent.toFixed(2)}%` : "unknown"}`,
     `  Jitter: ${d.videoJitter !== null ? `${d.videoJitter.toFixed(1)} ms` : "unknown"}`,
@@ -391,7 +403,7 @@ function sanitizeDiagnostics(d: DiagnosticsSnapshot): string {
     "",
     "Audio:",
     `  Codec: ${d.audioCodec ?? "unknown"}`,
-    `  Bitrate: ${d.audioBitrateBps !== null ? `${(d.audioBitrateBps / 1000).toFixed(1)} kbps` : "unknown"}`,
+    `  Bitrate: ${d.audioBitrateBps !== null ? fmtBpsInline(d.audioBitrateBps) : "unknown"}`,
     `  Packets: ${d.audioPacketsReceived} received, ${d.audioPacketsLost} lost`,
     `  Jitter: ${d.audioJitter !== null ? `${d.audioJitter.toFixed(1)} ms` : "unknown"}`,
     "",
@@ -418,7 +430,7 @@ export function DiagnosticsPanel({
 }: DiagnosticsPanelProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const stats = useDiagnosticsPoller(open ? session : null, {
+  const stats = useDiagnosticsPoller(contentOnly || open ? session : null, {
     lastRequested: lastRequestedQuality,
     effectiveKbps: effectiveBitrateKbps,
     configuredBps: configuredBitrateBps,
@@ -457,8 +469,7 @@ export function DiagnosticsPanel({
   }, [stats]);
 
   const fmtBps = (bps: number | null): string => {
-    if (bps === null || bps === 0) return "—";
-    return `${(bps / 1000).toFixed(1)} kbps`;
+    return formatBitrateBps(bps);
   };
 
   const fmtPct = (pct: number | null): string => {
@@ -564,17 +575,17 @@ export function DiagnosticsPanel({
           </p>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
             {stats.requestedBitrateKbps !== null ? (
-              <><span className="text-text-muted">Requested</span><span className="text-text-primary text-right">{stats.requestedBitrateKbps} kbps</span></>
+              <><span className="text-text-muted">Requested</span><span className="text-text-primary text-right">{fmtKbps(stats.requestedBitrateKbps)}</span></>
             ) : (
               <><span className="text-text-muted">Requested</span><span className="text-text-primary text-right">—</span></>
             )}
             {stats.effectiveBitrateKbps !== null ? (
-              <><span className="text-text-muted">Effective</span><span className="text-text-primary text-right">{stats.effectiveBitrateKbps} kbps</span></>
+              <><span className="text-text-muted">Effective</span><span className="text-text-primary text-right">{fmtKbps(stats.effectiveBitrateKbps)}</span></>
             ) : (
               <><span className="text-text-muted">Effective</span><span className="text-text-primary text-right">—</span></>
             )}
             {stats.senderMaxBitrateBps !== null ? (
-              <><span className="text-text-muted">Sender max</span><span className="text-text-primary text-right">{Math.round(stats.senderMaxBitrateBps / 1000)} kbps</span></>
+              <><span className="text-text-muted">Sender max</span><span className="text-text-primary text-right">{stats.senderMaxBitrateBps !== null ? fmtBps(stats.senderMaxBitrateBps) : "—"}</span></>
             ) : (
               <><span className="text-text-muted">Sender max</span><span className="text-text-primary text-right">—</span></>
             )}

@@ -260,9 +260,13 @@ export function updateEwma(
 // ─── Formatting helpers ─────────────────────────────────────────────────────
 
 export function fmtBitRate(bitsPerSecond: number): string {
-  if (bitsPerSecond <= 0) return "0 kbps";
-  if (bitsPerSecond < 1_000_000) return Math.round(bitsPerSecond / 1000) + " kbps";
-  return (bitsPerSecond / 1_000_000).toFixed(1) + " Mbps";
+  // Convert from bits to bytes: bps / 8 = B/s
+  if (bitsPerSecond <= 0) return "0 kB/s";
+  const Bps = bitsPerSecond / 8;
+  if (Bps < 1000) return Math.round(Bps) + " B/s";
+  const kBps = Bps / 1000;
+  if (kBps < 1000) return kBps.toFixed(1) + " kB/s";
+  return (kBps / 1000).toFixed(2) + " MB/s";
 }
 
 export function fmtByteRate(bytesPerSecond: number): string {

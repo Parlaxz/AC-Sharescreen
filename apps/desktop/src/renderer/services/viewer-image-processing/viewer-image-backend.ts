@@ -20,6 +20,47 @@ export type BackendKind = "webgl2" | "nvidia-vsr" | "unavailable";
 
 // ─── Shared result types ─────────────────────────────────────────────────────
 
+/**
+ * Timing breakdown for a single frame's lifecycle.
+ *
+ * All fields are optional; `undefined` means the measurement was not available
+ * for that frame (e.g. native timings before the first native-header response).
+ * `0` is a real measured zero — never substitute 0 for unavailable.
+ *
+ * This is the canonical type used in FrameProcessResult, FrameEvent,
+ * PerFrameSample, and the benchmark export path.
+ */
+export interface TimingBreakdown {
+  // ── Renderer-process timings (performance.now, process-local) ──────────
+  captureReadbackMs?: number;
+  drawImageMs?: number;
+  getImageDataMs?: number;
+  inputBufferPreparationMs?: number;
+  /** Renderer-observed wait for native result */
+  rendererToResultMs?: number;
+  textureUploadMs?: number;
+  rendererTotalMs?: number;
+
+  // ── Native-process transport+processing (carried as durations) ─────────
+  nativeTransportProcessingMs?: number;
+  displayUploadMs?: number;
+
+  // ── Main-process per-frame timings (VideoHelperManager.submitFrame) ────
+  mainInputHandlingMs?: number;
+  requestWriteMs?: number;
+  responseWaitMs?: number;
+  mainHandlerTotalMs?: number;
+
+  // ── Native per-stage timings from frame header (μs→ms) ─────────────────
+  // Only includes stages knowable-before-write. nativeOutputWriteMs NOT
+  // exposed per-frame (aggregate only).
+  nativeInputReceiveMs?: number;
+  nativeUploadMs?: number;
+  nativeEffectMs?: number;
+  nativeDownloadMs?: number;
+  nativePreWriteTotalMs?: number;
+}
+
 export interface BackendInitResult {
   success: boolean;
   reason?: string;
@@ -35,36 +76,7 @@ export interface FrameProcessResult {
   /** true when the frame was dropped due to backpressure */
   backpressureDrop?: boolean;
   /** Timing breakdown for Phase 1 truthful statistics */
-  timingBreakdown?: {
-    // Renderer-process timings (performance.now, process-local)
-    captureReadbackMs?: number;
-    drawImageMs?: number;
-    getImageDataMs?: number;
-    inputBufferPreparationMs?: number;
-    /** Renderer-observed wait for native result */
-    rendererToResultMs?: number;
-    textureUploadMs?: number;
-    rendererTotalMs?: number;
-    // Native-process transport+processing (carried as durations, not raw deltas)
-    nativeTransportProcessingMs?: number;
-    displayUploadMs?: number;
-
-    // Main-process per-frame timings (captured in VideoHelperManager.submitFrame)
-    // Truthful labels distinguishing capture/readback, renderer submission-to-result,
-    // main request write, response wait, response payload read.
-    mainInputHandlingMs?: number;
-    requestWriteMs?: number;
-    responseWaitMs?: number;
-    mainHandlerTotalMs?: number;
-
-    // Native per-stage timings from frame header (μs→ms conversion)
-    // Only includes stages knowable-before-write. nativeOutputWriteMs NOT exposed per-frame.
-    nativeInputReceiveMs?: number;
-    nativeUploadMs?: number;
-    nativeEffectMs?: number;
-    nativeDownloadMs?: number;
-    nativePreWriteTotalMs?: number;
-  };
+  timingBreakdown?: TimingBreakdown;
   /** Total latency from capture to displayed frame */
   totalLatencyMs?: number;
 

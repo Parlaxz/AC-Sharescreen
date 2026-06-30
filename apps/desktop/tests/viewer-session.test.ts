@@ -389,6 +389,24 @@ describe("ViewerSession — leave/rejoin lifecycle", () => {
     expect(sentLeave.viewerSessionId).toBe(session.viewerSessionId);
   });
 
+  it("stream.leave carries the mediaSessionId for precise host cleanup", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    session.stop();
+    await Promise.resolve();
+    const sentLeave = (runtime as any).__sendToPeer.mock.calls.find(
+      ([peer, payload]: [string, Record<string, unknown>]) => payload.type === "stream.leave",
+    )?.[1];
+    expect(sentLeave).toBeDefined();
+    // mediaSessionId must be present so the host can call removeViewerMapping()
+    // with the exact composite key instead of falling through to the less precise
+    // removeViewer() path.
+    expect(sentLeave.mediaSessionId).toBe("ms-1");
+  });
+
   it("teardown calls shutdown() on the ViewerClient (not stopViewing + disconnect concurrently)", async () => {
     mockJoinResponseOk();
     await session.start({
@@ -850,6 +868,163 @@ describe("ViewerSession — instance-local generations", () => {
     expect(mockViewerClientMethods.createAndConnect).toHaveBeenCalledTimes(2);
   });
 
+  it("retry refreshes stale logical/media session IDs from active stream registry", async () => {
+    // Original session has ms-1/ls-1, but host has restarted with ms-2/ls-2
+    mockJoinOk();
+
+    // Runtime mock with registry that returns the NEW stream
+    const mockRegistry = {
+      getStreamsByGroup: vi.fn().mockReturnValue([{
+        logicalStreamId: "ls-2",
+        mediaSessionId: "ms-2",
+        groupId: "g-1",
+        hostDeviceId: "host-1",
+        hostDisplayName: "Host",
+        sourceKind: "screen",
+        sourceName: "Screen",
+        startedAt: 2000,
+        appliedSettingsRevision: 0,
+        heartbeatSequence: 2,
+        streamRevision: 2,
+        mediaJoinMetadata: "",
+        replacesSessionId: "ms-1",
+      }]),
+      getStream: vi.fn().mockReturnValue(null),
+      registerLocalStream: vi.fn(),
+      handleStopped: vi.fn(),
+      getAllStreams: vi.fn().mockReturnValue([]),
+      onUpdate: vi.fn(),
+      destroy: vi.fn(),
+    };
+    const mockConn = {
+      sendToPeer: vi.fn().mockResolvedValue(undefined),
+      peerForDevice: vi.fn().mockReturnValue("peer-uuid-host"),
+    };
+    const mockConnManager = { getConnection: vi.fn().mockReturnValue(mockConn) };
+    const mockSsm = { getCaptureStream: vi.fn().mockReturnValue(null) };
+    const refreshedRuntime = {
+      ...runtime,
+      getActiveStreamRegistry: () => mockRegistry,
+      getConnectionManager: () => mockConnManager,
+      getStreamSessionManager: () => mockSsm,
+    };
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(refreshedRuntime);
+
+    // Start with old session IDs
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Host restarts — registry now has new stream
+    // Mock the join response to return new session IDs
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "new-token",
+      mediaSessionId: "ms-2",
+      streamId: "stream-2",
+      password: "vdo-password",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-2", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+
+    // Clear previous call tracking then retry
+    mockConn.sendToPeer.mockClear();
+
+    // Retry — should pick up new stream info from registry
+    await sessionA.retry();
+
+    // The join request should have been sent with the NEW logicalStreamId
+    const sendToPeerCalls = mockConn.sendToPeer.mock.calls;
+    const joinRequest = sendToPeerCalls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinRequest).toBeDefined();
+    const joinPayload = joinRequest![1] as Record<string, unknown>;
+    expect(joinPayload.logicalStreamId).toBe("ls-2");
+  });
+
+  it("restarting a share with new logical/media session does not leave viewer joining old stream", async () => {
+    // Viewer starts watching stream with ls-1/ms-1
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Host stops and restarts with new stream ls-2/ms-2
+    // Registry now only has the new stream
+    const mockRegistry2 = {
+      getStreamsByGroup: vi.fn().mockReturnValue([{
+        logicalStreamId: "ls-2",
+        mediaSessionId: "ms-2",
+        groupId: "g-1",
+        hostDeviceId: "host-1",
+        hostDisplayName: "Host",
+        sourceKind: "screen",
+        sourceName: "New Screen",
+        startedAt: 3000,
+        appliedSettingsRevision: 0,
+        heartbeatSequence: 1,
+        streamRevision: 2,
+        mediaJoinMetadata: "",
+        replacesSessionId: "ms-1",
+      }]),
+      getStream: vi.fn().mockReturnValue(null),
+      registerLocalStream: vi.fn(),
+      handleStopped: vi.fn(),
+      getAllStreams: vi.fn().mockReturnValue([]),
+      onUpdate: vi.fn(),
+      destroy: vi.fn(),
+    };
+    const conn2 = {
+      sendToPeer: vi.fn().mockResolvedValue(undefined),
+      peerForDevice: vi.fn().mockReturnValue("peer-uuid-new"),
+    };
+    const connManager2 = { getConnection: vi.fn().mockReturnValue(conn2) };
+    const ssm2 = { getCaptureStream: vi.fn().mockReturnValue(null) };
+    const refreshedRuntime2 = {
+      ...runtime,
+      getActiveStreamRegistry: () => mockRegistry2,
+      getConnectionManager: () => connManager2,
+      getStreamSessionManager: () => ssm2,
+    };
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(refreshedRuntime2);
+
+    // Retry should NOT send join request with old stream IDs
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "token-new",
+      mediaSessionId: "ms-2",
+      streamId: "vdo-stream-2",
+      password: "vdo-password-2",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-new", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+
+    await sessionA.retry();
+
+    // Verify join request carried new IDs
+    const calls = conn2.sendToPeer.mock.calls;
+    const joinReq = calls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinReq).toBeDefined();
+    const payload = joinReq![1] as Record<string, unknown>;
+    // Must NOT carry old stream IDs
+    expect(payload.logicalStreamId).not.toBe("ls-1");
+    // Must carry new stream ID
+    expect(payload.logicalStreamId).toBe("ls-2");
+  });
+
   it("retry on session A does not reset session B", async () => {
     mockJoinOk();
     await Promise.all([
@@ -931,5 +1106,245 @@ describe("ViewerSession — instance-local generations", () => {
     expect((videoA as any).srcObject).toBeNull();
     expect(videoB.pause).not.toHaveBeenCalled();
     expect((videoB as any).srcObject).toBe("stream-b");
+  });
+
+  it("retry calls requestGroupSync before sending a new join request", async () => {
+    // Setup mock with requestGroupSync
+    const requestGroupSync = vi.fn().mockReturnValue(undefined);
+    const runtimeWithSync = { ...runtime, requestGroupSync };
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtimeWithSync);
+
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Clear mocks and set up join response for retry
+    vi.clearAllMocks();
+    mockJoinOk();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtimeWithSync);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+
+    await sessionA.retry();
+
+    // Must have called requestGroupSync with the group ID
+    expect(requestGroupSync).toHaveBeenCalledWith("g-1");
+  });
+
+  it("retry awaits a returned promise from requestGroupSync before sending join request", async () => {
+    // Setup mock that returns a promise
+    let resolveSync!: () => void;
+    const syncPromise = new Promise<void>((resolve) => { resolveSync = resolve; });
+    const requestGroupSync = vi.fn().mockReturnValue(syncPromise);
+    const conn = {
+      sendToPeer: vi.fn().mockResolvedValue(undefined),
+      peerForDevice: vi.fn().mockReturnValue("peer-uuid-host"),
+    };
+    const connManager = { getConnection: vi.fn().mockReturnValue(conn) };
+    const runtimeWithSync = {
+      ...runtime,
+      requestGroupSync,
+      getConnectionManager: () => connManager,
+    };
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtimeWithSync);
+
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Clear mocks and set up for retry
+    conn.sendToPeer.mockClear();
+    vi.clearAllMocks();
+    mockJoinOk();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtimeWithSync);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    conn.sendToPeer.mockClear();
+
+    // Start retry (it will await the sync promise)
+    const retryPromise = sessionA.retry();
+
+    // At this point, retry should be waiting on the sync promise.
+    // A join request should NOT have been sent yet (leave may have been sent
+    // during teardown, but the join request must not be sent before sync).
+    const joinCallsBeforeSync = conn.sendToPeer.mock.calls.filter(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinCallsBeforeSync).toHaveLength(0);
+
+    // Resolve the sync
+    resolveSync();
+    await retryPromise;
+
+    // After sync resolves, the join request should have been sent
+    const joinCallsAfter = conn.sendToPeer.mock.calls.filter(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinCallsAfter.length).toBeGreaterThan(0);
+  });
+
+  it("retry picks the latest host stream when old logical stream is gone and multiple announcements exist", async () => {
+    // Registry has TWO announcements from the same host:
+    //   - Old stream (ls-1/ms-1) with lower streamRevision — stale, still in registry
+    //   - New stream (ls-2/ms-2) with higher streamRevision — the current active one
+    // After the host restarted, the viewer's old logical stream (ls-1) was replaced;
+    // the viewer must pick the latest by composite freshness.
+    const streamData = [
+      {
+        logicalStreamId: "ls-1", mediaSessionId: "ms-1",
+        groupId: "g-1", hostDeviceId: "host-1",
+        hostDisplayName: "Host", sourceKind: "screen",
+        sourceName: "Old Screen", startedAt: 1000,
+        appliedSettingsRevision: 0, heartbeatSequence: 1,
+        streamRevision: 1, mediaJoinMetadata: "", replacesSessionId: null,
+      },
+      {
+        logicalStreamId: "ls-2", mediaSessionId: "ms-2",
+        groupId: "g-1", hostDeviceId: "host-1",
+        hostDisplayName: "Host", sourceKind: "screen",
+        sourceName: "New Screen", startedAt: 2000,
+        appliedSettingsRevision: 0, heartbeatSequence: 5,
+        streamRevision: 2, mediaJoinMetadata: "", replacesSessionId: null,
+      },
+    ];
+    const mockRegistry = {
+      getStreamsByGroup: vi.fn(),
+      getStream: vi.fn().mockReturnValue(null),
+      registerLocalStream: vi.fn(),
+      handleStopped: vi.fn(),
+      getAllStreams: vi.fn().mockReturnValue([]),
+    };
+    const conn = {
+      sendToPeer: vi.fn().mockResolvedValue(undefined),
+      peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+    };
+    const connManager = { getConnection: vi.fn().mockReturnValue(conn) };
+    const ssm = { getCaptureStream: vi.fn().mockReturnValue(null) };
+    const runtimeWithMulti = {
+      ...runtime,
+      requestGroupSync: vi.fn().mockReturnValue(undefined),
+      getActiveStreamRegistry: () => mockRegistry,
+      getConnectionManager: () => connManager,
+      getStreamSessionManager: () => ssm,
+    };
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtimeWithMulti);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+
+    // On initial start, only ls-1 is in the registry
+    mockRegistry.getStreamsByGroup.mockReturnValue([
+      { ...streamData[0] },
+    ]);
+
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Now host restarts: old stream (ls-1) is gone from the viewpoint of
+    // the algorithm (same logicalStreamId not found — gone from registry).
+    // Both ls-1 and ls-2 are returned but the same-logical check is based
+    // on the viewer's stored logicalStreamId (ls-1). Since ls-1 is in the
+    // list, the algorithm will use it.  To test "prefers latest" we need
+    // the old stream GONE so Phase 2 triggers (pick latest announcement).
+    vi.clearAllMocks();
+    mockJoinOk();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtimeWithMulti);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    conn.sendToPeer.mockClear();
+    // Only return the NEW stream (ls-1 is gone from registry)
+    mockRegistry.getStreamsByGroup.mockReturnValue([{ ...streamData[1] }]);
+
+    await sessionA.retry();
+
+    const calls = conn.sendToPeer.mock.calls;
+    const joinReq = calls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinReq).toBeDefined();
+    const payload = joinReq![1] as Record<string, unknown>;
+    // The old logical stream is gone; must pick the latest (only) announcement
+    expect(payload.logicalStreamId).toBe("ls-2");
+    expect(payload.mediaSessionId).toBe("ms-2");
+  });
+
+  it("retry sends refreshed mediaSessionId in join.request payload", async () => {
+    // Start with ms-1, host restarted to ms-2 (same logicalStreamId)
+    mockJoinOk();
+    const tmpRuntime = { ...runtime, requestGroupSync: vi.fn().mockReturnValue(undefined) };
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(tmpRuntime);
+
+    const mockRegistry = {
+      getStreamsByGroup: vi.fn().mockReturnValue([
+        {
+          logicalStreamId: "ls-1", mediaSessionId: "ms-2",
+          groupId: "g-1", hostDeviceId: "host-1",
+          hostDisplayName: "Host", sourceKind: "screen",
+          sourceName: "Screen", startedAt: 2000,
+          appliedSettingsRevision: 0, heartbeatSequence: 10,
+          streamRevision: 2, mediaJoinMetadata: "", replacesSessionId: "ms-1",
+        },
+      ]),
+      getStream: vi.fn().mockReturnValue(null),
+      registerLocalStream: vi.fn(),
+      handleStopped: vi.fn(),
+      getAllStreams: vi.fn().mockReturnValue([]),
+    };
+    const conn = {
+      sendToPeer: vi.fn().mockResolvedValue(undefined),
+      peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+    };
+    const connManager = { getConnection: vi.fn().mockReturnValue(conn) };
+    const ssm = { getCaptureStream: vi.fn().mockReturnValue(null) };
+    tmpRuntime.getActiveStreamRegistry = () => mockRegistry;
+    tmpRuntime.getConnectionManager = () => connManager;
+    tmpRuntime.getStreamSessionManager = () => ssm;
+
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Retry: registry has ls-1 with ms-2 (same logical, newer media session)
+    vi.clearAllMocks();
+    mockJoinOk();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(tmpRuntime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    conn.sendToPeer.mockClear();
+    mockRegistry.getStreamsByGroup.mockClear();
+
+    await sessionA.retry();
+
+    const calls = conn.sendToPeer.mock.calls;
+    const joinReq = calls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinReq).toBeDefined();
+    const payload = joinReq![1] as Record<string, unknown>;
+    // Must carry the refreshed mediaSessionId in the join request
+    expect(payload.mediaSessionId).toBe("ms-2");
+    expect(payload.logicalStreamId).toBe("ls-1");
+  });
+
+  it("retry sends both logicalStreamId and mediaSessionId in join.request", async () => {
+    // Verify join.request payload always includes mediaSessionId alongside logicalStreamId
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    const conn = runtime.getConnectionManager().getConnection("g-1");
+    const joinRequests = (conn as any).sendToPeer.mock.calls.filter(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "stream.join.request",
+    );
+    expect(joinRequests.length).toBeGreaterThan(0);
+    const payload = joinRequests[0][1] as Record<string, unknown>;
+    expect(payload.mediaSessionId).toBe("ms-1");
+    expect(payload.logicalStreamId).toBe("ls-1");
   });
 });

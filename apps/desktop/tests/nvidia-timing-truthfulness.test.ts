@@ -21,7 +21,10 @@ import type {
   BackendStats,
   FrameMetadata,
   BackendKind,
+  TimingBreakdown,
 } from "@/services/viewer-image-processing/viewer-image-backend";
+import { toNum, decodeNativeFrameTiming } from "@/services/viewer-image-processing/nvidia-vsr-backend";
+import type { PerFrameSample } from "@/services/viewer-image-processing/nvidia-benchmark-service";
 
 // ─── Mock backend that returns full timing breakdowns ────────────────────────
 
@@ -685,5 +688,193 @@ describe("RC4 — Timing label honesty gaps", () => {
       // native processing should be significantly less than full round-trip
       expect(ratio).toBeLessThan(0.9);
     }
+  });
+});
+
+// ─── Pure function tests (decodeNativeFrameTiming, toNum) ───────────────────
+
+describe("toNum — safe numeric extraction", () => {
+  it("returns undefined for null", () => {
+    expect(toNum(null)).toBeUndefined();
+  });
+
+  it("returns undefined for undefined", () => {
+    expect(toNum(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined for NaN", () => {
+    expect(toNum(NaN)).toBeUndefined();
+  });
+
+  it("returns undefined for Infinity", () => {
+    expect(toNum(Infinity)).toBeUndefined();
+  });
+
+  it("returns number for valid numbers", () => {
+    expect(toNum(42)).toBe(42);
+    expect(toNum(0)).toBe(0);
+    expect(toNum(-1.5)).toBe(-1.5);
+  });
+
+  it("parses numeric strings", () => {
+    expect(toNum("42")).toBe(42);
+    expect(toNum("0")).toBe(0);
+  });
+
+  it("returns undefined for non-numeric strings", () => {
+    expect(toNum("abc")).toBeUndefined();
+  });
+
+  it("preserves zero as zero (not undefined)", () => {
+    // 0 is a real measured value, not unavailable
+    expect(toNum(0)).toBe(0);
+  });
+});
+
+describe("decodeNativeFrameTiming — timing field extraction", () => {
+  it("extracts all fields from a complete message", () => {
+    const msg = {
+      mainInputHandlingMs: 0.3,
+      requestWriteMs: 0.5,
+      responseWaitMs: 42,
+      responsePayloadReadMs: 0.1,
+      mainHandlerTotalMs: 43,
+      nativeInputReceiveMs: 0.8,
+      nativeUploadMs: 2.5,
+      nativeEffectMs: 8,
+      nativeDownloadMs: 2,
+      nativePreWriteTotalMs: 14,
+    };
+    const result = decodeNativeFrameTiming(msg);
+    expect(result.mainInputHandlingMs).toBe(0.3);
+    expect(result.requestWriteMs).toBe(0.5);
+    expect(result.responseWaitMs).toBe(42);
+    expect(result.responsePayloadReadMs).toBe(0.1);
+    expect(result.mainHandlerTotalMs).toBe(43);
+    expect(result.nativeInputReceiveMs).toBe(0.8);
+    expect(result.nativeUploadMs).toBe(2.5);
+    expect(result.nativeEffectMs).toBe(8);
+    expect(result.nativeDownloadMs).toBe(2);
+    expect(result.nativePreWriteTotalMs).toBe(14);
+  });
+
+  it("returns undefined for missing fields", () => {
+    const result = decodeNativeFrameTiming({});
+    expect(result.mainInputHandlingMs).toBeUndefined();
+    expect(result.nativeEffectMs).toBeUndefined();
+    expect(result.nativePreWriteTotalMs).toBeUndefined();
+  });
+
+  it("preserves zero as zero", () => {
+    const result = decodeNativeFrameTiming({
+      mainInputHandlingMs: 0,
+      nativeEffectMs: 0,
+    });
+    expect(result.mainInputHandlingMs).toBe(0);
+    expect(result.nativeEffectMs).toBe(0);
+  });
+
+  it("ignores non-numeric values", () => {
+    const result = decodeNativeFrameTiming({
+      mainInputHandlingMs: "abc",
+      nativeEffectMs: null,
+      nativeUploadMs: undefined,
+    });
+    expect(result.mainInputHandlingMs).toBeUndefined();
+    expect(result.nativeEffectMs).toBeUndefined();
+    expect(result.nativeUploadMs).toBeUndefined();
+  });
+
+  it("extracts only the declared timing fields (no extra keys)", () => {
+    const result = decodeNativeFrameTiming({
+      mainInputHandlingMs: 1,
+      requestWriteMs: 2,
+      responseWaitMs: 3,
+      responsePayloadReadMs: 4,
+      mainHandlerTotalMs: 5,
+      nativeInputReceiveMs: 6,
+      nativeUploadMs: 7,
+      nativeEffectMs: 8,
+      nativeDownloadMs: 9,
+      nativePreWriteTotalMs: 10,
+      unknownField: 99,
+    });
+    // All declared fields should be present
+    expect(result.mainInputHandlingMs).toBe(1);
+    expect(result.requestWriteMs).toBe(2);
+    expect(result.responseWaitMs).toBe(3);
+    expect(result.responsePayloadReadMs).toBe(4);
+    expect(result.mainHandlerTotalMs).toBe(5);
+    expect(result.nativeInputReceiveMs).toBe(6);
+    expect(result.nativeUploadMs).toBe(7);
+    expect(result.nativeEffectMs).toBe(8);
+    expect(result.nativeDownloadMs).toBe(9);
+    expect(result.nativePreWriteTotalMs).toBe(10);
+  });
+});
+
+// ─── PerFrameSample timingBreakdown regression ─────────────────────────────
+
+describe("PerFrameSample timingBreakdown retention", () => {
+  it("PerFrameSample type includes optional timingBreakdown", () => {
+    // Compile-time check: verify the type allows timingBreakdown assignment
+    const sample: PerFrameSample = {
+      processingTimeMs: 50,
+      rendererToResultMs: 40,
+      nativeTransportProcessingTimeMs: 15,
+      totalLatencyMs: 50,
+      nativeOutputWidth: 3840,
+      nativeOutputHeight: 2160,
+      nativeQualityLevel: 3,
+      backpressureDrop: false,
+      timingBreakdown: {
+        captureReadbackMs: 5,
+        drawImageMs: 2,
+        getImageDataMs: 3,
+        rendererToResultMs: 40,
+        nativeEffectMs: 8,
+        nativePreWriteTotalMs: 14,
+      },
+    };
+    expect(sample.timingBreakdown?.captureReadbackMs).toBe(5);
+    expect(sample.timingBreakdown?.nativeEffectMs).toBe(8);
+    expect(sample.timingBreakdown?.nativePreWriteTotalMs).toBe(14);
+  });
+
+  it("PerFrameSample timingBreakdown can be undefined", () => {
+    const sample: PerFrameSample = {
+      processingTimeMs: null,
+      rendererToResultMs: null,
+      nativeTransportProcessingTimeMs: null,
+      totalLatencyMs: null,
+      nativeOutputWidth: 0,
+      nativeOutputHeight: 0,
+      nativeQualityLevel: null,
+      backpressureDrop: false,
+    };
+    expect(sample.timingBreakdown).toBeUndefined();
+  });
+
+  it("PerFrameSample timingBreakdown preserves zero values", () => {
+    const sample: PerFrameSample = {
+      processingTimeMs: 0,
+      rendererToResultMs: 0,
+      nativeTransportProcessingTimeMs: 0,
+      totalLatencyMs: 0,
+      nativeOutputWidth: 0,
+      nativeOutputHeight: 0,
+      nativeQualityLevel: null,
+      backpressureDrop: false,
+      timingBreakdown: {
+        captureReadbackMs: 0,
+        drawImageMs: 0,
+        getImageDataMs: 0,
+        nativeEffectMs: 0,
+        textureUploadMs: 0,
+      },
+    };
+    // Zero is a valid measured value, not converted to undefined
+    expect(sample.timingBreakdown?.captureReadbackMs).toBe(0);
+    expect(sample.timingBreakdown?.nativeEffectMs).toBe(0);
   });
 });

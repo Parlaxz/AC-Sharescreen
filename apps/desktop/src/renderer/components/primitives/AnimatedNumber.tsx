@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from "react";
+﻿import React, { useEffect, useState } from "react";
 import { motion, useMotionValue, useSpring } from "motion/react";
 import { cn } from "@/lib/utils";
 
 /**
- * AnimatedNumber — Smoothly tweens between numeric values using framer-motion.
+ * AnimatedNumber â€” Smoothly tweens between numeric values using framer-motion.
  *
  * Uses useMotionValue + useSpring to interpolate the displayed number
  * with a spring animation. Renders in a <motion.span> with monospace +
@@ -36,8 +36,11 @@ function formatBytes(bytes: number): string {
 }
 
 function formatBitrate(kbps: number): string {
-  if (kbps < 1000) return `${kbps.toFixed(0)} kbps`;
-  return `${(kbps / 1000).toFixed(1)} Mbps`;
+  const Bps = kbps * 125; // kbps * 1000 / 8
+  if (Bps < 1000) return `${Math.round(Bps)} B/s`;
+  const kBps = Bps / 1000;
+  if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
+  return `${(kBps / 1000).toFixed(2)} MB/s`;
 }
 
 function formatDuration(seconds: number): string {

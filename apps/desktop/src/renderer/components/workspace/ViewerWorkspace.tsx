@@ -162,6 +162,17 @@ function formatLiveDuration(startedAt: number): string {
   return `${mins}m`;
 }
 
+// ─── Bitrate formatting ──────────────────────────────────────────────────
+
+function fmtKbps(kbps: number): string {
+  if (kbps <= 0) return "0 kB/s";
+  const Bps = kbps * 125; // kbps * 1000 / 8
+  if (Bps < 1000) return `${Math.round(Bps)} B/s`;
+  const kBps = Bps / 1000;
+  if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
+  return `${(kBps / 1000).toFixed(2)} MB/s`;
+}
+
 // ─── Auto-hide timeout hook ──────────────────────────────────────────────
 
 function useControlsAutoHide({ delayMs = 3000, locked = false }: { delayMs?: number; locked?: boolean }) {
@@ -902,9 +913,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   /**
    * Export handler — called by the benchmark service after successful
-   * aggregation.  Opens the native benchmark results folder and attempts
-   * to persist the run via the IPC export API.
+   * aggregation.  Persists the run via IPC export API and opens the
+   * benchmark results folder.  Tracks state for UI feedback.
+   *
+   * State machine: idle → saving → saved → exporting → exported/failed
    */
+  const [exportState, setExportState] = useState<"idle" | "saving" | "saved" | "exporting" | "exported" | "failed">("idle");
+  const exportErrorRef = useRef<string | null>(null);
+
   useEffect(() => {
     nvidiaBenchmarkService.onExport = async (aggregate, samples) => {
       const api = (window as unknown as { screenlink?: {
@@ -940,13 +956,37 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         avgNativeDownloadMs: aggregate.nativeBenchmarks[0]?.avgDownloadUs ? aggregate.nativeBenchmarks[0].avgDownloadUs / 1000 : undefined,
       };
 
-      if (api?.nvidiaSaveBenchmarkResult) {
-        const save: SavedBenchmarkResult = await api.nvidiaSaveBenchmarkResult(record).catch(() => ({ success: false }));
-        if (save?.success && save.id && api.nvidiaExportBenchmarkResult) {
-          await api.nvidiaExportBenchmarkResult(save.id).catch(() => null);
+      try {
+        setExportState("saving");
+        exportErrorRef.current = null;
+
+        if (api?.nvidiaSaveBenchmarkResult) {
+          const save = await api.nvidiaSaveBenchmarkResult(record);
+          if (!save?.success) {
+            exportErrorRef.current = save?.error ?? "Save failed";
+            setExportState("failed");
+            console.error("[benchmark] Save failed:", save?.error);
+            return;
+          }
+          setExportState("saved");
+
+          if (save.id && api.nvidiaExportBenchmarkResult) {
+            setExportState("exporting");
+            const exportPath = await api.nvidiaExportBenchmarkResult(save.id);
+            if (!exportPath) {
+              exportErrorRef.current = "Export returned no path";
+              console.error("[benchmark] Export failed: no path returned");
+            }
+          }
         }
+
+        setExportState("exported");
+        await api?.nvidiaOpenBenchmarkFolder?.();
+      } catch (err) {
+        exportErrorRef.current = err instanceof Error ? err.message : "Export error";
+        setExportState("failed");
+        console.error("[benchmark] Export error:", err);
       }
-      await api?.nvidiaOpenBenchmarkFolder?.().catch(() => {});
     };
     return () => {
       nvidiaBenchmarkService.onExport = null;
@@ -1301,7 +1341,26 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Send real quality request when user sets quality ──────────
   const handleQualityRequestChange = useCallback(async (newRequest: ViewerRequestState | null) => {
     const runtime = getRuntime();
-    const target = watchingTarget;
+    let target = watchingTarget;
+
+    // Fallback: when watchingTarget is null (e.g. during a stream-end
+    // transition) but the ViewerSession is still alive with valid
+    // identifiers, reconstruct the target from session data so the
+    // quality request can still be sent.
+    if (!target && sessionRef.current) {
+      const sessionInfo = sessionRef.current.getTargetInfo();
+      if (sessionInfo) {
+        target = {
+          groupId: sessionInfo.groupId,
+          logicalStreamId: sessionInfo.logicalStreamId,
+          mediaSessionId: sessionInfo.mediaSessionId,
+          hostDeviceId: sessionInfo.hostDeviceId,
+          hostName: sessionInfo.hostName,
+          startedAt: Date.now(),
+        };
+      }
+    }
+
     const dispatchError = getViewerQualityDispatchError(runtime, target);
     if (dispatchError || !runtime || !target) {
       setQualityFeedback(dispatchError);
@@ -1373,13 +1432,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
 
       // Accept optimistically — real feedback comes via quality.effective messages
-      setQualityFeedback(`Requested ${newRequest.videoBitrateKbps} kbps, ${newRequest.maxWidth}×${newRequest.maxHeight} @ ${newRequest.maxFps}fps — awaiting host response`);
+      const reqByteRate = fmtKbps(newRequest.videoBitrateKbps);
+      setQualityFeedback(`Requested ${reqByteRate}, ${newRequest.maxWidth}×${newRequest.maxHeight} @ ${newRequest.maxFps}fps — awaiting host response`);
       setLastQualityAccepted(undefined);
       if (viewerHistoryIdRef.current) {
         StreamMetricsService.getInstance().addMarker(
           viewerHistoryIdRef.current, "preset", null,
           `${newRequest.videoBitrateKbps}kbps ${newRequest.maxWidth}×${newRequest.maxHeight}`,
-          `Quality request: ${newRequest.videoBitrateKbps}kbps`
+          `Quality request: ${reqByteRate}`
         );
       }
     } catch (err) {
@@ -1427,7 +1487,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         setQualityFeedback(`Accepted, capped: ${clampReasons.join("; ")}`);
         setLastQualityAccepted(true);
       } else {
-        setQualityFeedback(`Accepted at ${kbps} kbps`);
+        setQualityFeedback(`Accepted at ${fmtKbps(kbps)}`);
         setLastQualityAccepted(true);
       }
     };
@@ -1449,7 +1509,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       if (kbps) setConfiguredBitrateBps(kbps * 1000);
 
       const parts: string[] = [];
-      if (kbps) parts.push(`${kbps} kbps`);
+      if (kbps) parts.push(fmtKbps(kbps));
       if (fps) parts.push(`${fps} fps`);
       if (scale) parts.push(`scale ${scale}x`);
       setQualityFeedback(parts.length > 0 ? `Applied: ${parts.join(", ")}` : "Applied to sender");
@@ -1965,8 +2025,31 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       >
         {/* ── Video stage ──────────────────────────────────────────── */}
         <div className="relative flex-1 flex items-center justify-center bg-black">
+          {/* ── Raw source video — ALWAYS mounted ── */}
+          {/* Keeps the WebRTC MediaStream pipeline alive. In compare mode
+              it is visually hidden behind the CompareViewerSurface layers. */}
+          <video
+            ref={videoRef}
+            data-video-native
+            className={cn(
+              "h-full object-contain absolute inset-0",
+              // In compare mode: hide raw video, CompareViewerSurface layers on top
+              isCompareActive && "invisible",
+              // Non-compare mode visibility rules:
+              !isCompareActive && streamPauseState === "paused" && "opacity-30",
+              !isCompareActive && enhancementActive && !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
+            )}
+            playsInline
+            autoPlay
+            aria-label={`${sharerName}'s stream - ${sourceName}`}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              handleToggleFullscreen();
+            }}
+          />
+
           {isCompareActive ? (
-            <div className="absolute inset-0">
+            <div className="absolute inset-0 z-10">
               <CompareViewerSurface
                 videoElement={videoRef.current}
                 settingsA={enhancementSettings}
@@ -1982,25 +2065,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             </div>
           ) : (
             <>
-              <video
-                ref={videoRef}
-                data-video-native
-                className={cn(
-                  "h-full object-contain",
-                  streamPauseState === "paused" && "opacity-30",
-                  // Hide native video when GPU canvas is actively rendering
-                  // Hide native video only after GPU canvas has rendered at least one frame
-                  enhancementActive && !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
-                )}
-                playsInline
-                autoPlay
-                aria-label={`${sharerName}'s stream - ${sourceName}`}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  handleToggleFullscreen();
-                }}
-              />
-
               {/* ── GPU-enhanced display surface ────────────────────── */}
               <EnhancedVideoSurface
                 videoElement={videoRef.current}

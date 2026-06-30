@@ -27,6 +27,7 @@ import { canonicalQualityLevel } from "@screenlink/shared";
 import type { ViewerImageEnhancementSettings, ProcessingBackend, NvidiaQuality } from "./viewer-image-settings";
 import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "./viewer-image-defaults";
 import type { FrameEvent, FrameEventListener, ConfigAppliedEvent } from "./frame-events";
+import type { TimingBreakdown } from "./viewer-image-backend";
 
 // ─── State machine ───────────────────────────────────────────────────────────
 
@@ -218,6 +219,8 @@ export interface PerFrameSample {
   nativeOutputHeight: number;
   nativeQualityLevel: number | null;
   backpressureDrop: boolean;
+  /** Full timing breakdown from the frame, if available. */
+  timingBreakdown?: TimingBreakdown;
   /** Raw frame event that produced this sample (for export). */
   rawFrameEvent?: FrameEvent;
 }
@@ -967,6 +970,7 @@ export class NvidiaBenchmarkService {
               nativeOutputHeight: event.outputHeight,
               nativeQualityLevel: event.canonicalQualityLevel,
               backpressureDrop: false,
+              timingBreakdown: event.timingBreakdown,
               rawFrameEvent: event,
             };
             samples.push(sample);

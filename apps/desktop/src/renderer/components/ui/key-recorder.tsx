@@ -104,8 +104,11 @@ export function KeyRecorder({
         return;
       }
 
+      // Use event.code for numpad keys so Numpad0 is distinct from Digit0
+      const effectiveKey = e.code.startsWith("Numpad") ? e.code : key;
+
       // Non-modifier pressed → finalize capture.
-      const label = getKeyLabel(key);
+      const label = getKeyLabel(effectiveKey);
       const combo = [...held, label].join("+");
       stopRecording();
       onChangeRef.current(combo);

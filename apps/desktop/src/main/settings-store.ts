@@ -75,7 +75,7 @@ export interface PersistedSettings {
   notificationsEnabled: boolean;
   localTransportPolicy: Record<string, unknown>;
   lastAudioMode?: AudioMode;
-  /** Cap for the viewer bitrate slider (kbps) */
+  /** Cap for the viewer bitrate slider (kbps → displayed as kB/s) */
   viewerBitrateSliderMaxKbps: number;
   /** Quick Share global shortcut configuration */
   quickShareShortcutEnabled: boolean;

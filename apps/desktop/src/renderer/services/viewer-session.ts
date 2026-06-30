@@ -405,6 +405,17 @@ export class ViewerSession {
       // The track handler (from runJoinFlow) will set el.srcObject = newStream
       // when the SDK fires trackAdded on the new connection.
 
+      // ── 2) Obtain a fresh join token ────────────────────────────────
+      // The original _bindToken was consumed by the host during the initial
+      // bind and cannot be reused. Send a new stream.join.request over group
+      // control to get a fresh token for the resumed media connection.
+      const freshToken = await this.getFreshJoinToken();
+      if (!freshToken) {
+        throw new Error("Failed to obtain fresh join token for resume");
+      }
+      // Update the saved token so resendMediaBind uses the fresh one
+      this._bindToken = freshToken;
+
       // ── 3) Re-establish the WebRTC media connection ──────────────
       //     view() on the SDK invites the host again. The SDK signaling
       //     stayed alive during pause, so no rejoin handshake is needed.
@@ -419,6 +430,8 @@ export class ViewerSession {
       //     RTC connection establishes a fresh one. The host requires
       //     media.bind to authorise media delivery — without it the host
       //     sees a connected viewer but does not forward video/audio.
+      //     The fresh join token from step 2 is used so the host can
+      //     authorise this bind (the old token was already consumed).
       await this.resendMediaBind(vc);
 
       // GENERATION CHECK
@@ -434,6 +447,52 @@ export class ViewerSession {
       // Keep pause state as-is so the UI shows the retryable error
       throw err;
     }
+  }
+
+  /**
+   * Obtain a fresh join token from the host by sending a new
+   * stream.join.request over group control. The host generates a new
+   * one-time token and sends it back in stream.join.response.
+   *
+   * Returns the token string, or null if the request failed.
+   */
+  private async getFreshJoinToken(): Promise<string | null> {
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return null;
+
+    const runtime = getRuntime();
+    if (!runtime || runtime.isDestroyed()) return null;
+
+    const connManager = runtime.getConnectionManager();
+    const conn = connManager.getConnection(this.groupId);
+    if (!conn) return null;
+
+    const peerUuid = conn.peerForDevice(this.hostDeviceId);
+    if (!peerUuid) return null;
+
+    // Register response waiter before sending the request
+    const requestId = crypto.randomUUID();
+    const joinResponsePromise = runtime.waitForJoinResponse(requestId, 15_000).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === "Join response cancelled") return null;
+      throw error;
+    });
+
+    // Send stream.join.request with the existing session ID so the host
+    // correlates this with the original join.
+    await conn.sendToPeer(peerUuid, {
+      type: "stream.join.request",
+      logicalStreamId: this.logicalStreamId,
+      mediaSessionId: this.mediaSessionId,
+      viewerDeviceId: runtime.deviceId ?? "viewer",
+      viewerDisplayName: runtime.displayName ?? "Viewer",
+      requestId,
+      ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
+    });
+
+    const response = await joinResponsePromise;
+    if (!response || !response.accepted) return null;
+
+    return response.mediaJoinMetadata ?? null;
   }
 
   /**
@@ -635,12 +694,91 @@ export class ViewerSession {
     this._receivedStream = null;
     this._trackIdsInStream.clear();
     this.leaveAnnounced = false;
+    this._viewerSessionId = generateViewerSessionId();
 
-		// Bump generation so in-flight flows from prior retry on this instance are abandoned
-		this._nextGeneration++;
-		this._generation = this._nextGeneration;
+    // Actively request a group sync before refreshing local state.
+    // This pings all connected peers for the latest group and stream state,
+    // ensuring the registry has up-to-date announcements before we decide
+    // which logical/media session to target on retry.
+    const runtime = getRuntime();
+    if (runtime && !runtime.isDestroyed()) {
+      try {
+        const syncResult = runtime.requestGroupSync(this.groupId);
+        // Best-effort: await if it returned a promise (in-flight or fresh)
+        if (syncResult && typeof (syncResult as Promise<void>).then === "function") {
+          await (syncResult as Promise<void>);
+        }
+      } catch {
+        // Non-fatal — proceed with whatever state we have
+      }
+    }
+
+    // Refresh active stream state from registry before sending a new join request.
+    // The host may have restarted with a new logical/media session while the viewer
+    // was disconnected — using stale IDs would cause the host to reject or the viewer
+    // to join a defunct stream.
+    this.refreshStreamStateFromRegistry();
+
+    // Bump generation so in-flight flows from prior retry on this instance are abandoned
+    this._nextGeneration++;
+    this._generation = this._nextGeneration;
 
     await this.runJoinFlow();
+  }
+
+  /**
+   * Refresh logicalStreamId and mediaSessionId from the latest stream announcement
+   * in the active stream registry. This prevents retry from using stale stream IDs
+   * after the host restarts with a new publication.
+   *
+   * Selection order:
+   *   1. Filter to announcements from our target host
+   *   2. Sort by streamRevision (desc), then startedAt (desc), then heartbeatSequence (desc)
+   *   3. If the same logicalStreamId is found with a newer mediaSessionId, prefer that
+   *   4. If the old logical stream is gone and the host has a newer active stream,
+   *      update BOTH logicalStreamId and mediaSessionId
+   */
+  private refreshStreamStateFromRegistry(): void {
+    try {
+      const runtime = getRuntime();
+      if (!runtime || runtime.isDestroyed()) return;
+      const registry = runtime.getActiveStreamRegistry();
+      const streams = registry.getStreamsByGroup(this.groupId);
+
+      // Filter to announcements from our target host
+      const hostStreams = streams.filter((s) => s.hostDeviceId === this.hostDeviceId);
+      if (hostStreams.length === 0) return;
+
+      // Sort by composite freshness: streamRevision (primary), startedAt (secondary),
+      // heartbeatSequence (tertiary) — all descending so index 0 is the latest.
+      const sorted = [...hostStreams].sort((a, b) => {
+        const revDiff = (b.streamRevision ?? 0) - (a.streamRevision ?? 0);
+        if (revDiff !== 0) return revDiff;
+        const startDiff = (b.startedAt ?? 0) - (a.startedAt ?? 0);
+        if (startDiff !== 0) return startDiff;
+        return (b.heartbeatSequence ?? 0) - (a.heartbeatSequence ?? 0);
+      });
+
+      const latest = sorted[0];
+
+      // Phase 1: Check if the same logicalStreamId still exists with a newer mediaSessionId
+      const sameLogical = sorted.find((s) => s.logicalStreamId === this.logicalStreamId);
+      if (sameLogical) {
+        // If the mediaSessionId changed, pick the newer one
+        if (sameLogical.mediaSessionId !== this.mediaSessionId) {
+          this.mediaSessionId = sameLogical.mediaSessionId;
+        }
+        // logicalStreamId stays the same (it matched)
+        return;
+      }
+
+      // Phase 2: The old logical stream is gone. Update both IDs to the latest
+      // active stream from this host.
+      this.logicalStreamId = latest.logicalStreamId;
+      this.mediaSessionId = latest.mediaSessionId;
+    } catch {
+      // Registry refresh is best-effort; proceed with existing values
+    }
   }
 
   /**
@@ -1025,6 +1163,7 @@ export class ViewerSession {
       await conn.sendToPeer(peerUuid, {
         type: "stream.join.request",
         logicalStreamId: this.logicalStreamId,
+        mediaSessionId: this.mediaSessionId,
         viewerDeviceId: runtime.deviceId ?? "viewer",
         viewerDisplayName: runtime.displayName ?? "Viewer",
         requestId,
@@ -1346,6 +1485,31 @@ export class ViewerSession {
     }
   }
 
+  /**
+   * Expose the active watch-target identifiers for use by the quality
+   * request dispatcher. Returns null before start() has been called or
+   * after destroy().
+   *
+   * This is the fallback path when the store's `watchingTarget` is
+   * temporarily null (e.g. during stream-end transitions).
+   */
+  getTargetInfo(): {
+    groupId: string;
+    hostDeviceId: string;
+    logicalStreamId: string;
+    mediaSessionId: string;
+    hostName: string;
+  } | null {
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return null;
+    return {
+      groupId: this.groupId,
+      hostDeviceId: this.hostDeviceId,
+      logicalStreamId: this.logicalStreamId,
+      mediaSessionId: this.mediaSessionId,
+      hostName: this.hostName,
+    };
+  }
+
   // ── Internal helpers ────────────────────────────────────────────────
 
   private setState(state: ViewerSessionState): void {
@@ -1473,6 +1637,7 @@ export class ViewerSession {
     void conn.sendToPeer(peerUuid, {
       type: "stream.leave",
       logicalStreamId: this.logicalStreamId,
+      mediaSessionId: this.mediaSessionId,
       viewerDeviceId: runtime.deviceId ?? "viewer",
       ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
     }).catch(() => {});

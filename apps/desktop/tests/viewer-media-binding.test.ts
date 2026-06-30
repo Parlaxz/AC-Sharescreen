@@ -32,7 +32,9 @@ function makeMockRuntime(): Phase3Runtime {
       streamId: "vdo-stream-abc",
       password: "vdo-password-xyz",
     })),
-    getPublisherManager: vi.fn().mockReturnValue(null),
+    getPublisherManager: vi.fn().mockReturnValue({
+      getPublisher: vi.fn().mockReturnValue(null),
+    }),
   };
   const mediaStatsService = {
     startViewerPoller: vi.fn(),
@@ -59,6 +61,9 @@ function makeMockRuntime(): Phase3Runtime {
     getStreamSessionManager: () => ssm,
     getViewerMediaBinding: () => ({} as any),
     getMediaStatsService: () => mediaStatsService,
+    getQualityCoordinator: () => null,
+    getSyncService: () => ({ getSyncState: vi.fn().mockReturnValue(null) }),
+    getHostQualityLimits: () => ({ maxVideoBitrateKbps: 20000, maxWidth: 3840, maxHeight: 2160, maxFps: 60, allowViewerQualityRequests: true }),
     resolveLocalPublication,
     getCompareSessionManager: vi.fn().mockReturnValue(null),
     ssm, // expose for test assertions
@@ -828,6 +833,163 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     expect(binding.getViewerAudioSender("unknown-viewer")).toBeNull();
   });
 
+  // ─── SSM-based authority (fix: StreamSessionManager is authority, not registry) ──
+
+  it("accepts join when registry is missing but StreamSessionManager is active", () => {
+    // Registry returns null (no entry), but SSM is active and matches
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+    const { ssm } = runtime as unknown as { ssm: { getPublisherManager: () => unknown } };
+    ssm.getPublisherManager = vi.fn().mockReturnValue({
+      getPublisher: vi.fn().mockReturnValue(null),
+    });
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "local-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    // Must accept: SSM has active publication matching the request
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("media-session-1");
+    expect(result!.token).toBeTruthy();
+
+    // Verify the token is stored
+    const storedToken = binding.getBindingToken(result!.token);
+    expect(storedToken).toBeDefined();
+    expect(storedToken!.groupId).toBe("group-1");
+    expect(storedToken!.logicalStreamId).toBe("local-stream-1");
+    expect(storedToken!.mediaSessionId).toBe("media-session-1");
+  });
+
+  it("self-heals by re-registering local stream when SSM active but registry entry missing", () => {
+    const registerSpy = vi.spyOn(registry, "registerLocalStream");
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+    const { ssm } = runtime as unknown as { ssm: { getPublisherManager: () => unknown } };
+    ssm.getPublisherManager = vi.fn().mockReturnValue({
+      getPublisher: vi.fn().mockReturnValue(null),
+    });
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "local-stream-1");
+    binding.handleJoinRequest(envelope);
+
+    // Must have called registerLocalStream to self-heal
+    expect(registerSpy).toHaveBeenCalled();
+    const registered = registerSpy.mock.calls[0][0];
+    expect(registered.groupId).toBe("group-1");
+    expect(registered.logicalStreamId).toBe("local-stream-1");
+    expect(registered.mediaSessionId).toBe("media-session-1");
+    expect(registered.hostDeviceId).toBe("real-host-device");
+  });
+
+  it("rejects join when SSM state is not active (e.g. stopped)", () => {
+    // Set SSM state to idle (not active)
+    const { ssm } = runtime as unknown as { ssm: { state: string } };
+    ssm.state = "idle";
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+
+    const envelope = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+  });
+
+  it("rejects join when SSM groupId does not match requested group", () => {
+    const { ssm } = runtime as unknown as { ssm: { currentGroupId: string } };
+    ssm.currentGroupId = "different-group";
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+
+    const envelope = makeJoinRequestEnvelope("requested-group", "viewer-1", "local-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+  });
+
+  it("rejects join when SSM logicalStreamId does not match requested stream", () => {
+    const { ssm } = runtime as unknown as { ssm: { currentLogicalStreamId: string } };
+    ssm.currentLogicalStreamId = "different-stream";
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "requested-stream");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+  });
+
+  it("rejects join when SSM has no PublisherManager", () => {
+    const { ssm } = runtime as unknown as { ssm: { getPublisherManager: () => null } };
+    ssm.getPublisherManager = vi.fn().mockReturnValue(null);
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "local-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+  });
+
+  it("rejects join when SSM has no VDO config", () => {
+    const { ssm } = runtime as unknown as { ssm: { getCurrentVdoConfig: () => null } };
+    ssm.getCurrentVdoConfig = vi.fn().mockReturnValue(null);
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "local-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+  });
+
+  it("still accepts join via registry fallback when SSM does not own the stream (remote stream)", () => {
+    // SSM has a different logical stream active; registry has the requested stream
+    const { ssm } = runtime as unknown as { ssm: { currentLogicalStreamId: string } };
+    ssm.currentLogicalStreamId = "local-stream-1";
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "remote-stream-1",
+      mediaSessionId: "remote-ms-1",
+      groupId: "group-1",
+      hostDeviceId: "remote-host",
+      hostDisplayName: "Remote Host",
+      sourceKind: "screen",
+      sourceName: "Remote Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "remote-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    // Must accept via registry fallback (remote stream)
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("remote-ms-1");
+  });
+
+  // ─── Normal join/HMAC behavior remains working ─────────────────────
+
+  it("normal join via registry continues to work unchanged", () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      groupId: "g-1",
+      hostDeviceId: "local",
+      hostDisplayName: "Host",
+      sourceKind: "screen",
+      sourceName: "Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    const envelope = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("ms-1");
+    expect(result!.token).toBeTruthy();
+  });
+
   it("getViewerAudioSender returns null when no audio sender resolved", async () => {
     vi.spyOn(registry, "getStream").mockReturnValue({
       logicalStreamId: "stream-1",
@@ -1135,5 +1297,134 @@ describe("ViewerMediaBinding (Stage 5)", () => {
       expect(v.audioSender).not.toBeNull();
       expect(v.audioSender!.track!.kind).toBe("audio");
     }
+  });
+
+  // ─── SSM authority: stale registry entry must NOT bypass stopped SSM ──
+
+  it("rejects local join when SSM is stopped but registry still has a matching entry", () => {
+    // SSM is stopped (idle) and does NOT match the request
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "local-stream-1",
+      mediaSessionId: "media-session-1",
+      groupId: "group-1",
+      hostDeviceId: "real-host-device",
+      hostDisplayName: "Host",
+      sourceKind: "screen",
+      sourceName: "Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    // SSM is stopped — state is idle but identities still match the request
+    const { ssm } = runtime as unknown as { ssm: { state: string } };
+    ssm.state = "idle";
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "local-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    // Must reject: SSM owns this stream (same group + logicalStreamId) but is not active,
+    // even though the registry has a stale matching entry.
+    expect(result).toBeNull();
+  });
+
+  it("self-heal re-registers with accurate current announcement snapshot from SSM", () => {
+    const registerSpy = vi.spyOn(registry, "registerLocalStream");
+    vi.spyOn(registry, "getStream").mockReturnValue(null);
+
+    // Verify getCurrentAnnouncementSnapshot is called and the registered
+    // announcement has real metadata (not placeholder defaults).
+    const { ssm } = runtime as unknown as {
+      ssm: {
+        getPublisherManager: () => unknown;
+        getCurrentAnnouncementSnapshot?: () => unknown;
+      };
+    };
+    ssm.getPublisherManager = vi.fn().mockReturnValue({
+      getPublisher: vi.fn().mockReturnValue(null),
+    });
+
+    // Add getCurrentAnnouncementSnapshot to the mock SSM with accurate data
+    const realSnapshot = {
+      logicalStreamId: "local-stream-1",
+      mediaSessionId: "media-session-1",
+      groupId: "group-1",
+      hostDeviceId: "real-host-device",
+      hostDisplayName: "Real Host",
+      sourceKind: "screen",
+      sourceName: "My Screen",
+      startedAt: 5000,
+      appliedSettingsRevision: 3,
+      heartbeatSequence: 42,
+      streamRevision: 7,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+      isAudioDegraded: false,
+    };
+
+    // We need to update the ssm mock to include getCurrentAnnouncementSnapshot
+    // Since it's on the prototype, let's add it directly
+    const ssmActual = runtime.getStreamSessionManager() as any;
+    const origSnapshot = ssmActual.getCurrentAnnouncementSnapshot;
+    ssmActual.getCurrentAnnouncementSnapshot = vi.fn().mockReturnValue(realSnapshot);
+
+    try {
+      const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "local-stream-1");
+      binding.handleJoinRequest(envelope);
+
+      // Must have called registerLocalStream with the accurate snapshot
+      expect(registerSpy).toHaveBeenCalled();
+      const registered = registerSpy.mock.calls[0][0];
+
+      // Verify the registered announcement has the real metadata, not placeholders
+      expect(registered.hostDisplayName).toBe("Real Host");
+      expect(registered.sourceName).toBe("My Screen");
+      expect(registered.startedAt).toBe(5000);
+      expect(registered.heartbeatSequence).toBe(42);
+      expect(registered.streamRevision).toBe(7);
+      expect(registered.sourceKind).toBe("screen");
+    } finally {
+      // Restore
+      if (origSnapshot !== undefined) {
+        ssmActual.getCurrentAnnouncementSnapshot = origSnapshot;
+      } else {
+        delete ssmActual.getCurrentAnnouncementSnapshot;
+      }
+    }
+  });
+
+  // ─── Normal join/HMAC behavior remains working (explicit re-test) ─────
+
+  it("normal join via registry fallback for remote streams continues to work when SSM has a different stream", () => {
+    // SSM has local-stream-1 active. Request is for remote-stream-1 (different stream)
+    // in the same group. Registry has the remote-host's stream. This must be accepted.
+    const { ssm } = runtime as unknown as { ssm: { currentLogicalStreamId: string } };
+    ssm.currentLogicalStreamId = "local-stream-1";
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "remote-stream-1",
+      mediaSessionId: "remote-ms-1",
+      groupId: "group-1",
+      hostDeviceId: "remote-host",
+      hostDisplayName: "Remote Host",
+      sourceKind: "screen",
+      sourceName: "Remote Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    });
+
+    const envelope = makeJoinRequestEnvelope("group-1", "viewer-1", "remote-stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    // Must accept via registry fallback (SSM has a different stream, not this one)
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("remote-ms-1");
+    expect(result!.token).toBeTruthy();
   });
 });

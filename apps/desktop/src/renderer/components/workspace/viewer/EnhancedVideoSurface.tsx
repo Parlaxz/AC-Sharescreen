@@ -6,9 +6,6 @@
  * When the environment does not support WebGL2 or the pipeline encounters
  * an unrecoverable error, the component renders nothing (null), allowing
  * the parent to fall back to a native <video> element.
- *
- * DEV-only feature: holding the B key hides the enhanced canvas to reveal
- * the original video beneath (A/B compare). Release B to restore.
  */
 
 import {
@@ -39,6 +36,35 @@ import {
 // Enable lifecycle logging in dev builds
 if (typeof import.meta !== "undefined" && import.meta.env.DEV) {
   enableLifecycleLogging();
+}
+
+/**
+ * Field-by-field comparison of ViewerImageEnhancementSettings to detect
+ * semantic changes.  Returns true when every meaningful field is equal.
+ * No deep-equality library needed.
+ */
+function settingsEqual(
+  a: ViewerImageEnhancementSettings,
+  b: ViewerImageEnhancementSettings,
+): boolean {
+  return (
+    a.enabled === b.enabled &&
+    a.processingBackend === b.processingBackend &&
+    a.webglScalingAlgorithm === b.webglScalingAlgorithm &&
+    a.fsrTargetScale === b.fsrTargetScale &&
+    a.fsrFinalScaler === b.fsrFinalScaler &&
+    a.nvidiaMode === b.nvidiaMode &&
+    a.nvidiaQuality === b.nvidiaQuality &&
+    a.nvidiaOutput === b.nvidiaOutput &&
+    a.customOutputWidth === b.customOutputWidth &&
+    a.customOutputHeight === b.customOutputHeight &&
+    a.maintainAspectRatio === b.maintainAspectRatio &&
+    a.sharpeningStrength === b.sharpeningStrength &&
+    a.noiseProtection === b.noiseProtection &&
+    a.compressionCleanup === b.compressionCleanup &&
+    a.debanding === b.debanding &&
+    a._schemaVersion === b._schemaVersion
+  );
 }
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -391,6 +417,11 @@ export function EnhancedVideoSurface({
 
     if (!processorRef.current || !prev) return;
 
+    // Skip when settings are semantically unchanged (avoid unnecessary work)
+    if (settingsEqual(prev, settings)) return;
+
+    // Only handle backend-specific work here; updateSettings is handled
+    // uniformly by the live settings update effect below.
     if (prev.processingBackend !== settings.processingBackend) {
       const proc = processorRef.current;
       try {
@@ -400,7 +431,6 @@ export function EnhancedVideoSurface({
           });
         onBackendChange?.(effective, fallbackReason);
         proc.setBackend(backend);
-        proc.updateSettings(settings);
       } catch (err) {
         onProcessingError?.(
           err instanceof Error
@@ -413,8 +443,16 @@ export function EnhancedVideoSurface({
 
   // ─── Live settings update (non-backend changes) ───────────────────────
 
+  const prevLiveSettingsRef = useRef<ViewerImageEnhancementSettings | null>(null);
+
   useEffect(() => {
     if (!processorRef.current) return;
+
+    // Skip when settings are semantically unchanged
+    const prev = prevLiveSettingsRef.current;
+    prevLiveSettingsRef.current = settings;
+    if (prev && settingsEqual(prev, settings)) return;
+
     processorRef.current.updateSettings(settings);
   }, [settings]);
 
@@ -481,45 +519,13 @@ export function EnhancedVideoSurface({
     };
   }, [handleResize]);
 
-  // ─── DEV-only hold-B compare (Phase 1) ──────────────────────────────────
-  // Holding B hides only the enhanced canvas to reveal original video beneath.
-  // Must not pause, reconfigure, recreate, destroy, or restart processor/backend.
-  const [holdBCompare, setHoldBCompare] = useState(false);
-
-  useEffect(() => {
-    // Guard: only active in DEV mode
-    if (typeof import.meta !== "undefined" && !import.meta.env.DEV) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === "KeyB" && !e.repeat) {
-        setHoldBCompare(true);
-      }
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === "KeyB") {
-        setHoldBCompare(false);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, []);
-
-  const isDevCompare =
-    typeof import.meta !== "undefined" && import.meta.env.DEV && holdBCompare;
-
   // ─── Render ───────────────────────────────────────────────────────────
 
   const canvasVisible =
     enabled &&
     !fallback &&
     firstFrameReceived &&
-    (processorState === "running" || processorState === "paused") &&
-    !isDevCompare;
+    (processorState === "running" || processorState === "paused");
 
   return (
     <div
@@ -534,14 +540,6 @@ export function EnhancedVideoSurface({
           display: canvasVisible ? "block" : "none",
         }}
       />
-      {/* DEV-only hold-B indicator — does not affect lifecycle */}
-      {isDevCompare && (
-        <div
-          className="absolute top-2 left-2 bg-black/70 text-white text-[11px] px-2 py-1 rounded pointer-events-none z-50"
-        >
-          Hold B: Original
-        </div>
-      )}
     </div>
   );
 }

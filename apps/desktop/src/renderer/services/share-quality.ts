@@ -139,7 +139,7 @@ export function customPresetToOverride(input: {
  * Validate that an override falls inside the accepted ranges.
  * Returns an error message when invalid, or null when valid.
  *
- * Width 256–3840 px, Height 144–2160 px, FPS 1–60, Bitrate 100–20_000 kbps.
+ * Width 256–3840 px, Height 144–2160 px, FPS 1–60, Bitrate 100–20_000 kbps (≈12.5 kB/s–2.5 MB/s).
  * The lower height bound is 144 (not 180) so that real 144p
  * (`256×144`) is accepted.
  */
@@ -151,7 +151,7 @@ export function validateSessionQualityOverride(
     q.videoBitrateKbps < 100 ||
     q.videoBitrateKbps > 20000
   ) {
-    return "Bitrate must be between 100 and 20000 kbps";
+    return "Bitrate must be between 100 and 20000 kbps (≈12.5 kB/s–2.5 MB/s)";
   }
   if (
     !Number.isFinite(q.sendWidth) ||

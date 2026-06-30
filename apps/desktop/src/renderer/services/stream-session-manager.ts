@@ -199,6 +199,18 @@ export class StreamSessionManager {
   }
 
   /**
+   * Build and return the current StreamAnnouncement snapshot from real internal state.
+   * Used by ViewerMediaBinding for self-healing with accurate metadata.
+   * Returns null when the session is not in an active/starting/restarting state
+   * with the required identifiers set.
+   */
+  getCurrentAnnouncementSnapshot(): StreamAnnouncement | null {
+    if (!this.groupId || !this.logicalStreamId || !this.mediaSessionId) return null;
+    if (this._state !== "active" && this._state !== "restarting" && this._state !== "starting") return null;
+    return this.buildAnnouncement();
+  }
+
+  /**
    * Get the source ID used for this session (if any).
    */
   getSourceId(): string | null {
@@ -402,6 +414,18 @@ export class StreamSessionManager {
         if (viewerBinding) {
           // Pass the actual media peer UUID to the binding handler
           viewerBinding.handleMediaBind(peerUuid, token, viewerSessionId).catch(() => {});
+        }
+      });
+
+      // Stage 7: React to VDO peerConnected so that any stored viewer
+      // quality request is applied to the now-ready RTCRtpSender.
+      // This handles the race where media.bind arrives before the
+      // host-side sender is fully established, and also covers
+      // sender replacement after reconnect or pause/resume.
+      this.publisherManager.setOnPeerConnected((peerUuid: string) => {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        if (viewerBinding) {
+          viewerBinding.reconcileViewerByPeerUuid(peerUuid).catch(() => {});
         }
       });
 
@@ -743,12 +767,17 @@ export class StreamSessionManager {
         }
       } catch { /* audio stop is best-effort */ }
 
-      // Reject pending joins and close viewer mappings
+      // Reject pending joins and close viewer mappings.
+      // Use removeMappingsForMediaSessions() so that devices with multiple
+      // composite mappings (e.g. compare mode, reconnect leftovers) are all
+      // cleaned up correctly — the legacy removeViewer(viewerDeviceId)
+      // silently skips devices with >1 mapping.
       const viewerBinding = this.runtime.getViewerMediaBinding();
       if (viewerBinding) {
         const allViewers = viewerBinding.getAllViewers();
-        for (const v of allViewers) {
-          viewerBinding.removeViewer(v.viewerDeviceId);
+        if (allViewers.length > 0) {
+          const mediaSessionIds = [...new Set(allViewers.map((v) => v.mediaSessionId))];
+          viewerBinding.removeMappingsForMediaSessions(mediaSessionIds);
         }
       }
 
@@ -864,6 +893,14 @@ export class StreamSessionManager {
         const viewerBinding = this.runtime.getViewerMediaBinding();
         if (viewerBinding) {
           viewerBinding.handleMediaBind(peerUuid, token, viewerSessionId).catch(() => {});
+        }
+      });
+
+      // Wire peerConnected handler for quality reconciliation on reconnect.
+      this.publisherManager.setOnPeerConnected((peerUuid: string) => {
+        const viewerBinding = this.runtime.getViewerMediaBinding();
+        if (viewerBinding) {
+          viewerBinding.reconcileViewerByPeerUuid(peerUuid).catch(() => {});
         }
       });
 

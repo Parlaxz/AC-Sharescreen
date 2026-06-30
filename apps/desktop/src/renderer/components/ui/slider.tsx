@@ -15,7 +15,7 @@ const Slider = React.forwardRef<
   }
 >(({ className, thumbTooltip, ...props }, ref) => {
   const thumb = (
-    <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border border-border-strong bg-surface-3 shadow transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:pointer-events-none disabled:opacity-50" />
+    <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border border-border-strong bg-accent shadow transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:pointer-events-none disabled:opacity-50" />
   );
 
   return (

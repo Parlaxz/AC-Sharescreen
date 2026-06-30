@@ -1,4 +1,5 @@
-import type { GroupControlEnvelope } from "@screenlink/shared";
+import type { GroupControlEnvelope, HostQualityLimits } from "@screenlink/shared";
+import { createDefaultGroupQualitySettings } from "@screenlink/shared";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import type { StreamAnnouncement } from "./active-stream-registry.js";
 
@@ -159,15 +160,127 @@ export class ViewerMediaBinding {
     // Use the real host device ID from the runtime, not hardcoded "local"
     const hostDeviceId = this.runtime.deviceId ?? "local";
 
-    // Verify this group has an active stream matching the request
+    // ── Phase 1: Check StreamSessionManager as authority (local host stream) ──
+    // StreamSessionManager owns the local publication. If it has an active
+    // session matching the request, accept regardless of registry state.
+    const ssm = this.runtime.getStreamSessionManager();
+    const ssmActive = ssm?.state === "active";
+    const ssmGroupMatch = ssmActive && ssm.currentGroupId === groupId;
+    const ssmStreamMatch = ssmActive && ssm.currentLogicalStreamId === logicalStreamId;
+    const ssmHasMediaSessionId = ssmActive && !!ssm.currentMediaSessionId;
+    const ssmHasPublisher = ssmActive && !!ssm.getPublisherManager();
+    const ssmHasVdoConfig = ssmActive && !!ssm.getCurrentVdoConfig();
+
+    const ssmValid =
+      ssmActive &&
+      ssmGroupMatch &&
+      ssmStreamMatch &&
+      ssmHasMediaSessionId &&
+      ssmHasPublisher &&
+      ssmHasVdoConfig;
+
+    // ── Phase 2: Check registry as fallback (remote streams) ──
     const registry = this.runtime.getActiveStreamRegistry();
-    const stream = registry.getStream({
+    const registryStream = registry.getStream({
       groupId,
       hostDeviceId,
       logicalStreamId,
     });
-    if (!stream) {
-      // Send explicit rejection instead of forcing a timeout
+    const registryValid = !!registryStream;
+
+    // Determine whether the local SSM should be authoritative for THIS
+    // specific stream.  SSM is authoritative for a stream when its own
+    // groupId AND logicalStreamId match the request.  This is true even
+    // when SSM is not active — if SSM's identifiers match, no other local
+    // publisher can own this composite key, so a stale registry entry must
+    // NOT bypass an inactive/mismatched SSM.  When SSM owns a different
+    // stream (same group, different logicalStreamId), the registry may
+    // serve a remote host's stream in the same group.
+    const ssmOwnsRequestedStream = !!(ssm && ssm.currentGroupId === groupId && ssm.currentLogicalStreamId === logicalStreamId);
+
+    // Determine effective media session ID
+    let effectiveMediaSessionId: string | null = null;
+    let streamForLogging: { mediaSessionId: string } | null = null;
+
+    if (ssmValid) {
+      // Use SSM's current media session ID directly (authority)
+      effectiveMediaSessionId = ssm.currentMediaSessionId!;
+      streamForLogging = { mediaSessionId: effectiveMediaSessionId };
+
+      // Self-heal: if registry entry is missing for this local stream,
+      // re-register using SSM's own accurate announcement snapshot.
+      if (!registryStream) {
+        const snapshot = ssm.getCurrentAnnouncementSnapshot
+          ? ssm.getCurrentAnnouncementSnapshot()
+          : this.buildSsmAnnouncement(ssm, hostDeviceId);
+        if (snapshot) {
+          registry.registerLocalStream(snapshot);
+        }
+      }
+    } else if (registryValid && !ssmOwnsRequestedStream) {
+      // Registry fallback: only valid when SSM does NOT own this specific
+      // stream (i.e. this is a remote stream from another host, or a
+      // different stream from the local host that SSM does not track).
+      effectiveMediaSessionId = requestedMediaSessionId ?? registryStream.mediaSessionId;
+      streamForLogging = registryStream;
+    }
+
+    const rejected = !ssmValid && (!registryValid || ssmOwnsRequestedStream);
+
+    if (rejected) {
+      // Send explicit rejection with sanitized diagnostic warning
+      const ssmState = ssm?.state ?? "none";
+      const ssmGroup = ssm?.currentGroupId ?? "none";
+      const ssmStream = ssm?.currentLogicalStreamId ?? "none";
+      const ssmMediaSession = ssm?.currentMediaSessionId ?? "none";
+      const registryIds = registryStream
+        ? { groupId: registryStream.groupId, logicalStreamId: registryStream.logicalStreamId }
+        : null;
+
+      let rejectionReason: string;
+      if (ssmOwnsRequestedStream) {
+        rejectionReason = "This share is no longer active";
+        console.warn(
+          "[ViewerMediaBinding] Rejected local join — SSM not authoritative despite owning stream",
+          {
+            requestedGroupId: groupId,
+            requestedLogicalStreamId: logicalStreamId,
+            ssmState,
+            ssmGroupId: ssmGroup,
+            ssmLogicalStreamId: ssmStream,
+            ssmMediaSessionId: ssmMediaSession,
+            ssmHasPublisher,
+            ssmHasVdoConfig,
+            registryMatchingIds: registryIds,
+          },
+        );
+      } else {
+        rejectionReason = "There is no active share for this stream";
+        console.warn(
+          "[ViewerMediaBinding] Rejected join — no active stream for request",
+          {
+            requestedGroupId: groupId,
+            requestedLogicalStreamId: logicalStreamId,
+            ssmState,
+            ssmGroupId: ssmGroup,
+            ssmLogicalStreamId: ssmStream,
+            ssmMediaSessionId: ssmMediaSession,
+            ssmHasPublisher,
+            ssmHasVdoConfig,
+            registryMatchingIds: registryIds,
+          },
+        );
+      }
+
+      this.sendJoinRejection(
+        envelope,
+        requestId,
+        rejectionReason,
+      );
+      return null;
+    }
+
+    if (!effectiveMediaSessionId) {
       this.sendJoinRejection(
         envelope,
         requestId,
@@ -175,10 +288,6 @@ export class ViewerMediaBinding {
       );
       return null;
     }
-
-    // Determine effective media session — use the one the viewer requested,
-    // or fall back to the stream's primary media session.
-    const effectiveMediaSessionId = requestedMediaSessionId ?? stream.mediaSessionId;
 
     // Generate 32 random bytes → Base64URL token
     const rawBytes = new Uint8Array(32);
@@ -398,6 +507,23 @@ export class ViewerMediaBinding {
       // Sender/PC resolution is best-effort
     }
 
+    // Before storing the new mapping, clean up any stale entries for this viewer
+    // device that point to the SAME logical stream but a DIFFERENT media session.
+    // This prevents viewer leaks when a viewer rejoins after the host restarted
+    // (same logical stream, new media session) but the old leave never arrived.
+    // Mappings with DIFFERENT logical streams (compare mode) are preserved.
+    // Mappings with the SAME (device, mediaSessionId) key are naturally replaced
+    // by the Map.set() below.
+    const staleDeviceEntries = Array.from(this.viewerMap.entries())
+      .filter(([, m]) =>
+        m.viewerDeviceId === input.viewerDeviceId &&
+        m.logicalStreamId === input.logicalStreamId &&
+        m.mediaSessionId !== input.mediaSessionId);
+    for (const [staleKey, staleMapping] of staleDeviceEntries) {
+      this.stopStatsForMapping(staleMapping);
+      this.viewerMap.delete(staleKey);
+    }
+
     // Store extended viewer mapping with composite key (viewerDeviceId::mediaSessionId).
     // The composite key allows one device to hold bindings for multiple media
     // sessions simultaneously (compare mode A + B).
@@ -431,7 +557,260 @@ export class ViewerMediaBinding {
       }
     }
 
+    // If the video sender was not ready yet, start bounded retry.
+    // This handles the race where media.bind arrives before the
+    // host-side RTCRtpSender is available.
+    if (!videoSender) {
+      this.retryResolveSender(
+        input.viewerDeviceId,
+        input.mediaSessionId,
+        input.mediaPeerUuid,
+      );
+    } else {
+      // Sender was found immediately — reconcile any stored quality request
+      void this.reconcileViewerQuality(input.viewerDeviceId, input.mediaSessionId);
+    }
+
     return true;
+  }
+
+  // ─── Reconciliation (Stage 7) ─────────────────────────────────────
+  //
+  // These methods re-resolve the live RTCRtpSender from the current SDK
+  // connection and apply any stored viewer quality request. They are the
+  // central fix for the race where media.bind arrives before the host's
+  // RTCRtpSender is ready.
+
+  /** Maximum bounded retry attempts for sender resolution (50ms * 40 = 2s). */
+  private static readonly SENDER_RETRY_MAX = 40;
+  private static readonly SENDER_RETRY_INTERVAL_MS = 50;
+
+  /**
+   * Bounded retry to resolve the RTCPeerConnection and senders for a
+   * viewer mapping that was stored before the host-side sender was ready.
+   * Attempts every 50ms for up to ~2 seconds. Stops immediately when the
+   * video sender is found, then triggers quality reconciliation.
+   */
+  private retryResolveSender(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    mediaPeerUuid: string,
+  ): void {
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts++;
+      if (this.destroyed || attempts > ViewerMediaBinding.SENDER_RETRY_MAX) {
+        clearInterval(timer);
+        return;
+      }
+
+      const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+      const mapping = this.viewerMap.get(key);
+      if (!mapping) {
+        clearInterval(timer);
+        return;
+      }
+
+      if (this.resolveSendersForMapping(mapping)) {
+        clearInterval(timer);
+        this.startStatsForMapping(mapping);
+        // Sender found — reconcile any stored quality request
+        void this.reconcileViewerQuality(viewerDeviceId, mediaSessionId);
+      }
+    }, ViewerMediaBinding.SENDER_RETRY_INTERVAL_MS);
+  }
+
+  /**
+   * Re-resolve the RTCPeerConnection and senders for a mapping from the
+   * live SDK connection. Updates the mapping in-place.
+   * Returns true if the video sender was resolved.
+   */
+  private resolveSendersForMapping(mapping: ViewerMapping): boolean {
+    try {
+      const publication = this.runtime.resolveLocalPublication(mapping.mediaSessionId);
+      const publisherManager = publication?.publisherManager ?? this.runtime.getStreamSessionManager().getPublisherManager();
+      const hostPublisher = publisherManager?.getPublisher();
+      if (hostPublisher) {
+        const sdk = hostPublisher.getSDK();
+        if (sdk && sdk.connections) {
+          const group = sdk.connections.get(mapping.mediaPeerUuid);
+          if (group) {
+            const pc = group.publisher?.pc ?? group.viewer?.pc ?? null;
+            if (pc) {
+              mapping.pc = pc;
+              const senders = pc.getSenders();
+              mapping.videoSender = senders.find(s => s.track?.kind === "video") ?? null;
+              mapping.audioSender = senders.find(s => s.track?.kind === "audio") ?? null;
+              return !!mapping.videoSender;
+            }
+          }
+        }
+      }
+    } catch {
+      // best-effort
+    }
+    return false;
+  }
+
+  /**
+   * Start per-viewer stats polling for a mapping if not already started.
+   * Safe to call multiple times.
+   */
+  private startStatsForMapping(mapping: ViewerMapping): void {
+    if (!mapping.pc) return;
+    try {
+      const statsService = this.runtime.getMediaStatsService();
+      if (statsService && !statsService.hasViewerPoller(
+        mapping.groupId,
+        mapping.logicalStreamId,
+        mapping.viewerDeviceId,
+        mapping.mediaPeerUuid,
+      )) {
+        statsService.startViewerPoller(
+          mapping.groupId,
+          mapping.logicalStreamId,
+          mapping.viewerDeviceId,
+          mapping.mediaPeerUuid,
+          mapping.pc,
+          () => {},
+        );
+      }
+    } catch {
+      // stats polling is best-effort
+    }
+  }
+
+  /**
+   * Reconcile viewer quality for an exact viewer identified by device ID
+   * and media session. This is the central reconciliation operation:
+   *
+   * 1. Re-resolves the live RTCRtpSender from the current SDK connection
+   * 2. Updates the mapping with the resolved sender
+   * 3. Checks for any stored viewer quality request
+   * 4. Applies the request to the sender and sends feedback
+   *
+   * Returns true if the sender was found and reconciliation completed.
+   *
+   * Called from:
+   * - consumeBinding() after bounded retry finds the sender
+   * - peerConnected event (via reconcileViewerByPeerUuid)
+   * - quality request handler (to ensure sender is current)
+   */
+  async reconcileViewerQuality(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+  ): Promise<boolean> {
+    if (this.destroyed) return false;
+
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    const mapping = this.viewerMap.get(key);
+    if (!mapping) return false;
+
+    // Re-resolve senders from the live SDK connection
+    const senderFound = this.resolveSendersForMapping(mapping);
+    if (!senderFound) return false;
+
+    // Start stats polling if not already running
+    this.startStatsForMapping(mapping);
+
+    // Check for a stored viewer quality request and apply it
+    const qualityCoordinator = this.runtime.getQualityCoordinator();
+    if (!qualityCoordinator) return true; // sender resolved, but no quality to apply
+
+    const request = qualityCoordinator.getViewerRequest(
+      mapping.groupId,
+      mapping.logicalStreamId,
+      mapping.viewerDeviceId,
+    );
+    if (!request || !mapping.videoSender) return true; // no stored request
+
+    // Apply the stored request — compute effective quality from group
+    // settings, host limits, and source dimensions
+    try {
+      const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+      const quality = syncState?.state?.defaultQuality?.value;
+      const groupSettings = quality ?? createDefaultGroupQualitySettings();
+
+      const ssm = this.runtime.getStreamSessionManager();
+      const actualDims = ssm.getActualCaptureDimensions();
+      const sourceDimensions = {
+        width: actualDims.width || groupSettings.video.sendWidth || 1920,
+        height: actualDims.height || groupSettings.video.sendHeight || 1080,
+      };
+
+      const runtimeLimits = this.runtime.getHostQualityLimits();
+      const hostLimits: HostQualityLimits = {
+        maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+        maxWidth: runtimeLimits.maxWidth,
+        maxHeight: runtimeLimits.maxHeight,
+        maxFps: runtimeLimits.maxFps,
+        allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+      };
+
+      const effective = qualityCoordinator.calculateEffectiveQuality(
+        groupSettings,
+        hostLimits,
+        request,
+        sourceDimensions,
+      );
+
+      const configured = await qualityCoordinator.applyToExactViewer(
+        mapping.viewerDeviceId,
+        mapping.mediaPeerUuid,
+        mapping.videoSender,
+        effective.effective,
+      ).catch(() => null);
+
+      // Send quality feedback back to the viewer
+      if (configured) {
+        const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+        const peerUuid = conn?.peerForDevice(mapping.viewerDeviceId);
+        if (conn && peerUuid) {
+          await conn.sendToPeer(peerUuid, {
+            type: "quality.effective",
+            streamSessionId: mapping.logicalStreamId,
+            videoBitrateKbps: effective.effective.videoBitrateKbps,
+            maxWidth: effective.effective.maxWidth,
+            maxHeight: effective.effective.maxHeight,
+            maxFps: effective.effective.maxFps,
+            degradationPreference: effective.effective.degradationPreference,
+            clampReasons: effective.clampReasons,
+          }).catch(() => {});
+
+          await conn.sendToPeer(peerUuid, {
+            type: "quality.configured",
+            streamSessionId: mapping.logicalStreamId,
+            videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+            maxFramerate: configured.maxFramerate ?? undefined,
+            scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
+            degradationPreference: configured.degradationPreference ?? undefined,
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // quality application is best-effort during reconciliation
+    }
+
+    return true;
+  }
+
+  /**
+   * Reconcile viewer quality for all viewers bound to a specific media
+   * peer UUID. Called when peerConnected fires — the media sender may
+   * now be available where it was not at bind time.
+   *
+   * Returns true if at least one viewer was reconciled.
+   */
+  async reconcileViewerByPeerUuid(mediaPeerUuid: string): Promise<boolean> {
+    if (this.destroyed) return false;
+    let reconciled = false;
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.mediaPeerUuid === mediaPeerUuid) {
+        const ok = await this.reconcileViewerQuality(mapping.viewerDeviceId, mapping.mediaSessionId);
+        if (ok) reconciled = true;
+      }
+    }
+    return reconciled;
   }
 
   // ─── Legacy single-key methods (backward compat) ──────────────────
@@ -768,6 +1147,31 @@ export class ViewerMediaBinding {
     } catch {
       // Stats cleanup is best-effort
     }
+  }
+
+  /**
+   * Build a minimal StreamAnnouncement from StreamSessionManager's public state.
+   * Used for self-healing when the registry entry is missing.
+   */
+  private buildSsmAnnouncement(
+    ssm: import("./stream-session-manager.js").StreamSessionManager,
+    hostDeviceId: string,
+  ): import("./active-stream-registry.js").StreamAnnouncement {
+    return {
+      logicalStreamId: ssm.currentLogicalStreamId ?? "",
+      mediaSessionId: ssm.currentMediaSessionId ?? "",
+      groupId: ssm.currentGroupId ?? "",
+      hostDeviceId,
+      hostDisplayName: "",
+      sourceKind: "screen",
+      sourceName: "",
+      startedAt: 0,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 0,
+      streamRevision: 0,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+    };
   }
 
   private base64URLEncode(bytes: Uint8Array): string {

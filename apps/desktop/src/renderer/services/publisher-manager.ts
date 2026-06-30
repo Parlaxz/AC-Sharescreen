@@ -82,6 +82,13 @@ export class PublisherManager {
   private _publishedVideoTrack: MediaStreamTrack | null = null;
   private mediaBindHandler: ((peerUuid: string, token: string, viewerSessionId?: string) => void) | null = null;
   /**
+   * Handler for VDO SDK peerConnected events. Fires when a viewer's
+   * media peer connection is established. Triggers quality reconciliation
+   * so that any stored viewer quality request is applied to the now-ready
+   * RTCRtpSender.
+   */
+  private peerConnectedHandler: ((peerUuid: string) => void) | null = null;
+  /**
    * Handler for VDO SDK peerDisconnected events. Fires when the SDK
    * reports that a media peer has gone away — used as a fallback
    * cleanup path when the viewer crashes or closes its tab without
@@ -151,6 +158,15 @@ export class PublisherManager {
       this.attachPeerDisconnectedListener();
       this._peerDisconnectedAttached = true;
     }
+  }
+
+  /**
+   * Register a handler for VDO SDK peerConnected events.
+   * Fires when a viewer's media connection is established.
+   * The handler receives the peer UUID of the connected viewer.
+   */
+  setOnPeerConnected(handler: (peerUuid: string) => void): void {
+    this.peerConnectedHandler = handler;
   }
 
   /**
@@ -338,15 +354,25 @@ export class PublisherManager {
       }
     }
 
-    // Register peerConnected handler for viewer-connected sender diagnostics.
-    // When a viewer peer connects (after successful binding), log the resolved
-    // video and audio senders for debugging.
+    // Register peerConnected handler for viewer-connected reconciliation.
+    // When a viewer peer connects (after successful binding), trigger quality
+    // reconciliation so stored viewer requests are applied to the now-ready
+    // RTCRtpSender. Also logs sender diagnostics for debugging.
     // Defensive check: if SDK mock or older SDK doesn't support .on, skip.
+    // Using extractPeerUuid to normalize both Event-object and direct-UUID shapes.
     {
       const sdk = publisher.getSDK();
       if (sdk && typeof (sdk as { on?: unknown }).on === "function") {
         (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on("peerConnected", (...args: unknown[]) => {
           this.logSenderDiagnostics('viewer-connected');
+          const { uuid } = extractPeerUuid(args[0]);
+          if (uuid) {
+            try {
+              this.peerConnectedHandler?.(uuid);
+            } catch {
+              // ignore handler errors
+            }
+          }
         });
       }
     }
@@ -427,7 +453,7 @@ export class PublisherManager {
         height: config.videoHeight,
         frameRate: config.videoFps,
       },
-      audioBitrate: 64000, // 64 kbps for Opus stereo
+      audioBitrate: 64000, // 64 kbps -> 8 kB/s for Opus stereo
     });
 
     // Stage 17: Apply degradationPreference to sender encoding parameters

@@ -136,6 +136,22 @@ export class ViewerClient {
     this.sdk.on("peerConnected", peerConnectedHandler);
     this._internalHandlers.push({ event: "peerConnected", handler: peerConnectedHandler });
 
+    // Suppress expected RTCErrorEvent "Close called" errors that fire when
+    // data channels are closed during normal SDK teardown.
+    const errorHandler = (...args: unknown[]): void => {
+      if (this._shuttingDown || this._shutdownPromise) return;
+      const event = args[0];
+      if (event && typeof event === "object") {
+        const err = (event as { error?: Error }).error;
+        if (err instanceof Error && err.message.includes("Close called")) {
+          return;
+        }
+      }
+      console.warn("[ViewerClient] SDK error event:", event);
+    };
+    this.sdk.on("error", errorHandler);
+    this._internalHandlers.push({ event: "error", handler: errorHandler });
+
     // Set up dataChannelOpen tracking.
     // In SDK 1.3.18, this fires as a CustomEvent with detail = { uuid }.
     this.setupDataChannelOpenHandler();

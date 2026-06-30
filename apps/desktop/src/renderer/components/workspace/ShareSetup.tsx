@@ -874,7 +874,7 @@ export function ShareSetup() {
                       <AlertTriangle className="h-4 w-4" />
                       <AlertTitle className="text-xs">Value out of range</AlertTitle>
                       <AlertDescription className="text-xs">
-                        Resolution must be 256×144–3840×2160, fps 1–60, bitrate 100–20000 kbps.
+                        Resolution must be 256×144–3840×2160, fps 1–60, bitrate 12.5 kB/s–2.5 MB/s.
                       </AlertDescription>
                     </Alert>
                   )}

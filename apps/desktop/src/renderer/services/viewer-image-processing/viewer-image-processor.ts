@@ -1110,7 +1110,7 @@ export class ViewerImageProcessor {
       completed: true,
       presented: true, // WebGL path: completion = presentation
       stale: false,
-      timingBreakdown: tb as Record<string, number | undefined> | undefined,
+      timingBreakdown: tb,
     });
 
     // Also emit config applied if we have a configurationId and the backend reports it

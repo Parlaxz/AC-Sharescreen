@@ -179,7 +179,7 @@ export async function startShare(input: StartShareInput): Promise<void> {
 
     // Resolve the effective video bitrate and persist it in the store so the
     // host/dashboard UI displays the actual bitrate rather than the initial
-    // default (650 kbps). Precedence matches StreamSessionManager.startStream:
+    // default (650 kbps ≈ 81.3 kB/s). Precedence matches StreamSessionManager.startStream:
     //   1) session quality override
     //   2) group default from sync state
     //   3) hardcoded fallback from shared constants

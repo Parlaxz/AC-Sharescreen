@@ -25,7 +25,7 @@ export const HELP_ENTRIES: Record<string, HelpEntry> = {
 
   videoBitrateKbps: {
     title: "Video Bitrate",
-    whatItChanges: "The number of kilobits per second allocated to the video stream. Higher values produce clearer picture but use more network bandwidth.",
+    whatItChanges: "The number of kilobytes per second (kB/s) allocated to the video stream. Higher values produce clearer picture but use more network bandwidth.",
     higherValue: "Sharper image, fewer compression artifacts, better for high-motion content",
     lowerValue: "Lower network usage, smoother playback on slow connections, but more visible compression artifacts",
     tradeoff: "Bandwidth vs. quality — more bitrate looks better but consumes more network capacity",
@@ -243,7 +243,7 @@ export const HELP_ENTRIES: Record<string, HelpEntry> = {
 
   audioBitrateKbps: {
     title: "Audio Bitrate",
-    whatItChanges: "The number of kilobits per second allocated to the audio stream. Higher values produce clearer audio.",
+    whatItChanges: "The number of kilobytes per second (kB/s) allocated to the audio stream. Higher values produce clearer audio.",
     higherValue: "Better audio clarity, especially for music and complex soundscapes",
     lowerValue: "Lower network usage, adequate for speech but may have audible artifacts for music",
     tradeoff: "Audio quality vs. bandwidth — higher bitrate sounds better but uses more bandwidth",

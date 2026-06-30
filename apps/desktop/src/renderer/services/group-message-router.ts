@@ -466,64 +466,70 @@ export class GroupMessageRouter {
         },
       );
 
-      // Apply quality to the exact viewer sender
+      // Apply quality to the exact viewer sender.
+      // The request is already stored above. Now try to apply it:
+      // 1. Try the cached sender first (fast path)
+      // 2. If the cached sender is null, attempt reconciliation which
+      //    re-resolves from the live SDK connection (fix for the race
+      //    where bind completed before the sender was ready)
+      // 3. If still no sender, the request remains stored and will be
+      //    applied when peerConnected fires via reconciliation.
       if (this.runtime) {
         const viewerBinding = this.runtime.getViewerMediaBinding();
-        const sender = viewerBinding.getViewerVideoSender(envelope.senderDeviceId);
-        if (sender && this.qualityCoordinator) {
-          // Get the stored viewer request and compute effective quality
-          const request = this.qualityCoordinator.getViewerRequest(
-            groupId,
-            logicalStreamId,
+        const mapping = viewerBinding.getViewerMapping(envelope.senderDeviceId);
+        if (mapping && this.qualityCoordinator) {
+          // Try reconciliation which re-resolves from live SDK and applies
+          const reconciled = await viewerBinding.reconcileViewerQuality(
             envelope.senderDeviceId,
+            mapping.mediaSessionId,
           );
-          if (request) {
-            // Use real group quality defaults from sync service
-            const syncState = this.runtime.getSyncService().getSyncState(groupId);
-            const quality = syncState?.state?.defaultQuality?.value;
-            const groupSettings = quality ?? createDefaultGroupQualitySettings();
-
-            // Use real source dimensions from StreamSessionManager
-            const ssm = this.runtime.getStreamSessionManager();
-            const actualDims = ssm.getActualCaptureDimensions();
-            const sourceDimensions = {
-              width: actualDims.width || groupSettings.video.sendWidth || 1920,
-              height: actualDims.height || groupSettings.video.sendHeight || 1080,
-            };
-
-            // Use real host quality limits from runtime (loaded from persisted settings)
-            const runtimeLimits = this.runtime.getHostQualityLimits();
-            const hostLimits: HostQualityLimits = {
-              maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
-              maxWidth: runtimeLimits.maxWidth,
-              maxHeight: runtimeLimits.maxHeight,
-              maxFps: runtimeLimits.maxFps,
-              allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
-            };
-
-            const effective = this.qualityCoordinator.calculateEffectiveQuality(
-              groupSettings,
-              hostLimits,
-              request,
-              sourceDimensions,
+          // If reconciliation failed (no sender yet), the request is stored
+          // and will be applied when peerConnected fires.
+          if (!reconciled && this.qualityCoordinator) {
+            // Send at least the effective values so the viewer knows
+            // the request was received, even if we can't apply yet.
+            const request = this.qualityCoordinator.getViewerRequest(
+              groupId,
+              logicalStreamId,
+              envelope.senderDeviceId,
             );
-
-            const configured = await this.qualityCoordinator.applyToExactViewer(
-              envelope.senderDeviceId,
-              envelope.senderDeviceId,
-              sender,
-              effective.effective,
-            ).catch(() => null);
-
-            // Send quality feedback back to the viewer (quality.effective with clamping info)
-            if (configured) {
-              await this.sendQualityFeedback(
-                groupId,
-                envelope.senderDeviceId,
-                logicalStreamId,
-                effective,
-                configured,
-              ).catch(() => {});
+            if (request) {
+              const syncState = this.runtime.getSyncService().getSyncState(groupId);
+              const quality = syncState?.state?.defaultQuality?.value;
+              const groupSettings = quality ?? createDefaultGroupQualitySettings();
+              const ssm = this.runtime.getStreamSessionManager();
+              const actualDims = ssm.getActualCaptureDimensions();
+              const sourceDimensions = {
+                width: actualDims.width || groupSettings.video.sendWidth || 1920,
+                height: actualDims.height || groupSettings.video.sendHeight || 1080,
+              };
+              const runtimeLimits = this.runtime.getHostQualityLimits();
+              const hostLimits: HostQualityLimits = {
+                maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+                maxWidth: runtimeLimits.maxWidth,
+                maxHeight: runtimeLimits.maxHeight,
+                maxFps: runtimeLimits.maxFps,
+                allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+              };
+              const effective = this.qualityCoordinator.calculateEffectiveQuality(
+                groupSettings, hostLimits, request, sourceDimensions,
+              );
+              // Send effective values even without configured (sender not ready)
+              // This prevents the viewer from waiting indefinitely.
+              const conn = this.runtime.getConnectionManager().getConnection(groupId);
+              const peerUuid = conn?.peerForDevice(envelope.senderDeviceId);
+              if (conn && peerUuid) {
+                await conn.sendToPeer(peerUuid, {
+                  type: "quality.effective",
+                  streamSessionId: logicalStreamId,
+                  videoBitrateKbps: effective.effective.videoBitrateKbps,
+                  maxWidth: effective.effective.maxWidth,
+                  maxHeight: effective.effective.maxHeight,
+                  maxFps: effective.effective.maxFps,
+                  degradationPreference: effective.effective.degradationPreference,
+                  clampReasons: [...effective.clampReasons, "sender not ready, will apply on connect"],
+                }).catch(() => {});
+              }
             }
           }
         }
@@ -542,57 +548,52 @@ export class GroupMessageRouter {
         envelope.senderDeviceId,
       );
 
-      // Clear quality on the exact viewer sender (reset to group defaults)
+      // Clear quality on the exact viewer sender (reset to group defaults).
+      // Try the cached sender first; if null, attempt reconciliation which
+      // re-resolves from the live SDK connection.
       if (this.runtime) {
         const viewerBinding = this.runtime.getViewerMediaBinding();
-        const sender = viewerBinding.getViewerVideoSender(envelope.senderDeviceId);
-        if (sender && this.qualityCoordinator) {
-          // Use real group quality defaults from sync service
-          const syncState = this.runtime.getSyncService().getSyncState(groupId);
-          const quality = syncState?.state?.defaultQuality?.value;
-          const groupSettings = quality ?? createDefaultGroupQualitySettings();
-
-          // Use real source dimensions from StreamSessionManager
-          const ssm = this.runtime.getStreamSessionManager();
-          const actualDims = ssm.getActualCaptureDimensions();
-          const sourceDimensions = {
-            width: actualDims.width || groupSettings.video.sendWidth || 1920,
-            height: actualDims.height || groupSettings.video.sendHeight || 1080,
-          };
-
-          // Use real host quality limits from runtime (loaded from persisted settings)
-          const runtimeLimits = this.runtime.getHostQualityLimits();
-          const hostLimits: HostQualityLimits = {
-            maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
-            maxWidth: runtimeLimits.maxWidth,
-            maxHeight: runtimeLimits.maxHeight,
-            maxFps: runtimeLimits.maxFps,
-            allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
-          };
-
-          const effective = this.qualityCoordinator.calculateEffectiveQuality(
-            groupSettings,
-            hostLimits,
-            null, // No viewer request → apply group defaults
-            sourceDimensions,
+        const mapping = viewerBinding.getViewerMapping(envelope.senderDeviceId);
+        if (mapping && this.qualityCoordinator) {
+          // Use reconciliation to re-resolve sender from live SDK
+          const reconciled = await viewerBinding.reconcileViewerQuality(
+            envelope.senderDeviceId,
+            mapping.mediaSessionId,
           );
-
-          const configured = await this.qualityCoordinator.applyToExactViewer(
-            envelope.senderDeviceId,
-            envelope.senderDeviceId,
-            sender,
-            effective.effective,
-          ).catch(() => null);
-
-          // Send quality feedback for the clear (reset to group defaults)
-          if (configured) {
-            await this.sendQualityFeedback(
-              groupId,
-              envelope.senderDeviceId,
-              logicalStreamId,
-              effective,
-              configured,
-            ).catch(() => {});
+          if (reconciled) {
+            // After reconciliation, re-apply group defaults (null request = defaults)
+            const freshMapping = viewerBinding.getViewerMapping(envelope.senderDeviceId, mapping.mediaSessionId);
+            const sender = freshMapping?.videoSender;
+            if (sender) {
+              const syncState = this.runtime.getSyncService().getSyncState(groupId);
+              const quality = syncState?.state?.defaultQuality?.value;
+              const groupSettings = quality ?? createDefaultGroupQualitySettings();
+              const ssm = this.runtime.getStreamSessionManager();
+              const actualDims = ssm.getActualCaptureDimensions();
+              const sourceDimensions = {
+                width: actualDims.width || groupSettings.video.sendWidth || 1920,
+                height: actualDims.height || groupSettings.video.sendHeight || 1080,
+              };
+              const runtimeLimits = this.runtime.getHostQualityLimits();
+              const hostLimits: HostQualityLimits = {
+                maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+                maxWidth: runtimeLimits.maxWidth,
+                maxHeight: runtimeLimits.maxHeight,
+                maxFps: runtimeLimits.maxFps,
+                allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+              };
+              const effective = this.qualityCoordinator.calculateEffectiveQuality(
+                groupSettings, hostLimits, null, sourceDimensions,
+              );
+              const configured = await this.qualityCoordinator.applyToExactViewer(
+                envelope.senderDeviceId, envelope.senderDeviceId, sender, effective.effective,
+              ).catch(() => null);
+              if (configured) {
+                await this.sendQualityFeedback(
+                  groupId, envelope.senderDeviceId, logicalStreamId, effective, configured,
+                ).catch(() => {});
+              }
+            }
           }
         }
       }

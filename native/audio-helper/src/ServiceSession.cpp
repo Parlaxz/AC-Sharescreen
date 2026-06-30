@@ -1378,46 +1378,81 @@ void ServiceSession::HandleSendShortcut(const CommandContext& ctx,
         return;
     }
 
+    // Normalize to uppercase for case-insensitive comparison (the JS side
+    // uppercases keys via normalizeShortcutBinding before sending).
+    for (auto& c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
     // Map key string to virtual key code
     WORD vk = 0;
     if (key.size() == 1) {
         char c = key[0];
         if (c >= 'A' && c <= 'Z') vk = static_cast<WORD>(c);
-        else if (c >= 'a' && c <= 'z') vk = static_cast<WORD>(c - 'a' + 'A');
         else if (c >= '0' && c <= '9') vk = static_cast<WORD>(c);
         else if (c == ' ') vk = VK_SPACE;
-    } else if (key == "Enter") {
+    } else if (key == "ENTER") {
         vk = VK_RETURN;
-    } else if (key == "Tab") {
+    } else if (key == "TAB") {
         vk = VK_TAB;
-    } else if (key == "Escape") {
+    } else if (key == "ESCAPE") {
         vk = VK_ESCAPE;
-    } else if (key == "Space") {
+    } else if (key == "SPACE") {
         vk = VK_SPACE;
-    } else if (key == "Backspace") {
+    } else if (key == "BACKSPACE") {
         vk = VK_BACK;
-    } else if (key == "Delete") {
+    } else if (key == "DELETE") {
         vk = VK_DELETE;
-    } else if (key == "Insert") {
+    } else if (key == "INSERT") {
         vk = VK_INSERT;
-    } else if (key == "Home") {
+    } else if (key == "HOME") {
         vk = VK_HOME;
-    } else if (key == "End") {
+    } else if (key == "END") {
         vk = VK_END;
-    } else if (key == "PageUp") {
+    } else if (key == "PAGEUP") {
         vk = VK_PRIOR;
-    } else if (key == "PageDown") {
+    } else if (key == "PAGEDOWN") {
         vk = VK_NEXT;
-    } else if (key == "ArrowUp") {
+    } else if (key == "ARROWUP") {
         vk = VK_UP;
-    } else if (key == "ArrowDown") {
+    } else if (key == "ARROWDOWN") {
         vk = VK_DOWN;
-    } else if (key == "ArrowLeft") {
+    } else if (key == "ARROWLEFT") {
         vk = VK_LEFT;
-    } else if (key == "ArrowRight") {
+    } else if (key == "ARROWRIGHT") {
         vk = VK_RIGHT;
-    } else if (key == "CapsLock") {
+    } else if (key == "CAPSLOCK") {
         vk = VK_CAPITAL;
+    } else if (key == "NUMPAD0") {
+        vk = VK_NUMPAD0;
+    } else if (key == "NUMPAD1") {
+        vk = VK_NUMPAD1;
+    } else if (key == "NUMPAD2") {
+        vk = VK_NUMPAD2;
+    } else if (key == "NUMPAD3") {
+        vk = VK_NUMPAD3;
+    } else if (key == "NUMPAD4") {
+        vk = VK_NUMPAD4;
+    } else if (key == "NUMPAD5") {
+        vk = VK_NUMPAD5;
+    } else if (key == "NUMPAD6") {
+        vk = VK_NUMPAD6;
+    } else if (key == "NUMPAD7") {
+        vk = VK_NUMPAD7;
+    } else if (key == "NUMPAD8") {
+        vk = VK_NUMPAD8;
+    } else if (key == "NUMPAD9") {
+        vk = VK_NUMPAD9;
+    } else if (key == "NUMPADMULTIPLY") {
+        vk = VK_MULTIPLY;
+    } else if (key == "NUMPADADD") {
+        vk = VK_ADD;
+    } else if (key == "NUMPADSUBTRACT") {
+        vk = VK_SUBTRACT;
+    } else if (key == "NUMPADDECIMAL") {
+        vk = VK_DECIMAL;
+    } else if (key == "NUMPADDIVIDE") {
+        vk = VK_DIVIDE;
+    } else if (key == "NUMPADENTER") {
+        vk = VK_RETURN;
     } else if (key.size() >= 2 && key[0] == 'F') {
         int fNum = std::atoi(key.c_str() + 1);
         if (fNum >= 1 && fNum <= 24) {

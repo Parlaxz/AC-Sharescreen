@@ -42,3 +42,15 @@ export function getInitials(name: string, maxParts = 2): string {
     .toUpperCase() || "?";
 }
 
+export function formatBitrateBps(bps: number | null): string {
+  if (bps === null || bps === 0) return "—";
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  return `${(bps / 1000).toFixed(1)} kbps`;
+}
+
+export function formatBitrateKbps(kbps: number | null): string {
+  if (kbps === null || kbps === 0) return "—";
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
+  return `${Math.round(kbps)} kbps`;
+}
+

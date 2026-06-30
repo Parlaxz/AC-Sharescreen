@@ -458,7 +458,7 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__custom__">
-                    Custom — {CUSTOM_DEFAULT_WIDTH}×{CUSTOM_DEFAULT_HEIGHT} @ {CUSTOM_DEFAULT_FPS} fps · {CUSTOM_DEFAULT_BITRATE_KBPS} kbps
+                    Custom — {CUSTOM_DEFAULT_WIDTH}×{CUSTOM_DEFAULT_HEIGHT} @ {CUSTOM_DEFAULT_FPS} fps · {(() => { const Bps = CUSTOM_DEFAULT_BITRATE_KBPS * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; return `${(Bps / 1000).toFixed(1)} kB/s`; })()}
                   </SelectItem>
                   {presets.map((p) => (
                     <SelectItem key={p.id} value={p.id}>

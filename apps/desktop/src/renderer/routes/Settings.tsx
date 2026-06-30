@@ -518,7 +518,7 @@ export function Settings() {
           Maximum quality values for your outgoing stream. Applied as a ceiling to preset and viewer requests.
         </p>
         <label className="field">
-          <span>Max Video Bitrate (kbps)</span>
+          <span>Max Video Bitrate (kB/s)</span>
           <input type="number" value={hostMaxBitrate}
             onChange={(e) => handleMaxBitrateChange(e.target.value)}
             min={100} max={20000} />

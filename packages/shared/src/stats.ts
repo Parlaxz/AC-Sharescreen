@@ -50,7 +50,7 @@ export interface CandidatePairStats {
 // ─── Utility Functions ─────────────────────────────────────────────────────
 
 /**
- * Compute kbps from byte counters over a time interval.
+ * Compute bitrate (kbps) from byte counters over a time interval.
  * Returns null if the delta is negative, time is zero/negative, or counter reset.
  */
 export function computeKbps(
@@ -69,6 +69,7 @@ export function computeKbps(
  * Estimate total bytes transferred over one hour at a given bitrate.
  */
 export function estimateBytesPerHour(kbps: number): number {
+  // kbps * 1000 / 8 = bytes per second. Multiply by 3600 for bytes per hour.
   return (kbps * 1000) / 8 * 3600;
 }
 

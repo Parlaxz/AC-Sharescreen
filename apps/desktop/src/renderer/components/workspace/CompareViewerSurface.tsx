@@ -20,6 +20,7 @@ import {
   useEffect,
   useState,
   useCallback,
+  useMemo,
   type ReactElement,
   type PointerEvent as ReactPointerEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -275,6 +276,14 @@ export function CompareViewerSurface({
   const backendB = settingsB.processingBackend;
   const enforcedA = getEffectiveBackend(settingsA, backendB === "nvidia-vsr" ? "nvidia-vsr" : null);
   const enforcedB = getEffectiveBackend(settingsB, enforcedA.effectiveBackend === "nvidia-vsr" ? "nvidia-vsr" : null);
+  const effectiveSettingsA = useMemo(() => ({
+    ...settingsA,
+    processingBackend: enforcedA.effectiveBackend,
+  }), [settingsA, enforcedA.effectiveBackend]);
+  const effectiveSettingsB = useMemo(() => ({
+    ...settingsB,
+    processingBackend: enforcedB.effectiveBackend,
+  }), [settingsB, enforcedB.effectiveBackend]);
 
   // ── Auto-hide controls ───────────────────────────────────────────
   const { visible: controlsVisible, show: showControls, hide: hideControls } =
@@ -330,23 +339,27 @@ export function CompareViewerSurface({
   }, [onFullscreenChange]);
 
   // ── Display mode helpers ─────────────────────────────────────────
+  //
+  // Presentation-only: these styles affect visibility/layering only.
+  // Both processing surfaces remain mounted in all modes.
   const showWipe = displayMode === "vertical-wipe";
   const showA = displayMode === "side-a";
   const showB = displayMode === "side-b";
-  const showBoth = showWipe; // both canvases always rendered
 
-  // CSS clip for vertical wipe: left = shown, right = hidden
-  const clipStyleA = showWipe
-    ? { clipPath: `inset(0 ${(1 - dividerPosition) * 100}% 0 0)` }
-    : showA
-    ? { clipPath: "inset(0 0 0 0)" }
-    : { clipPath: "inset(0 0 0 100%)" };
+  // Vertical compare: A is full baseline (no clip), B is clipped at divider.
+  // Single-side modes: use opacity/pointer-events to hide the non-selected
+  // side (never fully clip or display:none a processing surface).
+  const layerStyleA = useMemo(() => {
+    if (showWipe) return {}; // Full baseline — no clip
+    if (showA) return {}; // Fully visible
+    return { opacity: 0, pointerEvents: "none" as const }; // Invisible but mounted
+  }, [showWipe, showA]);
 
-  const clipStyleB = showWipe
-    ? { clipPath: `inset(0 0 0 ${dividerPosition * 100}%)` }
-    : showB
-    ? { clipPath: "inset(0 0 0 0)" }
-    : { clipPath: "inset(0 100% 0 0)" };
+  const layerStyleB = useMemo(() => {
+    if (showWipe) return { clipPath: `inset(0 0 0 ${dividerPosition * 100}%)` };
+    if (showB) return {}; // Fully visible
+    return { opacity: 0, pointerEvents: "none" as const }; // Invisible but mounted
+  }, [showWipe, showB, dividerPosition]);
 
   // Wipe handle style
   const handleStyle = showWipe
@@ -378,37 +391,35 @@ export function CompareViewerSurface({
     >
       {/* ── Video Stage ─────────────────────────────────────────── */}
       <div className="absolute inset-0">
-        {/* Variant A — overlays full area, clipped */}
-        <div className="absolute inset-0" style={clipStyleA}>
+        {/* Persistent raw video underlay — always present in compare mode */}
+        {videoElement && (
+          <video
+            ref={(el) => {
+              if (el && videoElement.srcObject) {
+                el.srcObject = videoElement.srcObject;
+              }
+            }}
+            className="absolute inset-0 w-full h-full object-contain"
+            autoPlay
+            playsInline
+            muted
+            aria-label="Source video underlay"
+          />
+        )}
+
+        {/* Variant A — overlays full area, styled per display mode */}
+        <div className="absolute inset-0" style={layerStyleA}>
           <div className="relative w-full h-full bg-black">
             <EnhancedVideoSurface
               videoElement={videoElement}
               enabled
               presentationMode="dom-only"
-              settings={{
-                ...settingsA,
-                processingBackend: enforcedA.effectiveBackend,
-              }}
+              settings={effectiveSettingsA}
               className="w-full h-full"
               onStatsUpdate={onStatsUpdateA}
               onProcessorStateChange={onProcessorStateChangeA}
               processorApiRef={processorApiRefA}
             />
-            {/* Fallback: raw video when EnhancedVideoSurface returns null */}
-            {!settingsA.enabled && videoElement && (
-              <video
-                ref={(el) => {
-                  if (el && videoElement.srcObject) {
-                    el.srcObject = videoElement.srcObject;
-                  }
-                }}
-                className="absolute inset-0 w-full h-full object-contain"
-                autoPlay
-                playsInline
-                muted
-                aria-label="Variant A raw video"
-              />
-            )}
 
             {/* Label overlay — top-left */}
             <div
@@ -422,36 +433,19 @@ export function CompareViewerSurface({
           </div>
         </div>
 
-        {/* Variant B — overlays full area, clipped */}
-        <div className="absolute inset-0" style={clipStyleB}>
+        {/* Variant B — overlays full area, styled per display mode */}
+        <div className="absolute inset-0" style={layerStyleB}>
           <div className="relative w-full h-full bg-black">
             <EnhancedVideoSurface
               videoElement={videoElement}
               enabled
               presentationMode="dom-only"
-              settings={{
-                ...settingsB,
-                processingBackend: enforcedB.effectiveBackend,
-              }}
+              settings={effectiveSettingsB}
               className="w-full h-full"
               onStatsUpdate={onStatsUpdateB}
               onProcessorStateChange={onProcessorStateChangeB}
               processorApiRef={processorApiRefB}
             />
-            {!settingsB.enabled && videoElement && (
-              <video
-                ref={(el) => {
-                  if (el && videoElement.srcObject) {
-                    el.srcObject = videoElement.srcObject;
-                  }
-                }}
-                className="absolute inset-0 w-full h-full object-contain"
-                autoPlay
-                playsInline
-                muted
-                aria-label="Variant B raw video"
-              />
-            )}
 
             {/* Label overlay — top-left */}
             <div
@@ -534,6 +528,7 @@ export function CompareViewerSurface({
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         className="absolute top-3 right-3 z-30"
+        onPointerDown={(e) => e.stopPropagation()}
       >
         <Button
           variant="outline"
@@ -556,6 +551,7 @@ export function CompareViewerSurface({
         }}
         transition={{ duration: 0.2, ease: "easeInOut" }}
         className="absolute bottom-0 left-0 right-0 z-30 bg-gradient-to-t from-black/80 via-black/50 to-transparent"
+        onPointerDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-center gap-2 px-4 pb-3 pt-8">
           <div className="flex items-center gap-1 rounded-standard bg-black/60 backdrop-blur-sm px-2 py-1.5 border border-white/10 max-w-3xl w-full">

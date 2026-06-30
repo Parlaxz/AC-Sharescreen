@@ -27,7 +27,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn, getInitials } from "@/lib/utils";
-import { useStore, type GroupNavPage, type Page } from "@/stores/main-store";
+import { useStore, type GroupNavPage, type Page, type StreamAnnouncement } from "@/stores/main-store";
 import { UserDock } from "./UserDock.js";
 import { AnimatedCountBadge } from "@/components/primitives/AnimatedCountBadge";
 import { InviteDialog } from "@/components/workspace/InviteDialog";
@@ -82,6 +82,32 @@ export function GroupDashboard() {
     if (!selectedGroupId) return;
     await copyGroupInviteFromUi(selectedGroupId, "Invite link copied");
   }, [selectedGroupId]);
+
+  const handleWatchShare = useCallback((share: StreamAnnouncement) => {
+    if (useStore.getState().isViewing) return;
+    const s = useStore.getState();
+    const target = {
+      groupId: share.groupId,
+      logicalStreamId: share.logicalStreamId,
+      mediaSessionId: share.mediaSessionId,
+      hostDeviceId: share.hostDeviceId,
+      hostName: share.hostDisplayName,
+      startedAt: share.startedAt,
+      sourceName: share.sourceName,
+      sourceKind: share.sourceKind,
+    };
+    s.setWatchedStreams({
+      [share.mediaSessionId]: {
+        hostDeviceId: share.hostDeviceId,
+        hostName: share.hostDisplayName,
+        startedAt: share.startedAt,
+      },
+    });
+    s.setWatchingTarget(target);
+    s.setIsViewing(true);
+    s.setViewStatus("connecting");
+    s.navigate("viewer");
+  }, []);
 
   const navItems: {
     id: GroupNavPage;
@@ -266,27 +292,32 @@ export function GroupDashboard() {
                         animate={{ opacity: 1, height: "auto" }}
                         exit={{ opacity: 0, height: 0 }}
                         transition={{ duration: 0.2 }}
-                        className="flex items-center gap-2 px-2 py-1.5 rounded-compact hover:bg-surface-hover cursor-pointer"
+                        className="flex-shrink-0"
                       >
-                        <Avatar className="h-6 w-6 rounded-md flex-shrink-0">
-                          <AvatarFallback className="rounded-md text-[10px] bg-surface-3">
-                            {getInitials(share.hostDisplayName)}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div className="flex-1 min-w-0">
-                          <span className="block text-xs text-text-primary truncate">
-                            {share.hostDisplayName}
-                          </span>
-                          <span className="block text-[10px] text-text-muted truncate">
-                            {share.sourceName}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1 flex-shrink-0">
-                          <span className="w-1.5 h-1.5 rounded-full bg-success" />
-                          <span className="text-[10px] text-text-muted">
-                            {share.sourceKind}
-                          </span>
-                        </div>
+                        <button
+                          onClick={() => handleWatchShare(share)}
+                          className="flex items-center gap-2 w-full px-2 py-1.5 rounded-compact hover:bg-surface-hover cursor-pointer text-left"
+                        >
+                          <Avatar className="h-6 w-6 rounded-md flex-shrink-0 pointer-events-none">
+                            <AvatarFallback className="rounded-md text-[10px] bg-surface-3">
+                              {getInitials(share.hostDisplayName)}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="flex-1 min-w-0">
+                            <span className="block text-xs text-text-primary truncate">
+                              {share.hostDisplayName}
+                            </span>
+                            <span className="block text-[10px] text-text-muted truncate">
+                              {share.sourceName}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1 flex-shrink-0 pointer-events-none">
+                            <span className="w-1.5 h-1.5 rounded-full bg-success" />
+                            <span className="text-[10px] text-text-muted">
+                              {share.sourceKind}
+                            </span>
+                          </div>
+                        </button>
                       </motion.div>
                     ))}
                   </AnimatePresence>

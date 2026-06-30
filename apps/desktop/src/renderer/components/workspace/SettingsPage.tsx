@@ -525,7 +525,7 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-1.5">
           <Label htmlFor="viewer-bitrate-slider-max">
-            Maximum bitrate (kbps) shown on the viewer quality slider
+            Maximum bitrate (kB/s) shown on the viewer quality slider
           </Label>
           <Input
             id="viewer-bitrate-slider-max"

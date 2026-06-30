@@ -227,7 +227,7 @@ export function GroupSettingsDialog({ groupId, onClose }: Props) {
           <legend style={{ fontWeight: 600, fontSize: "0.9rem" }}>Default Stream Quality</legend>
 
           <div className="field-row">
-            <label htmlFor="settings-bitrate">Video Bitrate (kbps)</label>
+            <label htmlFor="settings-bitrate">Video Bitrate (kB/s)</label>
             <input
               id="settings-bitrate"
               type="number"

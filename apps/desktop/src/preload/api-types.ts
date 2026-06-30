@@ -178,6 +178,7 @@ export interface ScreenLinkAPI {
   videoHelperFlush: () => Promise<boolean>;
   videoHelperGetState: () => Promise<string>;
   videoHelperGetAppliedConfig: () => Promise<import("@screenlink/shared").AppliedNvidiaConfig | null>;
+  videoHelperGetDiagnostics: () => Promise<Record<string, unknown> | null>;
   /** Phase 5: Request a dedicated MessagePort for zero-copy frame data transfer.
    *  The port arrives asynchronously via window `message` event with type `frame:port`. */
   requestFramePort: () => Promise<{ success: boolean }>;

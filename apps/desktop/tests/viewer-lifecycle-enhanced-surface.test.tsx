@@ -3,7 +3,8 @@
  * Component-level integration tests for EnhancedVideoSurface lifecycle.
  *
  * Verifies that the component correctly manages processor lifecycle across
- * same-videoElement rerenders and videoElement replacement.
+ * same-videoElement rerenders and videoElement replacement, and that
+ * semantically unchanged settings do not trigger updateSettings.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
@@ -248,5 +249,120 @@ describe("EnhancedVideoSurface — processor lifecycle", () => {
     // "deps changed" or hardcoded value) because the closure had truthy
     // enabled/videoElement but the component is leaving the tree.
     expect(prevDestroy).toHaveBeenCalledWith("component-unmount");
+  });
+
+  it("does not call updateSettings when settings are semantically unchanged", async () => {
+    const video = createVideoElement();
+    const { rerender } = render(
+      <EnhancedVideoSurface
+        videoElement={video}
+        enabled={true}
+        settings={DEFAULT_SETTINGS}
+      />,
+    );
+
+    await settleEffects();
+
+    // Clear all mock calls from initialization
+    const proc = currentMockProcessor()!;
+    proc.updateSettings.mockClear();
+
+    // Rerender with a fresh object that has identical values
+    rerender(
+      <EnhancedVideoSurface
+        videoElement={video}
+        enabled={true}
+        settings={{ ...DEFAULT_SETTINGS }}
+      />,
+    );
+
+    await settleEffects();
+
+    // updateSettings should NOT be called when values are identical
+    expect(proc.updateSettings).not.toHaveBeenCalled();
+    // setBackend should NOT be called when backend hasn't changed
+    expect(proc.setBackend).not.toHaveBeenCalled();
+    // destroy should NOT be called
+    expect(proc.destroy).not.toHaveBeenCalled();
+  });
+
+  it("calls updateSettings when a numeric setting changes", async () => {
+    const video = createVideoElement();
+    const { rerender } = render(
+      <EnhancedVideoSurface
+        videoElement={video}
+        enabled={true}
+        settings={DEFAULT_SETTINGS}
+      />,
+    );
+
+    await settleEffects();
+
+    const proc = currentMockProcessor()!;
+    proc.updateSettings.mockClear();
+
+    // Change sharpening strength
+    const changedSettings: ViewerImageEnhancementSettings = {
+      ...DEFAULT_SETTINGS,
+      sharpeningStrength: 0.75,
+    };
+
+    rerender(
+      <EnhancedVideoSurface
+        videoElement={video}
+        enabled={true}
+        settings={changedSettings}
+      />,
+    );
+
+    await settleEffects();
+
+    // updateSettings should be called with the new settings
+    expect(proc.updateSettings).toHaveBeenCalledTimes(1);
+    expect(proc.updateSettings).toHaveBeenCalledWith(changedSettings);
+    // setBackend should NOT be called when only a numeric field changed
+    expect(proc.setBackend).not.toHaveBeenCalled();
+    // destroy should NOT be called
+    expect(proc.destroy).not.toHaveBeenCalled();
+  });
+
+  it("calls setBackend when processingBackend changes", async () => {
+    const video = createVideoElement();
+    const { rerender } = render(
+      <EnhancedVideoSurface
+        videoElement={video}
+        enabled={true}
+        settings={DEFAULT_SETTINGS}
+      />,
+    );
+
+    await settleEffects();
+
+    const proc = currentMockProcessor()!;
+    proc.setBackend.mockClear();
+    proc.updateSettings.mockClear();
+
+    // Change backend
+    const changedSettings: ViewerImageEnhancementSettings = {
+      ...DEFAULT_SETTINGS,
+      processingBackend: "nvidia-vsr",
+    };
+
+    rerender(
+      <EnhancedVideoSurface
+        videoElement={video}
+        enabled={true}
+        settings={changedSettings}
+      />,
+    );
+
+    await settleEffects();
+
+    // setBackend should be called when backend changes
+    expect(proc.setBackend).toHaveBeenCalledTimes(1);
+    // updateSettings should also be called after backend switch
+    expect(proc.updateSettings).toHaveBeenCalledTimes(1);
+    // destroy should NOT be called
+    expect(proc.destroy).not.toHaveBeenCalled();
   });
 });

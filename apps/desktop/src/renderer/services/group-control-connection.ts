@@ -143,6 +143,7 @@ interface BoundHandlers {
   reconnected: (event: unknown) => void;
   reconnectFailed: (event: unknown) => void;
   roomJoined: (event: unknown) => void;
+  error: (event: unknown) => void;
 }
 
 /** Handle returned by autoConnect — invoked on destroy to clean up the mesh. */
@@ -595,6 +596,7 @@ export class GroupControlConnection {
       try { sdk.removeEventListener("reconnected", this.handlers.reconnected as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("reconnectFailed", this.handlers.reconnectFailed as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("roomJoined", this.handlers.roomJoined as never); } catch { /* ignore */ }
+      try { sdk.removeEventListener("error", this.handlers.error as never); } catch { /* ignore */ }
       this.handlers = null;
     }
 
@@ -838,6 +840,20 @@ export class GroupControlConnection {
         // announce() resolves, not at roomJoined. Keep this hook so the
         // mesh state can be inspected at the seam.
       },
+      error: (event: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        // RTCErrorEvent with `reason=Close called` fires on RTCDataChannel
+        // when close() is called during normal SDK teardown. The SDK
+        // re-emits these as its own "error" event — suppress them since
+        // they are expected behaviour, not actual errors.
+        if (event && typeof event === "object") {
+          const err = (event as { error?: Error }).error;
+          if (err instanceof Error && err.message.includes("Close called")) {
+            return;
+          }
+        }
+        console.warn("[group-control] SDK error event:", event);
+      },
     };
 
     this.handlers = handlers;
@@ -851,5 +867,6 @@ export class GroupControlConnection {
     sdk.addEventListener("reconnected", handlers.reconnected as never);
     sdk.addEventListener("reconnectFailed", handlers.reconnectFailed as never);
     sdk.addEventListener("roomJoined", handlers.roomJoined as never);
+    sdk.addEventListener("error", handlers.error as never);
   }
 }

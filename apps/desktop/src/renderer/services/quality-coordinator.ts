@@ -55,7 +55,7 @@ export interface AcceptedViewerRequest {
 // ─── Shared Sender-Setting Utilities ───────────────────────────────────────
 
 export interface SenderSettingsInput {
-  /** Video bitrate in kbps (converted to bps internally) */
+  /** Video bitrate in kbps (converted to B/s internally) */
   maxBitrate: number;
   /** Maximum framerate */
   maxFramerate: number;

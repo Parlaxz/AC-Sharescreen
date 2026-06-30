@@ -39,11 +39,15 @@ const reducedCollapse = {
  *   │           │ USER DOCK    │                      │              │
  *   └───────────┴──────────────┴──────────────────────┴──────────────┘
  *
- * When `isViewing` is true:
- *   - The viewer workspace replaces the primary workspace content
+ * When `isViewing` is true AND `currentPage` is `"viewer"`:
+ *   - ViewerWorkspace fills the primary workspace
  *   - GroupDashboard and ContextPanel are hidden
- *   - GroupRail remains visible (Section 13.4)
- *
+ *   - GroupRail remains visible
+ * When `isViewing` is true AND `currentPage` is NOT `"viewer"`:
+ *   - The routed page (home, settings, etc.) fills the workspace
+ *   - GroupDashboard is shown, providing sidebar navigation and UserDock
+ *   - ViewerWorkspace stays mounted in the background (WebRTC stays alive)
+ *   - ContextPanel remains hidden
  * When `focusMode` is true (Section 5):
  *   - GroupRail, GroupDashboard, and ContextPanel are all hidden
  *   - Only the title bar and viewer workspace remain
@@ -62,10 +66,15 @@ export function AppShell({ children, className }: AppShellProps) {
   const isSharing = useStore((s) => s.isSharing);
   const focusMode = useStore((s) => s.focusMode);
   const isContextPanelOpen = useStore((s) => s.showContextPanel);
+  const currentPage = useStore((s) => s.currentPage);
 
   const showTitleBar = !focusMode;
   const showRail = !focusMode;
-  const showDashboard = !isViewing && !focusMode;
+  // Show dashboard when:
+  // 1. Not viewing (normal browsing), OR
+  // 2. Viewing but on a non-viewer page (home, settings, etc.)
+  // Always hide in focus mode.
+  const showDashboard = (!isViewing || currentPage !== "viewer") && !focusMode;
   const isContextPanelEligible = !isViewing && !focusMode && isSharing;
   const showContextPanel = isContextPanelEligible && isContextPanelOpen;
 
@@ -135,11 +144,23 @@ export function AppShell({ children, className }: AppShellProps) {
         {showDashboard && <Separator orientation="vertical" />}
 
         {/* ─── Primary Workspace ─────────────────────────── */}
-        <ResizablePanel className="flex-1 min-w-0 min-h-0 bg-canvas overflow-hidden">
-          {isViewing ? (
+        <ResizablePanel className="flex-1 min-w-0 min-h-0 bg-canvas overflow-hidden relative">
+          {isViewing && currentPage === "viewer" ? (
             <ViewerWorkspace />
           ) : (
             <main className="h-full min-h-0 overflow-auto">{children}</main>
+          )}
+          {/* When viewing a stream but on a non-viewer page (home, settings, etc.),
+              keep ViewerWorkspace mounted in the background so the WebRTC session
+              stays alive. Hidden via opacity/pointer-events, not display:none,
+              so Chromium continues decoding video frames. */}
+          {isViewing && currentPage !== "viewer" && (
+            <div
+              className="absolute inset-0 pointer-events-none opacity-0"
+              aria-hidden="true"
+            >
+              <ViewerWorkspace />
+            </div>
           )}
         </ResizablePanel>
 

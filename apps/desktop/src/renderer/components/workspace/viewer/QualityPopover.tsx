@@ -19,9 +19,9 @@ import { Info, Settings2, Copy, Check } from "lucide-react";
 export type QualityLevel = "low" | "medium" | "high" | "custom";
 
 const QUALITY_LABELS: Record<QualityLevel, string> = {
-  low: "Low (300 kbps)",
-  medium: "Medium (1500 kbps)",
-  high: "High (3000 kbps)",
+  low: "Low (37.5 kB/s)",
+  medium: "Medium (187.5 kB/s)",
+  high: "High (375 kB/s)",
   custom: "Custom",
 };
 
@@ -31,6 +31,16 @@ const QUALITY_BITRATES: Record<QualityLevel, number | null> = {
   high: 3000,
   custom: null,
 };
+
+/** Format a kbps value as a byte-rate display string (kB/s or MB/s). */
+function formatKbpsAsByteRate(kbps: number): string {
+  if (kbps <= 0) return "0 kB/s";
+  const Bps = kbps * 125; // kbps * 1000 / 8
+  if (Bps < 1000) return `${Math.round(Bps)} B/s`;
+  const kBps = Bps / 1000;
+  if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
+  return `${(kBps / 1000).toFixed(2)} MB/s`;
+}
 
 // ─── Stats types ───────────────────────────────────────────────────────────
 
@@ -124,8 +134,8 @@ function sanitizeDiagnostics(stats: ViewerStats, quality: QualityLevel): string 
     `ScreenLink Viewer Diagnostics`,
     `=============================`,
     `Quality: ${QUALITY_LABELS[quality]}`,
-    `Configured bitrate: ${stats.configuredBitrateKbps ?? "unknown"} kbps`,
-    `Measured bitrate: ${stats.measuredBitrateKbps ?? "unknown"} kbps`,
+    `Configured bitrate: ${stats.configuredBitrateKbps !== null ? formatKbpsAsByteRate(stats.configuredBitrateKbps) : "unknown"}`,
+    `Measured bitrate: ${stats.measuredBitrateKbps !== null ? formatKbpsAsByteRate(stats.measuredBitrateKbps) : "unknown"}`,
     `Resolution: ${stats.resolution ?? "unknown"}`,
     `Frame rate: ${stats.frameRate ?? "unknown"} fps`,
     `Codec: ${stats.codec ?? "unknown"}`,
@@ -254,9 +264,9 @@ export function QualityPopover({ current, onSelect, children }: QualityPopoverPr
                 </p>
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
                   <span className="text-text-muted">Configured</span>
-                  <span className="text-text-primary text-right">— kbps</span>
+                  <span className="text-text-primary text-right">— kB/s</span>
                   <span className="text-text-muted">Measured</span>
-                  <span className="text-text-primary text-right">— kbps</span>
+                  <span className="text-text-primary text-right">— kB/s</span>
                 </div>
               </div>
 

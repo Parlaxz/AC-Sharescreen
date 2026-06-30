@@ -135,7 +135,7 @@ function QualityStatusDisplay({ groupId, sessionId, hostDeviceId, hostName }: Qu
         <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
           <p style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.15rem" }}>Requested</p>
           <p className="dim" style={{ fontSize: "0.75rem", lineHeight: 1.4 }}>
-            {effectiveInfo.requestedBitrate} kbps &middot; {effectiveInfo.requestedWidth}&times;{effectiveInfo.requestedHeight} @ {effectiveInfo.requestedFps} fps
+            {(() => { const Bps = effectiveInfo.requestedBitrate * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; const kBps = (Bps / 1000).toFixed(1); return `${kBps} kB/s`; })()} &middot; {effectiveInfo.requestedWidth}&times;{effectiveInfo.requestedHeight} @ {effectiveInfo.requestedFps} fps
             &middot; {effectiveInfo.requestedDegradation}
           </p>
         </div>
@@ -152,7 +152,7 @@ function QualityStatusDisplay({ groupId, sessionId, hostDeviceId, hostName }: Qu
         <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
           <p style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.15rem" }}>Observed</p>
           <p className="dim" style={{ fontSize: "0.75rem", lineHeight: 1.4 }}>
-            {observedStats.videoBitrateKbps ?? "?"} kbps &middot; {observedStats.width ?? "?"}&times;{observedStats.height ?? "?"} @ {observedStats.fps ?? "?"} fps
+            {observedStats.videoBitrateKbps != null ? (() => { const Bps = observedStats.videoBitrateKbps * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; return `${(Bps / 1000).toFixed(1)} kB/s`; })() : "?"} &middot; {observedStats.width ?? "?"}&times;{observedStats.height ?? "?"} @ {observedStats.fps ?? "?"} fps
             &middot; {observedStats.codec ?? "?"}
             {observedStats.qualityLimitationReason ? ` &middot; Limited: ${observedStats.qualityLimitationReason}` : ""}
             {observedStats.rtt !== undefined ? ` &middot; RTT: ${observedStats.rtt}ms` : ""}
@@ -555,10 +555,10 @@ export function QualityPresets() {
 
               <div className="preset-details" style={{ fontSize: "0.85rem", margin: "0.5rem 0" }}>
                 <p>
-                  <strong>Video:</strong> {p.settings.video.sendWidth}&times;{p.settings.video.sendHeight} @ {p.settings.video.sendFps} fps &middot; {p.settings.video.videoBitrateKbps} kbps &middot; {p.settings.video.codec}
+                  <strong>Video:</strong> {p.settings.video.sendWidth}&times;{p.settings.video.sendHeight} @ {p.settings.video.sendFps} fps &middot; {(() => { const Bps = p.settings.video.videoBitrateKbps * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; return `${(Bps / 1000).toFixed(1)} kB/s`; })()} &middot; {p.settings.video.codec}
                 </p>
                 <p>
-                  <strong>Audio:</strong> {p.settings.audio.bitrateKbps} kbps &middot; {p.settings.audio.channels} &middot; FEC: {p.settings.audio.fec ? "ON" : "OFF"} &middot; DTX: {p.settings.audio.dtx ? "ON" : "OFF"}
+                  <strong>Audio:</strong> {(() => { const Bps = p.settings.audio.bitrateKbps * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; return `${(Bps / 1000).toFixed(1)} kB/s`; })()} &middot; {p.settings.audio.channels} &middot; FEC: {p.settings.audio.fec ? "ON" : "OFF"} &middot; DTX: {p.settings.audio.dtx ? "ON" : "OFF"}
                 </p>
                 <p className="dim" style={{ fontSize: "0.8rem" }}>
                   Content: {p.settings.video.contentHint} &middot; Degradation: {p.settings.video.degradationPreference} &middot; Codec: {p.settings.video.codec} &middot; H264: {p.settings.video.h264Profile}

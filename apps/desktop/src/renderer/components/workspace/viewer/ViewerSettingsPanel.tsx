@@ -482,11 +482,11 @@ interface ViewerSettingsPanelProps {
   requestPending?: boolean;
   /** Whether the last request was accepted (true) or capped/rejected (false) */
   lastRequestAccepted?: boolean | undefined;
-  /** Feedback message (e.g. "Capped at 2000 kbps") */
+  /** Feedback message (e.g. "Capped at 250 kB/s") */
   requestFeedback?: string | null;
   /** Called when the popover opens or closes */
   onOpenChange?: (open: boolean) => void;
-  /** Max value for the bitrate slider kbps (default 5000) */
+  /** Max value for the bitrate slider (kbps, displayed as kB/s; default 5000 ≈ 625 kB/s) */
   maxSliderBitrateKbps?: number;
   /** Current GPU image enhancement settings */
   enhancementSettings?: ViewerImageEnhancementSettings;

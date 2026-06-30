@@ -28,6 +28,37 @@ type NativeVideoConfig = {
   pixelFormat: "rgba8";
 };
 
+/**
+ * Timing fields that the main process may include in a frame response.
+ * These are extracted from the native frame header (μs→ms conversion) and
+ * main-process IPC timing, then carried through to the renderer.
+ *
+ * Convention: `undefined` = measurement not available (never convert to 0).
+ * `0` = real measured zero (e.g. zero-copy GPU→GPU path).
+ */
+type NativeFrameTimingFields = {
+  /** Main-process input handling duration (ms) */
+  mainInputHandlingMs?: number;
+  /** Main-process request-write duration (ms) */
+  requestWriteMs?: number;
+  /** Main-process response-wait duration (ms) */
+  responseWaitMs?: number;
+  /** Main-process response-payload-read duration (ms) */
+  responsePayloadReadMs?: number;
+  /** Main-process handler total duration (ms) */
+  mainHandlerTotalMs?: number;
+  /** Native input-receive stage (μs→ms) */
+  nativeInputReceiveMs?: number;
+  /** Native upload stage (μs→ms) */
+  nativeUploadMs?: number;
+  /** Native effect stage (μs→ms) */
+  nativeEffectMs?: number;
+  /** Native download stage (μs→ms) */
+  nativeDownloadMs?: number;
+  /** Native pre-write total (μs→ms) — sum of upload+effect+download */
+  nativePreWriteTotalMs?: number;
+};
+
 type NativeFrameResult = {
   generation: number;
   sequence?: number;
@@ -37,7 +68,46 @@ type NativeFrameResult = {
   height: number;
   configurationId?: number;
   appliedQualityLevel?: number;
-};
+  /** True when the native presenter handled the frame (no pixel data returned). */
+  _metadataOnly?: boolean;
+} & NativeFrameTimingFields;
+
+/**
+ * Safe numeric extraction from an unknown message field.
+ * Returns `undefined` for null/undefined/non-finite values, preserving the
+ * distinction between unavailable and zero.
+ *
+ * Exported for testing.
+ */
+export function toNum(v: unknown): number | undefined {
+  if (v === null || v === undefined) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Decode timing fields from a raw frame response message.
+ * The main process includes these as JSON properties on the MessagePort
+ * response (both shared-slot and fallback paths).
+ *
+ * Exported for testing.
+ */
+export function decodeNativeFrameTiming(
+  msg: Record<string, unknown>,
+): NativeFrameTimingFields {
+  return {
+    mainInputHandlingMs: toNum(msg.mainInputHandlingMs),
+    requestWriteMs: toNum(msg.requestWriteMs),
+    responseWaitMs: toNum(msg.responseWaitMs),
+    responsePayloadReadMs: toNum(msg.responsePayloadReadMs),
+    mainHandlerTotalMs: toNum(msg.mainHandlerTotalMs),
+    nativeInputReceiveMs: toNum(msg.nativeInputReceiveMs),
+    nativeUploadMs: toNum(msg.nativeUploadMs),
+    nativeEffectMs: toNum(msg.nativeEffectMs),
+    nativeDownloadMs: toNum(msg.nativeDownloadMs),
+    nativePreWriteTotalMs: toNum(msg.nativePreWriteTotalMs),
+  };
+}
 
 type ScreenLinkVideoApi = {
   probeNvidiaVsrCapability?: () => Promise<{
@@ -69,6 +139,9 @@ type ScreenLinkVideoApi = {
   ) => Promise<NativeFrameResult | null>;
 
   videoHelperFlush?: () => Promise<boolean>;
+
+  /** Get enhancement diagnostics from the native helper (native timing, helper state) */
+  videoHelperGetDiagnostics?: () => Promise<Record<string, unknown> | null>;
 
   /** Phase 5: Request a dedicated MessagePort for zero-copy frame transfer */
   requestFramePort?: () => Promise<{ success: boolean }>;
@@ -261,6 +334,8 @@ function clampDimension(value: number): number {
   return Math.max(1, Math.min(4096, Math.round(value)));
 }
 
+const CAPTURE_FRAME_WAIT_TIMEOUT_MS = 250;
+
 export class NvidiaVsrBackend implements ViewerImageBackend {
   readonly kind: BackendKind = "nvidia-vsr";
   /** Stable monotonically increasing instance identifier */
@@ -330,14 +405,34 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   // Slice 5: Renderer-owned shared input slots for zero-copy frame transport
   private inputSlots: RendererInputSlots | null = null;
   private inputSlotsGeneration: number = -1;
+  private sharedSlotsUnavailable = false;
 
   // Slice 5: Capture path tracking
   private capturePath: "video-frame" | "rqvc-canvas" | "none" = "none";
   private videoFrameCaptureActive = false;
+
+  // ── Persistent capture resources (avoid per-frame setup) ──────────────
+  // Reusable capture buffer — reallocated only on dimension change
+  private captureBuffer: Uint8Array | null = null;
+  private captureBufferWidth = 0;
+  private captureBufferHeight = 0;
+
   // MediaStreamTrackProcessor is available in Chrome/Electron 120+
   // We store the processor and track reader for cleanup
   private mediaStreamTrackProcessor: any | null = null;
   private mediaStreamTrackReader: ReadableStreamDefaultReader | null = null;
+
+  // Source track identity for detecting track changes
+  private captureTrack: MediaStreamTrack | null = null;
+  private captureGeneration = 0;
+
+  // Background capture pump state
+  private capturePumpPromise: Promise<void> | null = null;
+  private nextCapturedFrameResolver: (() => void) | null = null;
+
+  // Retained VideoFrame for latest-frame semantics.
+  // At most one retained captured frame; newer replaces older (old closed).
+  private retainedVideoFrame: VideoFrame | null = null;
 
   // requestVideoFrameCallback handle for cleanup
   private rqvcHandle: number | null = null;
@@ -439,57 +534,220 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   // ── Slice 5: Capture paths ────────────────────────────────────────────
 
   /**
-   * Attempt to capture a video frame using the WebCodecs VideoFrame API
-   * (MediaStreamTrackProcessor + copyTo). This is the primary capture path
-   * when supported, as it avoids the drawImage + getImageData CPU round-trip.
+   * Ensure persistent capture resources (processor + reader) are created
+   * for the current source track. Detects track changes and invalidates
+   * old resources. Creates/cancels one MediaStreamTrackProcessor + one
+   * reader per source generation.
    *
-   * Returns the pixel data and timing info, or null if VideoFrame capture
-   * is not available or fails.
+   * Uses the video's srcObject (existing MediaStream track) directly —
+   * does NOT call video.captureStream() per frame.
    */
-  private captureViaVideoFrame(
+  private ensureCaptureResources(
     video: HTMLVideoElement,
-  ): { frameData: Uint8Array; inputWidth: number; inputHeight: number } | null {
-    // Check if VideoFrame is available
+  ): ReadableStreamDefaultReader | null {
     if (typeof VideoFrame === "undefined") return null;
 
-    // Check if the video has a MediaStream track we can capture from
-    // (captured streams via getDisplayMedia have a srcObject with active tracks)
-    if (!video.srcObject) return null;
+    const stream = video.srcObject as MediaStream | null;
+    if (!stream) return null;
 
+    const track = stream.getVideoTracks()?.[0];
+    if (!track) return null;
+
+    // Track identity: detect whether the source track changed
+    if (this.captureTrack !== track) {
+      // Track changed — tear down old resources
+      this.releaseCaptureResources();
+      this.captureTrack = track;
+      this.captureGeneration += 1;
+    }
+
+    // If processor already exists and matches current track, reuse it
+    if (this.mediaStreamTrackProcessor && this.mediaStreamTrackReader) {
+      return this.mediaStreamTrackReader;
+    }
+
+    // Create new processor + reader for this track
     try {
-      const track = (video.srcObject as MediaStream)?.getVideoTracks()?.[0];
-      if (!track) return null;
-
-      // Try MediaStreamTrackProcessor (available in Chrome/Electron 120+)
       const TProcessor = (self as any).MediaStreamTrackProcessor;
       if (!TProcessor) return null;
 
       const processor = new TProcessor({ track });
       const reader = processor.readable.getReader();
 
-      // Read one frame synchronously (with timeout via requestVideoFrameCallback)
-      // We need a synchronous approach since processFrame is async but
-      // we need to read and release ASAP
-      // Use Promise-based approach:
-      // We store the reader for cleanup and read one frame
       this.mediaStreamTrackProcessor = processor;
       this.mediaStreamTrackReader = reader;
+      this.videoFrameCaptureActive = true;
+      this.capturePumpPromise = this.pumpCapturedFrames(reader, this.captureGeneration);
 
-      // Read one frame — but we need it synchronously. Instead, we implement
-      // an async readOne method and let the caller handle timing.
-      // For now, fall through to the per-frame approach.
-      return null;
+      return reader;
     } catch {
       return null;
     }
   }
 
+  private async pumpCapturedFrames(
+    reader: ReadableStreamDefaultReader,
+    generation: number,
+  ): Promise<void> {
+    try {
+      while (
+        !this.destroyed &&
+        generation === this.captureGeneration &&
+        this.mediaStreamTrackReader === reader
+      ) {
+        const readResult = await reader.read();
+
+        if (readResult.done || !readResult.value) {
+          break;
+        }
+
+        const frame = readResult.value as VideoFrame;
+
+        if (
+          this.destroyed ||
+          generation !== this.captureGeneration ||
+          this.mediaStreamTrackReader !== reader
+        ) {
+          frame.close();
+          break;
+        }
+
+        if (this.retainedVideoFrame) {
+          try {
+            this.retainedVideoFrame.close();
+          } catch {
+            // ignore
+          }
+          this.stats = {
+            ...this.stats,
+            coalescedCount: (this.stats.coalescedCount ?? 0) + 1,
+          };
+        }
+
+        this.retainedVideoFrame = frame;
+        const notify = this.nextCapturedFrameResolver;
+        this.nextCapturedFrameResolver = null;
+        notify?.();
+      }
+    } catch {
+      // Let caller fall back to canvas or recreate capture resources later.
+    } finally {
+      if (generation === this.captureGeneration && this.mediaStreamTrackReader === reader) {
+        this.mediaStreamTrackReader = null;
+        this.mediaStreamTrackProcessor = null;
+        this.capturePumpPromise = null;
+        this.videoFrameCaptureActive = false;
+        const notify = this.nextCapturedFrameResolver;
+        this.nextCapturedFrameResolver = null;
+        notify?.();
+      }
+    }
+  }
+
+  private async takeLatestCapturedFrame(
+    generation: number,
+  ): Promise<VideoFrame | null> {
+    if (this.retainedVideoFrame) {
+      const frame = this.retainedVideoFrame;
+      this.retainedVideoFrame = null;
+      return frame;
+    }
+
+    if (
+      generation !== this.captureGeneration ||
+      !this.mediaStreamTrackReader ||
+      this.destroyed
+    ) {
+      return null;
+    }
+
+    const waitOutcome = await new Promise<"frame" | "timeout">((resolve) => {
+      const resolver = () => resolve("frame");
+      this.nextCapturedFrameResolver = resolver;
+
+      const timeout = setTimeout(() => {
+        if (this.nextCapturedFrameResolver === resolver) {
+          this.nextCapturedFrameResolver = null;
+        }
+        resolve("timeout");
+      }, CAPTURE_FRAME_WAIT_TIMEOUT_MS);
+
+      const wrappedResolver = () => {
+        clearTimeout(timeout);
+        resolve("frame");
+      };
+
+      this.nextCapturedFrameResolver = wrappedResolver;
+    });
+
+    if (waitOutcome !== "frame") {
+      return null;
+    }
+
+    if (
+      generation !== this.captureGeneration ||
+      this.destroyed ||
+      !this.retainedVideoFrame
+    ) {
+      return null;
+    }
+
+    const frame = this.retainedVideoFrame;
+    this.retainedVideoFrame = null;
+    return frame;
+  }
+
   /**
-   * Capture a single frame using VideoFrame API with copyTo.
-   * Returns pixel data or null if unavailable/failed.
+   * Release capture resources (processor + reader).
+   * Cancels the reader and clears references.
+   * Also closes any retained VideoFrame.
+   */
+  private releaseCaptureResources(): void {
+    this.captureGeneration += 1;
+
+    // Close retained VideoFrame exactly once
+    if (this.retainedVideoFrame) {
+      try {
+        this.retainedVideoFrame.close();
+      } catch {
+        // ignore
+      }
+      this.retainedVideoFrame = null;
+    }
+
+    // Cancel reader
+    if (this.mediaStreamTrackReader) {
+      this.mediaStreamTrackReader.cancel().catch(() => {});
+      try {
+        (this.mediaStreamTrackReader as ReadableStreamDefaultReader & { releaseLock?: () => void }).releaseLock?.();
+      } catch {
+        // ignore
+      }
+      this.mediaStreamTrackReader = null;
+    }
+    this.mediaStreamTrackProcessor = null;
+    this.capturePumpPromise = null;
+    this.videoFrameCaptureActive = false;
+    this.captureTrack = null;
+
+    const notify = this.nextCapturedFrameResolver;
+    this.nextCapturedFrameResolver = null;
+    notify?.();
+  }
+
+  /**
+   * Capture a single frame using persistent MediaStreamTrackProcessor + reader.
    *
-   * This is called per-frame in the processFrame method.
-   * Cleanup is handled in destroy() and after each capture.
+   * Uses the existing received track from video.srcObject as MediaStream.
+   * Does NOT call video.captureStream() per frame.
+   * Creates/cancels one processor + one reader per source generation.
+   * Reuses the RGBA capture buffer (reallocates only on dimension change).
+   *
+   * Latest-frame semantics:
+   * - One active reader.read() at a time.
+   * - If a newer captured frame arrives while one is pending, the older
+   *   retained frame is closed and replaced.
+   * - No FIFO backlog.
    */
   private async captureFrameViaVideoFrameCopy(
     video: HTMLVideoElement,
@@ -498,56 +756,40 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
     const captureStart = performance.now();
 
+    // Ensure persistent capture resources exist for the current source track
+    const reader = this.ensureCaptureResources(video);
+    if (!reader) return null;
+    const captureGeneration = this.captureGeneration;
+
     try {
-      // Try to get a VideoFrame from the video element directly
-      // (supported in Chrome/Electron 120+: HTMLVideoElement has a captureStream() method)
-      // Alternative: use requestVideoFrameCallback to get the frame
-      const stream = (video as any).captureStream?.();
-      if (!stream) return null;
+      const videoFrame = await this.takeLatestCapturedFrame(captureGeneration);
 
-      const track = stream.getVideoTracks()?.[0];
-      if (!track) return null;
-
-      const TProcessor = (self as any).MediaStreamTrackProcessor;
-      if (!TProcessor) return null;
-
-      const processor = new TProcessor({ track });
-      const reader = processor.readable.getReader();
-
-      // Read one frame with timeout
-      const readResult = await Promise.race([
-        reader.read(),
-        new Promise<{ done: true; value: undefined }>((_, reject) =>
-          setTimeout(() => reject(new Error("VideoFrame read timeout")), 1000),
-        ),
-      ]);
-
-      if (readResult.done || !readResult.value) {
-        reader.cancel().catch(() => {});
+      if (!videoFrame) {
         return null;
       }
 
-      const videoFrame: VideoFrame = readResult.value;
       const fmt = videoFrame.format;
       const w = videoFrame.displayWidth;
       const h = videoFrame.displayHeight;
 
       // Only support RGBA format (or convert)
-      let pixelData: Uint8Array | null = null;
-
-      if (fmt === "RGBA" || fmt === "RGBX") {
-        pixelData = new Uint8Array(w * h * 4);
-        await videoFrame.copyTo(pixelData);
-      } else {
-        // For other formats, we'd need a canvas intermediary
-        // Fall back to canvas readback
+      if (fmt !== "RGBA" && fmt !== "RGBX") {
         videoFrame.close();
-        reader.cancel().catch(() => {});
         return null;
       }
 
+      // Reuse capture buffer; reallocate only on dimension change
+      const neededSize = w * h * 4;
+      if (!this.captureBuffer || this.captureBuffer.byteLength < neededSize ||
+          this.captureBufferWidth !== w || this.captureBufferHeight !== h) {
+        this.captureBuffer = new Uint8Array(neededSize);
+        this.captureBufferWidth = w;
+        this.captureBufferHeight = h;
+      }
+
+      // Copy frame data into reusable buffer
+      await videoFrame.copyTo(this.captureBuffer);
       videoFrame.close();
-      reader.cancel().catch(() => {});
 
       const copyToEnd = performance.now();
 
@@ -555,13 +797,13 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       this.capturePath = "video-frame";
 
       return {
-        frameData: pixelData,
+        frameData: this.captureBuffer,
         inputWidth: w,
         inputHeight: h,
         timing: { captureStart, copyToEnd },
       };
     } catch (err) {
-      // VideoFrame capture failed — will fall back to rqvc+canvas
+      // VideoFrame read failed — will fall back to rqvc+canvas
       return null;
     }
   }
@@ -645,6 +887,11 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
    * Called once per generation during initial configuration.
    */
   private async ensureInputSlots(generation: number): Promise<boolean> {
+    // PERF: Once SharedArrayBuffer is known unavailable, skip entirely.
+    // Avoids per-frame retry loop that floods the console with "SharedArrayBuffer
+    // not available" warnings and creates unnecessary RendererInputSlots instances.
+    if (this.sharedSlotsUnavailable) return false;
+
     // Already created for this generation
     if (this.inputSlots && this.inputSlotsGeneration === generation && this.inputSlots.isCreated) {
       return this.inputSlots.isRegistered;
@@ -668,6 +915,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     // Create and register
     const slots = new RendererInputSlots();
     if (!slots.create()) {
+      this.sharedSlotsUnavailable = true;
       this.inputSlots = null;
       return false;
     }
@@ -721,7 +969,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
       port.onmessage = (evt: MessageEvent) => {
         if (settled) return;
-        const msg = evt.data as {
+        const raw = evt.data as Record<string, unknown>;
+        const msg = raw as {
           generation?: number;
           sequence?: number;
           width?: number;
@@ -743,6 +992,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         clearTimeout(timeout);
         port.onmessage = null;
 
+        // Decode native timing fields from the message
+        const timing = decodeNativeFrameTiming(raw);
+
         // Metadata-only response: native presenter handled the frame
         // Pixels are empty — renderer skips WebGL texture upload
         if (msg._metadataOnly) {
@@ -752,14 +1004,16 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
             pixels: new Uint8Array(0),
             width: msg.width ?? 0,
             height: msg.height ?? 0,
-            configurationId: (msg as any).configurationId,
-            appliedQualityLevel: (msg as any).appliedQualityLevel,
+            configurationId: toNum(raw.configurationId),
+            appliedQualityLevel: toNum(raw.appliedQualityLevel),
+            _metadataOnly: true,
+            ...timing,
           });
           return;
         }
 
         // Full response with pixel data
-        const rawPixels = (msg as any).pixels;
+        const rawPixels = raw.pixels;
         if (!rawPixels || !(rawPixels instanceof Uint8Array) || rawPixels.byteLength === 0) {
           resolve(null);
           return;
@@ -771,8 +1025,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           pixels: rawPixels,
           width: msg.width ?? 0,
           height: msg.height ?? 0,
-          configurationId: (msg as any).configurationId,
-          appliedQualityLevel: (msg as any).appliedQualityLevel,
+          configurationId: toNum(raw.configurationId),
+          appliedQualityLevel: toNum(raw.appliedQualityLevel),
+          ...timing,
         });
       };
 
@@ -838,7 +1093,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
       port.onmessage = (evt: MessageEvent) => {
         if (settled) return;
-        const msg = evt.data as {
+        const raw = evt.data as Record<string, unknown>;
+        const msg = raw as {
           generation?: number;
           sequence?: number;
           width?: number;
@@ -864,8 +1120,11 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         clearTimeout(timeout);
         port.onmessage = null;
 
+        // Decode native timing fields from the message
+        const timing = decodeNativeFrameTiming(raw);
+
         // Pixels arrive as Uint8Array (structured clone, not transferred)
-        const rawPixels = (msg as any).pixels;
+        const rawPixels = raw.pixels;
         if (!rawPixels || !(rawPixels instanceof Uint8Array) || rawPixels.byteLength === 0) {
           resolve(null);
           return;
@@ -877,8 +1136,9 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           pixels: rawPixels,
           width: msg.width ?? 0,
           height: msg.height ?? 0,
-          configurationId: (msg as any).configurationId,
-          appliedQualityLevel: (msg as any).appliedQualityLevel,
+          configurationId: toNum(raw.configurationId),
+          appliedQualityLevel: toNum(raw.appliedQualityLevel),
+          ...timing,
         });
       };
 
@@ -1414,15 +1674,18 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       // No pixel data is returned — we skip texture upload entirely.
       const noPixels = !result.pixels || result.pixels.byteLength === 0;
 
-      if (noPixels && (this.nativePresenterActive || (result as any)._metadataOnly)) {
-        // Frame was presented natively — no WebGL texture upload needed
+      if (noPixels && (this.nativePresenterActive || result._metadataOnly)) {
+        // Frame was presented natively — no WebGL texture upload needed.
+        // GPU time and native per-stage timings are NOT available in this path.
+        const rendererTotalMs = performance.now() - frameStart;
+
         this.stats = {
           inputWidth,
           inputHeight,
           outputWidth: result.width || output.width,
           outputHeight: result.height || output.height,
           enhancedScalingActive: true,
-          lastGpuTimeMs: 0,
+          lastGpuTimeMs: null,
           backend: "nvidia-vsr",
           framesProcessed: this.stats.framesProcessed + 1,
           activePasses: ["nvidia-vsr", "native-presenter"],
@@ -1439,12 +1702,19 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           capturePath: usedCapturePath,
         };
 
+        // Build timing breakdown with truthful values:
+        // - textureUploadMs = 0 (no WebGL upload in this path; that's truthful)
+        // - displayUploadMs removed (was duplicating textureUploadMs)
+        // - nativeTransportProcessingMs only when native timing available
+        // - nativeDownloadMs undefined (GPU→GPU path; no CPU download)
+        const nativePreWrite = result.nativePreWriteTotalMs;
+
         return {
           success: true,
-          gpuTimeMs: 0,
+          gpuTimeMs: undefined,
           outputWidth: result.width || output.width,
           outputHeight: result.height || output.height,
-          totalLatencyMs: 0,
+          totalLatencyMs: rendererTotalMs,
           configurationId: result.configurationId ?? this.expectedConfigurationId,
           canonicalQualityLevel: this.currentQualityLevel,
           timingBreakdown: {
@@ -1454,12 +1724,16 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
             inputBufferPreparationMs,
             rendererToResultMs,
             textureUploadMs: 0,
-            rendererTotalMs: performance.now() - frameStart,
-            nativeTransportProcessingMs: rendererToResultMs,
-            displayUploadMs: 0,
-            // Native presenter path: no CPU download
-            nativeDownloadMs: 0,
-            nativePreWriteTotalMs: rendererToResultMs,
+            rendererTotalMs,
+            // nativeTransportProcessingMs: only when native timing available
+            ...(nativePreWrite !== undefined ? { nativeTransportProcessingMs: nativePreWrite } : {}),
+            // displayUploadMs removed: no duplicate in this path either
+            // Native per-stage timings from result (if available from frame header)
+            nativeInputReceiveMs: result.nativeInputReceiveMs,
+            nativeUploadMs: result.nativeUploadMs,
+            nativeEffectMs: result.nativeEffectMs,
+            nativeDownloadMs: undefined,
+            nativePreWriteTotalMs: nativePreWrite,
           },
         };
       }
@@ -1507,14 +1781,20 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       const afterDisplay = performance.now();
       const textureUploadMs = afterDisplay - uploadStart;
 
-      // Derived renderer-phase totals
-      const displayUploadMs = textureUploadMs;
+      // Renderer total: full frame processing time
       const rendererTotalMs = afterDisplay - frameStart;
 
-      // Native transport+processing is carried as renderer-observed duration
-      // (rendererToResultMs). No cross-process clock subtractions.
-      // The native side separately tracks its own internal breakdown
-      // (upload, effect, download) which arrives via diagnostics polling.
+      // Native per-stage timings from result (from frame header)
+      const nativePreWriteTotalMs = result.nativePreWriteTotalMs;
+
+      // lastGpuTimeMs / gpuTimeMs: represent actual native GPU/effect/pre-write work
+      // when available (nativePreWriteTotalMs), NOT the full renderer round-trip.
+      const nativeGpuTimeMs = nativePreWriteTotalMs ?? null;
+
+      // nativeTransportProcessingMs: only set when native timing is available.
+      // Do NOT fall back to rendererToResultMs (that would mislabel renderer-observed
+      // wait time as native-only processing).
+      const nativeTransportMs = nativePreWriteTotalMs;
 
       this.stats = {
         inputWidth,
@@ -1523,7 +1803,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         outputHeight: result.height,
         enhancedScalingActive:
           result.width > inputWidth || result.height > inputHeight,
-        lastGpuTimeMs: rendererToResultMs,
+        lastGpuTimeMs: nativeGpuTimeMs,
         backend: "nvidia-vsr",
         framesProcessed: this.stats.framesProcessed + 1,
         activePasses: ["nvidia-vsr"],
@@ -1540,30 +1820,12 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         capturePath: usedCapturePath,
       };
 
-      // Main-process timings (from submitFrame result, if available)
-      const mainInputHandlingMs = (result as any).mainInputHandlingMs;
-      const requestWriteMs = (result as any).requestWriteMs;
-      const responseWaitMs = (result as any).responseWaitMs;
-      const responsePayloadReadMs = (result as any).responsePayloadReadMs;
-      const mainHandlerTotalMs = (result as any).mainHandlerTotalMs;
-
-      // Native per-stage timings from frame header (only knowable-before-write stages)
-      const nativeInputReceiveMs = (result as any).nativeInputReceiveMs;
-      const nativeUploadMs = (result as any).nativeUploadMs;
-      const nativeEffectMs = (result as any).nativeEffectMs;
-      const nativeDownloadMs = (result as any).nativeDownloadMs;
-      // nativeOutputWriteMs is NOT exposed per-frame; only in aggregate diagnostics
-      const nativePreWriteTotalMs = (result as any).nativePreWriteTotalMs;
-
-      // nativeTransportProcessingMs: true native pre-write total (from header) or fallback to rendererToResultMs
-      const trueNativeTransportMs = nativePreWriteTotalMs ?? rendererToResultMs;
-
       return {
         success: true,
-        gpuTimeMs: rendererToResultMs,
+        gpuTimeMs: nativeGpuTimeMs ?? undefined,
         outputWidth: result.width,
         outputHeight: result.height,
-        totalLatencyMs: afterDisplay - frameStart,
+        totalLatencyMs: rendererTotalMs,
         configurationId: result.configurationId ?? this.expectedConfigurationId,
         canonicalQualityLevel: this.currentQualityLevel,
         timingBreakdown: {
@@ -1574,20 +1836,22 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           rendererToResultMs,
           textureUploadMs,
           rendererTotalMs,
-          // Use true native pre-write total when available, not a duplicate of rendererToResultMs
-          nativeTransportProcessingMs: trueNativeTransportMs,
-          displayUploadMs,
-          // Main-process per-frame timings (truthful labels)
-          mainInputHandlingMs,
-          requestWriteMs,
-          responseWaitMs,
-          mainHandlerTotalMs,
-          // Native per-stage timings (only knowable-before-write)
-          nativeInputReceiveMs,
-          nativeUploadMs,
-          nativeEffectMs,
-          nativeDownloadMs,
-          nativePreWriteTotalMs,
+          // nativeTransportProcessingMs: only when native timing available;
+          // do NOT fallback to rendererToResultMs (avoids mislabeling)
+          ...(nativeTransportMs !== undefined ? { nativeTransportProcessingMs: nativeTransportMs } : {}),
+          // displayUploadMs removed: it duplicated textureUploadMs;
+          // textureUploadMs above IS the display upload step in the WebGL path.
+          // Main-process per-frame timings (truthful labels, from result)
+          mainInputHandlingMs: result.mainInputHandlingMs,
+          requestWriteMs: result.requestWriteMs,
+          responseWaitMs: result.responseWaitMs,
+          mainHandlerTotalMs: result.mainHandlerTotalMs,
+          // Native per-stage timings (only knowable-before-write, from result)
+          nativeInputReceiveMs: result.nativeInputReceiveMs,
+          nativeUploadMs: result.nativeUploadMs,
+          nativeEffectMs: result.nativeEffectMs,
+          nativeDownloadMs: result.nativeDownloadMs,
+          nativePreWriteTotalMs: result.nativePreWriteTotalMs,
         },
       };
     }
@@ -1691,14 +1955,15 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       this.inputSlots = null;
     }
     this.inputSlotsGeneration = -1;
+    this.sharedSlotsUnavailable = false;
 
-    // Clean up MediaStreamTrackReader
-    if (this.mediaStreamTrackReader) {
-      this.mediaStreamTrackReader.cancel().catch(() => {});
-      this.mediaStreamTrackReader = null;
-    }
-    this.mediaStreamTrackProcessor = null;
-    this.videoFrameCaptureActive = false;
+    // Release persistent capture resources (cancels reader, closes retained frame)
+    this.releaseCaptureResources();
+
+    // Free reusable capture buffer
+    this.captureBuffer = null;
+    this.captureBufferWidth = 0;
+    this.captureBufferHeight = 0;
 
     // Cancel pending requestVideoFrameCallback
     if (this.rqvcHandle !== null) {

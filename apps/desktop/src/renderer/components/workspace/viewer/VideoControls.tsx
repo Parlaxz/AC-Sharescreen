@@ -124,6 +124,22 @@ interface VideoControlsProps {
   onCompareToggle?: () => void;
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Convert a raw shortcut-sender error into a user-friendly toast message.
+ */
+function friendlyShortcutError(rawError: string | undefined, label: string): string {
+  if (!rawError) return `Failed to send ${label}.`;
+  if (rawError.includes("numpad-key-requires-helper")) {
+    return `${label} requires the audio helper to simulate properly. Make sure you're in a viewing session or restart the app.`;
+  }
+  if (rawError.includes("unsupported-key")) {
+    return `${label} uses an unsupported key. Try a different shortcut.`;
+  }
+  return rawError;
+}
+
 // ─── VideoControls ────────────────────────────────────────────────────────
 
 /**
@@ -208,7 +224,11 @@ export function VideoControls({
 
   const formatBindingLabel = useCallback((binding: ShortcutBinding): string => {
     const modifierLabel = binding.modifiers.map((modifier) => modifier[0].toUpperCase() + modifier.slice(1)).join("+");
-    return modifierLabel ? `${modifierLabel}+${binding.key}` : binding.key;
+    let keyLabel = binding.key;
+    if (keyLabel.startsWith("Numpad")) {
+      keyLabel = "Num " + keyLabel.slice(6); // "Numpad0" → "Num 0"
+    }
+    return modifierLabel ? `${modifierLabel}+${keyLabel}` : keyLabel;
   }, []);
 
   const handleDiscordMute = useCallback(async () => {
@@ -220,7 +240,8 @@ export function VideoControls({
 
     const result = await api.sendShortcut(discordMuteBinding);
     if (!result.success) {
-      toast.error(result.error ?? `Failed to send ${formatBindingLabel(discordMuteBinding)}.`);
+      const errMsg = friendlyShortcutError(result.error, formatBindingLabel(discordMuteBinding));
+      toast.error(errMsg);
       return;
     }
 
@@ -236,7 +257,8 @@ export function VideoControls({
 
     const result = await api.sendShortcut(discordDeafenBinding);
     if (!result.success) {
-      toast.error(result.error ?? `Failed to send ${formatBindingLabel(discordDeafenBinding)}.`);
+      const errMsg = friendlyShortcutError(result.error, formatBindingLabel(discordDeafenBinding));
+      toast.error(errMsg);
       return;
     }
 
@@ -249,9 +271,12 @@ export function VideoControls({
 
   // ── Bandwidth formatting ──
   const formatBandwidth = useCallback((bps: number): string => {
-    if (bps <= 0) return "0 kbps";
-    if (bps < 1_000_000) return `${Math.round(bps / 1000)} kbps`;
-    return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+    if (bps <= 0) return "0 kB/s";
+    const Bps = bps / 8;
+    if (Bps < 1000) return `${Math.round(Bps)} B/s`;
+    const kBps = Bps / 1000;
+    if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
+    return `${(kBps / 1000).toFixed(2)} MB/s`;
   }, []);
 
   const formatTotalBytes = useCallback((bytes: number): string => {

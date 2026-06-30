@@ -15,7 +15,7 @@ interface Props {
 }
 
 const ESSENTIAL_FIELDS: Array<{ key: string; label: string; type: "number" | "select" | "text"; options?: string[]; section: "video" | "audio" }> = [
-  { key: "videoBitrateKbps", label: "Video Bitrate (kbps)", type: "number", section: "video" },
+  { key: "videoBitrateKbps", label: "Video Bitrate (kB/s)", type: "number", section: "video" },
   { key: "sendWidth", label: "Send Width (px)", type: "number", section: "video" },
   { key: "sendHeight", label: "Send Height (px)", type: "number", section: "video" },
   { key: "sendFps", label: "Send FPS", type: "number", section: "video" },
@@ -39,7 +39,7 @@ const ADVANCED_FIELDS: Array<{ key: string; label: string; type: "number" | "sel
 ];
 
 const AUDIO_FIELDS: Array<{ key: string; label: string; type: "number" | "select"; options?: string[] }> = [
-  { key: "bitrateKbps", label: "Audio Bitrate (kbps)", type: "number" },
+  { key: "bitrateKbps", label: "Audio Bitrate (kB/s)", type: "number" },
   { key: "channels", label: "Channels", type: "select", options: ["mono", "stereo"] },
   { key: "bitrateMode", label: "Bitrate Mode", type: "select", options: ["vbr", "cbr"] },
   { key: "dtx", label: "DTX (Discontinuous Transmission)", type: "select", options: ["true", "false"] },

@@ -35,6 +35,7 @@ import { useHostViewerDiagnostics, type ViewerRow } from "@/hooks/use-host-viewe
 import { Separator } from "@/components/ui/separator";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
 import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
+import { formatBitrateKbps } from "@/lib/utils";
 
 function formatLiveDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
@@ -88,7 +89,7 @@ function ViewerRowItem({ row, onBitrateClick }: { row: ViewerRow; onBitrateClick
     }
   })();
 
-  const fmtKBps = (kbps: number | null) => kbps !== null ? `${(kbps / 1000).toFixed(1)} Mbps` : null;
+  const fmtBitrate = (kbps: number | null) => formatBitrateKbps(kbps);
 
   return (
     <div className="py-1.5 space-y-0.5">
@@ -128,7 +129,7 @@ function ViewerRowItem({ row, onBitrateClick }: { row: ViewerRow; onBitrateClick
 
           <div className="text-[11px] text-text-muted pl-4 flex flex-wrap gap-x-3 gap-y-0">
             {row.sent.bitrateKbps !== null && (
-              <span>{fmtKBps(row.sent.bitrateKbps)}</span>
+              <span>{fmtBitrate(row.sent.bitrateKbps)}</span>
             )}
             {row.sent.rttMs !== null && (
               <span>RTT {Math.round(row.sent.rttMs)} ms</span>
@@ -143,7 +144,7 @@ function ViewerRowItem({ row, onBitrateClick }: { row: ViewerRow; onBitrateClick
 
           {row.requested.bitrateKbps !== null && (
             <div className="text-[10px] text-text-muted pl-4">
-              Requested: {row.requested.width}Ã—{row.requested.height ?? "?"} Â· {row.requested.fps} FPS Â· {row.requested.bitrateKbps} kbps
+              Requested: {row.requested.width}Ã—{row.requested.height ?? "?"} Â· {row.requested.fps} FPS Â· {fmtBitrate(row.requested.bitrateKbps)}
               {row.requested.presetName ? ` Â· ${row.requested.presetName}` : null}
             </div>
           )}
@@ -416,7 +417,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Bitrate</span>
-              <span className="font-mono tabular-nums text-text-primary">{captureBitrate > 0 ? `${captureBitrate} kbps` : "â€”"}</span>
+              <span className="font-mono tabular-nums text-text-primary">{formatBitrateKbps(captureBitrate)}</span>
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Connection</span>

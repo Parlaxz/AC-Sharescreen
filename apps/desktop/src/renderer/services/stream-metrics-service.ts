@@ -1029,7 +1029,7 @@ export class StreamMetricsService {
       candidate.width !== null && candidate.height !== null;
     const fpsChanged = candidate.fps !== null && prev.fps !== null && candidate.fps !== prev.fps;
     const bitrateChanged = candidate.bitrateBps !== null && prev.bitrateBps !== null &&
-      Math.abs(candidate.bitrateBps - prev.bitrateBps) > 50000; // 50 kbps deadband
+      Math.abs(candidate.bitrateBps - prev.bitrateBps) > 50000; // 50 kbps (≈6.3 kB/s) deadband
 
     // No change: clear debounce and skip
     if (!resChanged && !fpsChanged && !bitrateChanged) {

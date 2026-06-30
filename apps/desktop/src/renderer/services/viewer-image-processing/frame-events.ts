@@ -10,7 +10,7 @@
  * All fields are readonly — once emitted, events are immutable.
  */
 
-import type { BackendKind } from "./viewer-image-backend";
+import type { BackendKind, TimingBreakdown } from "./viewer-image-backend";
 import type { NvidiaProcessingMode } from "@screenlink/shared";
 
 // ─── Frame event ─────────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ export interface FrameEvent {
   readonly dropReason?: "backpressure" | "stale-generation" | "stale-config" | "transient" | "failure";
 
   /** Raw timing breakdown from backend, if available. */
-  readonly timingBreakdown?: Record<string, number | undefined>;
+  readonly timingBreakdown?: TimingBreakdown;
 }
 
 // ─── Listener type ───────────────────────────────────────────────────────────
@@ -137,3 +137,101 @@ export interface ConfigAppliedEvent {
 }
 
 export type ConfigAppliedListener = (event: ConfigAppliedEvent) => void;
+
+// ─── Enhancement diagnostics (comprehensive, for display/export) ────────────
+
+/**
+ * Comprehensive diagnostics snapshot for the NVIDIA VSR enhancement pipeline.
+ *
+ * This type aggregates every available diagnostic signal:
+ *   - Timing breakdown (per-frame and aggregated)
+ *   - Native presenter state (GPU-resident display)
+ *   - Shared memory ring (SHM) async submission counters
+ *   - Quality and configuration metadata
+ *   - Processor-level counters
+ *   - Native benchmark results
+ *
+ * Convention: `undefined` = measurement not available (never convert to 0).
+ * `0` = real measured zero.
+ */
+export interface EnhancementFrameDiagnostics {
+  // ── Timing breakdown (latest-frame values) ────────────────────────────────
+  timingBreakdown?: TimingBreakdown;
+
+  // ── Aggregated timing averages over the measurement window ───────────────
+  /** Average capture+readback time (ms) */
+  avgCaptureReadbackMs?: number;
+  /** Average drawImage time (ms) */
+  avgDrawImageMs?: number;
+  /** Average getImageData time (ms) */
+  avgGetImageDataMs?: number;
+  /** Average input buffer preparation time (ms) */
+  avgInputBufferPreparationMs?: number;
+  /** Average renderer-to-result round-trip (ms) */
+  avgRendererToResultMs?: number;
+  /** Average texture upload time (ms) */
+  avgTextureUploadMs?: number;
+  /** Average renderer total time (ms) */
+  avgRendererTotalMs?: number;
+  /** Average native transport+processing time (ms) */
+  avgNativeTransportProcessingMs?: number;
+  /** Average display upload time (ms) */
+  avgDisplayUploadMs?: number;
+  /** Average total latency (ms) */
+  avgTotalLatencyMs?: number;
+
+  // ── Processor-level counters ─────────────────────────────────────────────
+  framesDisplayed?: number;
+  framesProcessed?: number;
+  processingAttempts?: number;
+  completedAttempts?: number;
+  failures?: number;
+  backpressureDrops?: number;
+  schedulerDrops?: number;
+  staleGenerationDrops?: number;
+  staleConfigDrops?: number;
+  coalescedFrames?: number;
+  completedFps?: number;
+
+  // ── Native presenter diagnostics ─────────────────────────────────────────
+  /** Whether the native presenter is actively displaying frames */
+  nativePresenterActive?: boolean;
+  /** Current presenter queue depth (frames in flight) */
+  presenterQueueDepth?: number;
+  /** Number of frames coalesced by the presenter (cumulative) */
+  presenterFramesCoalesced?: number;
+  /** Number of frames skipped by the presenter (cumulative) */
+  presenterFramesSkipped?: number;
+  /** Presenter GPU latency for last frame (microseconds) */
+  presenterGpuLatencyUs?: number;
+  /** Total frames presented by the native presenter (cumulative) */
+  presenterFramesPresented?: number;
+  /** Total frames dropped by the native presenter (cumulative) */
+  presenterFramesDropped?: number;
+
+  // ── SHM ring diagnostics ─────────────────────────────────────────────────
+  /** Number of SHM ring buffer overruns (cumulative) */
+  shmOverruns?: number;
+  /** Number of SHM submissions with notify failure (cumulative) */
+  shmNotifyFailures?: number;
+  /** Number of SHM submissions that timed out (cumulative) */
+  shmTimeouts?: number;
+  /** Average SHM write-to-notify latency (microseconds) */
+  shmAvgWriteNotifyUs?: number;
+  /** Average SHM notify-to-response latency (microseconds) */
+  shmAvgNotifyResponseUs?: number;
+
+  // ── Quality / configuration metadata ─────────────────────────────────────
+  inputWidth?: number;
+  inputHeight?: number;
+  outputWidth?: number;
+  outputHeight?: number;
+  processingMode?: string;
+  qualityLevel?: string;
+  canonicalQualityLevel?: number;
+  configurationId?: number;
+  generation?: number;
+  presentationPath?: "native-presenter" | "webgl" | "fallback-cpu";
+  capturePath?: "none" | "video-frame" | "rqvc-canvas";
+}
+

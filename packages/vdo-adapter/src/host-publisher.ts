@@ -30,6 +30,11 @@ export class HostPublisher {
   private pendingHandlers = new Map<SDKEvent, Set<(...args: unknown[]) => void>>();
   /** Stage 8: Tracked requested codec for applying preferences on new connections */
   private _requestedCodec: string = "auto";
+  /**
+   * Bound handler for SDK "error" events that filters out expected
+   * RTCErrorEvent "Close called" errors during teardown.
+   */
+  private _boundErrorHandler: ((...args: unknown[]) => void) | null = null;
 
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
@@ -87,6 +92,20 @@ export class HostPublisher {
       this.applyCodecPreferencesOnExistingConnections();
     });
 
+    // Suppress expected RTCErrorEvent "Close called" errors that fire when
+    // data channels are closed during normal SDK teardown.
+    this._boundErrorHandler = (...args: unknown[]): void => {
+      const event = args[0];
+      if (event && typeof event === "object") {
+        const err = (event as { error?: Error }).error;
+        if (err instanceof Error && err.message.includes("Close called")) {
+          return;
+        }
+      }
+      console.warn("[HostPublisher] SDK error event:", event);
+    };
+    this.sdk.on("error", this._boundErrorHandler);
+
     await withTimeout(this.sdk.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
 
     console.log('[HostPublisher] SDK connected, sdk still set:', this.sdk !== null);
@@ -132,6 +151,10 @@ export class HostPublisher {
 
   async disconnect(): Promise<void> {
     if (!this.sdk) return;
+    if (this._boundErrorHandler) {
+      try { this.sdk.off("error", this._boundErrorHandler); } catch { /* ignore */ }
+      this._boundErrorHandler = null;
+    }
     await this.sdk.disconnect();
     this.sdk = null;
   }
