@@ -32,9 +32,24 @@ struct DiagnosticsCounters {
     std::atomic<uint64_t> benchmarkTargetFrames{0};
     std::atomic<uint64_t> benchmarkFramesCompleted{0};
     std::atomic<uint64_t> benchmarkTotalTimeUs{0};
+    std::atomic<uint64_t> benchmarkTotalInputReceiveUs{0};
+    std::atomic<uint64_t> benchmarkTotalUploadUs{0};
+    std::atomic<uint64_t> benchmarkTotalEffectUs{0};
+    std::atomic<uint64_t> benchmarkTotalDownloadUs{0};
+    std::atomic<uint64_t> benchmarkTotalOutputWriteUs{0};
 
     // GPU lifecycle tracking
     std::atomic<uint32_t> effectLoadCount{0};
+
+    // Slice 6: Persistent resource allocation counters
+    std::atomic<uint64_t> configAllocations{0};
+    std::atomic<uint64_t> steadyStateAllocations{0};
+    std::atomic<uint64_t> pinnedBytes{0};
+    std::atomic<uint64_t> stagingReuseCount{0};
+    std::atomic<uint64_t> inputSlotReuseCount{0};
+    std::atomic<uint64_t> outputFallbackSlotReuseCount{0};
+    std::atomic<uint64_t> cpuDownloadCount{0};
+    std::atomic<uint32_t> contextCount{0};
 
     /// Record a processed frame with its elapsed time and success status.
     void RecordFrame(uint64_t elapsedUs, bool success);
@@ -79,6 +94,16 @@ struct DiagnosticSnapshot {
     /// Number of times the NVIDIA VFX effect has been loaded/reloaded.
     uint32_t effectLoadCount{0};
 
+    // Slice 6: Persistent resource allocation counters
+    uint64_t configAllocations{0};
+    uint64_t steadyStateAllocations{0};
+    uint64_t pinnedBytes{0};
+    uint64_t stagingReuseCount{0};
+    uint64_t inputSlotReuseCount{0};
+    uint64_t outputFallbackSlotReuseCount{0};
+    uint64_t cpuDownloadCount{0};
+    uint32_t contextCount{0};
+
     // Phase 7: Benchmark state
     bool benchmarkActive{false};
     uint64_t benchmarkTargetFrames{0};
@@ -95,6 +120,15 @@ struct DiagnosticSnapshot {
     uint32_t presenterResizes{0};
     uint32_t presenterAttachCount{0};
     uint32_t presenterDetachCount{0};
+
+    // Slice 3: Presenter queue diagnostics
+    uint64_t presenterQueueEnqueued{0};
+    uint64_t presenterQueueDequeued{0};
+    uint64_t presenterQueueOverflowDrops{0};
+    uint64_t presenterStaleGenerationDrops{0};
+    uint32_t presenterQueueDepth{0};
+    uint32_t presenterQueueMaxDepth{0};
+
     bool presenterActive{false};
 };
 

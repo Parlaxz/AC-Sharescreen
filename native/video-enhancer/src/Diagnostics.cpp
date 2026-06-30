@@ -65,6 +65,14 @@ void DiagnosticsCounters::RecordFrameDetails(
     lastDownloadUs = downloadUs;
     lastOutputWriteUs = outputWriteUs;
 
+    if (benchmarkActive.load()) {
+        benchmarkTotalInputReceiveUs.fetch_add(inputReceiveUs);
+        benchmarkTotalUploadUs.fetch_add(uploadUs);
+        benchmarkTotalEffectUs.fetch_add(effectUs);
+        benchmarkTotalDownloadUs.fetch_add(downloadUs);
+        benchmarkTotalOutputWriteUs.fetch_add(outputWriteUs);
+    }
+
     // Track completed frame timestamps for FPS computation
     if (success) {
         auto now = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -93,10 +101,25 @@ void DiagnosticsCounters::Reset() {
     lastEffectUs = 0;
     lastDownloadUs = 0;
     lastOutputWriteUs = 0;
+    // Slice 6: Persistent resource allocation counters
+    configAllocations = 0;
+    steadyStateAllocations = 0;
+    pinnedBytes = 0;
+    stagingReuseCount = 0;
+    inputSlotReuseCount = 0;
+    outputFallbackSlotReuseCount = 0;
+    cpuDownloadCount = 0;
+    contextCount = 0;
+
     benchmarkActive = false;
     benchmarkTargetFrames = 0;
     benchmarkFramesCompleted = 0;
     benchmarkTotalTimeUs = 0;
+    benchmarkTotalInputReceiveUs = 0;
+    benchmarkTotalUploadUs = 0;
+    benchmarkTotalEffectUs = 0;
+    benchmarkTotalDownloadUs = 0;
+    benchmarkTotalOutputWriteUs = 0;
     effectLoadCount = 0;
 
     // Reset FPS tracker
@@ -179,6 +202,16 @@ DiagnosticSnapshot GetDiagnostics() {
     // GPU lifecycle tracking
     snap.effectLoadCount = g_counters.effectLoadCount.load();
 
+    // Slice 6: Persistent resource allocation counters
+    snap.configAllocations = g_counters.configAllocations.load();
+    snap.steadyStateAllocations = g_counters.steadyStateAllocations.load();
+    snap.pinnedBytes = g_counters.pinnedBytes.load();
+    snap.stagingReuseCount = g_counters.stagingReuseCount.load();
+    snap.inputSlotReuseCount = g_counters.inputSlotReuseCount.load();
+    snap.outputFallbackSlotReuseCount = g_counters.outputFallbackSlotReuseCount.load();
+    snap.cpuDownloadCount = g_counters.cpuDownloadCount.load();
+    snap.contextCount = g_counters.contextCount.load();
+
     // Phase 7: Benchmark state
     snap.benchmarkActive = g_counters.benchmarkActive.load();
     snap.benchmarkTargetFrames = g_counters.benchmarkTargetFrames.load();
@@ -198,6 +231,15 @@ DiagnosticSnapshot GetDiagnostics() {
     snap.presenterResizes = presenterDiag.presenterResizes.load();
     snap.presenterAttachCount = presenterDiag.presenterAttachCount.load();
     snap.presenterDetachCount = presenterDiag.presenterDetachCount.load();
+
+    // Slice 3: Presenter queue diagnostics
+    snap.presenterQueueEnqueued = presenterDiag.queueEnqueued.load();
+    snap.presenterQueueDequeued = presenterDiag.queueDequeued.load();
+    snap.presenterQueueOverflowDrops = presenterDiag.queueOverflowDrops.load();
+    snap.presenterStaleGenerationDrops = presenterDiag.staleGenerationDrops.load();
+    snap.presenterQueueDepth = presenterDiag.queueDepth.load();
+    snap.presenterQueueMaxDepth = presenterDiag.queueMaxDepth.load();
+
     // active is not tracked at the global diagnostics level; the per-instance
     // NativePresenter tracks its own active state via the instance snapshot.
 

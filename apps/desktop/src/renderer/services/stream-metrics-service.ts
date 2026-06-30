@@ -149,6 +149,9 @@ interface ConnectionState {
 
   // Generation for peer replacement
   generation: number;
+
+  // Easy Compare variant label
+  variantId?: "A" | "B";
 }
 
 // ─── Session state ─────────────────────────────────────────────────────────
@@ -301,6 +304,7 @@ export class StreamMetricsService {
     direction: "inbound" | "outbound";
     configuredVideoBitsPerSecond?: number | null;
     effectiveVideoBitsPerSecond?: number | null;
+    variantId?: "A" | "B";
   }): () => void {
     const state = this.sessions.get(input.historyId);
     if (!state) return () => {};
@@ -348,6 +352,7 @@ export class StreamMetricsService {
       qualityDebounceCount: 0,
       qualityDebounceTarget: null,
       generation: 0,
+      variantId: input.variantId,
     };
 
     state.connections.set(input.connectionId, conn);
@@ -895,6 +900,7 @@ export class StreamMetricsService {
         codec: resolvedCodec,
         connectionType,
         state: conn.state,
+        variantId: conn.variantId,
       };
 
       conn.rawSamples.push(sample);
@@ -1241,6 +1247,7 @@ export class StreamMetricsService {
         viewerDeviceId: conn.viewerDeviceId,
         displayName: conn.displayName,
         receivedStatus: conn.receivedStatus,
+        variantId: conn.variantId,
         rawSamples: Object.freeze([...conn.rawSamples]),
         mediumBuckets: Object.freeze([...conn.mediumBuckets]),
         longBuckets: Object.freeze([...conn.longBuckets]),

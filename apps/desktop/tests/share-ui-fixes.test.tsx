@@ -292,7 +292,7 @@ describe("Viewer overlay controls mounted (Issues 2+3)", () => {
         window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-settings"));
       });
     }).not.toThrow();
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------

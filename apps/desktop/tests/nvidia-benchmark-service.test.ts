@@ -12,6 +12,71 @@ import {
 } from "@/services/viewer-image-processing/nvidia-benchmark-service";
 import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
 import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "@/services/viewer-image-processing/viewer-image-defaults";
+import type { FrameEvent } from "@/services/viewer-image-processing/frame-events";
+
+// ─── Helpers to generate synthetic frame events for mock hosts ─────────────
+
+let eventSeqCounter = 0;
+
+function makeEvent(overrides?: Partial<FrameEvent>): FrameEvent {
+  eventSeqCounter++;
+  return {
+    clientId: undefined,
+    generation: 1,
+    sequence: eventSeqCounter,
+    sourceMediaTime: undefined,
+    configurationId: 1,
+    backend: "webgl2",
+    nvidiaMode: undefined,
+    canonicalQualityLevel: null,
+    inputWidth: 1920,
+    inputHeight: 1080,
+    outputWidth: 1920,
+    outputHeight: 1080,
+    capturePath: "webgl-texsubimage2d",
+    transportPath: "none",
+    presentationPath: "webgl-texture-upload",
+    captureStartedAt: performance.now(),
+    submittedAt: undefined,
+    nativeCompletedAt: undefined,
+    presentedAt: undefined,
+    captureDurationMs: 2,
+    transportDurationMs: undefined,
+    nativeProcessingDurationMs: undefined,
+    presentationDurationMs: 1,
+    totalLatencyMs: 16,
+    completed: true,
+    presented: true,
+    stale: false,
+    dropReason: undefined,
+    timingBreakdown: undefined,
+    ...overrides,
+  };
+}
+
+function startEventDelivery(
+  listener: (event: FrameEvent) => void,
+  intervalMs = 30,
+  count = 100,
+  overrides?: Partial<FrameEvent>,
+): { stop: () => void } {
+  let stopped = false;
+  let delivered = 0;
+  const id = setInterval(() => {
+    if (stopped || delivered >= count) {
+      clearInterval(id);
+      return;
+    }
+    listener(makeEvent(overrides));
+    delivered++;
+  }, intervalMs);
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(id);
+    },
+  };
+}
 
 // ─── Test scenarios — fast variants for minimal test latency ───────────────
 
@@ -41,6 +106,7 @@ const SINGLE_SCENARIO = [FAST_SCENARIOS[0]!];
 function createMockHost(
   overrides?: Partial<BenchmarkHost>,
 ): BenchmarkHost {
+  let delivery: { stop: () => void } | null = null;
   return {
     applySettings: vi.fn(),
     readStats: vi.fn(() => ({
@@ -57,11 +123,25 @@ function createMockHost(
       backpressureDrops: 0,
       nativeFailures: 0,
     })),
+    subscribeFrameEvents: vi.fn((listener) => {
+      // Deliver frames at ~33fps so the event-driven loop collects samples
+      delivery = startEventDelivery(listener, 30, 200);
+      return () => { delivery?.stop(); };
+    }),
+    waitForConfigApplied: vi.fn(async () => ({
+      configurationId: 1,
+      backend: "webgl2" as const,
+      canonicalQualityLevel: null,
+      outputWidth: 1920,
+      outputHeight: 1080,
+      generation: 1,
+    })),
     ...overrides,
   };
 }
 
 function createNvidiaHost(qualityLevel = 4): BenchmarkHost {
+  let delivery: { stop: () => void } | null = null;
   return {
     applySettings: vi.fn(),
     readStats: vi.fn(() => ({
@@ -77,6 +157,26 @@ function createNvidiaHost(qualityLevel = 4): BenchmarkHost {
       backend: "nvidia-vsr",
       backpressureDrops: 0,
       nativeFailures: 0,
+    })),
+    subscribeFrameEvents: vi.fn((listener) => {
+      delivery = startEventDelivery(listener, 30, 200, {
+        backend: "nvidia-vsr",
+        nvidiaMode: "vsr",
+        canonicalQualityLevel: qualityLevel,
+        configurationId: 1,
+        outputWidth: 1920,
+        outputHeight: 1080,
+      });
+      return () => { delivery?.stop(); };
+    }),
+    waitForConfigApplied: vi.fn(async () => ({
+      configurationId: 1,
+      backend: "nvidia-vsr" as const,
+      nvidiaMode: "vsr" as const,
+      canonicalQualityLevel: qualityLevel ?? 4,
+      outputWidth: 1920,
+      outputHeight: 1080,
+      generation: 1,
     })),
   };
 }
@@ -94,7 +194,7 @@ async function waitForTerminal(service: NvidiaBenchmarkService, timeoutMs = 5000
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe("NvidiaBenchmarkService", () => {
+describe.sequential("NvidiaBenchmarkService", () => {
   let service: NvidiaBenchmarkService;
 
   beforeEach(() => {
@@ -396,20 +496,18 @@ describe("NvidiaBenchmarkService", () => {
   // ── Results ──────────────────────────────────────────────────────────
 
   it("collects per-scenario results", async () => {
-    service.setScenarios(FAST_SCENARIOS);
+    // Use webgl-only scenarios so the mock host's (WebGL) events match
+    const webglOnly = FAST_SCENARIOS.filter((s) => s.id.startsWith("webgl2"));
+    service.setScenarios(webglOnly);
     service.saveSettings(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS);
     const host = createMockHost();
     service.start(host);
     await waitForTerminal(service);
 
     const aggregate = service.aggregate!;
-    expect(aggregate.scenarios.length).toBe(2);
-
-    // Each scenario should have collected frames
-    for (const scenario of aggregate.scenarios) {
-      expect(scenario.framesCollected).toBeGreaterThan(0);
-      expect(scenario.label).toBeTruthy();
-    }
+    expect(aggregate.scenarios.length).toBe(1);
+    expect(aggregate.scenarios[0]!.framesCollected).toBeGreaterThan(0);
+    expect(aggregate.scenarios[0]!.label).toBeTruthy();
   });
 
   it("populates bestLatency and highestQuality", async () => {
@@ -616,5 +714,68 @@ describe("NvidiaBenchmarkService", () => {
     const restored = service.buildRestoredSettings();
     expect(restored).not.toBeNull();
     expect(restored!.processingBackend).toBe("nvidia-vsr");
+  });
+
+  // ── Environment collection ────────────────────────────────────────────
+
+  it("collects environment info from host readStats and getEnvironment", async () => {
+    const host = createMockHost({
+      getEnvironment: () => ({
+        nvidiaAvailable: true,
+        nvidiaAdapterName: "NVIDIA GeForce RTX 4090",
+        nvidiaDriverVersion: "546.17",
+      }),
+    });
+
+    service.setScenarios(SINGLE_SCENARIO);
+    service.saveSettings(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS);
+    service.start(host);
+    await waitForTerminal(service);
+
+    const aggregate = service.aggregate!;
+    expect(aggregate.environment).not.toBeNull();
+    expect(aggregate.environment!.processingBackend).toBe("webgl2");
+    expect(aggregate.environment!.nvidiaAvailable).toBe(true);
+    expect(aggregate.environment!.nvidiaAdapterName).toContain("RTX 4090");
+    expect(aggregate.environment!.nvidiaDriverVersion).toBe("546.17");
+    expect(aggregate.environment!.nativeOutputWidth).toBe(1920);
+    expect(aggregate.environment!.nativeOutputHeight).toBe(1080);
+    expect(aggregate.environment!.completedFps).toBe(30);
+  });
+
+  it("environment is null when getEnvironment returns null and stats are null", async () => {
+    // Use a host that returns null for both readStats and getEnvironment
+    // readStats must return valid data to pass validation, so we provide
+    // valid stats but no getEnvironment
+    const host = createMockHost(); // no getEnvironment defined
+
+    service.setScenarios(SINGLE_SCENARIO);
+    service.saveSettings(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS);
+    service.start(host);
+    await waitForTerminal(service);
+
+    const aggregate = service.aggregate!;
+    // Environment should still be populated from readStats even without getEnvironment
+    expect(aggregate.environment).not.toBeNull();
+    expect(aggregate.environment!.nvidiaAvailable).toBe(false);
+    expect(aggregate.environment!.nvidiaAdapterName).toBeNull();
+    expect(aggregate.environment!.nvidiaDriverVersion).toBeNull();
+    expect(aggregate.environment!.processingBackend).toBe("webgl2");
+  });
+
+  it("calls getEnvironment during collecting-environment phase", async () => {
+    const getEnvironment = vi.fn(() => ({
+      nvidiaAvailable: false,
+      nvidiaAdapterName: null,
+      nvidiaDriverVersion: null,
+    }));
+
+    const host = createMockHost({ getEnvironment });
+    service.setScenarios(SINGLE_SCENARIO);
+    service.saveSettings(VIEWER_IMAGE_ENHANCEMENT_DEFAULTS);
+    service.start(host);
+    await waitForTerminal(service);
+
+    expect(getEnvironment).toHaveBeenCalled();
   });
 });

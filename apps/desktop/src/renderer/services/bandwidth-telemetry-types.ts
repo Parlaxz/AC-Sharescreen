@@ -78,6 +78,8 @@ export interface TelemetrySample {
   codec: string | null;
   connectionType: "direct" | "turn" | null;
   state: TelemetryState;
+  /** Easy Compare variant label, if this connection belongs to a compare variant. */
+  variantId?: "A" | "B";
 }
 
 // ─── Aggregated bucket ──────────────────────────────────────────────────────
@@ -177,6 +179,8 @@ export interface ConnectionTelemetrySnapshot extends TelemetrySeriesSnapshot {
   viewerDeviceId: string | null;
   displayName: string | null;
   receivedStatus: ViewerReportedStatus | null;
+  /** Easy Compare variant label, if this connection belongs to a compare variant. */
+  variantId?: "A" | "B";
 }
 
 // ─── Bandwidth snapshot (root) ──────────────────────────────────────────────

@@ -5,6 +5,7 @@ import {
   classifySettingsDiff,
   diffGroupSettings,
 } from "@screenlink/shared";
+import { applySenderSettings } from "./quality-coordinator.js";
 
 /**
  * GroupSettingsLiveApply (Gate 9.5)
@@ -92,24 +93,23 @@ export class GroupSettingsLiveApply {
 
   /**
    * Apply live-safe GroupQualitySettings fields to a single
-   * RTCRtpSender. We do not apply host-only fields (codec, capture
+   * RTCRtpSender. Delegates to the shared `applySenderSettings`
+   * from quality-coordinator to avoid duplicating sender-encoding
+   * parameter logic. We do not apply host-only fields (codec, capture
    * dimensions, cursor mode, audio) — those require a restart.
    */
   private async applyToSender(
     sender: RTCRtpSender,
     settings: GroupQualitySettings,
   ): Promise<void> {
-    const params = sender.getParameters();
-    if (!params.encodings || params.encodings.length === 0) {
-      params.encodings = [{}];
-    }
-    const enc = params.encodings[0]!;
-    enc.maxBitrate = settings.video.videoBitrateKbps * 1000;
-    enc.maxFramerate = settings.video.sendFps;
-    (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = settings.video.degradationPreference as RTCDegradationPreference;
-    if (settings.video.scaleResolutionDownBy >= 1) {
-      enc.scaleResolutionDownBy = settings.video.scaleResolutionDownBy;
-    }
-    await sender.setParameters(params);
+    await applySenderSettings(sender, {
+      maxBitrate: settings.video.videoBitrateKbps,
+      maxFramerate: settings.video.sendFps,
+      degradationPreference: settings.video.degradationPreference,
+      scaleResolutionDownBy:
+        settings.video.scaleResolutionDownBy >= 1
+          ? settings.video.scaleResolutionDownBy
+          : undefined,
+    });
   }
 }

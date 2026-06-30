@@ -571,7 +571,8 @@ export function BandwidthGraphModal({
       { value: "__all__", label: "All Viewers" },
       ...snapshot.connections.map((v) => ({
         value: v.viewerDeviceId ?? v.connectionId,
-        label: v.displayName ?? v.connectionId,
+        label: v.variantId ? `${v.displayName ?? v.connectionId} [Variant ${v.variantId}]` : (v.displayName ?? v.connectionId),
+        variantId: v.variantId,
       })),
     ];
   }, [role, snapshot.connections]);
@@ -582,10 +583,21 @@ export function BandwidthGraphModal({
     selectedSeries.mediumBuckets.length > 0 ||
     selectedSeries.longBuckets.length > 0;
 
+  // Detect if any connection has a compare variant label
+  const hasCompareVariant = useMemo(
+    () => snapshot.connections.some((c) => c.variantId),
+    [snapshot.connections],
+  );
+
   const content = (
     <Fragment>
-      <div className="text-lg font-semibold mb-4 text-text-primary">
+      <div className="text-lg font-semibold mb-4 text-text-primary flex items-center gap-2">
         Bandwidth
+        {hasCompareVariant && (
+          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+            Compare
+          </Badge>
+        )}
       </div>
 
       <ScrollArea className="max-h-[calc(85vh-8rem)] pr-2">

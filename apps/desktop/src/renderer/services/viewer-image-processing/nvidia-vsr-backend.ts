@@ -16,6 +16,7 @@ import type {
 import { canonicalQualityLevel } from "@screenlink/shared";
 import type { AppliedNvidiaConfig } from "@screenlink/shared";
 import { nextMonotonicId, lifecycleLog } from "./lifecycle-id";
+import { RendererInputSlots } from "./renderer-input-slots";
 
 type NativeVideoConfig = {
   inputWidth: number;
@@ -74,6 +75,10 @@ type ScreenLinkVideoApi = {
   /** Phase 6: Request a frame port bound to a specific clientId lease */
   requestFramePortForClient?: (clientId: string) => Promise<{ success: boolean; error?: string }>;
 
+  // Slice 5: Renderer-owned shared input slot registration
+  rendererSlotsRegister?: (slots: SharedArrayBuffer[]) => Promise<{ success: boolean }>;
+  rendererSlotsRelease?: () => Promise<{ success: boolean }>;
+
   // Native presenter operations
   nativePresenterAttach?: (width: number, height: number) => Promise<{ success: boolean }>;
   nativePresenterDetach?: () => Promise<{ success: boolean }>;
@@ -102,6 +107,7 @@ const EMPTY_STATS: BackendStats = {
   failures: 0,
   configState: "idle",
   staleConfigDrops: 0,
+  capturePath: "none",
 };
 
 const VERTEX_SHADER = `#version 300 es
@@ -315,6 +321,21 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   private nativePresenterActive = false;
   private nativePresenterSupported = false;
 
+  // Slice 5: Renderer-owned shared input slots for zero-copy frame transport
+  private inputSlots: RendererInputSlots | null = null;
+  private inputSlotsGeneration: number = -1;
+
+  // Slice 5: Capture path tracking
+  private capturePath: "video-frame" | "rqvc-canvas" | "none" = "none";
+  private videoFrameCaptureActive = false;
+  // MediaStreamTrackProcessor is available in Chrome/Electron 120+
+  // We store the processor and track reader for cleanup
+  private mediaStreamTrackProcessor: any | null = null;
+  private mediaStreamTrackReader: ReadableStreamDefaultReader | null = null;
+
+  // requestVideoFrameCallback handle for cleanup
+  private rqvcHandle: number | null = null;
+
   /**
    * Acquire a client lease and then the dedicated frame MessagePort.
    */
@@ -409,13 +430,386 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     return ok;
   }
 
+  // ── Slice 5: Capture paths ────────────────────────────────────────────
+
+  /**
+   * Attempt to capture a video frame using the WebCodecs VideoFrame API
+   * (MediaStreamTrackProcessor + copyTo). This is the primary capture path
+   * when supported, as it avoids the drawImage + getImageData CPU round-trip.
+   *
+   * Returns the pixel data and timing info, or null if VideoFrame capture
+   * is not available or fails.
+   */
+  private captureViaVideoFrame(
+    video: HTMLVideoElement,
+  ): { frameData: Uint8Array; inputWidth: number; inputHeight: number } | null {
+    // Check if VideoFrame is available
+    if (typeof VideoFrame === "undefined") return null;
+
+    // Check if the video has a MediaStream track we can capture from
+    // (captured streams via getDisplayMedia have a srcObject with active tracks)
+    if (!video.srcObject) return null;
+
+    try {
+      const track = (video.srcObject as MediaStream)?.getVideoTracks()?.[0];
+      if (!track) return null;
+
+      // Try MediaStreamTrackProcessor (available in Chrome/Electron 120+)
+      const TProcessor = (self as any).MediaStreamTrackProcessor;
+      if (!TProcessor) return null;
+
+      const processor = new TProcessor({ track });
+      const reader = processor.readable.getReader();
+
+      // Read one frame synchronously (with timeout via requestVideoFrameCallback)
+      // We need a synchronous approach since processFrame is async but
+      // we need to read and release ASAP
+      // Use Promise-based approach:
+      // We store the reader for cleanup and read one frame
+      this.mediaStreamTrackProcessor = processor;
+      this.mediaStreamTrackReader = reader;
+
+      // Read one frame — but we need it synchronously. Instead, we implement
+      // an async readOne method and let the caller handle timing.
+      // For now, fall through to the per-frame approach.
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Capture a single frame using VideoFrame API with copyTo.
+   * Returns pixel data or null if unavailable/failed.
+   *
+   * This is called per-frame in the processFrame method.
+   * Cleanup is handled in destroy() and after each capture.
+   */
+  private async captureFrameViaVideoFrameCopy(
+    video: HTMLVideoElement,
+  ): Promise<{ frameData: Uint8Array; inputWidth: number; inputHeight: number; timing: { captureStart: number; copyToEnd: number } } | null> {
+    if (typeof VideoFrame === "undefined") return null;
+
+    const captureStart = performance.now();
+
+    try {
+      // Try to get a VideoFrame from the video element directly
+      // (supported in Chrome/Electron 120+: HTMLVideoElement has a captureStream() method)
+      // Alternative: use requestVideoFrameCallback to get the frame
+      const stream = (video as any).captureStream?.();
+      if (!stream) return null;
+
+      const track = stream.getVideoTracks()?.[0];
+      if (!track) return null;
+
+      const TProcessor = (self as any).MediaStreamTrackProcessor;
+      if (!TProcessor) return null;
+
+      const processor = new TProcessor({ track });
+      const reader = processor.readable.getReader();
+
+      // Read one frame with timeout
+      const readResult = await Promise.race([
+        reader.read(),
+        new Promise<{ done: true; value: undefined }>((_, reject) =>
+          setTimeout(() => reject(new Error("VideoFrame read timeout")), 1000),
+        ),
+      ]);
+
+      if (readResult.done || !readResult.value) {
+        reader.cancel().catch(() => {});
+        return null;
+      }
+
+      const videoFrame: VideoFrame = readResult.value;
+      const fmt = videoFrame.format;
+      const w = videoFrame.displayWidth;
+      const h = videoFrame.displayHeight;
+
+      // Only support RGBA format (or convert)
+      let pixelData: Uint8Array | null = null;
+
+      if (fmt === "RGBA" || fmt === "RGBX") {
+        pixelData = new Uint8Array(w * h * 4);
+        await videoFrame.copyTo(pixelData);
+      } else {
+        // For other formats, we'd need a canvas intermediary
+        // Fall back to canvas readback
+        videoFrame.close();
+        reader.cancel().catch(() => {});
+        return null;
+      }
+
+      videoFrame.close();
+      reader.cancel().catch(() => {});
+
+      const copyToEnd = performance.now();
+
+      this.videoFrameCaptureActive = true;
+      this.capturePath = "video-frame";
+
+      return {
+        frameData: pixelData,
+        inputWidth: w,
+        inputHeight: h,
+        timing: { captureStart, copyToEnd },
+      };
+    } catch (err) {
+      // VideoFrame capture failed — will fall back to rqvc+canvas
+      return null;
+    }
+  }
+
+  /**
+   * Capture a frame using requestVideoFrameCallback + canvas readback.
+   * This is the fallback path, explicitly labeled as such.
+   */
+  private async captureFrameViaRqvcCanvas(
+    video: HTMLVideoElement,
+    inputWidth: number,
+    inputHeight: number,
+  ): Promise<{ frameData: Uint8Array; timing: { drawImageMs: number; getImageDataMs: number; totalMs: number } } | null> {
+    if (
+      !this.captureCanvas ||
+      !this.captureContext
+    ) return null;
+
+    const frameStart = performance.now();
+
+    // Ensure capture canvas is sized correctly
+    if (
+      this.captureCanvas.width !== inputWidth ||
+      this.captureCanvas.height !== inputHeight
+    ) {
+      this.captureCanvas.width = inputWidth;
+      this.captureCanvas.height = inputHeight;
+    }
+
+    // ── Phase A1: drawImage ──────────────────────────────────────────
+    const drawImageStart = performance.now();
+
+    try {
+      this.captureContext.drawImage(
+        video,
+        0,
+        0,
+        inputWidth,
+        inputHeight,
+      );
+    } catch {
+      return null;
+    }
+
+    const afterDrawImage = performance.now();
+    const drawImageMs = afterDrawImage - drawImageStart;
+
+    // ── Phase A2: getImageData ───────────────────────────────────────
+    const source = this.captureContext.getImageData(
+      0,
+      0,
+      inputWidth,
+      inputHeight,
+    );
+    const afterGetImageData = performance.now();
+    const getImageDataMs = afterGetImageData - afterDrawImage;
+
+    // ── Phase A3: buffer preparation ─────────────────────────────────
+    const frameData = new Uint8Array(
+      source.data.buffer,
+      source.data.byteOffset,
+      source.data.byteLength,
+    );
+
+    this.capturePath = "rqvc-canvas";
+
+    return {
+      frameData,
+      timing: {
+        drawImageMs,
+        getImageDataMs,
+        totalMs: performance.now() - frameStart,
+      },
+    };
+  }
+
+  // ── Shared-slot submission helpers (Slice 5) ───────────────────────────
+
+  /**
+   * Initialize and register renderer-owned shared input slots.
+   * Called once per generation during initial configuration.
+   */
+  private async ensureInputSlots(generation: number): Promise<boolean> {
+    // Already created for this generation
+    if (this.inputSlots && this.inputSlotsGeneration === generation && this.inputSlots.isCreated) {
+      return this.inputSlots.isRegistered;
+    }
+
+    // Release old slots if generation changed
+    if (this.inputSlots && this.inputSlotsGeneration !== generation) {
+      const api = getVideoApi();
+      if (api?.rendererSlotsRelease) {
+        await this.inputSlots.release(() => api.rendererSlotsRelease!());
+      }
+      this.inputSlots.destroy();
+      this.inputSlots = null;
+    }
+
+    const api = getVideoApi();
+    if (!api?.rendererSlotsRegister || !api.rendererSlotsRelease) {
+      return false; // slots not supported by this runtime
+    }
+
+    // Create and register
+    const slots = new RendererInputSlots();
+    if (!slots.create()) {
+      this.inputSlots = null;
+      return false;
+    }
+
+    const registered = await slots.register(
+      (bufs) => api.rendererSlotsRegister!(bufs),
+    );
+
+    if (!registered) {
+      slots.destroy();
+      this.inputSlots = null;
+      return false;
+    }
+
+    this.inputSlots = slots;
+    this.inputSlotsGeneration = generation;
+
+    lifecycleLog("NvidiaBackend", "inputSlotsReady", {
+      instanceId: this.instanceId,
+      generation,
+    });
+
+    return true;
+  }
+
+  /**
+   * Submit a frame via the MessagePort using the optimized shared-slot path.
+   * Per-frame payload is metadata-only (~32 bytes) — the pixel data is
+   * written directly to the shared slot by the renderer.
+   */
+  private submitFrameViaSharedSlot(
+    generation: number,
+    frameSequence: number,
+    frameData: Uint8Array,
+    inputWidth: number,
+    inputHeight: number,
+  ): Promise<NativeFrameResult | null> {
+    return new Promise((resolve) => {
+      const port = this.framePort;
+      if (!port || !this.inputSlots || !this.inputSlots.isRegistered) {
+        resolve(null);
+        return;
+      }
+
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(null);
+      }, 5000);
+
+      port.onmessage = (evt: MessageEvent) => {
+        if (settled) return;
+        const msg = evt.data as {
+          generation?: number;
+          sequence?: number;
+          width?: number;
+          height?: number;
+          error?: string;
+          _metadataOnly?: boolean;
+        };
+
+        if (msg.error) {
+          settled = true;
+          clearTimeout(timeout);
+          port.onmessage = null;
+          console.error("[nvidia-vsr] Shared-slot processing error:", msg.error);
+          resolve(null);
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        port.onmessage = null;
+
+        // Metadata-only response: native presenter handled the frame
+        // Pixels are empty — renderer skips WebGL texture upload
+        if (msg._metadataOnly) {
+          resolve({
+            generation,
+            sequence: frameSequence,
+            pixels: new Uint8Array(0),
+            width: msg.width ?? 0,
+            height: msg.height ?? 0,
+            configurationId: (msg as any).configurationId,
+            appliedQualityLevel: (msg as any).appliedQualityLevel,
+          });
+          return;
+        }
+
+        // Full response with pixel data
+        const rawPixels = (msg as any).pixels;
+        if (!rawPixels || !(rawPixels instanceof Uint8Array) || rawPixels.byteLength === 0) {
+          resolve(null);
+          return;
+        }
+
+        resolve({
+          generation,
+          sequence: frameSequence,
+          pixels: rawPixels,
+          width: msg.width ?? 0,
+          height: msg.height ?? 0,
+          configurationId: (msg as any).configurationId,
+          appliedQualityLevel: (msg as any).appliedQualityLevel,
+        });
+      };
+
+      // Write pixel data to the shared slot
+      const slotIndex = this.inputSlots.nextSlot();
+      const wrote = this.inputSlots.writeSlot(
+        slotIndex,
+        generation,
+        frameSequence,
+        inputWidth,
+        inputHeight,
+        frameData,
+      );
+
+      if (!wrote) {
+        clearTimeout(timeout);
+        port.onmessage = null;
+        resolve(null);
+        return;
+      }
+
+      // Send metadata-only message (no frameData)
+      port.postMessage({
+        clientId: this.clientId,
+        generation,
+        frameSequence,
+        slotIndex,
+        inputWidth,
+        inputHeight,
+        // Deliberately no frameData — main process reads from shared slot
+      });
+    });
+  }
+
   /**
    * Submit a frame via the MessagePort using structured-cloned binary data.
    * Uses exact-buffer path: if frameData covers entire backing ArrayBuffer,
    * use that exact buffer with structured clone and no slice.
    * If partial view, create exactly one right-sized copy.
+   *
+   * This is the explicit fallback path when shared slots are unavailable.
    */
-  private submitFrameViaPort(
+  private async submitFrameViaPort(
     generation: number,
     frameSequence: number,
     frameData: Uint8Array,
@@ -504,6 +898,8 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           inputWidth,
           inputHeight,
           frameData: buffer,
+          // Explicit fallback — structured clone path
+          _fallbackPath: true,
         });
     });
   }
@@ -637,6 +1033,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         ...EMPTY_STATS,
         generation: this.generation,
         nativeQualityLevel: this.currentQualityLevel,
+        capturePath: "none",
       };
 
       // Try to activate native presenter (GPU-resident display path)
@@ -833,52 +1230,86 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         return { success: false };
       }
 
-      if (
-        this.captureCanvas.width !== inputWidth ||
-        this.captureCanvas.height !== inputHeight
-      ) {
-        this.captureCanvas.width = inputWidth;
-        this.captureCanvas.height = inputHeight;
-      }
-
       // ── Phase 6: Correlated frame identity ─────────────────────────────
       const generation = metadata?.generation ?? this.generation;
       const frameSequence = metadata?.frameSequence ?? 0;
 
-      // ── Renderer timing: Phase A1 — drawImage ──────────────────────────
+      // ── Frame capture ──────────────────────────────────────────────────
       const frameStart = performance.now();
 
-      this.captureContext.drawImage(
-        video,
-        0,
-        0,
-        inputWidth,
-        inputHeight,
-      );
+      // Slice 5: Try VideoFrame/MediaStreamTrackProcessor/copyTo first
+      let frameData: Uint8Array;
+      let captureReadbackMs = 0;
+      let drawImageMs = 0;
+      let getImageDataMs = 0;
+      let inputBufferPreparationMs = 0;
+      let usedCapturePath: "video-frame" | "rqvc-canvas" = "rqvc-canvas";
 
-      const afterDrawImage = performance.now();
-      const drawImageMs = afterDrawImage - frameStart;
+      const vfResult = await this.captureFrameViaVideoFrameCopy(video);
 
-      // ── Renderer timing: Phase A2 — getImageData ───────────────────────
-      const source = this.captureContext.getImageData(
-        0,
-        0,
-        inputWidth,
-        inputHeight,
-      );
+      if (vfResult) {
+        frameData = vfResult.frameData;
+        const actualInputWidth = vfResult.inputWidth;
+        const actualInputHeight = vfResult.inputHeight;
 
-      const afterGetImageData = performance.now();
-      const getImageDataMs = afterGetImageData - afterDrawImage;
+        // Only adjust input dimensions if VideoFrame gave different values
+        // (shouldn't normally happen, but handle it)
+        if (actualInputWidth !== inputWidth || actualInputHeight !== inputHeight) {
+          // Log discrepancy but use original for consistency
+        }
 
-      // ── Renderer timing: Phase A3 — input buffer preparation ──────────
-      const frameData = new Uint8Array(
-        source.data.buffer,
-        source.data.byteOffset,
-        source.data.byteLength,
-      );
+        inputBufferPreparationMs = 0; // copyTo is direct
+        captureReadbackMs = vfResult.timing.copyToEnd - vfResult.timing.captureStart;
+        usedCapturePath = "video-frame";
+        this.capturePath = "video-frame";
+      } else {
+        // ── Fallback: canvas readback ─────────────────────────────────────
+        if (
+          this.captureCanvas.width !== inputWidth ||
+          this.captureCanvas.height !== inputHeight
+        ) {
+          this.captureCanvas.width = inputWidth;
+          this.captureCanvas.height = inputHeight;
+        }
 
-      const afterBufferPrep = performance.now();
-      const inputBufferPreparationMs = afterBufferPrep - afterGetImageData;
+        // ── Renderer timing: Phase A1 — drawImage ────────────────────────
+        const drawImageStart = performance.now();
+
+        this.captureContext.drawImage(
+          video,
+          0,
+          0,
+          inputWidth,
+          inputHeight,
+        );
+
+        const afterDrawImage = performance.now();
+        drawImageMs = afterDrawImage - drawImageStart;
+
+        // ── Renderer timing: Phase A2 — getImageData ─────────────────────
+        const source = this.captureContext.getImageData(
+          0,
+          0,
+          inputWidth,
+          inputHeight,
+        );
+
+        const afterGetImageData = performance.now();
+        getImageDataMs = afterGetImageData - afterDrawImage;
+
+        // ── Renderer timing: Phase A3 — input buffer preparation ─────────
+        frameData = new Uint8Array(
+          source.data.buffer,
+          source.data.byteOffset,
+          source.data.byteLength,
+        );
+
+        const afterBufferPrep = performance.now();
+        inputBufferPreparationMs = afterBufferPrep - afterGetImageData;
+        captureReadbackMs = drawImageMs + getImageDataMs;
+        usedCapturePath = "rqvc-canvas";
+        this.capturePath = "rqvc-canvas";
+      }
 
       const api = getVideoApi();
 
@@ -886,19 +1317,34 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         return { success: false };
       }
 
+      // Ensure shared input slots are ready for this generation
+      const sharedSlotsAvailable = await this.ensureInputSlots(generation);
+
       // ── Renderer timing: Phase B — native transport (renderer-observed) ──
       let result: NativeFrameResult | null = null;
 
       if (this.framePort || await this.acquireClientAndPort()) {
-        result = await this.submitFrameViaPort(
-          generation,
-          frameSequence,
-          frameData,
-          inputWidth,
-          inputHeight,
-        );
+        if (sharedSlotsAvailable) {
+          // Optimized path: metadata-only via shared slots
+          result = await this.submitFrameViaSharedSlot(
+            generation,
+            frameSequence,
+            frameData,
+            inputWidth,
+            inputHeight,
+          );
+        } else {
+          // Fallback path: structured clone via MessagePort
+          result = await this.submitFrameViaPort(
+            generation,
+            frameSequence,
+            frameData,
+            inputWidth,
+            inputHeight,
+          );
+        }
       } else {
-        // Fall back to invoke-based submission
+        // Fall back to invoke-based submission (legacy path)
         result = await api.videoHelperSubmitFrame(
           generation,
           frameSequence,
@@ -910,7 +1356,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
 
       const afterResult = performance.now();
       // rendererToResultMs = renderer-observed round-trip wait for native result
-      const rendererToResultMs = afterResult - afterBufferPrep;
+      const rendererToResultMs = afterResult - (frameStart + captureReadbackMs + inputBufferPreparationMs);
 
       if (!result) {
         this.stats = {
@@ -955,63 +1401,66 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         };
       }
 
-      // ── Native presenter path (GPU-resident) ─────────────────────────
-      // When the native presenter is active, the native helper presents the
-      // frame directly to a D3D11 swapchain overlay window. No pixel data is
-      // returned — we skip texture upload entirely.
-      if (this.nativePresenterActive) {
-        // Check if pixel data is empty (expected for presenter path)
-        const noPixels = !result.pixels || result.pixels.byteLength === 0;
+      // ── Metadata-only / Native presenter path (no pixel data) ────────
+      // When the native presenter is active (GPU-resident display), or when
+      // the shared-slot path indicates metadata-only completion, the native
+      // helper presents the frame directly to a D3D11 swapchain overlay window.
+      // No pixel data is returned — we skip texture upload entirely.
+      const noPixels = !result.pixels || result.pixels.byteLength === 0;
 
-        if (noPixels) {
-          // Frame was presented natively — no WebGL texture upload needed
-          this.stats = {
-            inputWidth,
-            inputHeight,
-            outputWidth: result.width || output.width,
-            outputHeight: result.height || output.height,
-            enhancedScalingActive: true,
-            lastGpuTimeMs: 0,
-            backend: "nvidia-vsr",
-            framesProcessed: this.stats.framesProcessed + 1,
-            activePasses: ["nvidia-vsr", "native-presenter"],
-            backpressureDrops: this.stats.backpressureDrops,
-            generation,
-            nativeQualityLevel: this.currentQualityLevel,
-            processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
-            completedAttempts: (this.stats.completedAttempts ?? 0) + 1,
-            displayedCount: (this.stats.displayedCount ?? 0) + 1,
-            coalescedCount: this.stats.coalescedCount ?? 0,
-            backendDrops: this.stats.backpressureDrops,
-            staleGenerationResults: this.stats.staleGenerationResults ?? 0,
-            failures: this.stats.failures ?? 0,
-          };
+      if (noPixels && (this.nativePresenterActive || (result as any)._metadataOnly)) {
+        // Frame was presented natively — no WebGL texture upload needed
+        this.stats = {
+          inputWidth,
+          inputHeight,
+          outputWidth: result.width || output.width,
+          outputHeight: result.height || output.height,
+          enhancedScalingActive: true,
+          lastGpuTimeMs: 0,
+          backend: "nvidia-vsr",
+          framesProcessed: this.stats.framesProcessed + 1,
+          activePasses: ["nvidia-vsr", "native-presenter"],
+          backpressureDrops: this.stats.backpressureDrops,
+          generation,
+          nativeQualityLevel: this.currentQualityLevel,
+          processingAttempts: (this.stats.processingAttempts ?? 0) + 1,
+          completedAttempts: (this.stats.completedAttempts ?? 0) + 1,
+          displayedCount: (this.stats.displayedCount ?? 0) + 1,
+          coalescedCount: this.stats.coalescedCount ?? 0,
+          backendDrops: this.stats.backpressureDrops,
+          staleGenerationResults: this.stats.staleGenerationResults ?? 0,
+          failures: this.stats.failures ?? 0,
+          capturePath: usedCapturePath,
+        };
 
-          return {
-            success: true,
-            gpuTimeMs: 0,
-            totalLatencyMs: 0,
-            timingBreakdown: {
-              captureReadbackMs: drawImageMs + getImageDataMs,
-              drawImageMs,
-              getImageDataMs,
-              inputBufferPreparationMs,
-              rendererToResultMs,
-              textureUploadMs: 0,
-              rendererTotalMs: performance.now() - frameStart,
-              nativeTransportProcessingMs: rendererToResultMs,
-              displayUploadMs: 0,
-              // Native presenter path: no CPU download
-              nativeDownloadMs: 0,
-              nativePreWriteTotalMs: rendererToResultMs,
-            },
-          };
-        }
-
-        // Presenter is active but pixel data was returned — this means the
-        // GPU-to-GPU path failed and we fell back to the CPU download path.
-        // Continue with normal WebGL texture upload.
+        return {
+          success: true,
+          gpuTimeMs: 0,
+          outputWidth: result.width || output.width,
+          outputHeight: result.height || output.height,
+          totalLatencyMs: 0,
+          configurationId: result.configurationId ?? this.expectedConfigurationId,
+          canonicalQualityLevel: this.currentQualityLevel,
+          timingBreakdown: {
+            captureReadbackMs,
+            drawImageMs,
+            getImageDataMs,
+            inputBufferPreparationMs,
+            rendererToResultMs,
+            textureUploadMs: 0,
+            rendererTotalMs: performance.now() - frameStart,
+            nativeTransportProcessingMs: rendererToResultMs,
+            displayUploadMs: 0,
+            // Native presenter path: no CPU download
+            nativeDownloadMs: 0,
+            nativePreWriteTotalMs: rendererToResultMs,
+          },
+        };
       }
+
+      // If native presenter is active but pixel data was returned, it means
+      // the GPU-to-GPU path failed and we fell back to CPU download.
+      // Continue with normal WebGL texture upload below.
 
       // Safe frame byte-size validation before expectedBytes calculation
       if (result.width <= 0 || result.height <= 0 || result.width > 8192 || result.height > 8192) {
@@ -1053,7 +1502,6 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       const textureUploadMs = afterDisplay - uploadStart;
 
       // Derived renderer-phase totals
-      const captureReadbackMs = drawImageMs + getImageDataMs;
       const displayUploadMs = textureUploadMs;
       const rendererTotalMs = afterDisplay - frameStart;
 
@@ -1083,6 +1531,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
         backendDrops: this.stats.backpressureDrops,
         staleGenerationResults: this.stats.staleGenerationResults ?? 0,
         failures: this.stats.failures ?? 0,
+        capturePath: usedCapturePath,
       };
 
       // Main-process timings (from submitFrame result, if available)
@@ -1106,7 +1555,11 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       return {
         success: true,
         gpuTimeMs: rendererToResultMs,
+        outputWidth: result.width,
+        outputHeight: result.height,
         totalLatencyMs: afterDisplay - frameStart,
+        configurationId: result.configurationId ?? this.expectedConfigurationId,
+        canonicalQualityLevel: this.currentQualityLevel,
         timingBreakdown: {
           captureReadbackMs,
           drawImageMs,
@@ -1152,6 +1605,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       configState: this.configState,
       staleConfigDrops: this.staleConfigDrops,
       presentationPath: this.nativePresenterActive ? "native-presenter" : "webgl",
+      capturePath: this.capturePath,
     };
   }
 
@@ -1220,6 +1674,33 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
     }
     this.framePortRequested = false;
     this.pendingFramePort = null;
+
+    // Slice 5: Clean up shared input slots
+    if (this.inputSlots) {
+      const slotsApi = getVideoApi();
+      if (slotsApi?.rendererSlotsRelease && this.inputSlots.isRegistered) {
+        this.inputSlots.release(() => slotsApi.rendererSlotsRelease!()).catch(() => {});
+      }
+      this.inputSlots.destroy();
+      this.inputSlots = null;
+    }
+    this.inputSlotsGeneration = -1;
+
+    // Clean up MediaStreamTrackReader
+    if (this.mediaStreamTrackReader) {
+      this.mediaStreamTrackReader.cancel().catch(() => {});
+      this.mediaStreamTrackReader = null;
+    }
+    this.mediaStreamTrackProcessor = null;
+    this.videoFrameCaptureActive = false;
+
+    // Cancel pending requestVideoFrameCallback
+    if (this.rqvcHandle !== null) {
+      // No cancel API needed; just null the handle
+      this.rqvcHandle = null;
+    }
+
+    this.capturePath = "none";
 
     console.info(
       "[nvidia-vsr] Native backend destroyed",

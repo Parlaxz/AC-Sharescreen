@@ -98,8 +98,13 @@ export interface ScreenLinkAPI {
 
   // NVIDIA benchmark operations
   nvidiaOpenBenchmarkFolder: () => Promise<boolean>;
+  nvidiaSaveBenchmarkResult: (record: NvidiaBenchmarkResultRecord) => Promise<{ success: boolean; id?: string; error?: string }>;
   nvidiaExportBenchmarkResult: (resultId: string) => Promise<string | null>;
   nvidiaGetBenchmarkResults: () => Promise<NvidiaBenchmarkResultRecord[]>;
+  nvidiaRunBenchmark: (config: NvidiaBenchmarkConfig) => Promise<{ success: boolean; error?: string; targetFrames?: number }>;
+  nvidiaGetBenchmarkStatus: () => Promise<NvidiaBenchmarkStatusResponse | null>;
+  nvidiaCancelBenchmark: () => Promise<boolean>;
+  nvidiaGetBenchmarkAggregateResults: () => Promise<NvidiaBenchmarkAggregateResult | null>;
 
   // Audio capabilities
   getAudioCapabilities: () => Promise<{
@@ -178,6 +183,10 @@ export interface ScreenLinkAPI {
   requestFramePort: () => Promise<{ success: boolean }>;
   /** Phase 6: Request a frame port bound to a specific clientId lease. */
   requestFramePortForClient: (clientId: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Slice 5: Renderer-owned shared input slots for zero-copy frame transport
+  rendererSlotsRegister: (slots: SharedArrayBuffer[]) => Promise<{ success: boolean }>;
+  rendererSlotsRelease: () => Promise<{ success: boolean }>;
 
   // Native presenter operations
   nativePresenterAttach: (width: number, height: number) => Promise<{ success: boolean }>;
@@ -310,6 +319,39 @@ export interface NvidiaBenchmarkResultRecord {
   exportedPath?: string;
   /** Error message if status is "failed" */
   error?: string;
+}
+
+/**
+ * Response from the native benchmarkStatus command.
+ */
+export interface NvidiaBenchmarkStatusResponse {
+  benchmarkActive: boolean;
+  benchmarkTargetFrames: number;
+  benchmarkFramesCompleted: number;
+  benchmarkTotalTimeUs: number;
+  benchmarkAvgTimeUs?: number;
+  benchmarkComplete?: boolean;
+}
+
+/**
+ * Aggregated benchmark result from the native helper (benchmarkGetResults).
+ */
+export interface NvidiaBenchmarkAggregateResult {
+  success: boolean;
+  error?: string;
+  framesProcessed: number;
+  framesDropped: number;
+  framesFailed: number;
+  totalTimeUs: number;
+  avgTimeUs: number;
+  minTimeUs: number;
+  maxTimeUs: number;
+  avgInputReceiveUs: number;
+  avgUploadUs: number;
+  avgEffectUs: number;
+  avgDownloadUs: number;
+  avgOutputWriteUs: number;
+  avgFps: number;
 }
 
 // ── Per-group shortcut config types ──────────────────────────────────────────

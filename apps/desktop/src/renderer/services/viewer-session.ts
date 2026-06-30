@@ -111,6 +111,14 @@ export interface ViewerSessionOptions {
   mediaSessionId: string;
   hostName: string;
   videoElement?: HTMLVideoElement | null;
+  /**
+   * Compare variant ID ("A" or "B") when this viewer is joining a specific
+   * variant of an Easy Compare session. When present, the join request,
+   * leave, and status messages carry the variant ID and exact media session
+   * ID so the host can issue the correct credentials and route leave/status
+   * to the right variant.
+   */
+  compareVariantId?: string;
 }
 
 export interface ViewerSessionEvents {
@@ -172,9 +180,14 @@ export class ViewerSession {
   private _receivedStream: MediaStream | null = null;
   private _destructed = false;
 
-  /** Generation counter: incremented on start(), checked after every await. */
-  private static nextGeneration = 0;
-  private _generation = -1;
+	/**
+	 * Instance-local generation counter: incremented on start(), checked
+	 * after every await. Unlike the old static counter, this is per-instance
+	 * so two ViewerSession instances can run concurrently without one
+	 * invalidating the other's in-flight operations.
+	 */
+	private _nextGeneration = 0;
+	private _generation = -1;
 
   /**
    * Single shared teardown promise. stop(), destroy(), and retry() all
@@ -227,6 +240,11 @@ export class ViewerSession {
   private logicalStreamId = "";
   private mediaSessionId = "";
   private hostName = "";
+  /**
+   * Compare variant ID for Easy Compare A/B sessions.
+   * Set from options.compareVariantId; null for single-stream (legacy) flows.
+   */
+  private _compareVariantId: string | null = null;
   private leaveAnnounced = false;
 
   /**
@@ -251,9 +269,13 @@ export class ViewerSession {
   private _pauseState: ViewerPauseState = "playing";
   /** Captured poster frame (data: URL) shown while paused. */
   private _pausePoster: string | null = null;
-  /** Bumped to cancel in-flight pause/resume that raced a newer call. */
-  private static nextPauseGeneration = 0;
-  private _pauseGeneration = -1;
+	/**
+	 * Instance-local pause generation counter. Bumped to cancel in-flight
+	 * pause/resume that raced a newer call on this instance. Static would
+	 * let one session's pause invalidate another's, so this is per-instance.
+	 */
+	private _nextPauseGeneration = 0;
+	private _pauseGeneration = -1;
 
   // Events
   public onStateChange: ((state: ViewerSessionState) => void) | null = null;
@@ -323,8 +345,8 @@ export class ViewerSession {
       return;
     }
 
-    ViewerSession.nextPauseGeneration++;
-    this._pauseGeneration = ViewerSession.nextPauseGeneration;
+    this._nextPauseGeneration++;
+    this._pauseGeneration = this._nextPauseGeneration;
 
     this.setPauseState("pausing");
 
@@ -370,8 +392,8 @@ export class ViewerSession {
     if (this._destructed) return;
     if (this._pauseState !== "paused") return; // no-op if not paused (also covers resuming)
 
-    ViewerSession.nextPauseGeneration++;
-    this._pauseGeneration = ViewerSession.nextPauseGeneration;
+    this._nextPauseGeneration++;
+    this._pauseGeneration = this._nextPauseGeneration;
 
     this.setPauseState("resuming");
     void this.buildAndSendViewerStatus("reconnecting");
@@ -542,6 +564,7 @@ export class ViewerSession {
     this.logicalStreamId = options.logicalStreamId;
     this.mediaSessionId = options.mediaSessionId;
     this.hostName = options.hostName;
+    this._compareVariantId = options.compareVariantId ?? null;
     this.leaveAnnounced = false;
     // Fresh session ID per Watch attempt — the host uses this to tell
     // leaves from prior attempts apart from the active one.
@@ -551,9 +574,9 @@ export class ViewerSession {
       this.videoElement = options.videoElement;
     }
 
-    // Bump generation to invalidate any prior in-flight flow
-    ViewerSession.nextGeneration++;
-    this._generation = ViewerSession.nextGeneration;
+		// Bump generation to invalidate any prior in-flight flow on this instance
+		this._nextGeneration++;
+		this._generation = this._nextGeneration;
 
     // Reset self-view retry counter on fresh start attempt
     this._selfViewRetryCount = 0;
@@ -567,18 +590,18 @@ export class ViewerSession {
    * After every await in runJoinFlow(), this guard prevents abandoned
    * flows from continuing.
    */
-  private isCurrent(): boolean {
-    return !this._destructed && this._generation === ViewerSession.nextGeneration;
-  }
+	private isCurrent(): boolean {
+		return !this._destructed && this._generation === this._nextGeneration;
+	}
 
   /**
    * Check whether this pause/resume operation's generation is still current.
    * After every await in pause()/resume(), this guard prevents a stale
    * operation from continuing after a newer pause()/resume() call.
    */
-  private isPauseGenerationCurrent(): boolean {
-    return !this._destructed && this._pauseGeneration === ViewerSession.nextPauseGeneration;
-  }
+	private isPauseGenerationCurrent(): boolean {
+		return !this._destructed && this._pauseGeneration === this._nextPauseGeneration;
+	}
 
   /**
    * Bind or rebind the video element. If a stream is already received,
@@ -627,9 +650,9 @@ export class ViewerSession {
     this._trackIdsInStream.clear();
     this.leaveAnnounced = false;
 
-    // Bump generation so in-flight flows from prior retry are abandoned
-    ViewerSession.nextGeneration++;
-    this._generation = ViewerSession.nextGeneration;
+		// Bump generation so in-flight flows from prior retry on this instance are abandoned
+		this._nextGeneration++;
+		this._generation = this._nextGeneration;
 
     await this.runJoinFlow();
   }
@@ -699,10 +722,10 @@ export class ViewerSession {
       try {
         if (options.final) this._destructed = true;
 
-        // Invalidate any in-flight join flow BEFORE we touch the
-        // ViewerClient — otherwise runJoinFlow() could resume after
-        // teardown and try to use a destroyed client.
-        ViewerSession.nextGeneration++;
+		// Invalidate any in-flight join flow on this instance BEFORE we touch the
+		// ViewerClient — otherwise runJoinFlow() could resume after
+		// teardown and try to use a destroyed client.
+		this._nextGeneration++;
 
         // 1) Send the leave message FIRST, while the group-control
         //    channel is still healthy. sendLeave() is fire-and-forget;
@@ -762,9 +785,9 @@ export class ViewerSession {
         this._receivedStream = null;
         this._trackIdsInStream.clear();
 
-        // 6) Clear pause state so any in-flight pause/resume observers
-        //    see a clean slate. Increment generation to cancel stale ops.
-        ViewerSession.nextPauseGeneration++;
+		// 6) Clear pause state so any in-flight pause/resume observers
+		//    see a clean slate. Increment generation to cancel stale ops on this instance.
+		this._nextPauseGeneration++;
         this._pauseState = "playing";
         this.clearPosterFrame();
         this._bindToken = null;
@@ -1006,7 +1029,9 @@ export class ViewerSession {
 
       // 3) Send stream.join.request — carries the per-attempt session
       //    ID so the host can disambiguate attempts and ignore stale
-      //    leaves from prior attempts.
+      //    leaves from prior attempts. In compare mode, also carries
+      //    the variant ID and exact media session ID so the host issues
+      //    the correct credentials.
       await conn.sendToPeer(peerUuid, {
         type: "stream.join.request",
         logicalStreamId: this.logicalStreamId,
@@ -1014,6 +1039,8 @@ export class ViewerSession {
         viewerDisplayName: runtime.displayName ?? "Viewer",
         requestId,
         viewerSessionId: this._viewerSessionId ?? undefined,
+        compareVariantId: this._compareVariantId ?? undefined,
+        mediaSessionId: this._compareVariantId ? this.mediaSessionId : undefined,
       });
 
       // GENERATION CHECK
@@ -1041,6 +1068,12 @@ export class ViewerSession {
       if (!joinToken) {
         this.setError("no join token in response");
         return;
+      }
+
+      // Preserve compare variant ID from response (if any) for correlation
+      // in leave/status messages.
+      if (response.compareVariantId) {
+        this._compareVariantId = response.compareVariantId;
       }
 
       this.setState("accepted");
@@ -1404,6 +1437,8 @@ export class ViewerSession {
       receivedHeight,
       displayedFps,
       sampledAt: Date.now(),
+      mediaSessionId: this._compareVariantId ? this.mediaSessionId : undefined,
+      compareVariantId: this._compareVariantId ?? undefined,
     }).catch(() => {});
   }
 
@@ -1460,6 +1495,8 @@ export class ViewerSession {
       logicalStreamId: this.logicalStreamId,
       viewerDeviceId: runtime.deviceId ?? "viewer",
       viewerSessionId: this._viewerSessionId ?? undefined,
+      mediaSessionId: this._compareVariantId ? this.mediaSessionId : undefined,
+      compareVariantId: this._compareVariantId ?? undefined,
     }).catch(() => {});
   }
 

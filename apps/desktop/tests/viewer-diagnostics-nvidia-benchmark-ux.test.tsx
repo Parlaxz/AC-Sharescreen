@@ -306,3 +306,159 @@ describe("Benchmark result summary copy", () => {
     expect(timedOutResult.framesCollected).toBeLessThan(timedOutResult.framesRequested);
   });
 });
+
+// ─── BenchmarkResultsSummary in DiagnosticsPanel ────────────────────────────
+
+describe("DiagnosticsPanel — BenchmarkResultsSummary", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nvidiaBenchmarkService.reset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("does not render benchmark summary when no aggregate is available", () => {
+    // Reset the service — should have no aggregate
+    nvidiaBenchmarkService.reset();
+
+    const { container } = renderWithProviders(
+      <DiagnosticsPanel session={null} contentOnly>
+        <span>trigger</span>
+      </DiagnosticsPanel>,
+    );
+
+    // The text "Last Benchmark" should NOT appear
+    expect(container.textContent).not.toContain("Last Benchmark");
+  });
+
+  it("renders benchmark summary when aggregate is available", () => {
+    // Manually set an aggregate result on the service
+    const mockAggregate = {
+      scenarios: [
+        {
+          scenario: "webgl2-native" as const,
+          label: "WebGL2 — Native",
+          framesRequested: 60,
+          framesCollected: 60,
+          framesDropped: 0,
+          avgProcessingTimeMs: 2.5,
+          p50ProcessingTimeMs: 2.3,
+          p95ProcessingTimeMs: 3.1,
+          avgLatencyMs: 5.0,
+          p50LatencyMs: 4.8,
+          p95LatencyMs: 6.2,
+          achievedFps: 30,
+          nativeOutputWidth: 1920,
+          nativeOutputHeight: 1080,
+          nativeQualityLevel: null,
+          activeBackend: "webgl2",
+          timedOut: false,
+        },
+      ],
+      totalDurationMs: 12345,
+      completedAt: new Date().toISOString(),
+      bestLatency: { scenario: "webgl2-native" as const, label: "WebGL2 — Native", avgMs: 2.5 },
+      highestQuality: { scenario: "webgl2-native" as const, label: "WebGL2 — Native", avgMs: 2.5 },
+      environment: null,
+      recommendedSettings: { processingBackend: "webgl2", webglScalingAlgorithm: "native" },
+    };
+
+    // Set via internal property (tests only)
+    (nvidiaBenchmarkService as unknown as { _aggregate: typeof mockAggregate })._aggregate = mockAggregate;
+
+    const { container } = renderWithProviders(
+      <DiagnosticsPanel session={null} contentOnly>
+        <span>trigger</span>
+      </DiagnosticsPanel>,
+    );
+
+    expect(container.textContent).toContain("Last Benchmark");
+    expect(container.textContent).toContain("1/1 completed");
+    expect(container.textContent).toContain("12.3s");
+  });
+});
+
+// ─── Benchmark aggregate environment field ──────────────────────────────────
+
+describe("BenchmarkAggregateResult environment field", () => {
+  it("stores environment info on successful run", () => {
+    const mockEnv = {
+      processingBackend: "nvidia-vsr",
+      nativeOutputWidth: 1920,
+      nativeOutputHeight: 1080,
+      nativeQualityLevel: 4,
+      completedFps: 30,
+      nvidiaAvailable: true,
+      nvidiaAdapterName: "NVIDIA GeForce RTX 4090",
+      nvidiaDriverVersion: "546.17",
+    };
+
+    // Verify the environment type shape is compatible
+    const aggregate = {
+      scenarios: [],
+      totalDurationMs: 1000,
+      completedAt: new Date().toISOString(),
+      bestLatency: null,
+      highestQuality: null,
+      environment: mockEnv,
+      recommendedSettings: null,
+    };
+
+    expect(aggregate.environment).not.toBeNull();
+    expect(aggregate.environment!.processingBackend).toBe("nvidia-vsr");
+    expect(aggregate.environment!.nvidiaAvailable).toBe(true);
+    expect(aggregate.environment!.nvidiaAdapterName).toContain("RTX");
+    expect(aggregate.environment!.nvidiaDriverVersion).toBe("546.17");
+    expect(aggregate.environment!.nativeOutputWidth).toBe(1920);
+    expect(aggregate.environment!.nativeQualityLevel).toBe(4);
+  });
+
+  it("environment defaults to null when no collection occurred", () => {
+    const aggregate = {
+      scenarios: [],
+      totalDurationMs: 0,
+      completedAt: new Date().toISOString(),
+      bestLatency: null,
+      highestQuality: null,
+      environment: null,
+      recommendedSettings: null,
+    };
+    expect(aggregate.environment).toBeNull();
+  });
+});
+
+// ─── Export handler wiring ──────────────────────────────────────────────────
+
+describe("Benchmark onExport handler", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    nvidiaBenchmarkService.reset();
+  });
+
+  it("has onExport property that can be set and called", () => {
+    const handler = vi.fn();
+    nvidiaBenchmarkService.onExport = handler;
+
+    const mockAggregate = {
+      scenarios: [],
+      totalDurationMs: 100,
+      completedAt: new Date().toISOString(),
+      bestLatency: null,
+      highestQuality: null,
+      environment: null,
+      recommendedSettings: null,
+    };
+
+    // Simulate the service calling the export handler
+    nvidiaBenchmarkService.onExport(mockAggregate, []);
+
+    expect(handler).toHaveBeenCalledWith(mockAggregate, []);
+  });
+
+  it("onExport resets to null via reset()", () => {
+    nvidiaBenchmarkService.reset();
+    expect(nvidiaBenchmarkService.onExport).toBeNull();
+  });
+});

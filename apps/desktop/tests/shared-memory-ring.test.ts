@@ -149,4 +149,77 @@ describe("SharedMemoryFrameRing", () => {
     expect(ring.findEmptySlot()).toBe(-1);
     expect(ring.readOutput(0)).toBeNull();
   });
+
+  // ── Slice 4: Legal/illegal slot transition tests ──────────────────
+
+  it("accepts legal slot transitions: Empty→Submitted→Processing→Done", () => {
+    expect(ring.open(tmpFile)).toBe(true);
+
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+    expect(ring.writeControl(0, SlotState.Submitted)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Submitted);
+    expect(ring.writeControl(0, SlotState.Processing)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Processing);
+    expect(ring.writeControl(0, SlotState.Done)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Done);
+  });
+
+  it("accepts legal Empty→Done transition (skip processing)", () => {
+    expect(ring.open(tmpFile)).toBe(true);
+
+    expect(ring.writeControl(0, SlotState.Done)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Done);
+
+    // Reset to Empty
+    expect(ring.writeControl(0, SlotState.Empty)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+  });
+
+  it("accepts Done→Empty transition (slot release)", () => {
+    expect(ring.open(tmpFile)).toBe(true);
+
+    ring.writeControl(0, SlotState.Done);
+    expect(ring.writeControl(0, SlotState.Empty)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+  });
+
+  it("accepts Error→Empty transition (error recovery)", () => {
+    expect(ring.open(tmpFile)).toBe(true);
+
+    ring.writeControl(0, SlotState.Error);
+    expect(ring.readControl(0)).toBe(SlotState.Error);
+    expect(ring.writeControl(0, SlotState.Empty)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+  });
+
+  it("accepts Submitted→Empty transition (cancellation)", () => {
+    expect(ring.open(tmpFile)).toBe(true);
+
+    expect(ring.writeControl(0, SlotState.Submitted)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Submitted);
+    // Cancel: reset to Empty
+    expect(ring.writeControl(0, SlotState.Empty)).toBe(true);
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+  });
+
+  it("all 3 slots can be occupied simultaneously", () => {
+    expect(ring.open(tmpFile)).toBe(true);
+
+    // Fill all 3 slots
+    expect(ring.writeControl(0, SlotState.Submitted)).toBe(true);
+    expect(ring.writeControl(1, SlotState.Submitted)).toBe(true);
+    expect(ring.writeControl(2, SlotState.Submitted)).toBe(true);
+
+    // No empty slots
+    expect(ring.findEmptySlot()).toBe(-1);
+    expect(ring.readControl(0)).toBe(SlotState.Submitted);
+    expect(ring.readControl(1)).toBe(SlotState.Submitted);
+    expect(ring.readControl(2)).toBe(SlotState.Submitted);
+  });
+
+  it("writeInput returns false when ring is closed", () => {
+    // Ring not opened yet
+    const result = ring.writeInput(0, 1, 1, 100, 100, 400, 2, 100, 100, 1, 2, new Uint8Array(1600));
+    expect(result).toBe(false);
+  });
 });

@@ -149,6 +149,10 @@ const api: ScreenLinkAPI = {
   requestFramePort: () => ipcRenderer.invoke("request-frame-port"),
   requestFramePortForClient: (clientId) => ipcRenderer.invoke("video-helper:request-frame-port", clientId),
 
+  // Slice 5: Renderer-owned shared input slots
+  rendererSlotsRegister: (slots) => ipcRenderer.invoke("video-helper:register-renderer-slots", slots),
+  rendererSlotsRelease: () => ipcRenderer.invoke("video-helper:release-renderer-slots"),
+
   // Native presenter operations
   nativePresenterAttach: (width, height) => ipcRenderer.invoke("video-helper:attach-presenter", width, height),
   nativePresenterDetach: () => ipcRenderer.invoke("video-helper:detach-presenter"),
@@ -158,8 +162,13 @@ const api: ScreenLinkAPI = {
 
   // NVIDIA benchmark operations
   nvidiaOpenBenchmarkFolder: () => ipcRenderer.invoke("nvidia:open-benchmark-folder"),
+  nvidiaSaveBenchmarkResult: (record) => ipcRenderer.invoke("nvidia:save-benchmark-result", record),
   nvidiaExportBenchmarkResult: (resultId) => ipcRenderer.invoke("nvidia:export-benchmark-result", resultId),
   nvidiaGetBenchmarkResults: () => ipcRenderer.invoke("nvidia:get-benchmark-results"),
+  nvidiaRunBenchmark: (config) => ipcRenderer.invoke("nvidia:run-benchmark", config),
+  nvidiaGetBenchmarkStatus: () => ipcRenderer.invoke("nvidia:get-benchmark-status"),
+  nvidiaCancelBenchmark: () => ipcRenderer.invoke("nvidia:cancel-benchmark"),
+  nvidiaGetBenchmarkAggregateResults: () => ipcRenderer.invoke("nvidia:get-benchmark-results-aggregate"),
 
   // Discord shortcut simulation
   sendShortcut: (binding) => ipcRenderer.invoke("send-shortcut", binding),

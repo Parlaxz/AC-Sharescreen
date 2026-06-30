@@ -95,6 +95,20 @@ static std::unique_ptr<sv::NvidiaVfxContext> g_nvidiaVfx;
 static bool g_nvidiaAvailable = false;
 static std::string g_nvidiaReason;
 
+static void SyncVfxDiagnostics() {
+    if (!g_nvidiaVfx) return;
+    auto& dc = sv::GetDiagnosticsCounters();
+    dc.effectLoadCount = g_nvidiaVfx->effectLoadCount();
+    dc.configAllocations = g_nvidiaVfx->configAllocations();
+    dc.steadyStateAllocations = g_nvidiaVfx->steadyStateAllocations();
+    dc.pinnedBytes = g_nvidiaVfx->pinnedBytes();
+    dc.stagingReuseCount = g_nvidiaVfx->stagingReuseCount();
+    dc.inputSlotReuseCount = g_nvidiaVfx->inputSlotReuseCount();
+    dc.outputFallbackSlotReuseCount = g_nvidiaVfx->outputFallbackSlotReuseCount();
+    dc.cpuDownloadCount = g_nvidiaVfx->cpuDownloadCount();
+    dc.contextCount = sv::NvidiaVfxContext::contextCount();
+}
+
 // Native presenter (GPU-resident display path)
 static std::unique_ptr<sv::NativePresenter> g_presenter;
 static std::mutex g_presenterMutex;
@@ -153,11 +167,11 @@ static void InitNvidiaVfx(uint32_t outW, uint32_t outH) {
 }
 
 static void ShutdownNvidiaVfx() {
+    g_nvidiaAvailable = false;
     if (g_nvidiaVfx) {
         g_nvidiaVfx->Destroy();
         g_nvidiaVfx.reset();
     }
-    g_nvidiaAvailable = false;
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Helper: create JSON response Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
@@ -313,10 +327,7 @@ static bool HandleConfigure(const sv::JsonObject& payload) {
     if (g_nvidiaAvailable) {
         g_config.configurationId++;
         g_config.effectInstanceId++;
-        // Sync effect load count to global diagnostics counters
-        if (g_nvidiaVfx) {
-            sv::GetDiagnosticsCounters().effectLoadCount = g_nvidiaVfx->effectLoadCount();
-        }
+        SyncVfxDiagnostics();
     }
 
     // Return success only when VFX initialization/effect loading succeeded.
@@ -417,10 +428,6 @@ static bool ProcessSlotFromShm(uint32_t slotIndex) {
                         presented = g_presenter->PresentFrameFromCudaGpuBuffer(
                             gpuOutputPtr, g_config.outputWidth, g_config.outputHeight,
                             g_config.outputWidth * 4);
-                    if (!presented && gpuOutputPtr)
-                        presented = g_presenter->PresentFrameFromCudaBuffer(
-                            gpuOutputPtr, g_config.outputWidth, g_config.outputHeight,
-                            g_config.outputWidth * 4);
                 }
             }
             if (!presented) {
@@ -489,6 +496,7 @@ static bool ProcessSlotFromShm(uint32_t slotIndex) {
         ok ? sv::SlotState::kDone : sv::SlotState::kError);
 
     diag.RecordFrameDetails(preWriteTotalUs, ok, 0, uploadUs, effectUs, downloadUs, 0);
+    SyncVfxDiagnostics();
 
     if (diag.benchmarkActive.load()) {
         diag.benchmarkFramesCompleted++;
@@ -729,17 +737,6 @@ static int RunServe(const std::vector<std::string>& args) {
                                     g_config.outputWidth * 4);
                             }
 
-                            if (!presented) {
-                                // GPU-to-GPU fallback: copy through the CUDA
-                                // staging buffer (no CPU roundtrip — both ends
-                                // are GPU-resident on the same adapter)
-                                // Uses CUDA-D3D11 interop or driver-mediated copy.
-                                presented = g_presenter->PresentFrameFromCudaBuffer(
-                                    gpuOutputPtr,
-                                    g_config.outputWidth,
-                                    g_config.outputHeight,
-                                    g_config.outputWidth * 4);
-                            }
                         }
                     }
 
@@ -844,6 +841,7 @@ static int RunServe(const std::vector<std::string>& args) {
             // outputWriteUsAggregate is kept ONLY in aggregate diagnostics, never per-frame header
             diag.RecordFrameDetails(preWriteTotalUs, ok,
                                      inputReceiveUs, uploadUs, effectUs, downloadUs, outputWriteUsAggregate);
+            SyncVfxDiagnostics();
 
             // Phase 7: Benchmark tracking
             if (diag.benchmarkActive.load()) {
@@ -1006,6 +1004,12 @@ static int RunServe(const std::vector<std::string>& args) {
                 resp["presenterAvgPresentUs"] = sv::JsonValue(static_cast<double>(stats.presenterAvgPresentUs));
                 resp["presenterMaxPresentUs"] = sv::JsonValue(static_cast<double>(stats.presenterMaxPresentUs));
                 resp["presenterResizes"] = sv::JsonValue(static_cast<double>(stats.presenterResizes));
+                resp["presenterQueueEnqueued"] = sv::JsonValue(static_cast<double>(stats.presenterQueueEnqueued));
+                resp["presenterQueueDequeued"] = sv::JsonValue(static_cast<double>(stats.presenterQueueDequeued));
+                resp["presenterQueueOverflowDrops"] = sv::JsonValue(static_cast<double>(stats.presenterQueueOverflowDrops));
+                resp["presenterStaleGenerationDrops"] = sv::JsonValue(static_cast<double>(stats.presenterStaleGenerationDrops));
+                resp["presenterQueueDepth"] = sv::JsonValue(static_cast<double>(stats.presenterQueueDepth));
+                resp["presenterQueueMaxDepth"] = sv::JsonValue(static_cast<double>(stats.presenterQueueMaxDepth));
                 resp["presenterActive"] = sv::JsonValue(stats.presenterActive);
 
                 response = resp;
@@ -1056,6 +1060,36 @@ static int RunServe(const std::vector<std::string>& args) {
                 if (!diag.benchmarkActive.load() && completed > 0) {
                     resp["benchmarkComplete"] = sv::JsonValue(true);
                 }
+                response = resp;
+                break;
+            }
+
+            case sv::Command::kBenchmarkCancel: {
+                auto& diag = sv::GetDiagnosticsCounters();
+                diag.benchmarkActive = false;
+                printf("[Serve] Benchmark cancelled by request\n");
+                response = MakeResponse(true, "", id);
+                break;
+            }
+
+            case sv::Command::kBenchmarkGetResults: {
+                auto result = sv::SnapshotBenchmarkResult();
+                sv::JsonObject resp;
+                resp["id"] = sv::JsonValue(id);
+                resp["success"] = sv::JsonValue(true);
+                resp["framesProcessed"] = sv::JsonValue(static_cast<double>(result.framesProcessed));
+                resp["framesDropped"] = sv::JsonValue(static_cast<double>(result.framesDropped));
+                resp["framesFailed"] = sv::JsonValue(static_cast<double>(result.framesFailed));
+                resp["totalTimeUs"] = sv::JsonValue(static_cast<double>(result.totalTimeUs));
+                resp["avgTimeUs"] = sv::JsonValue(static_cast<double>(result.avgTimeUs));
+                resp["minTimeUs"] = sv::JsonValue(static_cast<double>(result.minTimeUs));
+                resp["maxTimeUs"] = sv::JsonValue(static_cast<double>(result.maxTimeUs));
+                resp["avgInputReceiveUs"] = sv::JsonValue(static_cast<double>(result.avgInputReceiveUs));
+                resp["avgUploadUs"] = sv::JsonValue(static_cast<double>(result.avgUploadUs));
+                resp["avgEffectUs"] = sv::JsonValue(static_cast<double>(result.avgEffectUs));
+                resp["avgDownloadUs"] = sv::JsonValue(static_cast<double>(result.avgDownloadUs));
+                resp["avgOutputWriteUs"] = sv::JsonValue(static_cast<double>(result.avgOutputWriteUs));
+                resp["avgFps"] = sv::JsonValue(result.avgFps);
                 response = resp;
                 break;
             }
@@ -1148,32 +1182,69 @@ static int RunServe(const std::vector<std::string>& args) {
                 resp["avgPresentUs"] = sv::JsonValue(static_cast<double>(pstats.avgPresentUs));
                 resp["maxPresentUs"] = sv::JsonValue(static_cast<double>(pstats.maxPresentUs));
                 resp["presenterResizes"] = sv::JsonValue(static_cast<double>(pstats.presenterResizes));
+                resp["queueEnqueued"] = sv::JsonValue(static_cast<double>(pstats.queueEnqueued));
+                resp["queueDequeued"] = sv::JsonValue(static_cast<double>(pstats.queueDequeued));
+                resp["queueOverflowDrops"] = sv::JsonValue(static_cast<double>(pstats.queueOverflowDrops));
+                resp["staleGenerationDrops"] = sv::JsonValue(static_cast<double>(pstats.staleGenerationDrops));
+                resp["queueDepth"] = sv::JsonValue(static_cast<double>(pstats.queueDepth));
+                resp["queueMaxDepth"] = sv::JsonValue(static_cast<double>(pstats.queueMaxDepth));
                 response = resp;
                 break;
             }
 
-            case sv::Command::kProcessSlot: {
+            case sv::Command::kSlotSubmit: {
                 uint32_t slotIdx = static_cast<uint32_t>(
                     sv::GetNumber(payload, "slotIndex", 999));
                 if (slotIdx >= sv::kRingSlotCount) {
                     response = MakeResponse(false, "Invalid slotIndex", id);
                     break;
                 }
+                // Send immediate acknowledgment (slot accepted)
+                response = MakeResponse(true, "", id);
+                response["slotIndex"] = sv::JsonValue(static_cast<double>(slotIdx));
+                transport.WriteControlResponse(sv::SerializeJson(response));
+
+                // Process the slot synchronously (blocks control loop)
+                auto& diag = sv::GetDiagnosticsCounters();
                 bool procOk = ProcessSlotFromShm(slotIdx);
-                if (procOk) {
-                    response = MakeResponse(true, "", id);
-                    response["slotIndex"] = sv::JsonValue(static_cast<double>(slotIdx));
-                    response["resultCode"] = sv::JsonValue(1.0);
-                    response["configurationId"] = sv::JsonValue(
-                        static_cast<double>(g_config.configurationId));
-                    response["appliedQualityLevel"] = sv::JsonValue(
-                        static_cast<double>(g_config.qualityLevel));
-                } else {
-                    response = MakeResponse(false, "Slot processing failed", id);
-                    response["slotIndex"] = sv::JsonValue(static_cast<double>(slotIdx));
-                    response["resultCode"] = sv::JsonValue(2.0);
+
+                // Send completion event asynchronously over control pipe
+                sv::JsonObject event;
+                event["event"] = sv::JsonValue(std::string("slotCompleted"));
+                sv::JsonObject eventPayload;
+                eventPayload["slotIndex"] = sv::JsonValue(static_cast<double>(slotIdx));
+                eventPayload["success"] = sv::JsonValue(procOk);
+                eventPayload["resultCode"] = sv::JsonValue(procOk ? 1.0 : 2.0);
+                eventPayload["generation"] = sv::JsonValue(
+                    sv::GetNumber(payload, "generation", 0.0));
+                eventPayload["frameSequence"] = sv::JsonValue(
+                    sv::GetNumber(payload, "frameSequence", 0.0));
+                eventPayload["configurationId"] = sv::JsonValue(
+                    static_cast<double>(g_config.configurationId));
+                eventPayload["appliedQualityLevel"] = sv::JsonValue(
+                    static_cast<double>(g_config.qualityLevel));
+                // Include native timing from the processed header if available
+                if (g_sharedRing && g_sharedRing->IsValid()) {
+                    auto* slot = g_sharedRing->Slot(slotIdx);
+                    if (slot) {
+                        const auto& hdr = slot->header;
+                        eventPayload["nativeInputReceiveUs"] = sv::JsonValue(
+                            static_cast<double>(hdr.nativeInputReceiveUs));
+                        eventPayload["nativeUploadUs"] = sv::JsonValue(
+                            static_cast<double>(hdr.nativeUploadUs));
+                        eventPayload["nativeEffectUs"] = sv::JsonValue(
+                            static_cast<double>(hdr.nativeEffectUs));
+                        eventPayload["nativeDownloadUs"] = sv::JsonValue(
+                            static_cast<double>(hdr.nativeDownloadUs));
+                        eventPayload["nativeTotalUs"] = sv::JsonValue(
+                            static_cast<double>(hdr.nativeTotalUs));
+                    }
                 }
-                break;
+                for (const auto& [key, value] : eventPayload) {
+                    event[key] = value;
+                }
+                transport.WriteControlResponse(sv::SerializeJson(event));
+                continue;
             }
 
             case sv::Command::kShutdown:
@@ -1265,6 +1336,12 @@ static int RunCapabilities() {
 
 static int RunSelfTest() {
     bool allPassed = true;
+    auto check = [&](bool condition, const char* label) {
+        if (!condition) {
+            fprintf(stderr, "  FAIL: %s\n", label);
+            allPassed = false;
+        }
+    };
 
     // Command parsing
     auto cmd = sv::ParseCommand("hello");
@@ -1353,29 +1430,45 @@ static int RunSelfTest() {
 
     // ── Phase 7: New command parsing tests ────────────────────────────
     cmd = sv::ParseCommand("getDiagnostics");
-    allPassed &= (cmd == sv::Command::kGetDiagnostics);
+    check(cmd == sv::Command::kGetDiagnostics, "ParseCommand(getDiagnostics)");
     cmd = sv::ParseCommand("resetDiagnostics");
-    allPassed &= (cmd == sv::Command::kResetDiagnostics);
+    check(cmd == sv::Command::kResetDiagnostics, "ParseCommand(resetDiagnostics)");
     cmd = sv::ParseCommand("benchmarkRun");
-    allPassed &= (cmd == sv::Command::kBenchmarkRun);
+    check(cmd == sv::Command::kBenchmarkRun, "ParseCommand(benchmarkRun)");
     cmd = sv::ParseCommand("benchmarkStatus");
-    allPassed &= (cmd == sv::Command::kBenchmarkStatus);
+    check(cmd == sv::Command::kBenchmarkStatus, "ParseCommand(benchmarkStatus)");
 
     name = sv::CommandName(sv::Command::kGetDiagnostics);
-    allPassed &= (name == "getDiagnostics");
+    check(name == "getDiagnostics", "CommandName(kGetDiagnostics)");
     name = sv::CommandName(sv::Command::kResetDiagnostics);
-    allPassed &= (name == "resetDiagnostics");
+    check(name == "resetDiagnostics", "CommandName(kResetDiagnostics)");
     name = sv::CommandName(sv::Command::kBenchmarkRun);
-    allPassed &= (name == "benchmarkRun");
+    check(name == "benchmarkRun", "CommandName(kBenchmarkRun)");
     name = sv::CommandName(sv::Command::kBenchmarkStatus);
-    allPassed &= (name == "benchmarkStatus");
+    check(name == "benchmarkStatus", "CommandName(kBenchmarkStatus)");
+    cmd = sv::ParseCommand("benchmarkCancel");
+    check(cmd == sv::Command::kBenchmarkCancel, "ParseCommand(benchmarkCancel)");
+    cmd = sv::ParseCommand("benchmarkGetResults");
+    check(cmd == sv::Command::kBenchmarkGetResults, "ParseCommand(benchmarkGetResults)");
+    name = sv::CommandName(sv::Command::kBenchmarkCancel);
+    check(name == "benchmarkCancel", "CommandName(kBenchmarkCancel)");
+    name = sv::CommandName(sv::Command::kBenchmarkGetResults);
+    check(name == "benchmarkGetResults", "CommandName(kBenchmarkGetResults)");
+
+    // ── Phase 7: SnapshotBenchmarkResult initial state ─────────────────
+    {
+        auto benchResult = sv::SnapshotBenchmarkResult();
+        check(benchResult.framesProcessed == 0, "SnapshotBenchmarkResult.framesProcessed initial");
+        check(benchResult.totalTimeUs == 0, "SnapshotBenchmarkResult.totalTimeUs initial");
+        check(benchResult.success == false, "SnapshotBenchmarkResult.success initial");
+    }
 
     // ── Phase 7: Diagnostics API tests ────────────────────────────────
     // GetDiagnostics should return a valid snapshot without crashing
     auto diagSnap = sv::GetDiagnostics();
-    allPassed &= (diagSnap.uptimeMs > 0); // uptime must be ticking
-    allPassed &= (diagSnap.avgProcessingTimeUs == 0); // no frames yet
-    allPassed &= (diagSnap.effectLoadCount == 0);
+    check(diagSnap.uptimeMs > 0, "GetDiagnostics.uptimeMs");
+    check(diagSnap.avgProcessingTimeUs == 0, "GetDiagnostics.avgProcessingTimeUs initial");
+    check(diagSnap.effectLoadCount == 0, "GetDiagnostics.effectLoadCount initial");
 
     // ResetDiagnostics should clear counters
     sv::GetDiagnosticsCounters().totalFramesSubmitted++;
@@ -1383,17 +1476,17 @@ static int RunSelfTest() {
     sv::GetDiagnosticsCounters().totalProcessingErrors++;
     sv::ResetDiagnostics();
     auto resetSnap = sv::GetDiagnostics();
-    allPassed &= (resetSnap.totalFramesSubmitted == 0);
-    allPassed &= (resetSnap.totalFramesCompleted == 0);
-    allPassed &= (resetSnap.totalProcessingErrors == 0);
-    allPassed &= (resetSnap.benchmarkActive == false);
+    check(resetSnap.totalFramesSubmitted == 0, "ResetDiagnostics.totalFramesSubmitted");
+    check(resetSnap.totalFramesCompleted == 0, "ResetDiagnostics.totalFramesCompleted");
+    check(resetSnap.totalProcessingErrors == 0, "ResetDiagnostics.totalProcessingErrors");
+    check(resetSnap.benchmarkActive == false, "ResetDiagnostics.benchmarkActive");
 
     // SetGpuInfo round-trip
     sv::SetGpuInfo("Test GPU", "555.55", "SDK 3.0");
     auto gpuSnap = sv::GetDiagnostics();
-    allPassed &= (gpuSnap.gpuName == "Test GPU");
-    allPassed &= (gpuSnap.driverVersion == "555.55");
-    allPassed &= (gpuSnap.sdkVersion == "SDK 3.0");
+    check(gpuSnap.gpuName == "Test GPU", "SetGpuInfo.gpuName");
+    check(gpuSnap.driverVersion == "555.55", "SetGpuInfo.driverVersion");
+    check(gpuSnap.sdkVersion == "SDK 3.0", "SetGpuInfo.sdkVersion");
 
     printf("Self-tests: %s\n", allPassed ? "ALL PASSED" : "FAILED");
     return allPassed ? 0 : 1;

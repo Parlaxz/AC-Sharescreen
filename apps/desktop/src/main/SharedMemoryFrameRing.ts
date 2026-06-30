@@ -33,8 +33,10 @@ export const SlotState = {
  * CreateFileMapping).  The helper maps it with MapViewOfFile (zero-copy).
  * The main process uses fs.readSync / fs.writeSync at per-slot file offsets.
  *
- * Coordination: slot control words (uint32) + JSON messages over the
- * control named pipe (processSlot / slotComplete).
+ * Coordination: slot control words (uint32) + async JSON messages
+ * over the control named pipe (slotSubmit command + slotCompleted event).
+ *
+ * Up to 3 frames can be in-flight simultaneously (Sliver 4).
  *
  * Fallback: when open() fails, the caller uses the existing named-pipe
  * frame transport (FramePipeParser + net.Socket).

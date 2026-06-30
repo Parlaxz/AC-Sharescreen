@@ -8,6 +8,8 @@ import type { ViewerImageBackend, BackendKind } from "./viewer-image-backend";
 import type { ViewerImageEnhancementSettings, ScalingAlgorithm, FsrFinalScaler } from "./viewer-image-settings";
 import { nextMonotonicId, lifecycleLog } from "./lifecycle-id";
 import { BoundedWindowStats } from "@/lib/bounded-window-stats";
+import type { FrameEvent, FrameEventListener, ConfigAppliedEvent, ConfigAppliedListener } from "./frame-events";
+import { canonicalQualityLevel } from "@screenlink/shared";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -233,6 +235,10 @@ export class ViewerImageProcessor {
   private nativeRoundTripStats = new BoundedWindowStats(250);
   private totalLatencyStats = new BoundedWindowStats(250);
 
+  // Frame event listeners
+  private _frameEventListeners: Set<FrameEventListener> = new Set();
+  private _configAppliedListeners: Set<ConfigAppliedListener> = new Set();
+
   // Phase 4: Lifecycle counters
   private _sourceCallbacksReceived = 0;
   private _processingAttempts = 0;
@@ -293,10 +299,66 @@ export class ViewerImageProcessor {
 
     this.settings = { ...settings };
     this.framesProcessed = 0;
+    this.framesDisplayed = 0;
+    this.completedFps = 0;
+    this.completedTimestamps = [];
     this.firstFrameFired = false;
     this.lastMediaTime = -1;
     this.rafLastTime = -1;
-
+    this.captureReadbackTotalMs = 0;
+    this.captureReadbackCount = 0;
+    this.nativeTransportProcessingTotalMs = 0;
+    this.nativeTransportProcessingCount = 0;
+    this.displayUploadTotalMs = 0;
+    this.displayUploadCount = 0;
+    this.totalLatencySumMs = 0;
+    this.totalLatencyCount = 0;
+    this.schedulerDropCount = 0;
+    this.nativeFailureCount = 0;
+    this.lastNativeOutputWidth = 0;
+    this.lastNativeOutputHeight = 0;
+    this.drawImageTotalMs = 0;
+    this.drawImageCount = 0;
+    this.getImageDataTotalMs = 0;
+    this.getImageDataCount = 0;
+    this.inputBufferPreparationTotalMs = 0;
+    this.inputBufferPreparationCount = 0;
+    this.rendererToResultTotalMs = 0;
+    this.rendererToResultCount = 0;
+    this.textureUploadTotalMs = 0;
+    this.textureUploadCount = 0;
+    this.rendererTotalTotalMs = 0;
+    this.rendererTotalCount = 0;
+    this.mainInputHandlingTotalMs = 0;
+    this.mainInputHandlingCount = 0;
+    this.requestWriteTotalMs = 0;
+    this.requestWriteCount = 0;
+    this.responseWaitTotalMs = 0;
+    this.responseWaitCount = 0;
+    this.mainHandlerTotalTotalMs = 0;
+    this.mainHandlerTotalCount = 0;
+    this.nativeInputReceiveTotalMs = 0;
+    this.nativeInputReceiveCount = 0;
+    this.nativeUploadTotalMs = 0;
+    this.nativeUploadCount = 0;
+    this.nativeEffectTotalMs = 0;
+    this.nativeEffectCount = 0;
+    this.nativeDownloadTotalMs = 0;
+    this.nativeDownloadCount = 0;
+    this.nativePreWriteTotalTotalMs = 0;
+    this.nativePreWriteTotalCount = 0;
+    this.rendererTotalStats = new BoundedWindowStats(250);
+    this.nativeRoundTripStats = new BoundedWindowStats(250);
+    this.totalLatencyStats = new BoundedWindowStats(250);
+    this._sourceCallbacksReceived = 0;
+    this._processingAttempts = 0;
+    this._coalescedFrames = 0;
+    this._staleGenerationDrops = 0;
+    this._completedAttempts = 0;
+    this._displayedCount = 0;
+    this._backendDrops = 0;
+    this._failures = 0;
+    
     // Bump generation and reset frame sequencing
     this.generation++;
     this.frameSequence = 0;
@@ -587,6 +649,52 @@ export class ViewerImageProcessor {
     this.callbacks = callbacks;
   }
 
+  // ─── Frame event subscription ────────────────────────────────────────────
+
+  /**
+   * Subscribe to per-frame lifecycle events. The listener is called for every
+   * frame processing result (success, transient, drop, or failure).
+   * Returns an unsubscribe function.
+   */
+  subscribeFrameEvents(listener: FrameEventListener): () => void {
+    this._frameEventListeners.add(listener);
+    return () => {
+      this._frameEventListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Subscribe to configuration-applied events. Fired when the backend
+   * successfully applies a new configuration.
+   * Returns an unsubscribe function.
+   */
+  subscribeConfigApplied(listener: ConfigAppliedListener): () => void {
+    this._configAppliedListeners.add(listener);
+    return () => {
+      this._configAppliedListeners.delete(listener);
+    };
+  }
+
+  private emitFrameEvent(event: FrameEvent): void {
+    for (const listener of this._frameEventListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Silently swallow listener errors
+      }
+    }
+  }
+
+  private emitConfigApplied(event: ConfigAppliedEvent): void {
+    for (const listener of this._configAppliedListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Silently swallow listener errors
+      }
+    }
+  }
+
   // ─── Frame scheduling ──────────────────────────────────────────────────
 
   private scheduleFrame(): void {
@@ -697,6 +805,8 @@ export class ViewerImageProcessor {
   private async processCurrentFrameAsync(): Promise<void> {
     const seq = ++this.frameSequence;
     const gen = this.generation;
+    const captureStartedAt = performance.now();
+    const sourceMediaTime = this.videoElement.currentTime;
 
     // Notify backend when source dimensions change (so native config re-evaluates)
     const vw = this.videoElement.videoWidth;
@@ -712,27 +822,118 @@ export class ViewerImageProcessor {
       frameSequence: seq,
     });
 
+    // Build base paths
+    const framePaths = this.resolveFramePaths();
+
     // Ignore results from stale generations (backend swap or restart)
     if (gen !== this.generation) {
       this._staleGenerationDrops++;
+      this.emitFrameEvent({
+        generation: gen,
+        sequence: seq,
+        sourceMediaTime,
+        configurationId: result.configurationId ?? 0,
+        backend: this.backend.kind,
+        nvidiaMode: this.resolveNvidiaMode(),
+        canonicalQualityLevel: result.canonicalQualityLevel ?? null,
+        inputWidth: vw,
+        inputHeight: vh,
+        outputWidth: 0,
+        outputHeight: 0,
+        capturePath: framePaths.capturePath,
+        transportPath: framePaths.transportPath,
+        presentationPath: framePaths.presentationPath,
+        captureStartedAt,
+        captureDurationMs: 0,
+        completed: false,
+        presented: false,
+        stale: true,
+        dropReason: "stale-generation",
+      });
       return;
     }
 
     // Transient frames (video not ready yet) — skip silently
-    if (result.transient) return;
+    if (result.transient) {
+      this.emitFrameEvent({
+        generation: gen,
+        sequence: seq,
+        sourceMediaTime,
+        configurationId: result.configurationId ?? 0,
+        backend: this.backend.kind,
+        nvidiaMode: this.resolveNvidiaMode(),
+        canonicalQualityLevel: result.canonicalQualityLevel ?? null,
+        inputWidth: vw,
+        inputHeight: vh,
+        outputWidth: 0,
+        outputHeight: 0,
+        capturePath: framePaths.capturePath,
+        transportPath: framePaths.transportPath,
+        presentationPath: framePaths.presentationPath,
+        captureStartedAt,
+        captureDurationMs: 0,
+        completed: false,
+        presented: false,
+        stale: false,
+        dropReason: "transient",
+      });
+      return;
+    }
 
     // Backpressure drops from the backend — skip
     if (result.backpressureDrop) {
       this._backendDrops++;
+      this.emitFrameEvent({
+        generation: gen,
+        sequence: seq,
+        sourceMediaTime,
+        configurationId: result.configurationId ?? 0,
+        backend: this.backend.kind,
+        nvidiaMode: this.resolveNvidiaMode(),
+        canonicalQualityLevel: result.canonicalQualityLevel ?? null,
+        inputWidth: vw,
+        inputHeight: vh,
+        outputWidth: 0,
+        outputHeight: 0,
+        capturePath: framePaths.capturePath,
+        transportPath: framePaths.transportPath,
+        presentationPath: framePaths.presentationPath,
+        captureStartedAt,
+        captureDurationMs: 0,
+        completed: false,
+        presented: false,
+        stale: false,
+        dropReason: "backpressure",
+      });
       return;
     }
 
     if (!result.success) {
-      // Don't count failures in the processed count
-      this.framesProcessed--;
       this.nativeFailureCount++;
       this._failures++;
       this.callbacks.onError?.("Frame processing failed");
+      this.emitFrameEvent({
+        generation: gen,
+        sequence: seq,
+        sourceMediaTime,
+        configurationId: result.configurationId ?? 0,
+        backend: this.backend.kind,
+        nvidiaMode: this.resolveNvidiaMode(),
+        canonicalQualityLevel: result.canonicalQualityLevel ?? null,
+        inputWidth: vw,
+        inputHeight: vh,
+        outputWidth: result.gpuTimeMs != null ? 0 : 0,
+        outputHeight: 0,
+        capturePath: framePaths.capturePath,
+        transportPath: framePaths.transportPath,
+        presentationPath: framePaths.presentationPath,
+        captureStartedAt,
+        captureDurationMs: 0,
+        completed: false,
+        presented: false,
+        stale: false,
+        dropReason: "failure",
+      });
       // Transition to error state so the parent can fall back to native video
       this.state = "error";
       this.cancelFrame();
@@ -869,6 +1070,61 @@ export class ViewerImageProcessor {
       this.lastStatsTime = statsNow;
       this.callbacks.onStatsUpdate?.(this.getStats());
     }
+
+    // ─── Emit success frame event ──────────────────────────────────────────
+    const tb = result.timingBreakdown;
+    const captureDur = tb ? ((tb.captureReadbackMs ?? 0) + (tb.inputBufferPreparationMs ?? 0)) : 0;
+    const transportDur = tb?.rendererToResultMs ?? 0;
+    const presentDur = tb ? ((tb.textureUploadMs ?? 0) + (tb.displayUploadMs ?? 0)) : 0;
+    const nativeDur = tb?.nativeTransportProcessingMs ?? transportDur;
+    const outW = (result.outputWidth ?? this.lastNativeOutputWidth) || vw;
+    const outH = (result.outputHeight ?? this.lastNativeOutputHeight) || vh;
+    this.lastNativeOutputWidth = outW;
+    this.lastNativeOutputHeight = outH;
+    const presentedAt = captureStartedAt + captureDur + transportDur + presentDur;
+
+    this.emitFrameEvent({
+      generation: gen,
+      sequence: seq,
+      sourceMediaTime,
+      configurationId: result.configurationId ?? 0,
+      backend: this.backend.kind,
+      nvidiaMode: this.resolveNvidiaMode(),
+      canonicalQualityLevel: result.canonicalQualityLevel ?? null,
+      inputWidth: vw,
+      inputHeight: vh,
+      outputWidth: outW,
+      outputHeight: outH,
+      capturePath: framePaths.capturePath,
+      transportPath: framePaths.transportPath,
+      presentationPath: framePaths.presentationPath,
+      captureStartedAt,
+      submittedAt: captureStartedAt + captureDur,
+      nativeCompletedAt: captureStartedAt + captureDur + nativeDur,
+      presentedAt,
+      captureDurationMs: captureDur,
+      transportDurationMs: transportDur,
+      nativeProcessingDurationMs: nativeDur,
+      presentationDurationMs: presentDur,
+      totalLatencyMs: result.totalLatencyMs,
+      completed: true,
+      presented: true, // WebGL path: completion = presentation
+      stale: false,
+      timingBreakdown: tb as Record<string, number | undefined> | undefined,
+    });
+
+    // Also emit config applied if we have a configurationId and the backend reports it
+    if ((result.configurationId ?? 0) > 0 && this._configAppliedListeners.size > 0) {
+      this.emitConfigApplied({
+        configurationId: result.configurationId!,
+        backend: this.backend.kind,
+        nvidiaMode: this.resolveNvidiaMode(),
+        canonicalQualityLevel: result.canonicalQualityLevel ?? null,
+        outputWidth: outW,
+        outputHeight: outH,
+        generation: gen,
+      });
+    }
   }
 
   // ─── Legacy sync wrapper (deprecated, for backward-compat testing) ──────
@@ -895,5 +1151,32 @@ export class ViewerImageProcessor {
 
   private emitError(reason: string): void {
     this.callbacks.onError?.(reason);
+  }
+
+  /** Resolve capture/transport/presentation paths based on active backend. */
+  private resolveFramePaths(): {
+    capturePath: FrameEvent["capturePath"];
+    transportPath: FrameEvent["transportPath"];
+    presentationPath: FrameEvent["presentationPath"];
+  } {
+    if (this.backend.kind === "webgl2") {
+      return {
+        capturePath: "webgl-texsubimage2d",
+        transportPath: "none",
+        presentationPath: "webgl-texture-upload",
+      };
+    }
+    // nvidia-vsr
+    return {
+      capturePath: "canvas-2d-drawimage",
+      transportPath: this.settings?.processingBackend === "nvidia-vsr" ? "message-port" : "invoke",
+      presentationPath: "webgl-texture-upload",
+    };
+  }
+
+  /** Resolve NVIDIA processing mode from settings. */
+  private resolveNvidiaMode(): "vsr" | "high-bitrate" | "denoise" | "deblur" | undefined {
+    if (this.backend.kind !== "nvidia-vsr") return undefined;
+    return this.settings?.nvidiaMode;
   }
 }

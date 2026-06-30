@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -86,6 +87,86 @@ public:
     /// Monotonically increasing; resets to 0 on Destroy.
     uint32_t effectLoadCount() const { return effectLoadCount_; }
 
+    // -- Slice 6: Persistent resource and allocation counters --
+    // Always available; return 0 when VFX support is not compiled in.
+
+    /// Total allocations performed at configuration/setup time
+    /// (CUDA stream, effect handle, GPU images, pinned buffers, staging).
+    uint64_t configAllocations() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return configAllocations_;
+#else
+        return 0;
+#endif
+    }
+
+    /// Allocations during frame processing (should be 0 in optimized steady state).
+    uint64_t steadyStateAllocations() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return steadyStateAllocations_;
+#else
+        return 0;
+#endif
+    }
+
+    /// Total bytes of page-locked (pinned) host memory allocated.
+    uint64_t pinnedBytes() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return pinnedBytes_;
+#else
+        return 0;
+#endif
+    }
+
+    /// How many times the persistent staging buffer has been passed to
+    /// NvCVImage_Transfer (measures staging reuse across upload + download).
+    uint64_t stagingReuseCount() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return stagingReuseCount_;
+#else
+        return 0;
+#endif
+    }
+
+    /// How many times the persistent pinned input buffer has been reused
+    /// without reallocation (equals number of UploadInput calls after setup).
+    uint64_t inputSlotReuseCount() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return inputSlotReuseCount_;
+#else
+        return 0;
+#endif
+    }
+
+    /// How many times the persistent pinned output fallback buffer has been
+    /// reused without reallocation (equals number of DownloadOutput calls).
+    uint64_t outputFallbackSlotReuseCount() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return outputFallbackSlotReuseCount_;
+#else
+        return 0;
+#endif
+    }
+
+    /// Number of CPU-side downloads (DownloadOutput calls).
+    uint64_t cpuDownloadCount() const {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return cpuDownloadCount_;
+#else
+        return 0;
+#endif
+    }
+
+    /// Total number of NvidiaVfxContext instances alive.
+    /// Always available; returns 0 when VFX support is not compiled in.
+    static uint32_t contextCount() {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+        return contextCount_.load();
+#else
+        return 0;
+#endif
+    }
+
 private:
     bool initialized_ = false;
     bool effectCreated_ = false;
@@ -101,14 +182,40 @@ private:
     NvVfxConfig config_;
     NvVfxImage inputDesc_;
     NvVfxImage outputDesc_;
-    std::vector<uint8_t> inputBuffer_;
     /// Persistent CUDA stream for upload/run/download sequencing
     void* cudaStream_ = nullptr;
+
+    // -- Slice 6: Persistent resources --
+    /// Persistent staging buffer for NvCVImage_Transfer (replaces nullptr).
+    /// SDK reshapes internally as needed; avoids per-frame ephemeral allocation.
+    void* staging_ = nullptr;
+
+    /// Fixed page-locked (pinned) CPU input buffer.
+    /// CPU input data stays here across frames; then transferred to GPU input image.
+    void* pinnedInput_ = nullptr;
+
+    /// Fixed pinned CPU output fallback buffer.
+    /// Used only when the native presenter (GPU→display) is unavailable.
+    void* pinnedOutput_ = nullptr;
+
+    // -- Slice 6: Allocation/resource counters --
+    uint64_t configAllocations_ = 0;
+    uint64_t steadyStateAllocations_ = 0;
+    uint64_t pinnedBytes_ = 0;
+    uint64_t stagingReuseCount_ = 0;
+    uint64_t inputSlotReuseCount_ = 0;
+    uint64_t outputFallbackSlotReuseCount_ = 0;
+    uint64_t cpuDownloadCount_ = 0;
+
+    static std::atomic<uint32_t> contextCount_;
 
     NvVfxResult CreateSuperResEffect();
     NvVfxResult LoadConfiguredEffect();
     NvVfxResult AllocateNvImage(void*& imagePtr, const NvVfxImage& desc);
     void FreeNvImage(void*& imagePtr);
+    NvVfxResult AllocatePinnedInput(const NvVfxImage& desc);
+    NvVfxResult AllocatePinnedOutput(const NvVfxImage& desc);
+    void FreePinnedResources();
 #endif
 };
 

@@ -52,6 +52,80 @@ export interface AcceptedViewerRequest {
   acceptedAt: number;
 }
 
+// ─── Shared Sender-Setting Utilities ───────────────────────────────────────
+
+export interface SenderSettingsInput {
+  /** Video bitrate in kbps (converted to bps internally) */
+  maxBitrate: number;
+  /** Maximum framerate */
+  maxFramerate: number;
+  /** Degradation preference ("balanced", "maintain-resolution", "maintain-framerate") */
+  degradationPreference?: string;
+  /** Scale resolution down by factor (>=1) */
+  scaleResolutionDownBy?: number;
+}
+
+export interface SenderSettingsReadback {
+  /** Actual applied max bitrate in bps */
+  maxBitrate: number;
+  /** Actual applied max framerate */
+  maxFramerate: number;
+  /** Actual applied scale resolution down by */
+  scaleResolutionDownBy: number;
+  /** Applied degradation preference */
+  degradationPreference: string;
+  /** Sender encoding priority */
+  priority: string;
+}
+
+/**
+ * Apply sender encoding settings to an RTCRtpSender and read back the
+ * actual applied values. This is the canonical low-level implementation
+ * shared across PublisherManager (applyVideoSenderSettings) and
+ * GroupSettingsLiveApply.
+ *
+ * Preserves existing encoding fields not specified in `settings` (e.g.
+ * priority, codec payload type, header extensions).
+ */
+export async function applySenderSettings(
+  sender: RTCRtpSender,
+  settings: SenderSettingsInput,
+): Promise<SenderSettingsReadback> {
+  const params = sender.getParameters();
+  if (!params.encodings || params.encodings.length === 0) {
+    params.encodings = [{}];
+  }
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const enc = params.encodings[0]!;
+
+  // Preserve existing priority
+  const existingPriority = enc.priority;
+
+  enc.maxBitrate = settings.maxBitrate * 1000;
+  enc.maxFramerate = settings.maxFramerate;
+  if (settings.degradationPreference) {
+    (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
+      settings.degradationPreference as RTCDegradationPreference;
+  }
+  if (settings.scaleResolutionDownBy !== undefined && settings.scaleResolutionDownBy >= 1) {
+    enc.scaleResolutionDownBy = settings.scaleResolutionDownBy;
+  }
+  // Restore priority (was preserved above)
+  enc.priority = existingPriority ?? "medium";
+
+  await sender.setParameters(params);
+
+  // Read back actual configured values
+  const readback = sender.getParameters();
+  return {
+    maxBitrate: readback.encodings?.[0]?.maxBitrate ?? 0,
+    maxFramerate: readback.encodings?.[0]?.maxFramerate ?? 0,
+    scaleResolutionDownBy: readback.encodings?.[0]?.scaleResolutionDownBy ?? 1,
+    degradationPreference: settings.degradationPreference ?? "balanced",
+    priority: readback.encodings?.[0]?.priority ?? "medium",
+  };
+}
+
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
 function clamp(v: number, min: number, max: number): number {

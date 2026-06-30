@@ -158,6 +158,51 @@ export const enum ShmSlotState {
   Error = 4,
 }
 
+/**
+ * Payload for async slot submission (Sliver 4).
+ * Sent main→helper via `slotSubmit` command.
+ */
+export interface ShmSlotSubmitPayload {
+  slotIndex: number;
+  generation: number;
+  frameSequence: number;
+}
+
+/**
+ * Payload for async slot completion event (Sliver 4).
+ * Received helper→main via `slotCompleted` event.
+ */
+export interface ShmSlotCompletedPayload {
+  slotIndex: number;
+  generation: number;
+  frameSequence: number;
+  success: boolean;
+  resultCode: number;
+  configurationId: number;
+  appliedQualityLevel: number;
+  nativeInputReceiveUs: number;
+  nativeUploadUs: number;
+  nativeEffectUs: number;
+  nativeDownloadUs: number;
+  nativeTotalUs: number;
+}
+
+/**
+ * Deterministic drop counters for the SHM ring path (Sliver 4).
+ */
+export interface ShmDropCounters {
+  /** Frames dropped because all 3 SHM slots were busy (no empty slot). */
+  shmSlotBusyDrops: number;
+  /** SHM completions that timed out waiting for native response. */
+  shmCompletionTimeouts: number;
+  /** SHM completions cancelled due to helper restart or shutdown. */
+  shmRestartDrops: number;
+  /** Total SHM frames submitted. */
+  shmTotalSubmitted: number;
+  /** Total SHM frames completed. */
+  shmTotalCompleted: number;
+}
+
 /** Byte offsets and sizes for shared memory ring file access. */
 export const kRingSlotCount = 3;
 export const kSlotControlSize = 4;       // uint32_t
@@ -195,4 +240,53 @@ export interface ConfigureNativeResponse {
   effectLoadSucceeded?: boolean;
   effectLoadCount?: number;
   configuredAt?: number;
+}
+
+// ─── Native benchmark protocol types ─────────────────────────────────────
+
+/**
+ * Configuration sent to the native helper for a benchmark run.
+ * Mirrors the C++ BenchmarkConfig struct.
+ */
+export interface NativeBenchmarkConfig {
+  processingMode: "vsr" | "high-bitrate" | "denoise" | "deblur";
+  qualityLevel: "low" | "medium" | "high" | "ultra";
+  inputWidth: number;
+  inputHeight: number;
+  targetFrames: number;
+  frameTimeoutMs?: number;
+}
+
+/**
+ * Status response from the native helper's benchmarkStatus command.
+ */
+export interface NativeBenchmarkStatusResponse {
+  benchmarkActive: boolean;
+  benchmarkTargetFrames: number;
+  benchmarkFramesCompleted: number;
+  benchmarkTotalTimeUs: number;
+  benchmarkAvgTimeUs?: number;
+  benchmarkComplete?: boolean;
+}
+
+/**
+ * Aggregated result from the native helper's benchmarkGetResults command.
+ * Mirrors the C++ BenchmarkResult struct.
+ */
+export interface NativeBenchmarkResultResponse {
+  success: boolean;
+  error?: string;
+  framesProcessed: number;
+  framesDropped: number;
+  framesFailed: number;
+  totalTimeUs: number;
+  avgTimeUs: number;
+  minTimeUs: number;
+  maxTimeUs: number;
+  avgInputReceiveUs: number;
+  avgUploadUs: number;
+  avgEffectUs: number;
+  avgDownloadUs: number;
+  avgOutputWriteUs: number;
+  avgFps: number;
 }

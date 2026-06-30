@@ -32,6 +32,10 @@ function makeMockRuntime(): Phase3Runtime {
     getSyncState: vi.fn().mockReturnValue(null),
     performLocalEdit: vi.fn().mockResolvedValue(undefined),
   };
+  const compareSessionManager = {
+    isActive: vi.fn().mockReturnValue(false),
+    state: "idle",
+  };
   return {
     getActiveStreamRegistry: () => registry,
     getConnectionManager: () => connManager,
@@ -44,6 +48,7 @@ function makeMockRuntime(): Phase3Runtime {
       disconnectViewer: vi.fn(),
       hasViewerPoller: vi.fn().mockReturnValue(false),
     }),
+    getCompareSessionManager: () => compareSessionManager,
     viewerBinding, // expose for test assertions
     syncService,   // expose for test assertions
   } as unknown as Phase3Runtime & { viewerBinding: typeof viewerBinding; syncService: typeof syncService };

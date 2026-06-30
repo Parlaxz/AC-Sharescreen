@@ -89,6 +89,21 @@ const ALLOWED_BASE64_USES: AllowEntry[] = [
     linePattern: `"natvPresDetached"`,
     reason: "Lifecycle log event name (not base64)",
   },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"rejectShmCompletions"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"rendererSlotsRegister"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
+  {
+    file: "src/main/VideoHelperManager.ts",
+    linePattern: `"rendererSlotsRelease"`,
+    reason: "Lifecycle log event name (not base64)",
+  },
 ];
 
 // ─── Base64 regex ───────────────────────────────────────────────────────────

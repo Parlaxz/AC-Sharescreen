@@ -15,6 +15,9 @@ import {
   Info,
   Check,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -80,6 +83,16 @@ type SourceTab = "screen" | "window";
 
 type AudioModeValue = "none" | "monitor" | "application";
 
+// ─── Easy Compare types ────────────────────────────────────────────────
+
+interface CompareVariantSettings {
+  width: number;
+  height: number;
+  fps: number;
+  bitrateKbps: number;
+  codec: string;
+}
+
 /**
  * Resolve the user's selected preset + custom slider values into a
  * SessionQualityOverride. Returns null when no preset is selected.
@@ -113,6 +126,22 @@ function resolveSelectedQualityOverride(args: {
     contentHint: customQuality.contentHint,
     degradationPreference: customQuality.degradationPreference,
   });
+}
+
+/**
+ * Resolve Easy Compare variant settings into a VariantStartConfig
+ * accepted by CompareSessionManager.startCompare.
+ */
+function resolveCompareVariantSettings(
+  v: CompareVariantSettings,
+): import("@/services/compare-session-manager").VariantStartConfig {
+  return {
+    targetWidth: v.width,
+    targetHeight: v.height,
+    targetFps: v.fps,
+    videoBitrateKbps: v.bitrateKbps,
+    codec: v.codec,
+  };
 }
 
 /** User-facing audio mode descriptor used for radio cards. */
@@ -207,6 +236,79 @@ const springTransition = {
 
 const fadeTransition = { duration: 0.15 };
 
+// ─── CompareVariantFields ───────────────────────────────────────────────────
+
+function CompareVariantFields({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: CompareVariantSettings;
+  onChange: (v: CompareVariantSettings) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div>
+        <Label className="text-xs text-text-secondary">Width</Label>
+        <Input
+          type="number"
+          value={value.width}
+          onChange={(e) =>
+            onChange({ ...value, width: parseInt(e.target.value) || 0 })
+          }
+          disabled={disabled}
+          min={256}
+          max={3840}
+          className="h-8 text-xs"
+        />
+      </div>
+      <div>
+        <Label className="text-xs text-text-secondary">Height</Label>
+        <Input
+          type="number"
+          value={value.height}
+          onChange={(e) =>
+            onChange({ ...value, height: parseInt(e.target.value) || 0 })
+          }
+          disabled={disabled}
+          min={144}
+          max={2160}
+          className="h-8 text-xs"
+        />
+      </div>
+      <div>
+        <Label className="text-xs text-text-secondary">FPS</Label>
+        <Input
+          type="number"
+          value={value.fps}
+          onChange={(e) =>
+            onChange({ ...value, fps: parseInt(e.target.value) || 0 })
+          }
+          disabled={disabled}
+          min={1}
+          max={60}
+          className="h-8 text-xs"
+        />
+      </div>
+      <div>
+        <Label className="text-xs text-text-secondary">Bitrate (kbps)</Label>
+        <Input
+          type="number"
+          value={value.bitrateKbps}
+          onChange={(e) =>
+            onChange({ ...value, bitrateKbps: parseInt(e.target.value) || 0 })
+          }
+          disabled={disabled}
+          min={100}
+          max={20000}
+          className="h-8 text-xs"
+        />
+      </div>
+    </div>
+  );
+}
+
 // ─── ShareSetup ────────────────────────────────────────────────────────────
 
 /**
@@ -273,6 +375,25 @@ export function ShareSetup() {
     customQuality: QualityEditorFieldsValue;
     timestamp: number;
   } | null>(null);
+
+  // ── Easy Compare state ───────────────────────────────────────────────
+  const [compareMode, setCompareMode] = useState(false);
+
+  const [compareVariantA, setCompareVariantA] = useState<CompareVariantSettings>({
+    width: 1280,
+    height: 720,
+    fps: 30,
+    bitrateKbps: 2500,
+    codec: "vp9",
+  });
+
+  const [compareVariantB, setCompareVariantB] = useState<CompareVariantSettings>({
+    width: 854,
+    height: 480,
+    fps: 15,
+    bitrateKbps: 650,
+    codec: "vp9",
+  });
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -347,6 +468,21 @@ export function ShareSetup() {
       setSelectedPersonalPresetId(null);
       setSourceError(null);
       setStartingShare(false);
+      setCompareMode(false);
+      setCompareVariantA({
+        width: 1280,
+        height: 720,
+        fps: 30,
+        bitrateKbps: 2500,
+        codec: "vp9",
+      });
+      setCompareVariantB({
+        width: 854,
+        height: 480,
+        fps: 15,
+        bitrateKbps: 650,
+        codec: "vp9",
+      });
       setCustomQuality({
         resolutionValue: "1280x720",
         customWidth: 1280,
@@ -430,11 +566,123 @@ export function ShareSetup() {
   const sourceSelected = selectedSourceId !== null;
   const usingPersonalPreset = selectedPersonalPresetId !== null;
   const customValuesValid = qualityEditorFieldsValid(customQuality) === null;
-  const canStart = sourceSelected && (usingPersonalPreset || customValuesValid);
+
+  // Easy Compare validation
+  const compareValidationErrors = useMemo(() => {
+    const errors: string[] = [];
+    if (!compareMode) return errors;
+
+    // Same codec required
+    if (compareVariantA.codec !== compareVariantB.codec) {
+      errors.push("Both variants must use the same codec.");
+    }
+
+    // A must be >= B in resolution (conceptual check)
+    if (
+      compareVariantA.width < compareVariantB.width ||
+      compareVariantA.height < compareVariantB.height
+    ) {
+      errors.push("Variant A resolution should equal or exceed Variant B.");
+    }
+
+    // A FPS must be >= B
+    if (compareVariantA.fps < compareVariantB.fps) {
+      errors.push("Variant A frame rate should equal or exceed Variant B.");
+    }
+
+    return errors;
+  }, [compareMode, compareVariantA, compareVariantB]);
+
+  const compareValuesValid = compareValidationErrors.length === 0;
+  const canStart = sourceSelected && (compareMode ? compareValuesValid : (usingPersonalPreset || customValuesValid));
 
   // ── Start sharing ──────────────────────────────────────────────────────
+  const handleStartCompareShare = useCallback(async () => {
+    setStartingShare(true);
+    try {
+      const source = sources.find((s) => s.id === selectedSourceId);
+      if (!source) {
+        toast.error("Source not found");
+        return;
+      }
+
+      const groupId = useStore.getState().selectedGroupId;
+      if (!groupId) {
+        toast.error("No group selected");
+        return;
+      }
+
+      const runtime = getRuntime();
+      if (!runtime) {
+        toast.error("Runtime not available");
+        return;
+      }
+
+      const csm = runtime.getCompareSessionManager();
+      if (!csm) {
+        toast.error("Compare not available");
+        return;
+      }
+
+      await csm.startCompare({
+        groupId,
+        source: {
+          id: source.id,
+          name: source.name,
+          kind: source.kind,
+          displayId: source.displayId ?? null,
+          fingerprint: null,
+        },
+        variantConfigs: {
+          A: resolveCompareVariantSettings(compareVariantA),
+          B: resolveCompareVariantSettings(compareVariantB),
+        },
+        audioMode: audioMode === "none" ? "none" : audioMode,
+      });
+
+      // Update store state
+      useStore.getState().setIsSharing(true);
+      useStore.getState().setSharingGroupId(groupId);
+      useStore.getState().setSource({
+        id: source.id,
+        name: source.name,
+        kind: source.kind,
+        displayId: source.displayId ?? null,
+        fingerprint: null,
+      });
+
+      toast.success("Easy Compare started");
+      setOpenShareSetup(false);
+      navigate("host" as Page);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Compare start failed: ${msg}`);
+    } finally {
+      setStartingShare(false);
+    }
+  }, [
+    selectedSourceId,
+    sources,
+    compareVariantA,
+    compareVariantB,
+    audioMode,
+    setOpenShareSetup,
+    navigate,
+  ]);
+
   const handleStartSharing = useCallback(async () => {
     if (!canStart || startingShare) return;
+
+    if (compareMode) {
+      // Compare mode start
+      if (compareValidationErrors.length > 0) {
+        toast.error("Fix validation errors before starting");
+        return;
+      }
+      await handleStartCompareShare();
+      return;
+    }
+
     setStartingShare(true);
 
     try {
@@ -526,6 +774,9 @@ export function ShareSetup() {
     audioModeOptions,
     lastScreenAudioMode,
     lastWindowAudioMode,
+    compareMode,
+    compareValidationErrors,
+    handleStartCompareShare,
   ]);
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -588,6 +839,11 @@ export function ShareSetup() {
                           <RefreshCw className="h-4 w-4" />
                         </motion.div>
                         Starting...
+                      </>
+                    ) : compareMode ? (
+                      <>
+                        <Monitor className="h-4 w-4" />
+                        Start Easy Compare
                       </>
                     ) : (
                       <>
@@ -881,6 +1137,101 @@ export function ShareSetup() {
                       </AlertDescription>
                     </Alert>
                   )}
+                </CardContent>
+              </Card>
+            </section>
+
+            {/* ─── Section 5: Easy Compare toggle ────────────────────── */}
+            <section>
+              <h3 className="text-sm font-medium text-text-primary mb-3">
+                Easy Compare{" "}
+                <span className="text-xs text-text-muted font-normal">
+                  (experimental)
+                </span>
+              </h3>
+              <Card className={cn("border-border-subtle")}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <p className="text-sm font-medium text-text-primary">
+                        Broadcast two quality variants
+                      </p>
+                      <p className="text-xs text-text-secondary mt-0.5">
+                        Let viewers compare A (high quality + audio) vs B
+                        (lower quality, video-only)
+                      </p>
+                    </div>
+                    <Switch
+                      checked={compareMode}
+                      onCheckedChange={setCompareMode}
+                      disabled={startingShare}
+                    />
+                  </div>
+
+                  <AnimatePresence>
+                    {compareMode && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.2 }}
+                        className="space-y-4 pt-3 border-t border-border-subtle"
+                      >
+                        {/* Variant A card */}
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <Badge
+                              variant="default"
+                              className="text-[10px] px-1.5"
+                            >
+                              A
+                            </Badge>
+                            <span className="text-xs font-medium text-text-primary">
+                              High quality + audio
+                            </span>
+                          </div>
+                          <CompareVariantFields
+                            value={compareVariantA}
+                            onChange={setCompareVariantA}
+                            disabled={startingShare}
+                          />
+                        </div>
+
+                        {/* Variant B card */}
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] px-1.5"
+                            >
+                              B
+                            </Badge>
+                            <span className="text-xs font-medium text-text-primary">
+                              Lower quality, video-only
+                            </span>
+                            <span className="text-xs text-text-muted">
+                              (no audio)
+                            </span>
+                          </div>
+                          <CompareVariantFields
+                            value={compareVariantB}
+                            onChange={setCompareVariantB}
+                            disabled={startingShare}
+                          />
+                        </div>
+
+                        {/* Validation warnings */}
+                        {compareValidationErrors.map((err, i) => (
+                          <Alert key={i} variant="warning" className="py-2">
+                            <AlertTriangle className="h-4 w-4" />
+                            <AlertDescription className="text-xs">
+                              {err}
+                            </AlertDescription>
+                          </Alert>
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </CardContent>
               </Card>
             </section>

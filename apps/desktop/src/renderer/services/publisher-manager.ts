@@ -2,6 +2,8 @@ import { HostPublisher } from "@screenlink/vdo-adapter";
 import type { MediaStatsSnapshot } from "./media-stats-service.js";
 import type { ProcessAudioController } from "../audio/ProcessAudioController.js";
 import { extractDataReceivedEvent, extractPeerUuid } from "./sdk-event-normalizer.js";
+import { applySenderSettings } from "./quality-coordinator.js";
+import type { SenderSettingsInput, SenderSettingsReadback } from "./quality-coordinator.js";
 
 export type AudioState = "disabled" | "active" | "error";
 
@@ -35,6 +37,26 @@ export interface PublisherConfig {
   captureFps?: number;
 }
 
+export interface PerPeerApplyResult {
+  /** UUID of the viewer peer */
+  peerUuid: string;
+  /** Whether application succeeded */
+  success: boolean;
+  /** Error message on failure */
+  error?: string;
+  /** Readback of actual applied values (null on failure or no video sender) */
+  readback: SenderSettingsReadback | null;
+}
+
+export type ApplyOverallStatus = "all-succeeded" | "partial" | "all-failed";
+
+export interface ApplyVideoSenderSettingsResult {
+  /** Per-peer results in iteration order of SDK connections */
+  results: PerPeerApplyResult[];
+  /** Overall status across all peers */
+  overall: ApplyOverallStatus;
+}
+
 export interface PublisherEvents {
   onStateChange: (state: PublisherState) => void;
   onStats: (stats: MediaStatsSnapshot) => void;
@@ -66,6 +88,13 @@ export class PublisherManager {
    * sending a `stream.leave` message first.
    */
   private peerDisconnectedHandler: ((peerUuid: string) => void) | null = null;
+  /**
+   * Tracks whether the peerDisconnected SDK listener has been attached
+   * for the current publisher instance. Prevents duplicate listener
+   * attachment across setOnPeerDisconnected + startPublishing calls.
+   * Reset in stopCapture.
+   */
+  private _peerDisconnectedAttached: boolean = false;
 
   constructor(events: PublisherEvents) {
     PublisherManager.nextId++;
@@ -115,26 +144,35 @@ export class PublisherManager {
    */
   setOnPeerDisconnected(handler: (peerUuid: string) => void): void {
     this.peerDisconnectedHandler = handler;
-    // Subscribe lazily — the handler is registered after the publisher
-    // is created, so if it fires immediately due to in-flight state,
-    // the handler will be invoked.
-    if (this.publisher) {
-      const sdk = this.publisher.getSDK();
-      if (sdk && typeof (sdk as { on?: unknown }).on === "function") {
-        (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on(
-          "peerDisconnected",
-          (...args: unknown[]) => {
-            const { uuid } = extractPeerUuid(args[0]);
-            if (!uuid) return;
-            try {
-              this.peerDisconnectedHandler?.(uuid);
-            } catch {
-              // ignore handler errors
-            }
-          },
-        );
-      }
+    // If publisher exists, attach the SDK listener immediately.
+    // Guard against duplicate attachment via _peerDisconnectedAttached
+    // (the listener may already have been attached in startPublishing).
+    if (this.publisher && !this._peerDisconnectedAttached) {
+      this.attachPeerDisconnectedListener();
+      this._peerDisconnectedAttached = true;
     }
+  }
+
+  /**
+   * Attach the peerDisconnected SDK listener for the current publisher.
+   * Safe to call multiple times; guarded by _peerDisconnectedAttached.
+   * Using extractPeerUuid to normalize both Event-object and direct-UUID shapes.
+   */
+  private attachPeerDisconnectedListener(): void {
+    const sdk = this.publisher?.getSDK();
+    if (!sdk || typeof (sdk as { on?: unknown }).on !== "function") return;
+    (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on(
+      "peerDisconnected",
+      (...args: unknown[]) => {
+        const { uuid } = extractPeerUuid(args[0]);
+        if (!uuid) return;
+        try {
+          this.peerDisconnectedHandler?.(uuid);
+        } catch {
+          // ignore handler errors
+        }
+      },
+    );
   }
 
   setAudioController(controller: ProcessAudioController, mode: 'system' | 'application' | 'monitor' | 'test-tone'): void {
@@ -310,6 +348,32 @@ export class PublisherManager {
         (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on("peerConnected", (...args: unknown[]) => {
           this.logSenderDiagnostics('viewer-connected');
         });
+      }
+    }
+
+    // [Fix] Register peerDisconnected handler if one was registered before
+    // startPublishing (via setOnPeerDisconnected). This mirrors the pattern
+    // used by mediaBindHandler above and peerConnectedHandler — the SDK
+    // publisher exists (local variable) but this.publisher is not yet set,
+    // so we attach via the local `publisher` variable directly.
+    // The _peerDisconnectedAttached guard also prevents duplicate attachment
+    // when setOnPeerDisconnected is called after startPublishing.
+    if (this.peerDisconnectedHandler && !this._peerDisconnectedAttached) {
+      const sdk = publisher.getSDK();
+      if (sdk && typeof (sdk as { on?: unknown }).on === "function") {
+        (sdk as { on: (event: string, handler: (...args: unknown[]) => void) => void }).on(
+          "peerDisconnected",
+          (...args: unknown[]) => {
+            const { uuid } = extractPeerUuid(args[0]);
+            if (!uuid) return;
+            try {
+              this.peerDisconnectedHandler?.(uuid);
+            } catch {
+              // ignore handler errors
+            }
+          },
+        );
+        this._peerDisconnectedAttached = true;
       }
     }
 
@@ -613,6 +677,8 @@ export class PublisherManager {
         this.appliedAudioMode = 'none';
         this._audioState = "disabled";
         this.config = null;
+        this.peerDisconnectedHandler = null;
+        this._peerDisconnectedAttached = false;
 
         this.setState("idle");
       } finally {
@@ -624,38 +690,65 @@ export class PublisherManager {
     return this.stopPromise_;
   }
 
-  async setQuality(bitrate: number, width: number, height: number, fps: number): Promise<void> {
-    if (!this.publisher || !this.config) return;
+  /**
+   * Apply video sender settings (bitrate, framerate, degradation preference,
+   * scale) to every currently-connected viewer's video sender.
+   *
+   * Returns structured per-peer results with applied/readback state, so
+   * callers can verify the actual parameter values that took effect.
+   *
+   * Delegates to the shared `applySenderSettings` from quality-coordinator
+   * for the per-sender encoding parameter modification.
+   */
+  async applyVideoSenderSettings(settings: SenderSettingsInput): Promise<ApplyVideoSenderSettingsResult> {
+    if (!this.publisher) {
+      return { results: [], overall: "all-succeeded" };
+    }
     const sdk = this.publisher.getSDK();
-    if (!sdk) return;
+    if (!sdk) {
+      return { results: [], overall: "all-succeeded" };
+    }
 
-    for (const [, group] of sdk.connections) {
+    const results: PerPeerApplyResult[] = [];
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const [peerUuid, group] of sdk.connections) {
       const pc = group.publisher?.pc;
       if (!pc) continue;
       const sender = pc.getSenders().find(s => s.track?.kind === "video");
-      if (!sender) continue;
-
-      const params = sender.getParameters();
-      if (!Array.isArray(params.encodings) || params.encodings.length === 0) continue;
-
-      const encoding = params.encodings[0];
-      if (encoding) {
-        encoding.maxBitrate = bitrate * 1000;
-        encoding.maxFramerate = fps;
+      if (!sender) {
+        // No video sender for this peer — skip with a non-error entry
+        results.push({
+          peerUuid,
+          success: true,
+          readback: null,
+        });
+        successCount++;
+        continue;
       }
 
       try {
-        await sender.setParameters(params);
+        const readback = await applySenderSettings(sender, settings);
+        results.push({ peerUuid, success: true, readback });
+        successCount++;
       } catch (err) {
-        console.warn("[PublisherManager] setParameters failed:", err);
-        return;
-      }
-      const readback = sender.getParameters();
-      const appliedBitrate = readback.encodings?.[0]?.maxBitrate ?? 0;
-      if (appliedBitrate !== bitrate * 1000) {
-        console.warn("[PublisherManager] setParameters readback mismatch");
+        const message = err instanceof Error ? err.message : String(err);
+        results.push({ peerUuid, success: false, error: message, readback: null });
+        failCount++;
       }
     }
+
+    let overall: ApplyOverallStatus;
+    if (failCount === 0) {
+      overall = "all-succeeded";
+    } else if (successCount === 0) {
+      overall = "all-failed";
+    } else {
+      overall = "partial";
+    }
+
+    return { results, overall };
   }
 
   hasAudio(): boolean {

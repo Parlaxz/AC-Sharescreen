@@ -163,3 +163,404 @@ describe("buildEnvelope contract (HMAC-only)", () => {
     void buildEnvelope(input, "secret");
   });
 });
+
+// ─── Compare Extension Tests ──────────────────────────────────────────────
+
+import {
+  GROUP_CONTROL_MESSAGE_TYPES,
+  StreamStartedPayloadSchema,
+  StreamJoinRequestPayloadSchema,
+  StreamJoinResponsePayloadSchema,
+  StreamLeavePayloadSchema,
+  StreamBindAckPayloadSchema,
+  ViewerStatusPayloadSchema,
+  ViewerPausedPayloadSchema,
+  CompareVariantUpdatedPayloadSchema,
+  parseGroupMessagePayload,
+} from "@screenlink/shared";
+
+describe("compare.variant.updated", () => {
+  it("is listed in GROUP_CONTROL_MESSAGE_TYPES", () => {
+    expect(GROUP_CONTROL_MESSAGE_TYPES).toContain("compare.variant.updated");
+  });
+
+  it("accepts a valid payload", () => {
+    const result = CompareVariantUpdatedPayloadSchema.safeParse({
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      variantId: "A",
+      revision: 1,
+      configSnapshot: {
+        resolutionWidth: 1920,
+        resolutionHeight: 1080,
+        fps: 30,
+        videoBitrateKbps: 5000,
+        sourceKind: "screen",
+        sourceName: "Display 1",
+      },
+      appliedAt: 1234567890,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts payload with optional status", () => {
+    const result = CompareVariantUpdatedPayloadSchema.safeParse({
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      variantId: "B",
+      revision: 2,
+      configSnapshot: {
+        resolutionWidth: 1280,
+        resolutionHeight: 720,
+        fps: 30,
+        videoBitrateKbps: 3000,
+        sourceKind: "window",
+        sourceName: "Browser",
+      },
+      appliedAt: 1234567891,
+      status: "active",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects invalid variantId", () => {
+    const result = CompareVariantUpdatedPayloadSchema.safeParse({
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      variantId: "C",
+      revision: 1,
+      configSnapshot: {
+        resolutionWidth: 1920,
+        resolutionHeight: 1080,
+        fps: 30,
+        videoBitrateKbps: 5000,
+        sourceKind: "screen",
+        sourceName: "Display 1",
+      },
+      appliedAt: 1234567890,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects invalid config snapshot", () => {
+    const result = CompareVariantUpdatedPayloadSchema.safeParse({
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      variantId: "A",
+      revision: 1,
+      configSnapshot: {
+        resolutionWidth: -1,
+        resolutionHeight: 1080,
+        fps: 30,
+        videoBitrateKbps: 5000,
+      },
+      appliedAt: 1234567890,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects missing required fields", () => {
+    const result = CompareVariantUpdatedPayloadSchema.safeParse({});
+    expect(result.success).toBe(false);
+  });
+
+  it("payload contains no secrets", () => {
+    const shape = CompareVariantUpdatedPayloadSchema.shape;
+    expect(shape.password).toBeUndefined();
+    expect(shape.token).toBeUndefined();
+    expect(shape.bindingToken).toBeUndefined();
+    expect(shape.streamId).toBeUndefined();
+    // configSnapshot is the nested config; its schema separately forbids secrets
+  });
+
+  it("config snapshot in payload forbids secrets", () => {
+    const result = CompareVariantUpdatedPayloadSchema.safeParse({
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      variantId: "A",
+      revision: 1,
+      configSnapshot: {
+        resolutionWidth: 1920,
+        resolutionHeight: 1080,
+        fps: 30,
+        videoBitrateKbps: 5000,
+        sourceKind: "screen",
+        sourceName: "Display 1",
+        password: "secret",
+      },
+      appliedAt: 1234567890,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("parses via parseGroupMessagePayload", () => {
+    const result = parseGroupMessagePayload("compare.variant.updated", {
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      variantId: "A",
+      revision: 1,
+      configSnapshot: {
+        resolutionWidth: 1920,
+        resolutionHeight: 1080,
+        fps: 30,
+        videoBitrateKbps: 5000,
+        sourceKind: "screen",
+        sourceName: "Display 1",
+      },
+      appliedAt: 1234567890,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.variantId).toBe("A");
+    }
+  });
+});
+
+describe("Backward compatibility — old payloads still parse", () => {
+  it("stream.started without compare metadata", () => {
+    const oldPayload = {
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      groupId: "group-1",
+      hostDeviceId: "dev-1",
+      hostDisplayName: "Alice",
+      sourceKind: "screen",
+      sourceName: "Display 1",
+      startedAt: 1000,
+      appliedSettingsRevision: 1,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "meta",
+      replacesSessionId: null,
+    };
+    const result = StreamStartedPayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.join.request without compare fields", () => {
+    const oldPayload = {
+      logicalStreamId: "ls-1",
+      viewerDeviceId: "dev-2",
+      viewerDisplayName: "Bob",
+    };
+    const result = StreamJoinRequestPayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.join.response without compare fields", () => {
+    const oldPayload = {
+      logicalStreamId: "ls-1",
+      accepted: true,
+      viewerDeviceId: "dev-2",
+      mediaJoinMetadata: "meta",
+      mediaSessionId: "ms-1",
+      streamId: "s-1",
+      password: "p-1",
+    };
+    const result = StreamJoinResponsePayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.leave without compare fields", () => {
+    const oldPayload = {
+      logicalStreamId: "ls-1",
+      viewerDeviceId: "dev-2",
+    };
+    const result = StreamLeavePayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.bind.ack without compare fields", () => {
+    const oldPayload = {
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerDeviceId: "dev-2",
+      accepted: true,
+      boundMediaPeer: "peer-1",
+    };
+    const result = StreamBindAckPayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("viewer.paused without compare fields", () => {
+    const oldPayload = {
+      logicalStreamId: "ls-1",
+      viewerDeviceId: "dev-2",
+      paused: true,
+    };
+    const result = ViewerPausedPayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+
+  it("viewer.status without compare fields", () => {
+    const oldPayload = {
+      viewerDeviceId: "dev-2",
+      streamId: "s-1",
+      state: "playing" as const,
+      receivedBitrateKbps: null,
+      receivedWidth: null,
+      receivedHeight: null,
+      displayedFps: null,
+      sampledAt: 1000,
+    };
+    const result = ViewerStatusPayloadSchema.safeParse(oldPayload);
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("Compare correlation fields", () => {
+  it("stream.started accepts optional compare metadata", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      groupId: "group-1",
+      hostDeviceId: "dev-1",
+      hostDisplayName: "Alice",
+      sourceKind: "screen",
+      sourceName: "Display 1",
+      startedAt: 1000,
+      appliedSettingsRevision: 1,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "meta",
+      replacesSessionId: null,
+      compareMode: "side-by-side",
+      compareVersion: 1,
+      primaryVariant: "A",
+      variantADescriptor: {
+        mediaSessionId: "ms-a",
+        configSnapshot: {
+          resolutionWidth: 1920,
+          resolutionHeight: 1080,
+          fps: 30,
+          videoBitrateKbps: 5000,
+          sourceKind: "screen",
+          sourceName: "Display 1",
+        },
+      },
+      variantBDescriptor: {
+        mediaSessionId: "ms-b",
+        configSnapshot: {
+          resolutionWidth: 1280,
+          resolutionHeight: 720,
+          fps: 30,
+          videoBitrateKbps: 3000,
+          sourceKind: "window",
+          sourceName: "Browser",
+        },
+      },
+      appliedConfigSnapshot: {
+        resolutionWidth: 1920,
+        resolutionHeight: 1080,
+        fps: 30,
+        videoBitrateKbps: 5000,
+        sourceKind: "screen",
+        sourceName: "Display 1",
+      },
+      appliedCompareRevision: 1,
+    };
+    const result = StreamStartedPayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.started accepts partial compare metadata", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      groupId: "group-1",
+      hostDeviceId: "dev-1",
+      hostDisplayName: "Alice",
+      sourceKind: "screen",
+      sourceName: "Display 1",
+      startedAt: 1000,
+      appliedSettingsRevision: 1,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "meta",
+      replacesSessionId: null,
+      compareMode: "single",
+      compareVersion: 1,
+      primaryVariant: "A",
+    };
+    const result = StreamStartedPayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.join.request accepts optional compareVariantId and mediaSessionId", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      viewerDeviceId: "dev-2",
+      viewerDisplayName: "Bob",
+      compareVariantId: "A",
+      mediaSessionId: "ms-1",
+    };
+    const result = StreamJoinRequestPayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.join.response accepts optional compareVariantId", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      accepted: true,
+      viewerDeviceId: "dev-2",
+      mediaSessionId: "ms-1",
+      streamId: "s-1",
+      password: "p-1",
+      compareVariantId: "B",
+    };
+    const result = StreamJoinResponsePayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.leave accepts optional mediaSessionId and compareVariantId", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      viewerDeviceId: "dev-2",
+      mediaSessionId: "ms-1",
+      compareVariantId: "A",
+    };
+    const result = StreamLeavePayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("stream.bind.ack accepts optional compareVariantId", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerDeviceId: "dev-2",
+      accepted: true,
+      compareVariantId: "A",
+    };
+    const result = StreamBindAckPayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("viewer.paused accepts optional mediaSessionId and compareVariantId", () => {
+    const payload = {
+      logicalStreamId: "ls-1",
+      viewerDeviceId: "dev-2",
+      paused: true,
+      mediaSessionId: "ms-1",
+      compareVariantId: "A",
+    };
+    const result = ViewerPausedPayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+
+  it("viewer.status accepts optional mediaSessionId and compareVariantId", () => {
+    const payload = {
+      viewerDeviceId: "dev-2",
+      streamId: "s-1",
+      state: "playing" as const,
+      receivedBitrateKbps: 5000,
+      receivedWidth: 1920,
+      receivedHeight: 1080,
+      displayedFps: 30,
+      sampledAt: 1000,
+      mediaSessionId: "ms-1",
+      compareVariantId: "B",
+    };
+    const result = ViewerStatusPayloadSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+  });
+});

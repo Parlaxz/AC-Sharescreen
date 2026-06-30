@@ -15,6 +15,9 @@ import type {
   VideoEnhancerDiagnosticsResponse,
   ConfigureNativeResponse,
   VideoEnhancerStats,
+  NativeBenchmarkConfig,
+  NativeBenchmarkStatusResponse,
+  NativeBenchmarkResultResponse,
 } from "../src/main/video-enhancer-protocol";
 
 // ─── Runtime validation via factory-style helpers ────────────────────────────
@@ -144,6 +147,136 @@ describe("ConfigureNativeResponse", () => {
     expect(r.appliedMode).toBe("vsr");
     expect(r.outputWidth).toBe(3840);
     expect(r.effectLoadSucceeded).toBe(true);
+  });
+});
+
+describe("NativeBenchmarkConfig", () => {
+  it("accepts a valid benchmark config", () => {
+    const cfg: NativeBenchmarkConfig = {
+      processingMode: "vsr",
+      qualityLevel: "high",
+      inputWidth: 1920,
+      inputHeight: 1080,
+      targetFrames: 100,
+      frameTimeoutMs: 5000,
+    };
+    expect(cfg.processingMode).toBe("vsr");
+    expect(cfg.qualityLevel).toBe("high");
+    expect(cfg.targetFrames).toBe(100);
+  });
+
+  it("accepts all processing modes", () => {
+    const modes: NativeBenchmarkConfig["processingMode"][] = ["vsr", "high-bitrate", "denoise", "deblur"];
+    for (const mode of modes) {
+      const cfg: NativeBenchmarkConfig = {
+        processingMode: mode,
+        qualityLevel: "medium",
+        inputWidth: 1920,
+        inputHeight: 1080,
+        targetFrames: 50,
+      };
+      expect(cfg.processingMode).toBe(mode);
+    }
+  });
+
+  it("frameTimeoutMs is optional", () => {
+    const cfg: NativeBenchmarkConfig = {
+      processingMode: "vsr",
+      qualityLevel: "high",
+      inputWidth: 1920,
+      inputHeight: 1080,
+      targetFrames: 100,
+    };
+    expect(cfg.frameTimeoutMs).toBeUndefined();
+  });
+});
+
+describe("NativeBenchmarkStatusResponse", () => {
+  it("accepts active benchmark state", () => {
+    const status: NativeBenchmarkStatusResponse = {
+      benchmarkActive: true,
+      benchmarkTargetFrames: 100,
+      benchmarkFramesCompleted: 42,
+      benchmarkTotalTimeUs: 1_250_000,
+      benchmarkAvgTimeUs: 29761,
+    };
+    expect(status.benchmarkActive).toBe(true);
+    expect(status.benchmarkFramesCompleted).toBe(42);
+    expect(status.benchmarkAvgTimeUs).toBe(29761);
+  });
+
+  it("accepts completed benchmark state", () => {
+    const status: NativeBenchmarkStatusResponse = {
+      benchmarkActive: false,
+      benchmarkTargetFrames: 100,
+      benchmarkFramesCompleted: 100,
+      benchmarkTotalTimeUs: 3_000_000,
+      benchmarkAvgTimeUs: 30000,
+      benchmarkComplete: true,
+    };
+    expect(status.benchmarkActive).toBe(false);
+    expect(status.benchmarkComplete).toBe(true);
+  });
+
+  it("optional fields are undefined when absent", () => {
+    const status: NativeBenchmarkStatusResponse = {
+      benchmarkActive: false,
+      benchmarkTargetFrames: 0,
+      benchmarkFramesCompleted: 0,
+      benchmarkTotalTimeUs: 0,
+    };
+    expect(status.benchmarkAvgTimeUs).toBeUndefined();
+    expect(status.benchmarkComplete).toBeUndefined();
+  });
+});
+
+describe("NativeBenchmarkResultResponse", () => {
+  it("accepts a full benchmark result", () => {
+    const result: NativeBenchmarkResultResponse = {
+      success: true,
+      framesProcessed: 100,
+      framesDropped: 0,
+      framesFailed: 0,
+      totalTimeUs: 3_000_000,
+      avgTimeUs: 30000,
+      minTimeUs: 25000,
+      maxTimeUs: 45000,
+      avgInputReceiveUs: 120,
+      avgUploadUs: 500,
+      avgEffectUs: 28000,
+      avgDownloadUs: 800,
+      avgOutputWriteUs: 180,
+      avgFps: 33.33,
+    };
+    expect(result.success).toBe(true);
+    expect(result.framesProcessed).toBe(100);
+    expect(result.avgTimeUs).toBe(30000);
+    expect(result.avgFps).toBeCloseTo(33.33, 1);
+    expect(result.avgUploadUs).toBe(500);
+    expect(result.avgEffectUs).toBe(28000);
+  });
+
+  it("accepts failed benchmark result", () => {
+    const result: NativeBenchmarkResultResponse = {
+      success: false,
+      error: "Benchmark was cancelled",
+      framesProcessed: 42,
+      framesDropped: 3,
+      framesFailed: 5,
+      totalTimeUs: 1_200_000,
+      avgTimeUs: 28571,
+      minTimeUs: 0,
+      maxTimeUs: 0,
+      avgInputReceiveUs: 0,
+      avgUploadUs: 0,
+      avgEffectUs: 0,
+      avgDownloadUs: 0,
+      avgOutputWriteUs: 0,
+      avgFps: 0,
+    };
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Benchmark was cancelled");
+    expect(result.framesDropped).toBe(3);
   });
 });
 

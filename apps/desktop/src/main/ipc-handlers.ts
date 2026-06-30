@@ -5,6 +5,7 @@ import { getAudioCapabilities, getHelperPath } from "./audio-capability-service.
 import { probeNvidiaVsrCapability } from "./nvidia-capability-service.js";
 import { AudioHelperManager } from "./AudioHelperManager.js";
 import { VideoHelperManager } from "./VideoHelperManager.js";
+import { randomUUID } from "node:crypto";
 import type { VideoEnhancerConfig } from "./video-enhancer-protocol.js";
 import {
   generateVdoStreamId,
@@ -725,6 +726,29 @@ export function registerIpcHandlers(
     return { success: true };
   });
 
+  // ── Slice 5: Renderer-owned shared input slots ─────────────────────────────────
+
+  ipcMain.handle("video-helper:register-renderer-slots", async (_event, slots: SharedArrayBuffer[]) => {
+    const manager = ensureVideoHelperManager();
+    // Validate: must be exactly 3 slots
+    if (!Array.isArray(slots) || slots.length !== 3) {
+      return { success: false, error: "Expected exactly 3 SharedArrayBuffer slots" };
+    }
+    for (let i = 0; i < slots.length; i++) {
+      if (!(slots[i] instanceof SharedArrayBuffer)) {
+        return { success: false, error: `Slot ${i} is not a SharedArrayBuffer` };
+      }
+    }
+    manager.registerRendererSlots(slots);
+    return { success: true };
+  });
+
+  ipcMain.handle("video-helper:release-renderer-slots", async () => {
+    const mgr = videoHelperManager;
+    if (mgr) mgr.releaseRendererSlots();
+    return { success: true };
+  });
+
   // ── Video helper ──────────────────────────────────────────────────────────────
 
   ipcMain.handle("video-helper:start", async (_event, config: VideoEnhancerConfig) => {
@@ -818,6 +842,47 @@ export function registerIpcHandlers(
     }
   });
 
+  ipcMain.handle("nvidia:save-benchmark-result", async (_event, record: unknown) => {
+    const benchmarkDir = path.join(app.getPath("userData"), "nvidia-benchmarks");
+    try {
+      await fs.mkdir(benchmarkDir, { recursive: true });
+      const resultsFile = path.join(benchmarkDir, "results.json");
+      let results: Record<string, unknown>[] = [];
+      try {
+        const raw = await fs.readFile(resultsFile, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          results = parsed as Record<string, unknown>[];
+        }
+      } catch {
+        // no existing file
+      }
+
+      const normalized = (record && typeof record === "object"
+        ? { ...(record as Record<string, unknown>) }
+        : {}) as Record<string, unknown>;
+      const id = typeof normalized.id === "string" && normalized.id
+        ? normalized.id
+        : randomUUID();
+      normalized.id = id;
+
+      const existingIndex = results.findIndex((entry) => entry.id === id);
+      if (existingIndex >= 0) {
+        results[existingIndex] = normalized;
+      } else {
+        results.push(normalized);
+      }
+
+      await fs.writeFile(resultsFile, JSON.stringify(results, null, 2), "utf-8");
+      return { success: true, id };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to save benchmark result",
+      };
+    }
+  });
+
   /**
    * Export a benchmark result to a JSON file in the benchmark folder.
    * Returns the file path on success, null on failure.
@@ -861,6 +926,42 @@ export function registerIpcHandlers(
     } catch {
       return [];
     }
+  });
+
+  /**
+   * Start a native benchmark run.
+   * Forwards config to the native helper via the video helper manager.
+   */
+  ipcMain.handle("nvidia:run-benchmark", async (_event, config: import("./video-enhancer-protocol.js").NativeBenchmarkConfig) => {
+    const manager = ensureVideoHelperManager();
+    return await manager.runBenchmark(config);
+  });
+
+  /**
+   * Get current benchmark status from the native helper.
+   */
+  ipcMain.handle("nvidia:get-benchmark-status", async () => {
+    const mgr = videoHelperManager;
+    if (!mgr) return null;
+    return await mgr.getBenchmarkStatus();
+  });
+
+  /**
+   * Cancel a running benchmark.
+   */
+  ipcMain.handle("nvidia:cancel-benchmark", async () => {
+    const mgr = videoHelperManager;
+    if (!mgr) return false;
+    return await mgr.cancelBenchmark();
+  });
+
+  /**
+   * Get aggregated benchmark results after a completed run.
+   */
+  ipcMain.handle("nvidia:get-benchmark-results-aggregate", async () => {
+    const mgr = videoHelperManager;
+    if (!mgr) return null;
+    return await mgr.getBenchmarkResults();
   });
 
   // ── Tray state updates ──────────────────────────────────────────────────

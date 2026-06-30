@@ -32,6 +32,7 @@ function makeMockRuntime(): Phase3Runtime {
       streamId: "vdo-stream-abc",
       password: "vdo-password-xyz",
     })),
+    getPublisherManager: vi.fn().mockReturnValue(null),
   };
   const mediaStatsService = {
     startViewerPoller: vi.fn(),
@@ -39,12 +40,27 @@ function makeMockRuntime(): Phase3Runtime {
     disconnectViewer: vi.fn(),
     hasViewerPoller: vi.fn().mockReturnValue(false),
   };
+  // resolveLocalPublication returns the SSM's VDO config for any call
+  const resolveLocalPublication = vi.fn().mockImplementation((_mediaSessionId: string) => {
+    const vdoConfig = ssm.getCurrentVdoConfig();
+    if (vdoConfig) {
+      return {
+        mediaSessionId: _mediaSessionId,
+        logicalStreamId: ssm.currentLogicalStreamId ?? "",
+        publisherManager: null as any,
+        vdoConfig,
+      };
+    }
+    return null;
+  });
   return {
     getActiveStreamRegistry: () => registry,
     getConnectionManager: () => connManager,
     getStreamSessionManager: () => ssm,
     getViewerMediaBinding: () => ({} as any),
     getMediaStatsService: () => mediaStatsService,
+    resolveLocalPublication,
+    getCompareSessionManager: vi.fn().mockReturnValue(null),
     ssm, // expose for test assertions
     deviceId: "real-host-device",
     displayName: "Real Host",
@@ -291,7 +307,7 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     const close = vi.fn();
     const statsService = runtime.getMediaStatsService() as any;
 
-    (binding as any).viewerMap.set("viewer-1", {
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
       viewerDeviceId: "viewer-1",
       viewerSessionId: "session-1",
       mediaPeerUuid: "peer-uuid-1",
@@ -327,7 +343,7 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     // the new mapping.
     const statsService = runtime.getMediaStatsService() as any;
 
-    (binding as any).viewerMap.set("viewer-1", {
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
       viewerDeviceId: "viewer-1",
       viewerSessionId: "session-NEW",
       mediaPeerUuid: "peer-uuid-1",
@@ -357,7 +373,7 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     const close = vi.fn();
     const statsService = runtime.getMediaStatsService() as any;
 
-    (binding as any).viewerMap.set("viewer-1", {
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
       viewerDeviceId: "viewer-1",
       viewerSessionId: "session-1",
       mediaPeerUuid: "peer-uuid-1",
@@ -861,6 +877,232 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     expect(binding.getViewerAudioSender("viewer-1")).toBeNull();
   });
 
+  // ─── Composite-key concurrent session tests ────────────────────
+
+  it("getViewersForMediaSession returns all viewers for a media session", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", groupId: "g-1",
+      hostDeviceId: "local", hostDisplayName: "Host", sourceKind: "screen",
+      sourceName: "Screen", startedAt: 1000, appliedSettingsRevision: 0,
+      heartbeatSequence: 1, streamRevision: 1, mediaJoinMetadata: "", replacesSessionId: null,
+    });
+
+    // Two viewers join the same media session
+    const env1 = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const r1 = binding.handleJoinRequest(env1);
+    await binding.handleMediaBind("peer-uuid-1", r1!.token);
+
+    const env2 = makeJoinRequestEnvelope("g-1", "viewer-2", "stream-1");
+    const r2 = binding.handleJoinRequest(env2);
+    await binding.handleMediaBind("peer-uuid-2", r2!.token);
+
+    const viewers = binding.getViewersForMediaSession("ms-1");
+    expect(viewers).toHaveLength(2);
+    expect(viewers.map(v => v.viewerDeviceId).sort()).toEqual(["viewer-1", "viewer-2"]);
+  });
+
+  it("getViewerMapping with composite key returns exact match", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", groupId: "g-1",
+      hostDeviceId: "local", hostDisplayName: "Host", sourceKind: "screen",
+      sourceName: "Screen", startedAt: 1000, appliedSettingsRevision: 0,
+      heartbeatSequence: 1, streamRevision: 1, mediaJoinMetadata: "", replacesSessionId: null,
+    });
+
+    const env1 = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const r1 = binding.handleJoinRequest(env1);
+    await binding.handleMediaBind("peer-uuid-1", r1!.token);
+
+    const mapping = binding.getViewerMapping("viewer-1", "ms-1");
+    expect(mapping).not.toBeNull();
+    expect(mapping!.viewerDeviceId).toBe("viewer-1");
+    expect(mapping!.mediaSessionId).toBe("ms-1");
+
+    // Non-existent composite returns null
+    expect(binding.getViewerMapping("viewer-1", "nonexistent-session")).toBeNull();
+  });
+
+  it("one device can hold A and B bindings simultaneously", async () => {
+    // Register two streams (different media sessions)
+    const getStreamSpy = vi.spyOn(registry, "getStream");
+    getStreamSpy.mockImplementation(({ logicalStreamId }: { logicalStreamId: string }) => ({
+      logicalStreamId, mediaSessionId: logicalStreamId === "stream-a" ? "ms-a" : "ms-b",
+      groupId: "g-1", hostDeviceId: "local", hostDisplayName: "Host",
+      sourceKind: "screen", sourceName: "Screen", startedAt: 1000,
+      appliedSettingsRevision: 0, heartbeatSequence: 1, streamRevision: 1,
+      mediaJoinMetadata: "", replacesSessionId: null,
+    } as any));
+
+    // Same device joins both sessions
+    const envA = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-a");
+    const rA = binding.handleJoinRequest(envA);
+    await binding.handleMediaBind("peer-uuid-a", rA!.token);
+
+    const envB = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-b");
+    const rB = binding.handleJoinRequest(envB);
+    await binding.handleMediaBind("peer-uuid-b", rB!.token);
+
+    // Same device has two distinct bindings
+    const mappingA = binding.getViewerMapping("viewer-1", "ms-a");
+    const mappingB = binding.getViewerMapping("viewer-1", "ms-b");
+    expect(mappingA).not.toBeNull();
+    expect(mappingB).not.toBeNull();
+    expect(mappingA!.mediaPeerUuid).toBe("peer-uuid-a");
+    expect(mappingB!.mediaPeerUuid).toBe("peer-uuid-b");
+
+    // All-viewers returns both
+    expect(binding.getAllViewers()).toHaveLength(2);
+  });
+
+  it("removeViewerMapping removes exact composite entry", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", groupId: "g-1",
+      hostDeviceId: "local", hostDisplayName: "Host", sourceKind: "screen",
+      sourceName: "Screen", startedAt: 1000, appliedSettingsRevision: 0,
+      heartbeatSequence: 1, streamRevision: 1, mediaJoinMetadata: "", replacesSessionId: null,
+    });
+
+    const env1 = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const r1 = binding.handleJoinRequest(env1);
+    await binding.handleMediaBind("peer-uuid-1", r1!.token);
+
+    expect(binding.getViewerMapping("viewer-1", "ms-1")).not.toBeNull();
+
+    const removed = binding.removeViewerMapping("viewer-1", "ms-1");
+    expect(removed).toBe(true);
+    expect(binding.getViewerMapping("viewer-1", "ms-1")).toBeNull();
+  });
+
+  it("removeViewerMapping respects viewerSessionId guard", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", groupId: "g-1",
+      hostDeviceId: "local", hostDisplayName: "Host", sourceKind: "screen",
+      sourceName: "Screen", startedAt: 1000, appliedSettingsRevision: 0,
+      heartbeatSequence: 1, streamRevision: 1, mediaJoinMetadata: "", replacesSessionId: null,
+    });
+
+    const envelope = {
+      ...makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1"),
+      payload: {
+        logicalStreamId: "stream-1",
+        viewerDeviceId: "viewer-1",
+        viewerDisplayName: "Viewer",
+        viewerSessionId: "session-ACTIVE",
+      } as Record<string, unknown>,
+    };
+    const result = binding.handleJoinRequest(envelope);
+    await binding.handleMediaBind("peer-uuid-1", result!.token);
+
+    // Wrong viewerSessionId should not remove
+    const removed = binding.removeViewerMapping("viewer-1", "ms-1", "session-STALE");
+    expect(removed).toBe(false);
+    expect(binding.getViewerMapping("viewer-1", "ms-1")).not.toBeNull();
+
+    // Correct viewerSessionId removes
+    const removed2 = binding.removeViewerMapping("viewer-1", "ms-1", "session-ACTIVE");
+    expect(removed2).toBe(true);
+    expect(binding.getViewerMapping("viewer-1", "ms-1")).toBeNull();
+  });
+
+  it("removeMappingsForMediaSessions removes all mappings for given sessions", async () => {
+    const getStreamSpy = vi.spyOn(registry, "getStream");
+    getStreamSpy.mockImplementation(({ logicalStreamId }: { logicalStreamId: string }) => ({
+      logicalStreamId, mediaSessionId: logicalStreamId === "stream-a" ? "ms-a" : "ms-b",
+      groupId: "g-1", hostDeviceId: "local", hostDisplayName: "Host",
+      sourceKind: "screen", sourceName: "Screen", startedAt: 1000,
+      appliedSettingsRevision: 0, heartbeatSequence: 1, streamRevision: 1,
+      mediaJoinMetadata: "", replacesSessionId: null,
+    } as any));
+
+    // viewer-1 joins ms-a, viewer-2 joins ms-b
+    const envA = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-a");
+    await binding.handleMediaBind("peer-uuid-a", binding.handleJoinRequest(envA)!.token);
+
+    const envB = makeJoinRequestEnvelope("g-1", "viewer-2", "stream-b");
+    await binding.handleMediaBind("peer-uuid-b", binding.handleJoinRequest(envB)!.token);
+
+    expect(binding.getAllViewers()).toHaveLength(2);
+
+    const removed = binding.removeMappingsForMediaSessions(["ms-a"]);
+    expect(removed).toBe(1);
+    expect(binding.getViewerMapping("viewer-1", "ms-a")).toBeNull();
+    expect(binding.getViewerMapping("viewer-2", "ms-b")).not.toBeNull();
+  });
+
+  it("getUniqueViewerDevicesForLogicalStream deduplicates by viewerDeviceId", async () => {
+    const getStreamSpy = vi.spyOn(registry, "getStream");
+    getStreamSpy.mockImplementation(({ logicalStreamId }: { logicalStreamId: string }) => ({
+      logicalStreamId, mediaSessionId: logicalStreamId === "stream-a" ? "ms-a" : "ms-b",
+      groupId: "g-1", hostDeviceId: "local", hostDisplayName: "Host",
+      sourceKind: "screen", sourceName: "Screen", startedAt: 1000,
+      appliedSettingsRevision: 0, heartbeatSequence: 1, streamRevision: 1,
+      mediaJoinMetadata: "", replacesSessionId: null,
+    } as any));
+
+    // Same device joins both A and B sessions of the same logical stream
+    const envA = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-a");
+    const rA = binding.handleJoinRequest(envA);
+    await binding.handleMediaBind("peer-uuid-a", rA!.token);
+
+    const envB = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-b");
+    const rB = binding.handleJoinRequest(envB);
+    await binding.handleMediaBind("peer-uuid-b", rB!.token);
+
+    // Also add a different viewer
+    const envC = makeJoinRequestEnvelope("g-1", "viewer-2", "stream-a");
+    const rC = binding.handleJoinRequest(envC);
+    await binding.handleMediaBind("peer-uuid-c", rC!.token);
+
+    // All three mappings share the same logicalStreamId-related sessions
+    // Unique devices should be viewer-1 (once) and viewer-2 (once) = 2
+    const uniqueDevices = binding.getUniqueViewerDevicesForLogicalStream("stream-a");
+    expect(uniqueDevices.sort()).toEqual(["viewer-1", "viewer-2"]);
+    expect(uniqueDevices).toHaveLength(2);
+  });
+
+  it("legacy removeViewer on single mapping works as before", async () => {
+    vi.spyOn(registry, "getStream").mockReturnValue({
+      logicalStreamId: "stream-1", mediaSessionId: "ms-1", groupId: "g-1",
+      hostDeviceId: "local", hostDisplayName: "Host", sourceKind: "screen",
+      sourceName: "Screen", startedAt: 1000, appliedSettingsRevision: 0,
+      heartbeatSequence: 1, streamRevision: 1, mediaJoinMetadata: "", replacesSessionId: null,
+    });
+
+    const env1 = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const r1 = binding.handleJoinRequest(env1);
+    await binding.handleMediaBind("peer-uuid-1", r1!.token);
+
+    // Single mapping — legacy removeViewer should work
+    binding.removeViewer("viewer-1");
+    expect(binding.getViewerMapping("viewer-1", "ms-1")).toBeNull();
+  });
+
+  it("legacy removeViewer on compare-mode multiple mappings does not remove anything", async () => {
+    const getStreamSpy = vi.spyOn(registry, "getStream");
+    getStreamSpy.mockImplementation(({ logicalStreamId }: { logicalStreamId: string }) => ({
+      logicalStreamId, mediaSessionId: logicalStreamId === "stream-a" ? "ms-a" : "ms-b",
+      groupId: "g-1", hostDeviceId: "local", hostDisplayName: "Host",
+      sourceKind: "screen", sourceName: "Screen", startedAt: 1000,
+      appliedSettingsRevision: 0, heartbeatSequence: 1, streamRevision: 1,
+      mediaJoinMetadata: "", replacesSessionId: null,
+    } as any));
+
+    // Same device joins both A and B
+    const envA = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-a");
+    await binding.handleMediaBind("peer-uuid-a", binding.handleJoinRequest(envA)!.token);
+
+    const envB = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-b");
+    await binding.handleMediaBind("peer-uuid-b", binding.handleJoinRequest(envB)!.token);
+
+    expect(binding.getAllViewers()).toHaveLength(2);
+
+    // Legacy removeViewer without mediaSessionId should NOT remove compare mappings
+    const removed = binding.removeViewer("viewer-1");
+    expect(removed).toBe(false);
+    // Both mappings should still be intact
+    expect(binding.getAllViewers()).toHaveLength(2);
+  });
+
   it("audio sender is included in getAllViewers output", async () => {
     vi.spyOn(registry, "getStream").mockReturnValue({
       logicalStreamId: "stream-1",
@@ -919,5 +1161,185 @@ describe("ViewerMediaBinding (Stage 5)", () => {
       expect(v.audioSender).not.toBeNull();
       expect(v.audioSender!.track!.kind).toBe("audio");
     }
+  });
+
+  // ─── Compare-mode handleJoinRequest ────────────────────────────────
+
+  /**
+   * Helper: build a compare-mode stream announcement with variant descriptors.
+   */
+  function compareStreamAnnouncement(overrides: Record<string, unknown> = {}) {
+    return {
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-primary",
+      groupId: "g-1",
+      hostDeviceId: "local",
+      hostDisplayName: "Host",
+      sourceKind: "screen",
+      sourceName: "Screen",
+      startedAt: 1000,
+      appliedSettingsRevision: 0,
+      heartbeatSequence: 1,
+      streamRevision: 1,
+      mediaJoinMetadata: "",
+      replacesSessionId: null,
+      compareMode: "easy",
+      primaryVariant: "A",
+      variantADescriptor: { mediaSessionId: "ms-a" },
+      variantBDescriptor: { mediaSessionId: "ms-b" },
+      ...overrides,
+    };
+  }
+
+  it("legacy join with no compare fields still gets primary media session", () => {
+    vi.spyOn(registry, "getStream").mockReturnValue(compareStreamAnnouncement());
+
+    const envelope = makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1");
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("ms-primary");
+
+    // Response echoes primary mediaSessionId but NO compareVariantId
+    const connManager = runtime.getConnectionManager();
+    const connection = connManager.getConnection("g-1");
+    const mockSendToPeer = connection.sendToPeer as ReturnType<typeof vi.fn>;
+    const sentPayload = mockSendToPeer.mock.calls[0][1] as Record<string, unknown>;
+    expect(sentPayload.mediaSessionId).toBe("ms-primary");
+    expect(sentPayload.compareVariantId).toBeUndefined();
+  });
+
+  it("compare join with exact B mediaSessionId gets B credentials", () => {
+    vi.spyOn(registry, "getStream").mockReturnValue(compareStreamAnnouncement());
+
+    const envelope = {
+      ...makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1"),
+      payload: {
+        logicalStreamId: "stream-1",
+        viewerDeviceId: "viewer-1",
+        viewerDisplayName: "Viewer",
+        mediaSessionId: "ms-b",
+      } as Record<string, unknown>,
+    };
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("ms-b");
+
+    // Response echoes exact selected mediaSessionId
+    const connManager = runtime.getConnectionManager();
+    const connection = connManager.getConnection("g-1");
+    const mockSendToPeer = connection.sendToPeer as ReturnType<typeof vi.fn>;
+    const sentPayload = mockSendToPeer.mock.calls[0][1] as Record<string, unknown>;
+    expect(sentPayload.mediaSessionId).toBe("ms-b");
+  });
+
+  it("compare join with compareVariantId B and no exact mediaSessionId gets B credentials", () => {
+    vi.spyOn(registry, "getStream").mockReturnValue(compareStreamAnnouncement());
+
+    const envelope = {
+      ...makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1"),
+      payload: {
+        logicalStreamId: "stream-1",
+        viewerDeviceId: "viewer-1",
+        viewerDisplayName: "Viewer",
+        compareVariantId: "B",
+      } as Record<string, unknown>,
+    };
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).not.toBeNull();
+    expect(result!.mediaSessionId).toBe("ms-b");
+
+    // Response echoes compareVariantId B and the resolved B mediaSessionId
+    const connManager = runtime.getConnectionManager();
+    const connection = connManager.getConnection("g-1");
+    const mockSendToPeer = connection.sendToPeer as ReturnType<typeof vi.fn>;
+    const sentPayload = mockSendToPeer.mock.calls[0][1] as Record<string, unknown>;
+    expect(sentPayload.compareVariantId).toBe("B");
+    expect(sentPayload.mediaSessionId).toBe("ms-b");
+  });
+
+  it("mismatch between requested variant and requested mediaSessionId rejects", () => {
+    vi.spyOn(registry, "getStream").mockReturnValue(compareStreamAnnouncement());
+
+    const envelope = {
+      ...makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1"),
+      payload: {
+        logicalStreamId: "stream-1",
+        viewerDeviceId: "viewer-1",
+        viewerDisplayName: "Viewer",
+        compareVariantId: "A",
+        mediaSessionId: "ms-b", // mismatch: variant A but ms-b
+      } as Record<string, unknown>,
+    };
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+
+    // Rejection preserves correlation fields
+    const connManager = runtime.getConnectionManager();
+    const connection = connManager.getConnection("g-1");
+    const mockSendToPeer = connection.sendToPeer as ReturnType<typeof vi.fn>;
+    expect(mockSendToPeer).toHaveBeenCalled();
+    const sentPayload = mockSendToPeer.mock.calls[0][1] as Record<string, unknown>;
+    expect(sentPayload.accepted).toBe(false);
+    expect(sentPayload.compareVariantId).toBe("A");
+    expect(sentPayload.mediaSessionId).toBe("ms-b");
+  });
+
+  it("arbitrary mediaSessionId outside active compare metadata rejects", () => {
+    vi.spyOn(registry, "getStream").mockReturnValue(compareStreamAnnouncement());
+
+    const envelope = {
+      ...makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1"),
+      payload: {
+        logicalStreamId: "stream-1",
+        viewerDeviceId: "viewer-1",
+        viewerDisplayName: "Viewer",
+        mediaSessionId: "ms-arbitrary",
+      } as Record<string, unknown>,
+    };
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+
+    // Rejection preserves the requested mediaSessionId
+    const connManager = runtime.getConnectionManager();
+    const connection = connManager.getConnection("g-1");
+    const mockSendToPeer = connection.sendToPeer as ReturnType<typeof vi.fn>;
+    expect(mockSendToPeer).toHaveBeenCalled();
+    const sentPayload = mockSendToPeer.mock.calls[0][1] as Record<string, unknown>;
+    expect(sentPayload.accepted).toBe(false);
+    expect(sentPayload.mediaSessionId).toBe("ms-arbitrary");
+    expect(sentPayload.compareVariantId).toBeUndefined();
+  });
+
+  it("compare join with compareVariantId B when B is not configured rejects", () => {
+    // Stream has no variantBDescriptor (B not configured)
+    vi.spyOn(registry, "getStream").mockReturnValue(compareStreamAnnouncement({
+      variantBDescriptor: undefined,
+    }));
+
+    const envelope = {
+      ...makeJoinRequestEnvelope("g-1", "viewer-1", "stream-1"),
+      payload: {
+        logicalStreamId: "stream-1",
+        viewerDeviceId: "viewer-1",
+        viewerDisplayName: "Viewer",
+        compareVariantId: "B",
+      } as Record<string, unknown>,
+    };
+    const result = binding.handleJoinRequest(envelope);
+
+    expect(result).toBeNull();
+
+    const connManager = runtime.getConnectionManager();
+    const connection = connManager.getConnection("g-1");
+    const mockSendToPeer = connection.sendToPeer as ReturnType<typeof vi.fn>;
+    expect(mockSendToPeer).toHaveBeenCalled();
+    const sentPayload = mockSendToPeer.mock.calls[0][1] as Record<string, unknown>;
+    expect(sentPayload.accepted).toBe(false);
+    expect(sentPayload.compareVariantId).toBe("B");
   });
 });

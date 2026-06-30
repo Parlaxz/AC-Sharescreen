@@ -1,11 +1,31 @@
 #include "NativePresenter.h"
+
+// Guard against Windows min/max macro conflicts (CMake provides NOMINMAX,
+// but this ensures correctness if the file is compiled outside CMake).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <cstdio>
 #include <chrono>
+#include <algorithm>
+
 #include <d3d11_1.h>
 #include <dxgi1_4.h>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
+
+// ── CUDA headers (official, driver API) ─────────────────────────────────
+// When SCREENLINK_ENABLE_CUDA_PRESENTER is defined, we use the official
+// CUDA driver API (cu* functions) declared in <cuda.h> and <cudaD3D11.h>.
+// The import library cuda.lib is linked by CMakeLists.txt when the toggle
+// is enabled.  Using the driver API ensures the binary only depends on
+// cuda.dll (present with any NVIDIA driver) rather than cudart.dll.
+#ifdef SCREENLINK_ENABLE_CUDA_PRESENTER
+#include <cuda.h>
+#include <cudaD3D11.h>
+#endif
 
 namespace screenlink::video {
 
@@ -43,10 +63,16 @@ void PresenterDiagnostics::Reset() {
     presenterResizes = 0;
     presenterAttachCount = 0;
     presenterDetachCount = 0;
+    queueEnqueued = 0;
+    queueDequeued = 0;
+    queueOverflowDrops = 0;
+    staleGenerationDrops = 0;
+    queueDepth = 0;
+    queueMaxDepth = 0;
 }
 
 PresenterSnapshot NativePresenter::GetSnapshot() const {
-    PresenterSnapshot snap;
+    PresenterSnapshot snap{};
     snap.framesPresented = diag_.framesPresented.load();
     snap.framesDropped = diag_.framesDropped.load();
     snap.presentErrors = diag_.presentErrors.load();
@@ -58,7 +84,15 @@ PresenterSnapshot NativePresenter::GetSnapshot() const {
     snap.presenterResizes = diag_.presenterResizes.load();
     snap.presenterAttachCount = diag_.presenterAttachCount.load();
     snap.presenterDetachCount = diag_.presenterDetachCount.load();
-    snap.active = active_;
+
+    snap.queueEnqueued = diag_.queueEnqueued.load();
+    snap.queueDequeued = diag_.queueDequeued.load();
+    snap.queueOverflowDrops = diag_.queueOverflowDrops.load();
+    snap.staleGenerationDrops = diag_.staleGenerationDrops.load();
+    snap.queueDepth = diag_.queueDepth.load();
+    snap.queueMaxDepth = diag_.queueMaxDepth.load();
+
+    snap.active = active_.load();
     return snap;
 }
 
@@ -69,20 +103,18 @@ LRESULT CALLBACK NativePresenter::PresenterWndProc(
 {
     switch (msg) {
         case WM_ERASEBKGND:
-            return 1; // Prevent flicker
+            return 1;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(hwnd, &ps);
-            // Presenter surface is drawn via D3D swapchain, not GDI
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_NCHITTEST:
-            return HTTRANSPARENT; // Pass through all mouse events
+            return HTTRANSPARENT;
         case WM_MOUSEACTIVATE:
-            return MA_NOACTIVATE; // Never activate
+            return MA_NOACTIVATE;
         case WM_SETFOCUS:
-            // Redirect focus to owner if possible
             if (GetParent(hwnd)) {
                 SetFocus(GetParent(hwnd));
             }
@@ -93,6 +125,50 @@ LRESULT CALLBACK NativePresenter::PresenterWndProc(
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// ── PresenterQueue ──────────────────────────────────────────────────────
+
+PresenterQueue::PresenterQueue(uint32_t capacity)
+    : capacity_(capacity)
+    , slots_(std::make_unique<uint32_t[]>(capacity))
+{
+    for (uint32_t i = 0; i < capacity; ++i) {
+        slots_[i] = UINT32_MAX;
+    }
+}
+
+bool PresenterQueue::TryPush(uint32_t slotIndex) {
+    uint64_t t = tail_.load(std::memory_order_relaxed);
+    uint64_t h = head_.load(std::memory_order_acquire);
+
+    if (t - h >= capacity_) {
+        return false; // Full
+    }
+
+    slots_[t % capacity_] = slotIndex;
+    tail_.store(t + 1, std::memory_order_release);
+    return true;
+}
+
+bool PresenterQueue::TryPop(uint32_t& slotIndex) {
+    uint64_t h = head_.load(std::memory_order_relaxed);
+    uint64_t t = tail_.load(std::memory_order_acquire);
+
+    if (h >= t) {
+        return false; // Empty
+    }
+
+    slotIndex = slots_[h % capacity_];
+    head_.store(h + 1, std::memory_order_release);
+    return true;
+}
+
+uint32_t PresenterQueue::Size() const {
+    uint64_t t = tail_.load(std::memory_order_acquire);
+    uint64_t h = head_.load(std::memory_order_relaxed);
+    uint64_t sz = t - h;
+    return sz > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(sz);
+}
+
 // ── Construction / Destruction ──────────────────────────────────────────
 
 NativePresenter::NativePresenter() = default;
@@ -101,10 +177,10 @@ NativePresenter::~NativePresenter() {
     Detach();
 }
 
-// ── Attach: create presenter window and D3D11 resources ────────────────
+// ── Attach: create presenter window, D3D11, persistent slots, start thread ──
 
 bool NativePresenter::Attach(HWND ownerHwnd, uint32_t initialWidth, uint32_t initialHeight) {
-    if (active_) {
+    if (active_.load()) {
         Detach();
     }
 
@@ -117,15 +193,15 @@ bool NativePresenter::Attach(HWND ownerHwnd, uint32_t initialWidth, uint32_t ini
     surfaceWidth_ = initialWidth > 0 ? initialWidth : 1;
     surfaceHeight_ = initialHeight > 0 ? initialHeight : 1;
 
-    // Register window class once
+    // ── Register window class once ──
     if (!s_windowClassRegistered) {
         WNDCLASSEXW wc = {};
         wc.cbSize = sizeof(WNDCLASSEXW);
         wc.style = CS_HREDRAW | CS_VREDRAW | CS_NOCLOSE;
         wc.lpfnWndProc = PresenterWndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
-        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
-        wc.hbrBackground = nullptr; // No background brush — D3D paints
+        wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+        wc.hbrBackground = nullptr;
         wc.lpszClassName = kWindowClassName;
         if (!RegisterClassExW(&wc)) {
             DWORD err = GetLastError();
@@ -137,11 +213,7 @@ bool NativePresenter::Attach(HWND ownerHwnd, uint32_t initialWidth, uint32_t ini
         s_windowClassRegistered = true;
     }
 
-    // Determine initial position relative to owner
-    RECT ownerRect;
-    GetClientRect(ownerHwnd, &ownerRect);
-
-    // Create presenter window: child of owner, non-activating, transparent to input
+    // ── Create presenter window ──
     presenterWnd_ = CreateWindowExW(
         WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOREDIRECTIONBITMAP,
         kWindowClassName,
@@ -162,10 +234,9 @@ bool NativePresenter::Attach(HWND ownerHwnd, uint32_t initialWidth, uint32_t ini
         return false;
     }
 
-    // Set layered window attributes: 255 opacity, transparent color key not needed
     SetLayeredWindowAttributes(presenterWnd_, 0, 255, LWA_ALPHA);
 
-    // Create D3D11 device and swapchain
+    // ── Create D3D11 device and swapchain ──
     if (!CreateD3DResources(ownerHwnd_, surfaceWidth_, surfaceHeight_)) {
         DestroyWindow(presenterWnd_);
         presenterWnd_ = nullptr;
@@ -173,26 +244,51 @@ bool NativePresenter::Attach(HWND ownerHwnd, uint32_t initialWidth, uint32_t ini
         return false;
     }
 
-    active_ = true;
+    // ── Create persistent frame slots ──
+    if (!CreatePersistentSlots(surfaceWidth_, surfaceHeight_, surfaceWidth_ * 4)) {
+        fprintf(stderr, "[NativePresenter] Failed to create persistent slots\n");
+        DestroyD3DResources();
+        DestroyWindow(presenterWnd_);
+        presenterWnd_ = nullptr;
+        ownerHwnd_ = nullptr;
+        return false;
+    }
+
+    // ── Start the presenter thread ──
+    StartPresenterThread();
+
+    active_.store(true);
     diag_.presenterAttachCount++;
 
-    printf("[NativePresenter] Attached: %ux%u, owner=0x%p, presenter=0x%p\n",
+    printf("[NativePresenter] Attached: %ux%u, owner=0x%p, presenter=0x%p, slots=%u\n",
            surfaceWidth_, surfaceHeight_,
            reinterpret_cast<void*>(ownerHwnd_),
-           reinterpret_cast<void*>(presenterWnd_));
+           reinterpret_cast<void*>(presenterWnd_),
+           kPresenterSlotCount);
 
     return true;
 }
 
-// ── Detach: destroy resources ──────────────────────────────────────────
+// ── Detach ──────────────────────────────────────────────────────────────
 
 void NativePresenter::Detach() {
-    if (!active_) return;
+    if (!active_.exchange(false)) return;
 
     printf("[NativePresenter] Detaching...\n");
 
-    DestroyD3DResources();
+    // ── Stop the presenter thread first ──
+    StopPresenterThread();
 
+    // ── Destroy persistent slots ──
+    DestroyPersistentSlots();
+
+    // ── Destroy D3D11 resources ──
+    {
+        std::lock_guard<std::mutex> lock(d3dMutex_);
+        DestroyD3DResources();
+    }
+
+    // ── Destroy window ──
     if (presenterWnd_ && IsWindow(presenterWnd_)) {
         DestroyWindow(presenterWnd_);
     }
@@ -203,7 +299,6 @@ void NativePresenter::Detach() {
     surfaceHeight_ = 0;
     surfaceX_ = 0;
     surfaceY_ = 0;
-    active_ = false;
 
     diag_.presenterDetachCount++;
     printf("[NativePresenter] Detached\n");
@@ -212,12 +307,11 @@ void NativePresenter::Detach() {
 // ── Bounds / Visibility ────────────────────────────────────────────────
 
 void NativePresenter::UpdateBounds(int32_t x, int32_t y, uint32_t width, uint32_t height) {
-    if (!active_ || !presenterWnd_) return;
+    if (!active_.load() || !presenterWnd_) return;
 
     surfaceX_ = x;
     surfaceY_ = y;
 
-    // Clamp to minimum 1x1
     if (width == 0) width = 1;
     if (height == 0) height = 1;
 
@@ -225,7 +319,6 @@ void NativePresenter::UpdateBounds(int32_t x, int32_t y, uint32_t width, uint32_
     surfaceWidth_ = width;
     surfaceHeight_ = height;
 
-    // Move and resize window
     SetWindowPos(presenterWnd_, HWND_TOP,
                  x, y,
                  static_cast<int>(width),
@@ -233,6 +326,7 @@ void NativePresenter::UpdateBounds(int32_t x, int32_t y, uint32_t width, uint32_
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     if (sizeChanged) {
+        std::lock_guard<std::mutex> lock(d3dMutex_);
         ResizeSwapchain(width, height);
         diag_.RecordResize();
         printf("[NativePresenter] Resized to %ux%u at (%d, %d)\n", width, height, x, y);
@@ -240,369 +334,486 @@ void NativePresenter::UpdateBounds(int32_t x, int32_t y, uint32_t width, uint32_
 }
 
 void NativePresenter::SetVisible(bool visible) {
-    if (!active_ || !presenterWnd_) return;
+    if (!active_.load() || !presenterWnd_) return;
     visible_ = visible;
     ShowWindow(presenterWnd_, visible ? SW_SHOWNA : SW_HIDE);
 }
 
-// ── Present from D3D11 texture (GPU-resident) ──────────────────────────
+// ── Frame submission: Present from D3D11 texture ───────────────────────
 
 bool NativePresenter::PresentFrame(ID3D11Texture2D* srcTexture) {
-    if (!active_ || !swapChain_ || !backBuffer_) {
+    if (!active_.load() || !srcTexture) {
         return false;
     }
 
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-    ComPtr<ID3D11DeviceContext> context;
-    d3dDevice_->GetImmediateContext(&context);
-    if (!context) {
-        diag_.RecordPresent(0, false);
-        return false;
-    }
-
-    // Copy source texture to backbuffer
-    D3D11_BOX srcBox = {};
-    srcBox.left = 0;
-    srcBox.top = 0;
-    srcBox.right = surfaceWidth_;
-    srcBox.bottom = surfaceHeight_;
-    srcBox.front = 0;
-    srcBox.back = 1;
-
-    D3D11_TEXTURE2D_DESC srcDesc;
-    srcTexture->GetDesc(&srcDesc);
-
-    if (srcDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-        srcDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM) {
-        // Same-format copy
-        context->CopySubresourceRegion(backBuffer_.Get(), 0, 0, 0, 0,
-                                        srcTexture, 0, &srcBox);
-    } else {
-        // Format mismatch — skip present
-        fprintf(stderr, "[NativePresenter] Unsupported source format: %d\n", srcDesc.Format);
-        diag_.RecordPresent(0, false);
-        return false;
-    }
-
-    // Present the swapchain
-    HRESULT hr = swapChain_->Present(1, 0); // VSync enabled (1 = wait for VBlank)
-    if (FAILED(hr)) {
-        fprintf(stderr, "[NativePresenter] Present failed: 0x%08lX\n", hr);
+    // Claim an available slot
+    uint32_t slotIdx = ClaimAvailableSlot();
+    if (slotIdx >= kPresenterSlotCount) {
         diag_.framesDropped++;
-        diag_.RecordPresent(0, false);
-
-        // Try to recover by recreating swapchain
-        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-            fprintf(stderr, "[NativePresenter] Device lost — attempting recovery\n");
-            DestroyD3DResources();
-            if (ownerHwnd_) {
-                CreateD3DResources(ownerHwnd_, surfaceWidth_, surfaceHeight_);
-            }
-        }
+        diag_.queueOverflowDrops++;
         return false;
     }
 
-    auto t_end = std::chrono::high_resolution_clock::now();
-    uint64_t elapsedUs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count());
-    diag_.RecordPresent(elapsedUs, true);
+    // Copy from source texture to persistent slot
+    if (!FillSlotFromD3DTexture(slotIdx, srcTexture)) {
+        slots_[slotIdx].available.store(true, std::memory_order_release);
+        diag_.presentErrors++;
+        return false;
+    }
+
+    // Enqueue for presenter thread
+    if (!EnqueueSlot(slotIdx)) {
+        slots_[slotIdx].available.store(true, std::memory_order_release);
+        diag_.framesDropped++;
+        diag_.queueOverflowDrops++;
+        return false;
+    }
 
     return true;
 }
 
-// ── Present from raw RGBA8 pixel data via GPU upload (GPU-to-GPU fallback) ──
+// ── Frame submission: Present from CPU buffer (GPU upload) ─────────────
 
 bool NativePresenter::PresentFrameFromCudaBuffer(const void* srcData,
                                                    uint32_t width,
                                                    uint32_t height,
                                                    uint32_t stride) {
-    if (!active_ || !swapChain_ || !backBuffer_) {
+    if (!active_.load() || !srcData) {
         return false;
     }
 
-    auto t_start = std::chrono::high_resolution_clock::now();
-
-    // Ensure staging texture exists and matches dimensions
-    if (!stagingTexture_ ||
-        surfaceWidth_ != width ||
-        surfaceHeight_ != height) {
-
-        D3D11_TEXTURE2D_DESC stagingDesc = {};
-        stagingDesc.Width = width;
-        stagingDesc.Height = height;
-        stagingDesc.MipLevels = 1;
-        stagingDesc.ArraySize = 1;
-        stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        stagingDesc.SampleDesc.Count = 1;
-        stagingDesc.SampleDesc.Quality = 0;
-        stagingDesc.Usage = D3D11_USAGE_DEFAULT;
-        stagingDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
-        stagingDesc.CPUAccessFlags = 0;
-
-        HRESULT hr = d3dDevice_->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture_);
-        if (FAILED(hr)) {
-            fprintf(stderr, "[NativePresenter] CreateTexture2D (staging) failed: 0x%08lX\n", hr);
-            diag_.RecordPresent(0, false);
-            return false;
-        }
-    }
-
-    // Upload data via UpdateSubresource (GPU upload from CPU buffer)
-    // This is the GPU-to-GPU fallback path — data originates from CUDA GPU memory
-    // but must be copied through CPU. The primary GPU-resident path uses
-    // PresentFrame() with a D3D11 texture directly.
-    ComPtr<ID3D11DeviceContext> context;
-    d3dDevice_->GetImmediateContext(&context);
-
-    UINT srcRowPitch = stride > 0 ? stride : width * 4;
-    context->UpdateSubresource(stagingTexture_.Get(), 0, nullptr, srcData, srcRowPitch, 0);
-
-    // Copy staging texture to backbuffer
-    D3D11_BOX srcBox = {};
-    srcBox.left = 0;
-    srcBox.top = 0;
-    srcBox.right = width;
-    srcBox.bottom = height;
-    srcBox.front = 0;
-    srcBox.back = 1;
-
-    context->CopySubresourceRegion(backBuffer_.Get(), 0, 0, 0, 0,
-                                    stagingTexture_.Get(), 0, &srcBox);
-
-    // Present
-    HRESULT hr = swapChain_->Present(1, 0);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[NativePresenter] Present (fallback) failed: 0x%08lX\n", hr);
+    // Claim an available slot
+    uint32_t slotIdx = ClaimAvailableSlot();
+    if (slotIdx >= kPresenterSlotCount) {
         diag_.framesDropped++;
-        diag_.RecordPresent(0, false);
+        diag_.queueOverflowDrops++;
         return false;
     }
 
-    auto t_end = std::chrono::high_resolution_clock::now();
-    uint64_t elapsedUs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count());
-    diag_.RecordPresent(elapsedUs, true);
+    // Upload CPU data into the persistent slot
+    if (!FillSlotFromCpuBuffer(slotIdx, srcData, width, height, stride)) {
+        slots_[slotIdx].available.store(true, std::memory_order_release);
+        diag_.presentErrors++;
+        return false;
+    }
+
+    // Enqueue for presenter thread
+    if (!EnqueueSlot(slotIdx)) {
+        slots_[slotIdx].available.store(true, std::memory_order_release);
+        diag_.framesDropped++;
+        diag_.queueOverflowDrops++;
+        return false;
+    }
 
     return true;
 }
 
-// ── CUDA-D3D11 interop support ─────────────────────────────────────────
-//
-// These functions are loaded dynamically from cuda.dll to avoid a hard
-// link-time dependency when the NVIDIA VFX SDK is not present.
-
-// Forward declarations for CUDA types (loaded dynamically)
-// These match the actual CUDA types but avoid requiring cuda.h.
-typedef int CUresult;                            // cudaError_t is int
-typedef void* CUdeviceptr;                       // CUDA device pointer
-typedef void* cudaGraphicsResource_t;            // Opaque handle
-typedef void* cudaArray_t;                       // Opaque handle
-typedef void* CUstream;                          // Opaque handle
-// cudaMemcpyKind: 0=HostToHost, 1=HostToDevice, 2=DeviceToDevice, 3=DeviceToHost
-
-struct CudaInterop {
-    HMODULE cudaDll = nullptr;
-
-    // Function pointer types (using generic int/void* for CUDA types)
-    using CudaGraphicsD3D11RegisterResource_t = CUresult(*)(
-        cudaGraphicsResource_t*, ID3D11Resource*, unsigned int);
-    using CudaGraphicsMapResources_t = CUresult(*)(int, cudaGraphicsResource_t*, CUstream);
-    using CudaGraphicsSubResourceGetMappedArray_t = CUresult(*)(
-        cudaArray_t*, cudaGraphicsResource_t, unsigned int, unsigned int);
-    using CudaMemcpy2DToArray_t = CUresult(*)(
-        cudaArray_t, size_t, size_t, const void*, size_t, size_t, size_t, int);
-    using CudaGraphicsUnmapResources_t = CUresult(*)(int, cudaGraphicsResource_t*, CUstream);
-    using CudaGraphicsUnregisterResource_t = CUresult(*)(cudaGraphicsResource_t);
-
-    CudaGraphicsD3D11RegisterResource_t CudaGraphicsD3D11RegisterResource = nullptr;
-    CudaGraphicsMapResources_t CudaGraphicsMapResources = nullptr;
-    CudaGraphicsSubResourceGetMappedArray_t CudaGraphicsSubResourceGetMappedArray = nullptr;
-    CudaMemcpy2DToArray_t CudaMemcpy2DToArray = nullptr;
-    CudaGraphicsUnmapResources_t CudaGraphicsUnmapResources = nullptr;
-    CudaGraphicsUnregisterResource_t CudaGraphicsUnregisterResource = nullptr;
-
-    bool Load() {
-        if (cudaDll) return true;
-        cudaDll = LoadLibraryW(L"cuda.dll");
-        if (!cudaDll) return false;
-
-        CudaGraphicsD3D11RegisterResource =
-            reinterpret_cast<CudaGraphicsD3D11RegisterResource_t>(
-                GetProcAddress(cudaDll, "cudaGraphicsD3D11RegisterResource"));
-        CudaGraphicsMapResources =
-            reinterpret_cast<CudaGraphicsMapResources_t>(
-                GetProcAddress(cudaDll, "cudaGraphicsMapResources"));
-        CudaGraphicsSubResourceGetMappedArray =
-            reinterpret_cast<CudaGraphicsSubResourceGetMappedArray_t>(
-                GetProcAddress(cudaDll, "cudaGraphicsSubResourceGetMappedArray"));
-        CudaMemcpy2DToArray =
-            reinterpret_cast<CudaMemcpy2DToArray_t>(
-                GetProcAddress(cudaDll, "cudaMemcpy2DToArray"));
-        CudaGraphicsUnmapResources =
-            reinterpret_cast<CudaGraphicsUnmapResources_t>(
-                GetProcAddress(cudaDll, "cudaGraphicsUnmapResources"));
-        CudaGraphicsUnregisterResource =
-            reinterpret_cast<CudaGraphicsUnregisterResource_t>(
-                GetProcAddress(cudaDll, "cudaGraphicsUnregisterResource"));
-
-        if (!CudaGraphicsD3D11RegisterResource || !CudaGraphicsMapResources ||
-            !CudaGraphicsSubResourceGetMappedArray || !CudaMemcpy2DToArray ||
-            !CudaGraphicsUnmapResources || !CudaGraphicsUnregisterResource) {
-            FreeLibrary(cudaDll);
-            cudaDll = nullptr;
-            return false;
-        }
-        return true;
-    }
-
-    ~CudaInterop() {
-        if (cudaDll) {
-            FreeLibrary(cudaDll);
-            cudaDll = nullptr;
-        }
-    }
-};
-
-static CudaInterop g_cudaInterop;
-static bool g_cudaInteropLoaded = false;
-
-// ── CUDA-D3D11 interop path (GPU-resident, no CPU roundtrip) ──────────
+// ── Frame submission: Present from CUDA GPU buffer ─────────────────────
 
 bool NativePresenter::PresentFrameFromCudaGpuBuffer(const void* cudaDevicePtr,
                                                       uint32_t width,
                                                       uint32_t height,
                                                       uint32_t stride) {
-    if (!active_ || !swapChain_ || !backBuffer_ || !cudaDevicePtr) {
+    if (!active_.load() || !cudaDevicePtr) {
         return false;
     }
 
-    auto t_start = std::chrono::high_resolution_clock::now();
+#ifndef SCREENLINK_ENABLE_CUDA_PRESENTER
+    // CUDA presenter not compiled in — fall back to CPU upload path
+    return PresentFrameFromCudaBuffer(cudaDevicePtr, width, height, stride);
+#else
+    // Claim an available slot
+    uint32_t slotIdx = ClaimAvailableSlot();
+    if (slotIdx >= kPresenterSlotCount) {
+        diag_.framesDropped++;
+        diag_.queueOverflowDrops++;
+        return false;
+    }
 
-    // Ensure CUDA interop is loaded
-    if (!g_cudaInteropLoaded) {
-        g_cudaInteropLoaded = g_cudaInterop.Load();
-        if (!g_cudaInteropLoaded) {
-            fprintf(stderr, "[NativePresenter] CUDA interop not available, falling back\n");
+    // Copy from CUDA device pointer into persistent slot via CUDA-D3D11 interop
+    if (!FillSlotFromCudaGpu(slotIdx, cudaDevicePtr, width, height, stride)) {
+        slots_[slotIdx].available.store(true, std::memory_order_release);
+        diag_.presentErrors++;
+        return false;
+    }
+
+    // Enqueue for presenter thread
+    if (!EnqueueSlot(slotIdx)) {
+        slots_[slotIdx].available.store(true, std::memory_order_release);
+        diag_.framesDropped++;
+        diag_.queueOverflowDrops++;
+        return false;
+    }
+
+    return true;
+#endif
+}
+
+// ── Slot management ─────────────────────────────────────────────────────
+
+uint32_t NativePresenter::ClaimAvailableSlot() {
+    // Round-robin: try slots in order starting from producerSlotCounter_.
+    // A slot is available when its atomic flag is true.
+    uint64_t base = producerSlotCounter_.fetch_add(1, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < kPresenterSlotCount; ++i) {
+        uint32_t idx = static_cast<uint32_t>((base + i) % kPresenterSlotCount);
+        bool expected = true;
+        if (slots_[idx].available.compare_exchange_strong(expected, false,
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return idx;
+        }
+    }
+    return kPresenterSlotCount; // All slots busy
+}
+
+bool NativePresenter::FillSlotFromCudaGpu(uint32_t slotIndex,
+                                           const void* cudaDevicePtr,
+                                           uint32_t width, uint32_t height,
+                                           uint32_t stride) {
+#ifdef SCREENLINK_ENABLE_CUDA_PRESENTER
+    if (slotIndex >= kPresenterSlotCount) return false;
+    auto& slot = slots_[slotIndex];
+    if (!slot.cudaResource || !slot.texture) return false;
+
+    CUresult cuErr;
+
+    // Map the CUDA graphics resource for write access
+    cuErr = cuGraphicsMapResources(1, reinterpret_cast<CUgraphicsResource*>(&slot.cudaResource), nullptr);
+    if (cuErr != CUDA_SUCCESS) {
+        fprintf(stderr, "[NativePresenter] cuGraphicsMapResources failed: %d\n", static_cast<int>(cuErr));
+        return false;
+    }
+
+    // Get the mapped array from the subresource
+    CUarray mappedArray = nullptr;
+    cuErr = cuGraphicsSubResourceGetMappedArray(&mappedArray,
+                reinterpret_cast<CUgraphicsResource>(slot.cudaResource), 0, 0);
+    if (cuErr != CUDA_SUCCESS || !mappedArray) {
+        cuGraphicsUnmapResources(1, reinterpret_cast<CUgraphicsResource*>(&slot.cudaResource), nullptr);
+        fprintf(stderr, "[NativePresenter] cuGraphicsSubResourceGetMappedArray failed: %d\n",
+                static_cast<int>(cuErr));
+        return false;
+    }
+
+    // Copy from CUDA device pointer to the mapped D3D11 texture
+    CUDA_MEMCPY2D copyDesc = {};
+    copyDesc.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copyDesc.srcDevice = reinterpret_cast<CUdeviceptr>(cudaDevicePtr);
+    copyDesc.srcPitch = stride > 0 ? stride : width * 4;
+
+    copyDesc.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+    copyDesc.dstArray = mappedArray;
+    copyDesc.dstXInBytes = 0;
+    copyDesc.dstY = 0;
+
+    copyDesc.WidthInBytes = width * 4;
+    copyDesc.Height = height;
+
+    cuErr = cuMemcpy2D(&copyDesc);
+    if (cuErr != CUDA_SUCCESS) {
+        cuGraphicsUnmapResources(1, reinterpret_cast<CUgraphicsResource*>(&slot.cudaResource), nullptr);
+        fprintf(stderr, "[NativePresenter] cuMemcpy2D failed: %d\n", static_cast<int>(cuErr));
+        return false;
+    }
+
+    // Unmap the resource (D3D can now access the texture)
+    cuErr = cuGraphicsUnmapResources(1, reinterpret_cast<CUgraphicsResource*>(&slot.cudaResource), nullptr);
+    if (cuErr != CUDA_SUCCESS) {
+        fprintf(stderr, "[NativePresenter] cuGraphicsUnmapResources failed: %d\n", static_cast<int>(cuErr));
+        return false;
+    }
+
+    slot.width = width;
+    slot.height = height;
+    slot.stride = stride;
+    return true;
+#else
+    (void)slotIndex;
+    (void)cudaDevicePtr;
+    (void)width;
+    (void)height;
+    (void)stride;
+    return false;
+#endif
+}
+
+bool NativePresenter::FillSlotFromD3DTexture(uint32_t slotIndex, ID3D11Texture2D* src) {
+    if (slotIndex >= kPresenterSlotCount || !src) return false;
+    auto& slot = slots_[slotIndex];
+    if (!slot.texture) return false;
+
+    std::lock_guard<std::mutex> lock(d3dMutex_);
+    ComPtr<ID3D11DeviceContext> context;
+    d3dDevice_->GetImmediateContext(&context);
+    if (!context) return false;
+
+    D3D11_TEXTURE2D_DESC srcDesc;
+    src->GetDesc(&srcDesc);
+
+    // Copy from source to persistent slot texture
+    context->CopyResource(slot.texture.Get(), src);
+
+    slot.width = srcDesc.Width;
+    slot.height = srcDesc.Height;
+    slot.stride = srcDesc.Width * 4;
+    return true;
+}
+
+bool NativePresenter::FillSlotFromCpuBuffer(uint32_t slotIndex,
+                                              const void* srcData,
+                                              uint32_t width, uint32_t height,
+                                              uint32_t stride) {
+    if (slotIndex >= kPresenterSlotCount || !srcData) return false;
+    auto& slot = slots_[slotIndex];
+    if (!slot.texture) return false;
+
+    std::lock_guard<std::mutex> lock(d3dMutex_);
+    ComPtr<ID3D11DeviceContext> context;
+    d3dDevice_->GetImmediateContext(&context);
+    if (!context) return false;
+
+    UINT srcRowPitch = stride > 0 ? stride : width * 4;
+    context->UpdateSubresource(slot.texture.Get(), 0, nullptr, srcData, srcRowPitch, 0);
+
+    slot.width = width;
+    slot.height = height;
+    slot.stride = srcRowPitch;
+    return true;
+}
+
+bool NativePresenter::EnqueueSlot(uint32_t slotIndex) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        if (!frameQueue_.TryPush(slotIndex)) {
             return false;
         }
     }
 
-    // Create a D3D11 staging texture compatible with CUDA interop
-    D3D11_TEXTURE2D_DESC stagingDesc = {};
-    stagingDesc.Width = width;
-    stagingDesc.Height = height;
-    stagingDesc.MipLevels = 1;
-    stagingDesc.ArraySize = 1;
-    stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    stagingDesc.SampleDesc.Count = 1;
-    stagingDesc.SampleDesc.Quality = 0;
-    stagingDesc.Usage = D3D11_USAGE_DEFAULT;
-    stagingDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    stagingDesc.CPUAccessFlags = 0;
-    stagingDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // Required for CUDA interop
-
-    ComPtr<ID3D11Texture2D> interopTexture;
-    HRESULT hr = d3dDevice_->CreateTexture2D(&stagingDesc, nullptr, &interopTexture);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[NativePresenter] CreateTexture2D (CUDA interop) failed: 0x%08lX\n", hr);
-        return false;
+    // Update diagnostics
+    uint32_t qd = frameQueue_.Size();
+    diag_.queueDepth.store(qd, std::memory_order_relaxed);
+    if (qd > diag_.queueMaxDepth.load(std::memory_order_relaxed)) {
+        diag_.queueMaxDepth.store(qd, std::memory_order_relaxed);
     }
+    diag_.queueEnqueued++;
 
-    // Register the D3D11 texture with CUDA
-    cudaGraphicsResource_t cudaResource = nullptr;
-    CUresult cuResult = g_cudaInterop.CudaGraphicsD3D11RegisterResource(
-        &cudaResource, interopTexture.Get(), 0); // 0 = None flags
-
-    if (cuResult != 0) {
-        fprintf(stderr, "[NativePresenter] cudaGraphicsD3D11RegisterResource failed: %d\n",
-                static_cast<int>(cuResult));
-        return false;
-    }
-
-    // Map the resource for CUDA access
-    cuResult = g_cudaInterop.CudaGraphicsMapResources(1, &cudaResource, nullptr);
-    if (cuResult != 0) {
-        g_cudaInterop.CudaGraphicsUnregisterResource(cudaResource);
-        fprintf(stderr, "[NativePresenter] cudaGraphicsMapResources failed: %d\n",
-                static_cast<int>(cuResult));
-        return false;
-    }
-
-    // Get the mapped array
-    cudaArray_t cudaArray = nullptr;
-    cuResult = g_cudaInterop.CudaGraphicsSubResourceGetMappedArray(
-        &cudaArray, cudaResource, 0, 0);
-    if (cuResult != 0 || !cudaArray) {
-        g_cudaInterop.CudaGraphicsUnmapResources(1, &cudaResource, nullptr);
-        g_cudaInterop.CudaGraphicsUnregisterResource(cudaResource);
-        fprintf(stderr, "[NativePresenter] CudaGraphicsSubResourceGetMappedArray failed: %d\n",
-                static_cast<int>(cuResult));
-        return false;
-    }
-
-    // Copy from CUDA device pointer to the mapped D3D11 texture array
-    UINT srcRowPitch = stride > 0 ? stride : width * 4;
-    cuResult = g_cudaInterop.CudaMemcpy2DToArray(
-        cudaArray,
-        0, 0,                   // Offset in array
-        cudaDevicePtr,
-        srcRowPitch,            // Source row pitch (bytes)
-        width * 4,              // Width to copy (bytes)
-        height,                 // Height to copy (rows)
-        2);                     // cudaMemcpyDeviceToDevice = 2
-
-    if (cuResult != 0) {
-        g_cudaInterop.CudaGraphicsUnmapResources(1, &cudaResource, nullptr);
-        g_cudaInterop.CudaGraphicsUnregisterResource(cudaResource);
-        fprintf(stderr, "[NativePresenter] cudaMemcpy2DToArray failed: %d\n",
-                static_cast<int>(cuResult));
-        return false;
-    }
-
-    // Unmap the resource
-    g_cudaInterop.CudaGraphicsUnmapResources(1, &cudaResource, nullptr);
-
-    // Unregister the resource (we'll create a new one next time)
-    g_cudaInterop.CudaGraphicsUnregisterResource(cudaResource);
-
-    // Copy interop texture to backbuffer and present
-    ComPtr<ID3D11DeviceContext> context;
-    d3dDevice_->GetImmediateContext(&context);
-
-    D3D11_BOX srcBox = {};
-    srcBox.left = 0;
-    srcBox.top = 0;
-    srcBox.right = std::min(width, surfaceWidth_);
-    srcBox.bottom = std::min(height, surfaceHeight_);
-    srcBox.front = 0;
-    srcBox.back = 1;
-
-    context->CopySubresourceRegion(backBuffer_.Get(), 0, 0, 0, 0,
-                                    interopTexture.Get(), 0, &srcBox);
-
-    hr = swapChain_->Present(1, 0);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[NativePresenter] Present (CUDA interop) failed: 0x%08lX\n", hr);
-        diag_.framesDropped++;
-        diag_.RecordPresent(0, false);
-        return false;
-    }
-
-    auto t_end = std::chrono::high_resolution_clock::now();
-    uint64_t elapsedUs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count());
-    diag_.RecordPresent(elapsedUs, true);
-
+    // Wake the presenter thread
+    queueCv_.notify_one();
     return true;
+}
+
+// ── Presenter thread ────────────────────────────────────────────────────
+
+void NativePresenter::StartPresenterThread() {
+    presenterThreadStop_ = false;
+    presenterThread_ = std::thread(&NativePresenter::PresenterThreadProc, this);
+}
+
+void NativePresenter::StopPresenterThread() {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        presenterThreadStop_ = true;
+    }
+    queueCv_.notify_one();
+
+    if (presenterThread_.joinable()) {
+        presenterThread_.join();
+    }
+}
+
+void NativePresenter::PresenterThreadProc() {
+    printf("[NativePresenter] Presenter thread started\n");
+
+    // Set thread name for debugging
+    typedef HRESULT(WINAPI *SetThreadDescriptionFunc)(HANDLE, PCWSTR);
+    auto setThreadDesc = reinterpret_cast<SetThreadDescriptionFunc>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
+    if (setThreadDesc) {
+        setThreadDesc(GetCurrentThread(), L"ScreenLink Presenter");
+    }
+
+    while (true) {
+        uint32_t slotIndex = UINT32_MAX;
+
+        // Wait for work (or shutdown).  The predicate checks queue non-empty
+        // WITHOUT side effects — TryPop happens exclusively in the loop body.
+        {
+            std::unique_lock<std::mutex> lock(queueMutex_);
+            queueCv_.wait(lock, [this]() {
+                return presenterThreadStop_ || frameQueue_.Size() > 0;
+            });
+
+            if (presenterThreadStop_) {
+                break;
+            }
+
+            // Pop the next available frame; spurious wake → keep waiting
+            if (!frameQueue_.TryPop(slotIndex)) {
+                continue;
+            }
+        }
+
+        if (slotIndex >= kPresenterSlotCount) {
+            continue;
+        }
+
+        auto& slot = slots_[slotIndex];
+
+        // ── Present the slot ──
+        auto t_start = std::chrono::high_resolution_clock::now();
+
+        bool presentOk = false;
+        {
+            std::lock_guard<std::mutex> lock(d3dMutex_);
+
+            if (swapChain_ && backBuffer_) {
+                ComPtr<ID3D11DeviceContext> context;
+                d3dDevice_->GetImmediateContext(&context);
+
+                if (context && slot.texture) {
+                    // Copy slot texture to backbuffer
+                    D3D11_BOX srcBox = {};
+                    srcBox.left = 0;
+                    srcBox.top = 0;
+                    srcBox.right = std::min(slot.width, surfaceWidth_);
+                    srcBox.bottom = std::min(slot.height, surfaceHeight_);
+                    srcBox.front = 0;
+                    srcBox.back = 1;
+
+                    context->CopySubresourceRegion(backBuffer_.Get(), 0, 0, 0, 0,
+                                                    slot.texture.Get(), 0, &srcBox);
+
+                    // Present with VSync (waits on presenter thread, not processing thread)
+                    HRESULT hr = swapChain_->Present(1, 0);
+                    if (SUCCEEDED(hr)) {
+                        presentOk = true;
+                    } else {
+                        fprintf(stderr, "[NativePresenter] Present failed: 0x%08lX\n", hr);
+                        diag_.presentErrors++;
+                        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+                            fprintf(stderr, "[NativePresenter] Device lost\n");
+                            // Recovery is handled on next Attach
+                        }
+                    }
+                }
+            }
+        }
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        uint64_t elapsedUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count());
+        diag_.RecordPresent(elapsedUs, presentOk);
+        diag_.queueDequeued++;
+
+        // Release slot back to the pool
+        slot.available.store(true, std::memory_order_release);
+    }
+
+    // Drain any remaining frames
+    uint32_t remaining;
+    while (frameQueue_.TryPop(remaining)) {
+        if (remaining < kPresenterSlotCount) {
+            slots_[remaining].available.store(true, std::memory_order_release);
+        }
+    }
+
+    printf("[NativePresenter] Presenter thread stopped\n");
+}
+
+// ── Persistent slot creation / destruction ─────────────────────────────
+
+bool NativePresenter::CreatePersistentSlots(uint32_t width, uint32_t height, uint32_t stride) {
+    DestroyPersistentSlots();
+
+    if (!d3dDevice_) return false;
+
+    for (uint32_t i = 0; i < kPresenterSlotCount; ++i) {
+        auto& slot = slots_[i];
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED; // Required for CUDA interop
+
+        HRESULT hr = d3dDevice_->CreateTexture2D(&desc, nullptr, &slot.texture);
+        if (FAILED(hr)) {
+            fprintf(stderr, "[NativePresenter] CreateTexture2D (slot %u) failed: 0x%08lX\n", i, hr);
+            DestroyPersistentSlots();
+            return false;
+        }
+
+        slot.width = width;
+        slot.height = height;
+        slot.stride = stride > 0 ? stride : width * 4;
+        slot.available.store(true, std::memory_order_release);
+
+#ifdef SCREENLINK_ENABLE_CUDA_PRESENTER
+        // Register the D3D11 texture with CUDA (one-time, persistent)
+        CUresult cuErr = cuGraphicsD3D11RegisterResource(
+            reinterpret_cast<CUgraphicsResource*>(&slot.cudaResource),
+            slot.texture.Get(),
+            CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD);
+
+        if (cuErr != CUDA_SUCCESS) {
+            fprintf(stderr, "[NativePresenter] cuGraphicsD3D11RegisterResource (slot %u) failed: %d\n",
+                    i, static_cast<int>(cuErr));
+            slot.cudaResource = nullptr;
+            DestroyPersistentSlots();
+            return false;
+        }
+
+        printf("[NativePresenter] Slot %u: D3D11 texture + CUDA resource registered\n", i);
+#endif
+    }
+
+    // Reset producer counter for fresh round-robin allocation
+    producerSlotCounter_.store(0, std::memory_order_relaxed);
+
+    printf("[NativePresenter] %u persistent slots created: %ux%u, stride=%u\n",
+           kPresenterSlotCount, width, height, stride);
+    return true;
+}
+
+void NativePresenter::DestroyPersistentSlots() {
+    for (uint32_t i = 0; i < kPresenterSlotCount; ++i) {
+        auto& slot = slots_[i];
+
+#ifdef SCREENLINK_ENABLE_CUDA_PRESENTER
+        if (slot.cudaResource) {
+            CUresult cuErr = cuGraphicsUnregisterResource(
+                reinterpret_cast<CUgraphicsResource>(slot.cudaResource));
+            if (cuErr != CUDA_SUCCESS) {
+                fprintf(stderr, "[NativePresenter] cuGraphicsUnregisterResource (slot %u) failed: %d\n",
+                        i, static_cast<int>(cuErr));
+            }
+            slot.cudaResource = nullptr;
+        }
+#endif
+
+        slot.texture.Reset();
+        slot.width = 0;
+        slot.height = 0;
+        slot.stride = 0;
+        slot.available.store(true, std::memory_order_release);
+    }
+
+    producerSlotCounter_.store(0, std::memory_order_relaxed);
 }
 
 // ── D3D11 resource management ──────────────────────────────────────────
 
 bool NativePresenter::CreateD3DResources(HWND ownerHwnd, uint32_t width, uint32_t height) {
+    // d3dMutex_ should already be held by caller
     DestroyD3DResources();
 
-    // Create D3D11 device with debug layer only in debug builds
     UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 #ifdef _DEBUG
     createFlags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -620,9 +831,9 @@ bool NativePresenter::CreateD3DResources(HWND ownerHwnd, uint32_t width, uint32_
     D3D_FEATURE_LEVEL selectedLevel;
 
     HRESULT hr = D3D11CreateDevice(
-        nullptr,                          // Default adapter
+        nullptr,
         D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,                          // Software rasterizer DLL
+        nullptr,
         createFlags,
         featureLevels,
         ARRAYSIZE(featureLevels),
@@ -637,14 +848,6 @@ bool NativePresenter::CreateD3DResources(HWND ownerHwnd, uint32_t width, uint32_
         return false;
     }
 
-    // Get DXGI device for swapchain creation
-    ComPtr<IDXGIDevice> dxgiDevice;
-    hr = device.As(&dxgiDevice);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[NativePresenter] QueryInterface(IDXGIDevice) failed: 0x%08lX\n", hr);
-        return false;
-    }
-
     d3dDevice_ = device;
     d3dContext_ = context;
 
@@ -655,7 +858,6 @@ bool NativePresenter::CreateD3DResources(HWND ownerHwnd, uint32_t width, uint32_
 }
 
 void NativePresenter::DestroyD3DResources() {
-    stagingTexture_.Reset();
     backBuffer_.Reset();
     swapChain_.Reset();
 
@@ -665,6 +867,10 @@ void NativePresenter::DestroyD3DResources() {
         d3dContext_.Reset();
     }
     d3dDevice_.Reset();
+}
+
+void NativePresenter::ResetBackbuffer() {
+    backBuffer_.Reset();
 }
 
 bool NativePresenter::CreateSwapchain(HWND ownerHwnd, uint32_t width, uint32_t height) {
@@ -690,27 +896,28 @@ bool NativePresenter::CreateSwapchain(HWND ownerHwnd, uint32_t width, uint32_t h
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.BufferCount = 2; // Double buffered
+    desc.BufferCount = 2;
     desc.Scaling = DXGI_SCALING_STRETCH;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
+    HWND targetWnd = presenterWnd_ ? presenterWnd_ : ownerHwnd;
+
     hr = factory->CreateSwapChainForHwnd(
         d3dDevice_.Get(),
-        presenterWnd_ ? presenterWnd_ : ownerHwnd,
+        targetWnd,
         &desc,
-        nullptr, // Fullscreen desc
-        nullptr, // Restrict to output
+        nullptr,
+        nullptr,
         &swapChain_
     );
 
     if (FAILED(hr)) {
-        // Fall back to legacy flip sequential if flip discard not supported
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         hr = factory->CreateSwapChainForHwnd(
             d3dDevice_.Get(),
-            presenterWnd_ ? presenterWnd_ : ownerHwnd,
+            targetWnd,
             &desc,
             nullptr,
             nullptr,
@@ -723,19 +930,16 @@ bool NativePresenter::CreateSwapchain(HWND ownerHwnd, uint32_t width, uint32_t h
         return false;
     }
 
-    // Get backbuffer
     hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer_));
     if (FAILED(hr)) {
         fprintf(stderr, "[NativePresenter] GetBuffer (backbuffer) failed: 0x%08lX\n", hr);
         return false;
     }
 
-    // Disable ALT+ENTER fullscreen toggle
     ComPtr<IDXGIFactory> factoryBase;
     factory.As(&factoryBase);
     if (factoryBase) {
-        factoryBase->MakeWindowAssociation(presenterWnd_ ? presenterWnd_ : ownerHwnd,
-                                           DXGI_MWA_NO_ALT_ENTER);
+        factoryBase->MakeWindowAssociation(targetWnd, DXGI_MWA_NO_ALT_ENTER);
     }
 
     printf("[NativePresenter] Swapchain created: %ux%u\n", width, height);
@@ -745,12 +949,10 @@ bool NativePresenter::CreateSwapchain(HWND ownerHwnd, uint32_t width, uint32_t h
 bool NativePresenter::ResizeSwapchain(uint32_t width, uint32_t height) {
     if (!swapChain_) return false;
 
-    // Release backbuffer before resize
     backBuffer_.Reset();
-    stagingTexture_.Reset();
 
     HRESULT hr = swapChain_->ResizeBuffers(
-        2, // Buffer count
+        2,
         width,
         height,
         DXGI_FORMAT_B8G8R8A8_UNORM,

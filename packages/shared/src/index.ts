@@ -80,6 +80,8 @@ export * from "./groups.js";
 export * from "./quality-presets.js";
 export * from "./group-sync.js";
 
+export * from "./compare-config.js";
+
 // group-control-messages.js uses selective re-exports to avoid name conflicts
 // with control-messages.js (DEDUP_WINDOW_MS, buildEnvelope).
 export {
@@ -115,6 +117,8 @@ export {
   StreamLeavePayloadSchema,
   MediaBindPayloadSchema,
   ViewerPausedPayloadSchema,
+  ViewerStatusPayloadSchema,
+  CompareVariantUpdatedPayloadSchema,
   QualityViewerRequestPayloadSchema,
   QualityViewerClearPayloadSchema,
   QualityEffectivePayloadSchema,

@@ -37,6 +37,11 @@ set(SOURCES
   src/NativePresenter.cpp
 )
 
+# CUDA-D3D11 presenter (disabled by default).
+# When ON, uses official CUDA headers and links cuda.lib for GPU-resident
+# presenter path with persistent interop resources and a dedicated presenter thread.
+option(SCREENLINK_ENABLE_CUDA_PRESENTER "Enable CUDA-D3D11 presenter interop" OFF)
+
 # NVIDIA VFX integration (disabled by default)
 option(SCREENLINK_ENABLE_NVIDIA_VFX "Enable NVIDIA Video Effects SDK" OFF)
 set(NVIDIA_VFX_SDK_ROOT "" CACHE PATH "Path to NVIDIA Video Effects SDK root")
@@ -95,6 +100,24 @@ add_custom_command(
                            -P "${CMAKE_SOURCE_DIR}/cmake/GenerateBuildInfo.cmake"
   COMMENT "Regenerating build provenance header..."
 )
+
+# CUDA-D3D11 presenter support (Slice 3)
+# Requires CUDA toolkit (v12+ recommended) for official cuda.h/cudaD3D11.h headers.
+if(SCREENLINK_ENABLE_CUDA_PRESENTER)
+  find_package(CUDAToolkit REQUIRED)
+  target_include_directories(${PROJECT_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_compile_definitions(${PROJECT_NAME} PRIVATE SCREENLINK_ENABLE_CUDA_PRESENTER)
+  # Link CUDA driver API library for cuGraphicsD3D11RegisterResource etc.
+  if(TARGET CUDA::cuda_driver)
+    target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cuda_driver)
+  elseif(TARGET CUDA::cuda)
+    target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cuda)
+  else()
+    # Fall back to direct path (CMake < 3.27)
+    target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/cuda.lib")
+  endif()
+  message(STATUS "CUDA presenter enabled: ${CUDAToolkit_INCLUDE_DIRS}")
+endif()
 
 # Link dwmapi.lib for DpiAwareness
 target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi)

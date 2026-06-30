@@ -71,7 +71,11 @@ vi.mock("../src/main/helper-path", () => ({
 // ─── Import after mocks are set up ──────────────────────────────────────────
 
 import { VideoHelperManager, FramePipeParser } from "../src/main/VideoHelperManager";
+import { SharedMemoryFrameRing, SlotState } from "../src/main/SharedMemoryFrameRing";
 import { Buffer } from "node:buffer";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -599,6 +603,332 @@ describe("VideoHelperManager — restart policy", () => {
     expect(onError).toHaveBeenCalledWith("Video helper reached max restart attempts");
 
     manager.destroy();
+  });
+});
+
+// ─── Slice 4: SHM completion correlation, bounded map, restart rejection ────
+
+describe("VideoHelperManager — Slice 4 SHM async completions", () => {
+  let manager: VideoHelperManager;
+  let tmpFile: string;
+
+  // Constants matching the C++ layout
+  const kMaxFrameSize = 33_177_600;
+  const SLOT_HEADER_OFFSET = 8;
+  const SLOT_INPUT_OFFSET = SLOT_HEADER_OFFSET + 104;
+  const SLOT_OUTPUT_OFFSET = SLOT_INPUT_OFFSET + kMaxFrameSize;
+  const SLOT_BYTE_SIZE = SLOT_OUTPUT_OFFSET + kMaxFrameSize;
+  const RING_TOTAL_SIZE = 3 * SLOT_BYTE_SIZE;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    manager = new VideoHelperManager();
+
+    // Create a temp SHM ring file
+    tmpFile = path.join(os.tmpdir(), `screenlink-shm-slice4-${Date.now()}.bin`);
+    const buf = Buffer.alloc(RING_TOTAL_SIZE, 0);
+    fs.writeFileSync(tmpFile, buf);
+  });
+
+  afterEach(() => {
+    manager.destroy();
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+  });
+
+  function createTestRing(): SharedMemoryFrameRing {
+    const ring = new SharedMemoryFrameRing();
+    ring.open(tmpFile);
+    return ring;
+  }
+
+  it("rejects all pending SHM completions on cleanup", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    // Manually inject a pending completion entry
+    let resolvedValue: any = "not-called";
+    const timer = setTimeout(() => {}, 100000);
+    (manager as any).pendingShmCompletions.set(0, {
+      slotIndex: 0,
+      generation: 1,
+      frameSequence: 42,
+      resolve: (val: any) => { resolvedValue = val; },
+      timer,
+    });
+
+    // Trigger cleanup (simulates restart)
+    (manager as any).cleanup();
+
+    // Pending completion should be rejected with null
+    expect(resolvedValue).toBeNull();
+    // Restart drop counter should be incremented
+    expect((manager as any).shmDropCounters.shmRestartDrops).toBe(1);
+    // Pending map should be empty
+    expect((manager as any).pendingShmCompletions.size).toBe(0);
+
+    // Use a separate ring to verify slot state (the manager's ring is closed by cleanup)
+    const checkRing = createTestRing();
+    expect(checkRing.readControl(0)).toBe(SlotState.Empty);
+    checkRing.close();
+
+    ring.close();
+  });
+
+  it("handles slotCompleted event — resolves pending promise", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    // Write test data to slot 0 (simulate what submitFrameViaShm does)
+    const generation = 1;
+    const frameSequence = 42;
+    const inputWidth = 64;
+    const inputHeight = 64;
+    const frameData = new Uint8Array(inputWidth * inputHeight * 4);
+    for (let i = 0; i < frameData.length; i++) frameData[i] = i & 0xFF;
+
+    ring.writeInput(0, generation, frameSequence, inputWidth, inputHeight,
+      inputWidth * 4, 2, inputWidth, inputHeight, 1, 2, frameData);
+
+    // Simulate helper processing: write resultCode=1 in output header
+    // resultCode is at byte offset 76 within the header.
+    // Slot 0's header starts at file offset SLOT_HEADER_OFFSET (8).
+    const resultCodeFileOff = 8 + 76; // slot 0 header offset + resultCode offset
+    const rcbuf = Buffer.alloc(4);
+    rcbuf.writeUInt32LE(1, 0);
+    ring.writeControl(0, SlotState.Done);
+    const fd = fs.openSync(tmpFile, "r+");
+    fs.writeSync(fd, rcbuf, 0, 4, resultCodeFileOff);
+    fs.closeSync(fd);
+
+    // Install a pending completion
+    let resolvedValue: any = null;
+    const timer = setTimeout(() => {}, 100000);
+    (manager as any).pendingShmCompletions.set(0, {
+      slotIndex: 0,
+      generation,
+      frameSequence,
+      resolve: (val: any) => { resolvedValue = val; },
+      timer,
+    });
+
+    // Simulate slotCompleted event arriving
+    (manager as any).handleShmSlotCompleted({
+      slotIndex: 0,
+      success: true,
+      resultCode: 1,
+      generation,
+      frameSequence,
+      configurationId: 1,
+      appliedQualityLevel: 3,
+      nativeInputReceiveUs: 100,
+      nativeUploadUs: 200,
+      nativeEffectUs: 500,
+      nativeDownloadUs: 300,
+      nativeTotalUs: 1100,
+    });
+
+    // The pending promise should resolve with the frame data
+    expect(resolvedValue).not.toBeNull();
+    expect(resolvedValue.generation).toBe(generation);
+    expect(resolvedValue.sequence).toBe(frameSequence);
+    expect(resolvedValue.width).toBe(inputWidth);
+    expect(resolvedValue.height).toBe(inputHeight);
+    // Slot should be released (Empty)
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+    // Completed counter incremented
+    expect((manager as any).shmDropCounters.shmTotalCompleted).toBe(1);
+
+    ring.close();
+  });
+
+  it("handles slotCompleted event — failure result resolves with null", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    // Install a pending completion
+    let resolvedValue: any = "not-called";
+    const timer = setTimeout(() => {}, 100000);
+    (manager as any).pendingShmCompletions.set(0, {
+      slotIndex: 0,
+      generation: 1,
+      frameSequence: 42,
+      resolve: (val: any) => { resolvedValue = val; },
+      timer,
+    });
+
+    // Set slot to Error
+    ring.writeControl(0, SlotState.Error);
+
+    // Simulate failed slotCompleted event
+    (manager as any).handleShmSlotCompleted({
+      slotIndex: 0,
+      success: false,
+      resultCode: 2,
+    });
+
+    // Pending should resolve with null
+    expect(resolvedValue).toBeNull();
+    // Slot should be released
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+
+    ring.close();
+  });
+
+  it("handles slotCompleted event — unknown slot is silently released", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    // Set slot to Done to simulate completed processing
+    ring.writeControl(0, SlotState.Done);
+
+    // Handle event for slot 0 with no pending entry (timed out)
+    (manager as any).handleShmSlotCompleted({
+      slotIndex: 0,
+      success: true,
+      resultCode: 1,
+    });
+
+    // Slot should be released regardless
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+
+    ring.close();
+  });
+
+  it("bounded completion map — busy slots increment drop counter", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    // Fill all 3 slots with pending completions
+    for (let i = 0; i < 3; i++) {
+      ring.writeControl(i, SlotState.Submitted);
+      (manager as any).pendingShmCompletions.set(i, {
+        slotIndex: i,
+        generation: 1,
+        frameSequence: i,
+        resolve: () => {},
+        timer: setTimeout(() => {}, 100000),
+      });
+    }
+
+    // findEmptySlot should return -1 (all busy)
+    expect(ring.findEmptySlot()).toBe(-1);
+
+    // Counter starts at 0
+    expect((manager as any).shmDropCounters.shmSlotBusyDrops).toBe(0);
+
+    ring.close();
+  });
+
+  it("bounded completion map — 3 concurrent slots tracked correctly", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    // Constants for file layout
+    const kMaxFrameSize = 33_177_600;
+    const HEADER_SIZE = 104;
+    const SLOT_HEADER_OFFSET = 8;
+    const SLOT_BYTE_SIZE = (SLOT_HEADER_OFFSET + HEADER_SIZE + kMaxFrameSize) + kMaxFrameSize;
+
+    // Write frame data to slot 1 so the header has a valid FRAME_MAGIC
+    const frameData = new Uint8Array(64 * 64 * 4);
+    ring.writeInput(1, 1, 101, 64, 64, 256, 2, 64, 64, 1, 2, frameData);
+
+    // Install 3 pending completions
+    for (let i = 0; i < 3; i++) {
+      ring.writeControl(i, SlotState.Submitted);
+      (manager as any).pendingShmCompletions.set(i, {
+        slotIndex: i,
+        generation: 1,
+        frameSequence: 100 + i,
+        resolve: () => {},
+        timer: setTimeout(() => {}, 100000),
+      });
+    }
+
+    expect((manager as any).pendingShmCompletions.size).toBe(3);
+
+    // Resolve slot 1: set Done + patch resultCode in header
+    let resolved1: any = "not-called";
+    const entry1 = (manager as any).pendingShmCompletions.get(1);
+    entry1.resolve = (val: any) => { resolved1 = val; };
+    ring.writeControl(1, SlotState.Done);
+    // Patch resultCode=1 in slot 1's output header (offset 76 in header)
+    const fileOffset = 1 * SLOT_BYTE_SIZE + SLOT_HEADER_OFFSET + 76;
+    const rcbuf = Buffer.alloc(4);
+    rcbuf.writeUInt32LE(1, 0);
+    const fd = fs.openSync(tmpFile, "r+");
+    fs.writeSync(fd, rcbuf, 0, 4, fileOffset);
+    fs.closeSync(fd);
+
+    (manager as any).handleShmSlotCompleted({
+      slotIndex: 1, success: true, resultCode: 1,
+    });
+    expect(resolved1).not.toBeNull();
+    expect((manager as any).pendingShmCompletions.size).toBe(2);
+    expect(ring.readControl(1)).toBe(SlotState.Empty);
+
+    // Slot 1 is now free
+    expect(ring.findEmptySlot()).toBe(1);
+
+    ring.close();
+  });
+
+  it("rejectAllShmCompletions clears all pending and resets slots", () => {
+    const ring = createTestRing();
+    (manager as any).shmRing = ring;
+    (manager as any).shmAvailable = true;
+
+    const resolved: any[] = [];
+
+    // Install 2 pending completions
+    for (let i = 0; i < 2; i++) {
+      ring.writeControl(i, SlotState.Submitted);
+      resolved[i] = "pending";
+      (manager as any).pendingShmCompletions.set(i, {
+        slotIndex: i,
+        generation: 1,
+        frameSequence: i,
+        resolve: (val: any) => { resolved[i] = val; },
+        timer: setTimeout(() => {}, 100000),
+      });
+    }
+
+    expect((manager as any).pendingShmCompletions.size).toBe(2);
+
+    // Reject all
+    (manager as any).rejectAllShmCompletions("test restart");
+
+    // All resolved with null
+    expect(resolved[0]).toBeNull();
+    expect(resolved[1]).toBeNull();
+    // Map is empty
+    expect((manager as any).pendingShmCompletions.size).toBe(0);
+    // Slots reset to Empty
+    expect(ring.readControl(0)).toBe(SlotState.Empty);
+    expect(ring.readControl(1)).toBe(SlotState.Empty);
+    // Drop counters incremented
+    expect((manager as any).shmDropCounters.shmRestartDrops).toBe(2);
+
+    ring.close();
+  });
+
+  it("getShmDropCounters returns a snapshot of counters", () => {
+    // Set some counters
+    (manager as any).shmDropCounters.shmSlotBusyDrops = 5;
+    (manager as any).shmDropCounters.shmRestartDrops = 3;
+
+    const snapshot = manager.getShmDropCounters();
+    expect(snapshot.shmSlotBusyDrops).toBe(5);
+    expect(snapshot.shmRestartDrops).toBe(3);
+    expect(snapshot.shmTotalSubmitted).toBe(0);
+    expect(snapshot.shmTotalCompleted).toBe(0);
+    expect(snapshot.shmCompletionTimeouts).toBe(0);
   });
 });
 

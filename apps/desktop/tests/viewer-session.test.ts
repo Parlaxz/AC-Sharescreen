@@ -442,6 +442,215 @@ describe("ViewerSession — leave/rejoin lifecycle", () => {
   });
 });
 
+// ─── Easy Compare foundation ─────────────────────────────────────────
+
+describe("ViewerSession — Easy Compare foundation", () => {
+  let session: ViewerSession;
+  let runtime: ReturnType<typeof makeMockRuntime>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtime = makeMockRuntime();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    session = new ViewerSession();
+  });
+
+  afterEach(() => {
+    session.destroy();
+    vi.restoreAllMocks();
+  });
+
+  function mockJoinResponseOk() {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+  }
+
+  function mockCompareJoinOk() {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-compare-A",
+      streamId: "stream-1",
+      password: "vdo-password",
+      compareVariantId: "A",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+  }
+
+  it("stream.join.request carries compareVariantId and exact mediaSessionId when provided", async () => {
+    mockCompareJoinOk();
+    await session.start({
+      groupId: "g-compare",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-compare-A",
+      hostName: "Host",
+      compareVariantId: "A",
+    });
+
+    const joinPayload = (runtime as any).__sendToPeer.mock.calls.find(
+      ([, p]: [string, Record<string, unknown>]) => p.type === "stream.join.request",
+    )?.[1];
+    expect(joinPayload).toBeDefined();
+    expect(joinPayload.compareVariantId).toBe("A");
+    expect(joinPayload.mediaSessionId).toBe("ms-compare-A");
+  });
+
+  it("stream.join.request omits compareVariantId when not provided (legacy)", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+
+    const joinPayload = (runtime as any).__sendToPeer.mock.calls.find(
+      ([, p]: [string, Record<string, unknown>]) => p.type === "stream.join.request",
+    )?.[1];
+    expect(joinPayload).toBeDefined();
+    expect(joinPayload.compareVariantId).toBeUndefined();
+    // mediaSessionId should NOT be present in join.request for legacy (single-view) flows
+    // since it's derived from options.mediaSessionId on the host side.
+  });
+
+  it("join response echoes compareVariantId when present", async () => {
+    mockCompareJoinOk();
+    await session.start({
+      groupId: "g-compare",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-compare-A",
+      hostName: "Host",
+      compareVariantId: "A",
+    });
+
+    // The compareVariantId from the response should be preserved internally
+    expect((session as any)._compareVariantId).toBe("A");
+  });
+
+  it("stream.leave carries mediaSessionId and compareVariantId in compare mode", async () => {
+    mockCompareJoinOk();
+    await session.start({
+      groupId: "g-compare",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-compare-A",
+      hostName: "Host",
+      compareVariantId: "A",
+    });
+
+    session.stop();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const leavePayload = (runtime as any).__sendToPeer.mock.calls.find(
+      ([, p]: [string, Record<string, unknown>]) => p.type === "stream.leave",
+    )?.[1];
+    expect(leavePayload).toBeDefined();
+    expect(leavePayload.mediaSessionId).toBe("ms-compare-A");
+    expect(leavePayload.compareVariantId).toBe("A");
+  });
+
+  it("stream.leave omits compare fields in legacy mode", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+
+    session.stop();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const leavePayload = (runtime as any).__sendToPeer.mock.calls.find(
+      ([, p]: [string, Record<string, unknown>]) => p.type === "stream.leave",
+    )?.[1];
+    expect(leavePayload).toBeDefined();
+    expect(leavePayload.mediaSessionId).toBeUndefined();
+    expect(leavePayload.compareVariantId).toBeUndefined();
+  });
+
+  it("viewer.status carries mediaSessionId and compareVariantId in compare mode", async () => {
+    mockCompareJoinOk();
+    await session.start({
+      groupId: "g-compare",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-compare-A",
+      hostName: "Host",
+      compareVariantId: "A",
+    });
+
+    // Trigger a status report by calling the internal method
+    await (session as any).buildAndSendViewerStatus();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Find the viewer.status call (not the join.request)
+    const statusPayload = (runtime as any).__sendToPeer.mock.calls.find(
+      ([, p]: [string, Record<string, unknown>]) => p.type === "viewer.status",
+    )?.[1];
+    expect(statusPayload).toBeDefined();
+    expect(statusPayload.mediaSessionId).toBe("ms-compare-A");
+    expect(statusPayload.compareVariantId).toBe("A");
+  });
+
+  it("viewer.status omits compare fields in legacy mode", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+
+    await (session as any).buildAndSendViewerStatus();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const statusPayload = (runtime as any).__sendToPeer.mock.calls.find(
+      ([, p]: [string, Record<string, unknown>]) => p.type === "viewer.status",
+    )?.[1];
+    expect(statusPayload).toBeDefined();
+    expect(statusPayload.mediaSessionId).toBeUndefined();
+    expect(statusPayload.compareVariantId).toBeUndefined();
+  });
+
+  it("single-view start() works unchanged without any compare options", async () => {
+    mockJoinResponseOk();
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+
+    expect(session.state).not.toBe("error");
+    expect(mockViewerClientMethods.createAndConnect).toHaveBeenCalled();
+    expect((session as any)._compareVariantId).toBeNull();
+  });
+});
+
 describe("ViewerSession — track event handling", () => {
   let session: ViewerSession;
   let runtime: ReturnType<typeof makeMockRuntime>;
@@ -741,5 +950,195 @@ describe("ViewerSession — destroy lifecycle", () => {
 
     expect((session as any)._bindToken).toBeNull();
     expect((session as any)._bindMediaSessionId).toBeNull();
+  });
+});
+
+// ─── Concurrent instances (instance-local generations) ──────────────────
+
+describe("ViewerSession — instance-local generations", () => {
+  let sessionA: ViewerSession;
+  let sessionB: ViewerSession;
+  let runtime: ReturnType<typeof makeMockRuntime>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtime = makeMockRuntime();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    sessionA = new ViewerSession();
+    sessionB = new ViewerSession();
+  });
+
+  afterEach(() => {
+    sessionA.destroy();
+    sessionB.destroy();
+    vi.restoreAllMocks();
+  });
+
+  function mockJoinOk() {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+  }
+
+  it("two ViewerSession instances can run concurrently without interfering", async () => {
+    mockJoinOk();
+    mockJoinOk(); // same setup works for both
+
+    await Promise.all([
+      sessionA.start({
+        groupId: "g-1", hostDeviceId: "host-1",
+        logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+      }),
+      sessionB.start({
+        groupId: "g-2", hostDeviceId: "host-2",
+        logicalStreamId: "ls-2", mediaSessionId: "ms-2", hostName: "Host2",
+      }),
+    ]);
+
+    // Both sessions should have succeeded independently
+    expect(sessionA.state).not.toBe("error");
+    expect(sessionB.state).not.toBe("error");
+    expect(sessionA.viewerSessionId).toMatch(/^[0-9a-f-]{8,}/);
+    expect(sessionB.viewerSessionId).toMatch(/^[0-9a-f-]{8,}/);
+    expect(sessionA.viewerSessionId).not.toBe(sessionB.viewerSessionId);
+    // Both should have created their own ViewerClient
+    expect(mockViewerClientMethods.createAndConnect).toHaveBeenCalledTimes(2);
+    expect(mockViewerClientMethods.view).toHaveBeenCalledTimes(2);
+  });
+
+  it("destroy on session A does not invalidate session B", async () => {
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    // Start session B and hold it at join response
+    let resolveB!: (value: unknown) => void;
+    mockRuntimeMethods.waitForJoinResponse.mockReturnValue(
+      new Promise((resolve) => { resolveB = resolve; }),
+    );
+    const startBPromise = sessionB.start({
+      groupId: "g-2", hostDeviceId: "host-2",
+      logicalStreamId: "ls-2", mediaSessionId: "ms-2", hostName: "Host2",
+    });
+
+    // Destroy session A mid-flow of session B
+    await sessionA.destroy();
+    expect(sessionA.state).toBe("ended");
+
+    // Session B should still be alive (in-flight), resolve it
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-2", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+    resolveB({
+      accepted: true,
+      mediaJoinMetadata: "token-b",
+      mediaSessionId: "ms-2",
+      streamId: "stream-2",
+      password: "vdo-password",
+    });
+
+    await startBPromise;
+    // Session B's flow completed because it uses its own generation
+    expect(sessionB.state).not.toBe("error");
+    // Both A and B called createAndConnect: A before destroy, B after
+    expect(mockViewerClientMethods.createAndConnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("retry on session A does not reset session B", async () => {
+    mockJoinOk();
+    await Promise.all([
+      sessionA.start({
+        groupId: "g-1", hostDeviceId: "host-1",
+        logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+      }),
+      sessionB.start({
+        groupId: "g-2", hostDeviceId: "host-2",
+        logicalStreamId: "ls-2", mediaSessionId: "ms-2", hostName: "Host2",
+      }),
+    ]);
+
+    const genA = (sessionA as any)._generation;
+    const genB = (sessionB as any)._generation;
+
+    // Retry session A
+    vi.clearAllMocks();
+    mockJoinOk();
+    await sessionA.retry();
+
+    // Session A got a new generation
+    expect((sessionA as any)._generation).not.toBe(genA);
+    // Session B's generation should be unchanged
+    expect((sessionB as any)._generation).toBe(genB);
+    // Session B should still be watching
+    expect(sessionB.state).not.toBe("error");
+  });
+
+  it("pause on session A does not affect session B's pause generation", async () => {
+    mockJoinOk();
+    await sessionA.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+    await sessionB.start({
+      groupId: "g-2", hostDeviceId: "host-2",
+      logicalStreamId: "ls-2", mediaSessionId: "ms-2", hostName: "Host2",
+    });
+
+    const pauseGenA = (sessionA as any)._pauseGeneration;
+    const pauseGenB = (sessionB as any)._pauseGeneration;
+
+    // Simulate pause on A (viewerClient mock needed)
+    (sessionA as any).viewerClient = {
+      pauseMedia: vi.fn().mockResolvedValue(undefined),
+      getSDK: vi.fn(),
+      resumeMedia: vi.fn(),
+      sendMediaBind: vi.fn(),
+    };
+    await sessionA.pause();
+
+    expect((sessionA as any)._pauseGeneration).not.toBe(pauseGenA);
+    // Session B's pause generation should be unchanged
+    expect((sessionB as any)._pauseGeneration).toBe(pauseGenB);
+  });
+
+  it("each session cleans only its own video element on destroy", () => {
+    const videoA = {
+      pause: vi.fn(), srcObject: "stream-a",
+      autoplay: false, playsInline: false, muted: false, volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+    const videoB = {
+      pause: vi.fn(), srcObject: "stream-b",
+      autoplay: false, playsInline: false, muted: false, volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    sessionA.bindVideoElement(videoA);
+    sessionB.bindVideoElement(videoB);
+    Object.defineProperty(sessionA, "_receivedStream", { value: "stream-a", writable: true });
+    Object.defineProperty(sessionB, "_receivedStream", { value: "stream-b", writable: true });
+
+    sessionA.destroy();
+
+    // Only A's video should be paused and cleared
+    expect(videoA.pause).toHaveBeenCalled();
+    expect((videoA as any).srcObject).toBeNull();
+    expect(videoB.pause).not.toHaveBeenCalled();
+    expect((videoB as any).srcObject).toBe("stream-b");
   });
 });

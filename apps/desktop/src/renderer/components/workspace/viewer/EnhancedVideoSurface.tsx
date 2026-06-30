@@ -26,6 +26,7 @@ import type {
   ProcessorStats,
 } from "@/services/viewer-image-processing/viewer-image-processor";
 import { ViewerImageProcessor } from "@/services/viewer-image-processing/viewer-image-processor";
+import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
 import { getImageProcessingCapabilities, augmentWithNvidiaCapability } from "@/services/viewer-image-processing/viewer-image-capabilities";
 import { createImageProcessingBackend } from "@/services/viewer-image-processing/viewer-image-backend-factory";
 import { FallbackChainController } from "@/services/viewer-image-processing/fallback-chain-controller";
@@ -63,6 +64,13 @@ export interface EnhancedVideoSurfaceProps {
   onStatsUpdate?: (stats: ProcessorStats) => void;
   /** Called when the active backend changes (including fallback) */
   onBackendChange?: (effective: string, fallbackReason?: string) => void;
+
+  /**
+   * Mutable ref filled in by the component when the processor is created.
+   * Provides subscribeFrameEvents and waitForConfigApplied for benchmark
+   * orchestration.  Cleared to null when the processor is destroyed.
+   */
+  processorApiRef?: React.MutableRefObject<ProcessorAPI | null>;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -78,6 +86,7 @@ export function EnhancedVideoSurface({
   onFirstFrame,
   onStatsUpdate,
   onBackendChange,
+  processorApiRef,
 }: EnhancedVideoSurfaceProps): ReactElement | null {
   const instanceId = useRef<number>(nextMonotonicId());
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -293,6 +302,31 @@ export function EnhancedVideoSurface({
 
         processor.start(settings);
         processorRef.current = processor;
+
+        // Populate the processor API ref so the parent can subscribe
+        // to frame events and config-applied events for benchmarks.
+        if (processorApiRef) {
+          processorApiRef.current = {
+            subscribeFrameEvents: (listener) => processor!.subscribeFrameEvents(listener),
+            waitForConfigApplied: (timeoutMs = 5000) => {
+              return new Promise<import("@/services/viewer-image-processing/frame-events").ConfigAppliedEvent | null>((resolve) => {
+                if (!processor) {
+                  resolve(null);
+                  return;
+                }
+                const unsub = processor.subscribeConfigApplied((event) => {
+                  unsub();
+                  clearTimeout(timer);
+                  resolve(event);
+                });
+                const timer = setTimeout(() => {
+                  unsub();
+                  resolve(null);
+                }, timeoutMs);
+              });
+            },
+          };
+        }
       } catch (err) {
         if (!cancelled) {
           setFallback(true);
@@ -338,6 +372,9 @@ export function EnhancedVideoSurface({
         });
         processor.destroy(destroyReason).catch(() => {});
         processorRef.current = null;
+        if (processorApiRef) {
+          processorApiRef.current = null;
+        }
       }
     };
   }, [enabled, fallback, videoElement]); // intentionally limited deps — no retryAttempt

@@ -23,8 +23,10 @@
  *   Any state → cancelled | failed
  */
 
-import type { ViewerImageEnhancementSettings, ProcessingBackend } from "./viewer-image-settings";
+import { canonicalQualityLevel } from "@screenlink/shared";
+import type { ViewerImageEnhancementSettings, ProcessingBackend, NvidiaQuality } from "./viewer-image-settings";
 import { VIEWER_IMAGE_ENHANCEMENT_DEFAULTS } from "./viewer-image-defaults";
+import type { FrameEvent, FrameEventListener, ConfigAppliedEvent } from "./frame-events";
 
 // ─── State machine ───────────────────────────────────────────────────────────
 
@@ -185,6 +187,26 @@ const DEFAULT_SCENARIOS: BenchmarkScenarioConfig[] = [
   },
 ];
 
+/**
+ * Semantic quality ordering — highest quality first.
+ * Used for the highestQuality aggregate label and scenario ranking.
+ * The order reflects actual visual quality, NOT processing time.
+ */
+export const BENCHMARK_QUALITY_RANKING: Record<BenchmarkScenarioId, number> = {
+  "nvidia-vsr-ultra": 80,
+  "nvidia-vsr-high": 70,
+  "nvidia-vsr-medium": 60,
+  "nvidia-vsr-low": 50,
+  "webgl2-fsr1-easu": 40,
+  "webgl2-lanczos": 30,
+  "webgl2-bicubic": 20,
+  "webgl2-native": 10,
+};
+
+function compareQuality(a: BenchmarkScenarioId, b: BenchmarkScenarioId): number {
+  return (BENCHMARK_QUALITY_RANKING[b] ?? 0) - (BENCHMARK_QUALITY_RANKING[a] ?? 0);
+}
+
 // ─── Result types ────────────────────────────────────────────────────────────
 
 export interface PerFrameSample {
@@ -196,6 +218,8 @@ export interface PerFrameSample {
   nativeOutputHeight: number;
   nativeQualityLevel: number | null;
   backpressureDrop: boolean;
+  /** Raw frame event that produced this sample (for export). */
+  rawFrameEvent?: FrameEvent;
 }
 
 export interface BenchmarkScenarioResult {
@@ -227,6 +251,46 @@ export interface BenchmarkScenarioResult {
   timedOut: boolean;
 }
 
+/**
+ * Environment info snapshot collected at benchmark start.
+ * Populated during the collecting-environment phase from the
+ * host's readStats() and optional getEnvironment().
+ */
+export interface BenchmarkEnvironmentInfo {
+  /** Active processing backend at collection time. */
+  processingBackend: string;
+  /** Native output width (from processor stats). */
+  nativeOutputWidth: number;
+  /** Native output height (from processor stats). */
+  nativeOutputHeight: number;
+  /** Native quality level (null for WebGL backends). */
+  nativeQualityLevel: number | null;
+  /** Achieved FPS at collection time. */
+  completedFps: number | null;
+  /** Whether NVIDIA RTX Video was reported as available. */
+  nvidiaAvailable: boolean;
+  /** NVIDIA adapter name (null if not NVIDIA or unknown). */
+  nvidiaAdapterName: string | null;
+  /** NVIDIA driver version (null if not NVIDIA or unknown). */
+  nvidiaDriverVersion: string | null;
+}
+
+export interface NativeBenchmarkRunSummary {
+  qualityLevel: "low" | "medium" | "high" | "ultra";
+  success: boolean;
+  framesProcessed: number;
+  framesDropped: number;
+  framesFailed: number;
+  avgTimeUs: number;
+  avgFps: number;
+  avgInputReceiveUs: number;
+  avgUploadUs: number;
+  avgEffectUs: number;
+  avgDownloadUs: number;
+  avgOutputWriteUs: number;
+  error?: string;
+}
+
 export interface BenchmarkAggregateResult {
   scenarios: BenchmarkScenarioResult[];
   /** Total wall-clock duration of the benchmark run (ms). */
@@ -235,8 +299,16 @@ export interface BenchmarkAggregateResult {
   completedAt: string;
   /** Scenario with the lowest average latency. */
   bestLatency: { scenario: BenchmarkScenarioId; label: string; avgMs: number } | null;
-  /** Scenario with the highest processing time (most quality headroom used). */
+  /** Scenario with the highest semantic quality rank. */
   highestQuality: { scenario: BenchmarkScenarioId; label: string; avgMs: number } | null;
+  /** Native-only benchmark summaries collected before live scenarios. */
+  nativeBenchmarks: NativeBenchmarkRunSummary[];
+  /**
+   * Environment info collected at benchmark start.
+   * Populated during the collecting-environment phase.
+   */
+  environment: BenchmarkEnvironmentInfo | null;
+
   /**
    * Recommended settings that balance quality and performance.
    * Null if no scenarios completed successfully.
@@ -292,6 +364,7 @@ function initialProgress(): BenchmarkProgress {
 export interface BenchmarkHost {
   /** Apply enhancement settings and return immediately (fire-and-forget). */
   applySettings: (settings: ViewerImageEnhancementSettings) => void;
+
   /** Return the latest stats snapshot from the processor (or null). */
   readStats: () => {
     processingTimeMs: number | null;
@@ -307,6 +380,64 @@ export interface BenchmarkHost {
     backpressureDrops: number;
     nativeFailures: number;
   } | null;
+
+  /**
+   * Subscribe to per-frame lifecycle events for event-driven sample
+   * collection (replaces polling-based readStats).
+   * Returns an unsubscribe function.
+   */
+  subscribeFrameEvents?: (listener: FrameEventListener) => () => void;
+
+  /**
+   * Wait for the current configuration to be acknowledged by the backend.
+   * Resolves with the applied config info, or null on timeout/failure.
+   * Default timeout is 5000ms.
+   */
+  waitForConfigApplied?: (
+    timeoutMs?: number,
+  ) => Promise<ConfigAppliedEvent | null>;
+
+  /**
+   * Optional environment info gatherer.  Called during the
+   * collecting-environment phase to gather NVIDIA capability and
+   * adapter information.  Return null to skip environment enrichment.
+   */
+  getEnvironment?: () => Partial<BenchmarkEnvironmentInfo> | null;
+
+  runNativeBenchmark?: (config: {
+    processingMode: "vsr" | "high-bitrate" | "denoise" | "deblur";
+    qualityLevel: "low" | "medium" | "high" | "ultra";
+    inputWidth: number;
+    inputHeight: number;
+    targetFrames: number;
+    frameTimeoutMs?: number;
+  }) => Promise<{ success: boolean; error?: string; targetFrames?: number }>;
+  getNativeBenchmarkStatus?: () => Promise<{
+    benchmarkActive: boolean;
+    benchmarkTargetFrames: number;
+    benchmarkFramesCompleted: number;
+    benchmarkTotalTimeUs: number;
+    benchmarkAvgTimeUs?: number;
+    benchmarkComplete?: boolean;
+  } | null>;
+  cancelNativeBenchmark?: () => Promise<boolean>;
+  getNativeBenchmarkAggregateResults?: () => Promise<{
+    success: boolean;
+    error?: string;
+    framesProcessed: number;
+    framesDropped: number;
+    framesFailed: number;
+    totalTimeUs: number;
+    avgTimeUs: number;
+    minTimeUs: number;
+    maxTimeUs: number;
+    avgInputReceiveUs: number;
+    avgUploadUs: number;
+    avgEffectUs: number;
+    avgDownloadUs: number;
+    avgOutputWriteUs: number;
+    avgFps: number;
+  } | null>;
 }
 
 // ─── State assertion helper ─────────────────────────────────────────────────
@@ -351,6 +482,116 @@ export class NvidiaBenchmarkService {
   private _scenarios: BenchmarkScenarioConfig[] = DEFAULT_SCENARIOS;
   private _savedSettings: ViewerImageEnhancementSettings | null = null;
   private _restoredAfterRun = false;
+
+  // Event-driven collection state
+  private _currentGeneration = 0;
+  private _currentConfigurationId = 0;
+  private _scenarioFrameBuffer: FrameEvent[] = [];
+  private _seenScenarioKeys = new Set<string>();
+  private _warmupCount = 0;
+  private _warmedUp = false;
+  private _unsubscribeFrameEvents: (() => void) | null = null;
+
+  /** Optional export callback — called exactly once after successful aggregation. */
+  onExport: ((result: BenchmarkAggregateResult, samples: BenchmarkScenarioResult[]) => void | Promise<void>) | null = null;
+
+  private async runNativeBenchmarkSeries(
+    host: BenchmarkHost,
+    signal: AbortSignal,
+    inputWidth: number,
+    inputHeight: number,
+  ): Promise<NativeBenchmarkRunSummary[]> {
+    if (!host.runNativeBenchmark || !host.getNativeBenchmarkStatus || !host.getNativeBenchmarkAggregateResults) {
+      return [];
+    }
+
+    const summaries: NativeBenchmarkRunSummary[] = [];
+    const qualities: NativeBenchmarkRunSummary["qualityLevel"][] = ["low", "medium", "high", "ultra"];
+
+    for (const qualityLevel of qualities) {
+      if (signal.aborted) break;
+
+      const started = await host.runNativeBenchmark({
+        processingMode: "vsr",
+        qualityLevel,
+        inputWidth,
+        inputHeight,
+        targetFrames: 300,
+        frameTimeoutMs: 5000,
+      });
+
+      if (!started.success) {
+        summaries.push({
+          qualityLevel,
+          success: false,
+          framesProcessed: 0,
+          framesDropped: 0,
+          framesFailed: 0,
+          avgTimeUs: 0,
+          avgFps: 0,
+          avgInputReceiveUs: 0,
+          avgUploadUs: 0,
+          avgEffectUs: 0,
+          avgDownloadUs: 0,
+          avgOutputWriteUs: 0,
+          error: started.error,
+        });
+        continue;
+      }
+
+      while (!signal.aborted) {
+        const status = await host.getNativeBenchmarkStatus();
+        if (!status) break;
+        if (!status.benchmarkActive && status.benchmarkComplete) {
+          break;
+        }
+        await this.delay(50, signal);
+      }
+
+      if (signal.aborted) {
+        await host.cancelNativeBenchmark?.().catch(() => false);
+        break;
+      }
+
+      const aggregate = await host.getNativeBenchmarkAggregateResults();
+      if (!aggregate) {
+        summaries.push({
+          qualityLevel,
+          success: false,
+          framesProcessed: 0,
+          framesDropped: 0,
+          framesFailed: 0,
+          avgTimeUs: 0,
+          avgFps: 0,
+          avgInputReceiveUs: 0,
+          avgUploadUs: 0,
+          avgEffectUs: 0,
+          avgDownloadUs: 0,
+          avgOutputWriteUs: 0,
+          error: "no-native-benchmark-result",
+        });
+        continue;
+      }
+
+      summaries.push({
+        qualityLevel,
+        success: aggregate.success,
+        framesProcessed: aggregate.framesProcessed,
+        framesDropped: aggregate.framesDropped,
+        framesFailed: aggregate.framesFailed,
+        avgTimeUs: aggregate.avgTimeUs,
+        avgFps: aggregate.avgFps,
+        avgInputReceiveUs: aggregate.avgInputReceiveUs,
+        avgUploadUs: aggregate.avgUploadUs,
+        avgEffectUs: aggregate.avgEffectUs,
+        avgDownloadUs: aggregate.avgDownloadUs,
+        avgOutputWriteUs: aggregate.avgOutputWriteUs,
+        error: aggregate.error,
+      });
+    }
+
+    return summaries;
+  }
 
   // ── External store plumbing ───────────────────────────────────────────
   private readonly _listeners = new Set<() => void>();
@@ -431,6 +672,7 @@ export class NvidiaBenchmarkService {
    */
   cancel(): void {
     if (!this.running) return;
+    this.unsubscribeFromFrameEvents();
     this._abort.abort();
     this.transitionTo("cancelled");
   }
@@ -446,6 +688,8 @@ export class NvidiaBenchmarkService {
     this._state = "idle";
     this._savedSettings = null;
     this._restoredAfterRun = false;
+    this.onExport = null;
+    this.unsubscribeFromFrameEvents();
     this._notify();
   }
 
@@ -492,7 +736,13 @@ export class NvidiaBenchmarkService {
       return;
     }
 
-    // Check that the host can provide stats
+    // Check that the host can subscribe to frame events
+    if (typeof host.subscribeFrameEvents !== "function") {
+      this.setError("Host does not support frame event subscription");
+      return;
+    }
+
+    // Check that the host can provide stats (for UI progress)
     const initialStats = host.readStats();
     if (!initialStats) {
       this.setError("Processor not available — cannot run benchmark");
@@ -520,20 +770,49 @@ export class NvidiaBenchmarkService {
       currentScenario: null,
     });
 
+    // Gather environment info from host stats and optional getEnvironment
     const envStats = host.readStats();
-    const envInfo = {
-      activeBackend: envStats?.backend ?? "unknown",
-      displayResolution: envStats
-        ? `${envStats.nativeOutputWidth}x${envStats.nativeOutputHeight}`
-        : "unknown",
-      framesDisplayed: envStats?.framesDisplayed ?? 0,
+    const envExtra = typeof host.getEnvironment === "function" ? host.getEnvironment() : null;
+    const environment: BenchmarkEnvironmentInfo = {
+      processingBackend: envStats?.backend ?? "unknown",
+      nativeOutputWidth: envStats?.nativeOutputWidth ?? 0,
+      nativeOutputHeight: envStats?.nativeOutputHeight ?? 0,
+      nativeQualityLevel: envStats?.nativeQualityLevel ?? null,
+      completedFps: envStats?.completedFps ?? null,
+      nvidiaAvailable: envExtra?.nvidiaAvailable ?? false,
+      nvidiaAdapterName: envExtra?.nvidiaAdapterName ?? null,
+      nvidiaDriverVersion: envExtra?.nvidiaDriverVersion ?? null,
     };
+
+    let nativeBenchmarks: NativeBenchmarkRunSummary[] = [];
+    if (host.runNativeBenchmark && host.getNativeBenchmarkStatus && host.getNativeBenchmarkAggregateResults) {
+      this.setProgress({
+        percent: 12,
+        phaseLabel: "Running native-only NVIDIA benchmark scenarios…",
+        currentScenario: null,
+      });
+      const nativeInputWidth = environment.nativeOutputWidth > 0
+        ? Math.max(1, Math.floor(environment.nativeOutputWidth / 2))
+        : 1280;
+      const nativeInputHeight = environment.nativeOutputHeight > 0
+        ? Math.max(1, Math.floor(environment.nativeOutputHeight / 2))
+        : 720;
+      nativeBenchmarks = await this.runNativeBenchmarkSeries(
+        host,
+        signal,
+        nativeInputWidth,
+        nativeInputHeight,
+      );
+      if (signal.aborted) return;
+    }
+
     await this.delay(200, signal);
     if (signal.aborted) return;
 
     // ── Phase 4: Running scenarios ─────────────────────────────────────
     this.transitionTo("running-scenarios");
     const scenarioResults: BenchmarkScenarioResult[] = [];
+    const exportSamples: BenchmarkScenarioResult[] = [];
 
     for (let idx = 0; idx < this._scenarios.length; idx++) {
       if (signal.aborted) return;
@@ -554,6 +833,21 @@ export class NvidiaBenchmarkService {
       const merged = this.mergeScopedSettings(config.settings);
       host.applySettings(merged);
 
+      // Wait for explicit configuration acknowledgement (if supported)
+      let acknowledgedOutputWidth = 0;
+      let acknowledgedOutputHeight = 0;
+      if (typeof host.waitForConfigApplied === "function") {
+        const ack = await host.waitForConfigApplied(5000);
+        if (signal.aborted) return;
+        if (ack) {
+          this._currentGeneration = ack.generation;
+          this._currentConfigurationId = ack.configurationId;
+          acknowledgedOutputWidth = ack.outputWidth;
+          acknowledgedOutputHeight = ack.outputHeight;
+        }
+        // If no ack received, still proceed (generation 0 means events will be rejected)
+      }
+
       // Wait for stabilization
       await this.delay(config.stabilizeMs, signal);
       if (signal.aborted) return;
@@ -561,14 +855,58 @@ export class NvidiaBenchmarkService {
       // Show partial progress
       this.setProgress({ percent: scenarioPercentBase + 2 });
 
-      // Collect frame samples
+      // ── Event-driven sample collection ────────────────────────────────
       const scenarioStart = now();
       const samples: PerFrameSample[] = [];
-      const frameTimestamps: number[] = [];
+      const completionTimestamps: number[] = [];
+      const presentationTimestamps: number[] = [];
       let framesDropped = 0;
+      let configMismatch = false;
 
+      // Reset per-scenario event tracking state
+      this._scenarioFrameBuffer = [];
+      this._seenScenarioKeys = new Set<string>();
+      this._warmupCount = 0;
+      this._warmedUp = false;
+
+      // Subscribe to frame events for this scenario
+      this._unsubscribeFrameEvents = host.subscribeFrameEvents((event) => {
+        this._scenarioFrameBuffer.push(event);
+      });
+
+      // Compute expected configuration attributes from the applied settings
+      const expectedBackend = merged.processingBackend === "nvidia-vsr" ? "nvidia-vsr" : "webgl2";
+      const expectedNvidiaMode = merged.nvidiaMode;
+      const expectedQuality = merged.nvidiaQuality;
+      const expectedCanonicalQuality = expectedBackend === "nvidia-vsr"
+        ? canonicalQualityLevel(expectedNvidiaMode, expectedQuality as NvidiaQuality)
+        : null;
+
+      // Helper: check if an event matches the expected scenario config
+      const isMatchingEvent = (ev: FrameEvent): boolean => {
+        // Reject wrong backend
+        if (ev.backend !== expectedBackend) return false;
+        // Reject wrong NVIDIA mode (if applicable)
+        if (expectedBackend === "nvidia-vsr" && expectedNvidiaMode && ev.nvidiaMode !== expectedNvidiaMode) return false;
+        // Reject wrong canonical quality level (if known)
+        if (expectedCanonicalQuality != null && ev.canonicalQualityLevel != null &&
+            ev.canonicalQualityLevel !== expectedCanonicalQuality) return false;
+        // Reject wrong output dimensions when the applied configuration acknowledged them.
+        if (acknowledgedOutputWidth > 0 && ev.outputWidth > 0 && ev.outputWidth !== acknowledgedOutputWidth) return false;
+        if (acknowledgedOutputHeight > 0 && ev.outputHeight > 0 && ev.outputHeight !== acknowledgedOutputHeight) return false;
+        // Reject stale generations
+        if (this._currentGeneration > 0 && ev.generation !== this._currentGeneration) return false;
+        // Reject stale configuration IDs
+        if (this._currentConfigurationId > 0 && ev.configurationId > 0 &&
+            ev.configurationId !== this._currentConfigurationId) return false;
+        return true;
+      };
+
+      // Collect loop: drain the event buffer and gather samples
       while (samples.length < config.minFrames && !signal.aborted) {
         const elapsed = now() - scenarioStart;
+
+        // Update UI progress (keep polling for progress visibility)
         this.setProgress({
           currentSamples: samples,
           currentTargetFrames: config.minFrames,
@@ -579,35 +917,112 @@ export class NvidiaBenchmarkService {
           ),
         });
 
-        if (elapsed > config.timeoutMs) break;
-
-        const stats = host.readStats();
-        if (stats) {
-          // Backpressure drops count as dropped, not collected
-          if (stats.backpressureDrops > 0) {
-            framesDropped = stats.backpressureDrops;
+        if (elapsed > config.timeoutMs) {
+          // Mark config mismatch if no matching events received
+          if (samples.length === 0 && configMismatch) {
+            // already flagged
           }
-          // Only collect non-null processing times as valid samples
-          if (stats.processingTimeMs != null) {
-            samples.push({
-              processingTimeMs: stats.processingTimeMs,
-              rendererToResultMs: stats.rendererToResultMs,
-              nativeTransportProcessingTimeMs: stats.nativeTransportProcessingTimeMs,
-              totalLatencyMs: stats.totalEnhancedFrameLatencyMs,
-              nativeOutputWidth: stats.nativeOutputWidth,
-              nativeOutputHeight: stats.nativeOutputHeight,
-              nativeQualityLevel: stats.nativeQualityLevel,
+          break;
+        }
+
+        // Drain all pending events from the buffer
+        while (this._scenarioFrameBuffer.length > 0) {
+          const event = this._scenarioFrameBuffer.shift()!;
+
+          // Verify event matches expected configuration
+          if (!isMatchingEvent(event)) {
+            if (event.stale || event.configurationId !== this._currentConfigurationId) {
+              // Mark config mismatch for the scenario result
+              configMismatch = true;
+            }
+            continue;
+          }
+
+          // Warm-up: discard first few events to let the pipeline settle.
+          // Do NOT add to seenKeys during warmup so the same sequence can
+          // still be counted once after warmup completes.
+          if (!this._warmedUp) {
+            if (event.completed) {
+              this._warmupCount++;
+              if (this._warmupCount >= 3) {
+                this._warmedUp = true;
+              }
+            }
+            continue;
+          }
+
+          // After warmup: reject duplicates (same gen+seq already counted)
+          const key = `${event.generation}:${event.sequence}`;
+          if (this._seenScenarioKeys.has(key)) continue;
+          this._seenScenarioKeys.add(key);
+
+          // Collect completion events
+          if (event.completed && event.totalLatencyMs != null) {
+            const sample: PerFrameSample = {
+              processingTimeMs: event.totalLatencyMs,
+              rendererToResultMs: event.transportDurationMs ?? null,
+              nativeTransportProcessingTimeMs: event.nativeProcessingDurationMs ?? null,
+              totalLatencyMs: event.totalLatencyMs,
+              nativeOutputWidth: event.outputWidth,
+              nativeOutputHeight: event.outputHeight,
+              nativeQualityLevel: event.canonicalQualityLevel,
               backpressureDrop: false,
-            });
-            frameTimestamps.push(now());
+              rawFrameEvent: event,
+            };
+            samples.push(sample);
+            completionTimestamps.push(event.captureStartedAt);
+
+            if (event.presented && event.presentedAt != null) {
+              presentationTimestamps.push(event.presentedAt);
+            }
+          }
+
+          // Track backpressure drops
+          if (event.dropReason === "backpressure") {
+            framesDropped++;
           }
         }
 
-        // Throttled polling — don't busy-wait
-        await this.delay(50, signal);
+        // Throttled drain — don't busy-wait
+        await this.delay(16, signal);
       }
 
-      const scenarioDuration = now() - scenarioStart;
+      // Unsubscribe frame events for this scenario
+      this.unsubscribeFromFrameEvents();
+
+      // Handle config mismatch — clear samples and mark result
+      if (configMismatch && samples.length === 0) {
+        scenarioResults.push({
+          scenario: config.id,
+          label: config.label,
+          framesRequested: config.minFrames,
+          framesCollected: 0,
+          framesDropped,
+          avgProcessingTimeMs: null,
+          p50ProcessingTimeMs: null,
+          p95ProcessingTimeMs: null,
+          avgLatencyMs: null,
+          p50LatencyMs: null,
+          p95LatencyMs: null,
+          achievedFps: null,
+          nativeOutputWidth: acknowledgedOutputWidth,
+          nativeOutputHeight: acknowledgedOutputHeight,
+          nativeQualityLevel: expectedCanonicalQuality,
+          activeBackend: expectedBackend,
+          timedOut: true,
+        });
+        // Still create placeholder result for progress tracking
+        this.setProgress({
+          completedScenarios: idx + 1,
+          results: scenarioResults,
+          currentScenario: null,
+          phaseLabel: `Config mismatch: ${config.label}`,
+          percent: scenarioPercentBase + 80,
+        });
+        continue;
+      }
+
+      // ── Compute per-scenario metrics from event timestamps ────────────
       const processingTimes = samples
         .map((s) => s.processingTimeMs)
         .filter((t): t is number => t !== null)
@@ -617,12 +1032,25 @@ export class NvidiaBenchmarkService {
         .filter((t): t is number => t !== null)
         .sort((a, b) => a - b);
 
-      // Achieved FPS from frame timestamps in the collection window
-      let achievedFps: number | null = null;
-      if (frameTimestamps.length >= 2) {
-        const windowDuration = frameTimestamps[frameTimestamps.length - 1]! - frameTimestamps[0]!;
+      // Completed FPS from event timestamps
+      let completedFps: number | null = null;
+      if (completionTimestamps.length >= 2) {
+        const windowStart = completionTimestamps[0]!;
+        const windowEnd = completionTimestamps[completionTimestamps.length - 1]!;
+        const windowDuration = windowEnd - windowStart;
         if (windowDuration > 0) {
-          achievedFps = Math.round((frameTimestamps.length / windowDuration) * 1000);
+          completedFps = Math.round((completionTimestamps.length / windowDuration) * 1000);
+        }
+      }
+
+      // Presented FPS from presentation timestamps
+      let presentedFps: number | null = null;
+      if (presentationTimestamps.length >= 2) {
+        const pStart = presentationTimestamps[0]!;
+        const pEnd = presentationTimestamps[presentationTimestamps.length - 1]!;
+        const pDuration = pEnd - pStart;
+        if (pDuration > 0) {
+          presentedFps = Math.round((presentationTimestamps.length / pDuration) * 1000);
         }
       }
 
@@ -638,19 +1066,22 @@ export class NvidiaBenchmarkService {
         avgLatencyMs: latencies.length > 0 ? average(latencies) : null,
         p50LatencyMs: latencies.length > 0 ? percentile(latencies, 50) : null,
         p95LatencyMs: latencies.length > 0 ? percentile(latencies, 95) : null,
-        achievedFps,
+        achievedFps: completedFps ?? presentedFps,
         nativeOutputWidth: samples.length > 0
           ? samples[samples.length - 1]!.nativeOutputWidth
-          : envStats?.nativeOutputWidth ?? 0,
+          : acknowledgedOutputWidth,
         nativeOutputHeight: samples.length > 0
           ? samples[samples.length - 1]!.nativeOutputHeight
-          : envStats?.nativeOutputHeight ?? 0,
+          : acknowledgedOutputHeight,
         nativeQualityLevel: samples.length > 0
           ? samples[samples.length - 1]!.nativeQualityLevel
-          : null,
-        activeBackend: envStats?.backend ?? "unknown",
+          : expectedCanonicalQuality,
+        activeBackend: expectedBackend,
         timedOut: samples.length < config.minFrames,
       });
+
+      // Track samples for export
+      exportSamples.push(scenarioResults[scenarioResults.length - 1]!);
 
       this.setProgress({
         completedScenarios: idx + 1,
@@ -661,7 +1092,10 @@ export class NvidiaBenchmarkService {
       });
     }
 
-    if (signal.aborted) return;
+    if (signal.aborted) {
+      this.unsubscribeFromFrameEvents();
+      return;
+    }
 
     // ── Phase 5: Aggregating ───────────────────────────────────────────
     this.transitionTo("aggregating");
@@ -688,15 +1122,15 @@ export class NvidiaBenchmarkService {
         };
       }
 
-      // Highest quality = highest avg processing time (most GPU headroom used)
-      const sortedByTime = [...completed]
-        .filter((r) => r.avgProcessingTimeMs != null)
-        .sort((a, b) => (b.avgProcessingTimeMs ?? 0) - (a.avgProcessingTimeMs ?? 0));
-      if (sortedByTime.length > 0) {
+      // Highest quality = semantic quality order (not processing time)
+      const sortedByQuality = [...completed]
+        .filter((r) => r.framesCollected > 0)
+        .sort((a, b) => compareQuality(a.scenario, b.scenario));
+      if (sortedByQuality.length > 0) {
         highestQuality = {
-          scenario: sortedByTime[0]!.scenario,
-          label: sortedByTime[0]!.label,
-          avgMs: sortedByTime[0]!.avgProcessingTimeMs!,
+          scenario: sortedByQuality[0]!.scenario,
+          label: sortedByQuality[0]!.label,
+          avgMs: sortedByQuality[0]!.avgProcessingTimeMs ?? 0,
         };
       }
     }
@@ -722,13 +1156,7 @@ export class NvidiaBenchmarkService {
         // Use the highest NVIDIA quality that stayed within reasonable latency
         const balanced = nvidiaResults
           .filter((r) => (r.avgProcessingTimeMs ?? 0) < (bestLatency.avgMs * 3))
-          .sort((a, b) => {
-            const qualityOrder: Record<string, number> = {
-              "nvidia-vsr-ultra": 4, "nvidia-vsr-high": 3,
-              "nvidia-vsr-medium": 2, "nvidia-vsr-low": 1,
-            };
-            return (qualityOrder[b.scenario] ?? 0) - (qualityOrder[a.scenario] ?? 0);
-          });
+          .sort((a, b) => compareQuality(a.scenario, b.scenario));
         if (balanced.length > 0) {
           const pick = balanced[0]!;
           recommendedSettings = {
@@ -752,8 +1180,19 @@ export class NvidiaBenchmarkService {
       completedAt: new Date().toISOString(),
       bestLatency,
       highestQuality,
+      nativeBenchmarks,
+      environment,
       recommendedSettings,
     };
+
+    // Fire export hook exactly once after successful aggregation
+    if (typeof this.onExport === "function" && this._aggregate) {
+      try {
+        this.onExport(this._aggregate, exportSamples);
+      } catch {
+        // Silently swallow export errors
+      }
+    }
 
     await this.delay(100, signal);
     if (signal.aborted) return;
@@ -808,6 +1247,16 @@ export class NvidiaBenchmarkService {
   }
 
   // ── Utility ──────────────────────────────────────────────────────────
+
+  /** Unsubscribe from frame events (idempotent). */
+  private unsubscribeFromFrameEvents(): void {
+    if (this._unsubscribeFrameEvents) {
+      this._unsubscribeFrameEvents();
+      this._unsubscribeFrameEvents = null;
+    }
+    this._scenarioFrameBuffer = [];
+    this._seenScenarioKeys = new Set();
+  }
 
   /**
    * Non-busy delay.  Returns early if the signal is aborted.

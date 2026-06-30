@@ -28,6 +28,8 @@ export interface BackendInitResult {
 export interface FrameProcessResult {
   success: boolean;
   gpuTimeMs?: number;
+  outputWidth?: number;
+  outputHeight?: number;
   /** true when the frame was skipped (video not ready) — NOT a failure */
   transient?: boolean;
   /** true when the frame was dropped due to backpressure */
@@ -65,6 +67,12 @@ export interface FrameProcessResult {
   };
   /** Total latency from capture to displayed frame */
   totalLatencyMs?: number;
+
+  /** Configuration identity from the applied config (0 when unknown). */
+  configurationId?: number;
+
+  /** Canonical QualityLevel integer from the applied config. null for non-NVIDIA backends. */
+  canonicalQualityLevel?: number | null;
 }
 
 // ─── Frame metadata passed alongside each frame ──────────────────────────────
@@ -129,6 +137,8 @@ export interface BackendStats {
   // ── Native presenter diagnostics ───────────────────────────────────────
   /** Current presentation path identifier */
   presentationPath?: "native-presenter" | "webgl" | "fallback-cpu";
+  /** Current capture path identifier */
+  capturePath?: "none" | "video-frame" | "rqvc-canvas";
   /** Presenter latency for the last frame (microseconds) */
   presenterLatencyUs?: number;
   /** Number of frames presented natively (cumulative) */

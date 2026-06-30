@@ -1,5 +1,6 @@
 import type { GroupControlEnvelope } from "@screenlink/shared";
 import type { Phase3Runtime } from "./phase3-runtime.js";
+import type { StreamAnnouncement } from "./active-stream-registry.js";
 
 /**
  * Binding token created by the host for a viewer's stream.join.request.
@@ -63,6 +64,12 @@ export interface ConsumeBindingInput {
 }
 
 /**
+ * Composite-key separator for viewer mappings.
+ * Used to construct keys of the form `${viewerDeviceId}::${mediaSessionId}`.
+ */
+const COMPOSITE_KEY_SEP = "::";
+
+/**
  * C5: ViewerMediaBinding (Stages 4–5)
  *
  * Manages one-time binding tokens that authorize a viewer to attach
@@ -76,10 +83,22 @@ export interface ConsumeBindingInput {
  * - Duplicate request idempotency via requestId tracking
  * - getAllViewers() for cleanup on stream stop
  * - Viewer disconnect preserves other viewers
+ *
+ * Compare-mode (Task 2):
+ * - viewerMap uses composite key `viewerDeviceId::mediaSessionId` so one device
+ *   may hold A and B bindings simultaneously.
+ * - Explicit composite-key methods for exact leave/remove/disconnect.
+ * - Legacy removeViewer path is safe for non-compare messages.
+ * - Unique human counting deduplicates by viewerDeviceId.
  */
 export class ViewerMediaBinding {
   private tokens = new Map<string, BindingToken>();
-  /** viewerDeviceId → media peer mapping */
+  /**
+   * Composite-keyed viewer mapping.
+   * Key format: `${viewerDeviceId}::${mediaSessionId}`
+   * This allows one device to hold bindings for multiple media sessions
+   * simultaneously (compare mode A + B).
+   */
   private viewerMap = new Map<string, ViewerMapping>();
   /** Track processed requestIds for idempotency */
   private processedRequests = new Map<string, string>(); // requestEnvelopeId → token
@@ -90,6 +109,11 @@ export class ViewerMediaBinding {
 
   constructor(private runtime: Phase3Runtime) {
     this.startCleanup();
+  }
+
+  /** Build a composite key from viewer device ID and media session ID. */
+  private static compositeKey(viewerDeviceId: string, mediaSessionId: string): string {
+    return `${viewerDeviceId}${COMPOSITE_KEY_SEP}${mediaSessionId}`;
   }
 
   /**
@@ -120,6 +144,9 @@ export class ViewerMediaBinding {
     const viewerSessionId =
       (payload?.viewerSessionId as string | undefined) ??
       (envelope.messageId ?? `legacy-${viewerDeviceId ?? "unknown"}-${requestId ?? Date.now().toString()}`);
+    // Compare correlation fields (optional — viewer omits for legacy A-only join)
+    const compareVariantId = payload?.compareVariantId as string | undefined;
+    const requestedMediaSessionId = payload?.mediaSessionId as string | undefined;
 
     if (!viewerDeviceId || !logicalStreamId) {
       // Send rejection for invalid request so the viewer doesn't time out
@@ -127,6 +154,8 @@ export class ViewerMediaBinding {
         envelope,
         requestId,
         !viewerDeviceId ? "Invalid viewer identity" : "Missing stream identifier",
+        compareVariantId,
+        requestedMediaSessionId,
       );
       return null;
     }
@@ -156,9 +185,31 @@ export class ViewerMediaBinding {
         envelope,
         requestId,
         "There is no active share for this stream",
+        compareVariantId,
+        requestedMediaSessionId,
       );
       return null;
     }
+
+    // ── Compare-mode target media session resolution ──────────────
+    // If the viewer included compare correlation fields, resolve the
+    // exact media session they intend to join (A variant or B variant).
+    // Legacy requests (no compare fields) use the primary stream session.
+    const resolved = this.resolveTargetMediaSession(
+      stream,
+      compareVariantId,
+      requestedMediaSessionId,
+    );
+    if (!resolved) {
+      const reason = requestedMediaSessionId && !compareVariantId
+        ? `Requested media session "${requestedMediaSessionId}" not found`
+        : compareVariantId
+          ? `Requested compare variant "${compareVariantId}" is not available`
+          : "Could not resolve a valid media session for this request";
+      this.sendJoinRejection(envelope, requestId, reason, compareVariantId, requestedMediaSessionId);
+      return null;
+    }
+    const effectiveMediaSessionId = resolved.mediaSessionId;
 
     // Generate 32 random bytes → Base64URL token
     const rawBytes = new Uint8Array(32);
@@ -170,7 +221,7 @@ export class ViewerMediaBinding {
       token,
       groupId,
       logicalStreamId,
-      mediaSessionId: stream.mediaSessionId,
+      mediaSessionId: effectiveMediaSessionId,
       viewerDeviceId,
       viewerSessionId,
       createdAt: now,
@@ -186,10 +237,10 @@ export class ViewerMediaBinding {
     }
 
     // Send join response back to the requesting viewer
-    this.sendJoinResponse(envelope, token, stream.mediaSessionId, requestId, viewerSessionId).catch(() => {});
+    this.sendJoinResponse(envelope, token, effectiveMediaSessionId, requestId, viewerSessionId, resolved.variantId).catch(() => {});
 
     return {
-      mediaSessionId: stream.mediaSessionId,
+      mediaSessionId: effectiveMediaSessionId,
       token,
       viewerSessionId,
     };
@@ -204,6 +255,8 @@ export class ViewerMediaBinding {
     requestEnvelope: GroupControlEnvelope,
     requestId: string | undefined,
     reason: string,
+    compareVariantId?: string,
+    requestedMediaSessionId?: string,
   ): Promise<void> {
     const conn = this.runtime.getConnectionManager().getConnection(requestEnvelope.groupId);
     if (!conn) return;
@@ -212,16 +265,19 @@ export class ViewerMediaBinding {
 
     const payload = requestEnvelope.payload as Record<string, unknown> | undefined;
     const viewerSessionId = payload?.viewerSessionId as string | undefined;
+    const logicalStreamId = (payload?.logicalStreamId as string) ?? "";
 
     try {
       await conn.sendToPeer(peerUuid, {
         type: "stream.join.response",
-        logicalStreamId: (payload?.logicalStreamId as string) ?? "",
+        logicalStreamId,
         accepted: false,
         viewerDeviceId: requestEnvelope.senderDeviceId,
         reason,
         requestId: requestId ?? "",
         ...(viewerSessionId ? { viewerSessionId } : {}),
+        ...(compareVariantId ? { compareVariantId } : {}),
+        ...(requestedMediaSessionId ? { mediaSessionId: requestedMediaSessionId } : {}),
       });
     } catch {
       // Best-effort rejection — if the connection is gone the viewer will time out
@@ -232,6 +288,9 @@ export class ViewerMediaBinding {
    * Send a stream.join.response back to the requesting viewer via group control.
    * Includes VDO media credentials (streamId, password, bindingToken) so the
    * viewer can connect directly via ViewerClient without local host config.
+   *
+   * Uses resolveLocalPublication() to find the correct publication for the
+   * given media session, which works for both normal and compare mode variants.
    */
   private async sendJoinResponse(
     requestEnvelope: GroupControlEnvelope,
@@ -239,16 +298,19 @@ export class ViewerMediaBinding {
     mediaSessionId: string,
     requestId?: string,
     viewerSessionId?: string,
+    compareVariantId?: string,
   ): Promise<void> {
     const conn = this.runtime.getConnectionManager().getConnection(requestEnvelope.groupId);
     if (!conn) return;
     const peerUuid = conn.peerForDevice(requestEnvelope.senderDeviceId);
     if (!peerUuid) return;
 
-    // Get VDO credentials from the StreamSessionManager so the viewer can
-    // connect directly via ViewerClient with the real streamId & password.
-    const ssm = this.runtime.getStreamSessionManager();
-    const vdoConfig = ssm.getCurrentVdoConfig();
+    // Resolve the publication for this media session (works for both normal
+    // and compare mode). The runtime checks compare variants first, then
+    // falls back to the normal StreamSessionManager.
+    const publication = this.runtime.resolveLocalPublication(mediaSessionId);
+    const streamId = publication?.vdoConfig.streamId;
+    const password = publication?.vdoConfig.password;
 
     await conn.sendToPeer(peerUuid, {
       type: "stream.join.response",
@@ -257,11 +319,12 @@ export class ViewerMediaBinding {
       viewerDeviceId: requestEnvelope.senderDeviceId,
       mediaSessionId,
       mediaJoinMetadata: token,
-      streamId: vdoConfig?.streamId,
-      password: vdoConfig?.password,
+      streamId,
+      password,
       bindingToken: token,
       requestId: requestId ?? "",
       ...(viewerSessionId ? { viewerSessionId } : {}),
+      ...(compareVariantId ? { compareVariantId } : {}),
     });
   }
 
@@ -306,7 +369,8 @@ export class ViewerMediaBinding {
    * - The logicalStreamId matches
    * - The mediaSessionId matches
    *
-   * On success, deletes the token and stores the viewer mapping.
+   * On success, deletes the token and stores the viewer mapping
+   * under a composite key (viewerDeviceId::mediaSessionId).
    * Returns true if the binding was consumed successfully.
    */
   async consumeBinding(input: ConsumeBindingInput): Promise<boolean> {
@@ -345,12 +409,15 @@ export class ViewerMediaBinding {
     bindingToken.consumed = true;
     this.tokens.delete(input.token);
 
-    // Try to resolve the RTCPeerConnection, video sender, and audio sender for this viewer
+    // Try to resolve the RTCPeerConnection, video sender, and audio sender for this viewer.
+    // Uses resolveLocalPublication() to find the correct publisher for the media session
+    // (works for both normal and compare mode).
     let pc: RTCPeerConnection | null = null;
     let videoSender: RTCRtpSender | null = null;
     let audioSender: RTCRtpSender | null = null;
     try {
-      const publisherManager = this.runtime.getStreamSessionManager().getPublisherManager();
+      const publication = this.runtime.resolveLocalPublication(input.mediaSessionId);
+      const publisherManager = publication?.publisherManager ?? this.runtime.getStreamSessionManager().getPublisherManager();
       const hostPublisher = publisherManager?.getPublisher();
       if (hostPublisher) {
         const sdk = hostPublisher.getSDK();
@@ -370,10 +437,11 @@ export class ViewerMediaBinding {
       // Sender/PC resolution is best-effort
     }
 
-    // Store extended viewer mapping with peer connection and sender references.
-    // The viewer's per-attempt session ID is stored alongside the device ID so
-    // stale leave messages from a prior attempt can be ignored.
-    this.viewerMap.set(input.viewerDeviceId, {
+    // Store extended viewer mapping with composite key (viewerDeviceId::mediaSessionId).
+    // The composite key allows one device to hold bindings for multiple media
+    // sessions simultaneously (compare mode A + B).
+    const key = ViewerMediaBinding.compositeKey(input.viewerDeviceId, input.mediaSessionId);
+    this.viewerMap.set(key, {
       viewerDeviceId: input.viewerDeviceId,
       viewerSessionId: input.viewerSessionId ?? bindingToken.viewerSessionId,
       mediaPeerUuid: input.mediaPeerUuid,
@@ -405,21 +473,180 @@ export class ViewerMediaBinding {
     return true;
   }
 
+  // ─── Legacy single-key methods (backward compat) ──────────────────
+  //
+  // These methods look up by viewerDeviceId only, searching across all
+  // composite entries. They work correctly for the pre-compare (single
+  // session) case. In compare mode with multiple entries for the same
+  // device, they return the first match. Callers should prefer the new
+  // composite-key methods for exact targeting.
+
   /**
    * Get the media peer UUID for a viewer device ID.
+   * Searches across all composite entries.
    * Returns null if not found.
    */
   getViewerMediaPeer(viewerDeviceId: string): string | null {
-    return this.viewerMap.get(viewerDeviceId)?.mediaPeerUuid ?? null;
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.viewerDeviceId === viewerDeviceId) {
+        return mapping.mediaPeerUuid;
+      }
+    }
+    return null;
   }
 
   /**
-   * Remove a viewer from the binding map.
+   * Get the video RTCRtpSender for a specific viewer.
+   * Searches across all composite entries. Returns the first match.
+   * Returns null if the viewer is not mapped or sender is unavailable.
+   */
+  getViewerVideoSender(viewerDeviceId: string): RTCRtpSender | null {
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.viewerDeviceId === viewerDeviceId) {
+        return mapping.videoSender ?? null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get the audio RTCRtpSender for a specific viewer.
+   * Searches across all composite entries. Returns the first match.
+   * Returns null if the viewer is not mapped or sender is unavailable.
+   */
+  getViewerAudioSender(viewerDeviceId: string): RTCRtpSender | null {
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.viewerDeviceId === viewerDeviceId) {
+        return mapping.audioSender ?? null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get the RTCPeerConnection for a specific viewer.
+   * Searches across all composite entries. Returns the first match.
+   * Returns null if the viewer is not mapped or PC is unavailable.
+   */
+  getViewerPeerConnection(viewerDeviceId: string): RTCPeerConnection | null {
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.viewerDeviceId === viewerDeviceId) {
+        return mapping.pc ?? null;
+      }
+    }
+    return null;
+  }
+
+  // ─── Explicit composite-key methods ──────────────────────────────
+
+  /**
+   * Get all viewer mappings for a specific media session.
+   * Useful for per-session cleanup and diagnostics.
+   */
+  getViewersForMediaSession(mediaSessionId: string): ViewerMapping[] {
+    const result: ViewerMapping[] = [];
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.mediaSessionId === mediaSessionId) {
+        result.push(mapping);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get viewer mapping by composite key (viewerDeviceId + mediaSessionId).
+   * Returns the exact mapping for this device + session combination,
+   * or null if not found.
    *
+   * When called with a single argument (legacy), returns the first mapping
+   * found for that device ID.
+   */
+  getViewerMapping(viewerDeviceId: string): ViewerMapping | null;
+  getViewerMapping(viewerDeviceId: string, mediaSessionId: string): ViewerMapping | null;
+  getViewerMapping(viewerDeviceId: string, mediaSessionId?: string): ViewerMapping | null {
+    if (mediaSessionId) {
+      // Exact composite-key lookup
+      return this.viewerMap.get(ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId)) ?? null;
+    }
+    // Legacy: return first match for this device
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.viewerDeviceId === viewerDeviceId) {
+        return mapping;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Remove a viewer mapping by exact composite key.
    * Accepts an optional `viewerSessionId`. When provided, the mapping is
-   * only removed if the stored session ID matches. This prevents a
-   * delayed `stream.leave` from a prior Watch attempt from clobbering a
-   * newer active mapping for the same device.
+   * only removed if the stored session ID matches.
+   *
+   * Returns true if a mapping was removed.
+   */
+  removeViewerMapping(viewerDeviceId: string, mediaSessionId: string, viewerSessionId?: string): boolean {
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    const mapping = this.viewerMap.get(key);
+    if (!mapping) return false;
+
+    // Stale session guard: if a viewerSessionId is provided and it does not
+    // match the stored mapping, reject the removal.
+    if (viewerSessionId && mapping.viewerSessionId !== viewerSessionId) {
+      return false;
+    }
+
+    // Stop per-viewer stats polling
+    this.stopStatsForMapping(mapping);
+
+    this.viewerMap.delete(key);
+    return true;
+  }
+
+  /**
+   * Remove all viewer mappings for the given media session IDs.
+   * Returns the number of mappings removed.
+   */
+  removeMappingsForMediaSessions(mediaSessionIds: string[]): number {
+    const sessionSet = new Set(mediaSessionIds);
+    let removed = 0;
+    for (const [key, mapping] of this.viewerMap) {
+      if (sessionSet.has(mapping.mediaSessionId)) {
+        this.stopStatsForMapping(mapping);
+        this.viewerMap.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * Get unique viewer device IDs for a logical stream.
+   * Deduplicates by viewerDeviceId so a device watching both A and B variants
+   * counts as one human viewer.
+   */
+  getUniqueViewerDevicesForLogicalStream(logicalStreamId: string): string[] {
+    const devices = new Set<string>();
+    for (const [, mapping] of this.viewerMap) {
+      if (mapping.logicalStreamId === logicalStreamId) {
+        devices.add(mapping.viewerDeviceId);
+      }
+    }
+    return Array.from(devices);
+  }
+
+  // ─── Legacy removal (backward compat) ───────────────────────────
+
+  /**
+   * Remove a viewer from the binding map (legacy single-key path).
+   *
+   * When called with only `viewerDeviceId`:
+   * - If the device has exactly one mapping, it is removed (pre-compare behavior).
+   * - If the device has multiple mappings (compare mode), removal is SKIPPED
+   *   to avoid accidentally removing an unrelated compare mapping.
+   *   Callers should use removeViewerMapping() for exact targeting.
+   *
+   * When called with `viewerSessionId`, only the mapping(s) with a matching
+   * session ID are removed.
    *
    * Cleanup is restricted to ScreenLink-owned state (mapping entry,
    * per-viewer stats polling). The peer connection is owned by the
@@ -428,46 +655,43 @@ export class ViewerMediaBinding {
    * SDK's internal connection map in a broken state.
    */
   removeViewer(viewerDeviceId: string, viewerSessionId?: string): boolean {
-    const mapping = this.viewerMap.get(viewerDeviceId);
-    if (!mapping) return false;
+    // Find all entries for this device
+    const entries = Array.from(this.viewerMap.entries())
+      .filter(([, m]) => m.viewerDeviceId === viewerDeviceId);
 
-    // Stale leave guard: if the caller provided a session ID and it
-    // does not match the active mapping, ignore the message. A new
-    // Watch attempt has the same viewerDeviceId but a different
-    // session ID, and we must not remove the new mapping on behalf
-    // of the old one.
-    if (viewerSessionId && mapping.viewerSessionId &&
-        viewerSessionId !== mapping.viewerSessionId) {
-      console.warn(
-        '[ViewerMediaBinding] ignoring stream.leave for stale viewerSessionId',
-        {
-          viewerDeviceId,
-          incoming: viewerSessionId,
-          active: mapping.viewerSessionId,
-        },
-      );
-      return false;
+    if (entries.length === 0) return false;
+
+    if (viewerSessionId) {
+      // Remove only entries with matching session ID
+      let removed = false;
+      for (const [key, mapping] of entries) {
+        if (mapping.viewerSessionId === viewerSessionId) {
+          this.stopStatsForMapping(mapping);
+          this.viewerMap.delete(key);
+          removed = true;
+        }
+      }
+      return removed;
     }
 
-    // Note: we DO NOT call mapping.pc.close() here. The peer connection
-    // belongs to the VDO.Ninja SDK; closing it directly leaves the SDK
-    // in a broken state and is the root cause of repeated-rejoin
-    // failures. The SDK closes the PC when the viewer disconnects or
-    // when the publisher is torn down.
-
-    // Stop per-viewer stats polling
-    const statsService = this.runtime.getMediaStatsService();
-    if (statsService) {
-      statsService.disconnectViewer(
-        mapping.groupId,
-        mapping.logicalStreamId,
-        viewerDeviceId,
-        mapping.mediaPeerUuid,
-      );
+    // No session ID provided. Legacy safe fallback:
+    // - Single mapping: remove it (pre-compare behavior)
+    // - Multiple mappings: skip to avoid removing an unrelated compare mapping
+    if (entries.length === 1) {
+      const [key, mapping] = entries[0];
+      this.stopStatsForMapping(mapping);
+      this.viewerMap.delete(key);
+      return true;
     }
 
-    this.viewerMap.delete(viewerDeviceId);
-    return true;
+    // Multiple mappings with no session ID — do not touch (compare mode active).
+    // The caller should use removeViewerMapping() with the exact mediaSessionId,
+    // or removeMappingsForMediaSessions().
+    console.warn(
+      '[ViewerMediaBinding] removeViewer called without mediaSessionId for device with multiple mappings — skipping',
+      { viewerDeviceId, mappingCount: entries.length },
+    );
+    return false;
   }
 
   /**
@@ -477,9 +701,11 @@ export class ViewerMediaBinding {
    * state. The PC close itself is left to the SDK.
    */
   removeViewerByPeerUuid(mediaPeerUuid: string): boolean {
-    for (const [viewerDeviceId, mapping] of this.viewerMap) {
+    for (const [key, mapping] of this.viewerMap) {
       if (mapping.mediaPeerUuid === mediaPeerUuid) {
-        return this.removeViewer(viewerDeviceId, mapping.viewerSessionId);
+        this.stopStatsForMapping(mapping);
+        this.viewerMap.delete(key);
+        return true;
       }
     }
     return false;
@@ -491,41 +717,6 @@ export class ViewerMediaBinding {
    */
   getAllViewers(): ViewerMapping[] {
     return Array.from(this.viewerMap.values());
-  }
-
-  /**
-   * Get the video RTCRtpSender for a specific viewer.
-   * Returns null if the viewer is not mapped or sender is unavailable.
-   * Used by QualityCoordinator to apply per-viewer quality.
-   */
-  getViewerVideoSender(viewerDeviceId: string): RTCRtpSender | null {
-    return this.viewerMap.get(viewerDeviceId)?.videoSender ?? null;
-  }
-
-  /**
-   * Get the audio RTCRtpSender for a specific viewer.
-   * Returns null if the viewer is not mapped or sender is unavailable.
-   * Used for per-viewer audio diagnostics and control.
-   */
-  getViewerAudioSender(viewerDeviceId: string): RTCRtpSender | null {
-    return this.viewerMap.get(viewerDeviceId)?.audioSender ?? null;
-  }
-
-  /**
-   * Get the RTCPeerConnection for a specific viewer.
-   * Returns null if the viewer is not mapped or PC is unavailable.
-   * Used for per-viewer stats polling and diagnostics.
-   */
-  getViewerPeerConnection(viewerDeviceId: string): RTCPeerConnection | null {
-    return this.viewerMap.get(viewerDeviceId)?.pc ?? null;
-  }
-
-  /**
-   * Get full viewer mapping for a device ID.
-   * Returns null if viewer is not mapped.
-   */
-  getViewerMapping(viewerDeviceId: string): ViewerMapping | null {
-    return this.viewerMap.get(viewerDeviceId) ?? null;
   }
 
   /**
@@ -574,6 +765,26 @@ export class ViewerMediaBinding {
     }
   }
 
+  /**
+   * Stop per-viewer stats polling for a given mapping.
+   * Safe to call multiple times — idempotent.
+   */
+  private stopStatsForMapping(mapping: ViewerMapping): void {
+    try {
+      const statsService = this.runtime.getMediaStatsService();
+      if (statsService) {
+        statsService.disconnectViewer(
+          mapping.groupId,
+          mapping.logicalStreamId,
+          mapping.viewerDeviceId,
+          mapping.mediaPeerUuid,
+        );
+      }
+    } catch {
+      // Stats cleanup is best-effort
+    }
+  }
+
   private base64URLEncode(bytes: Uint8Array): string {
     // Convert to binary string, then btoa, then make URL-safe
     let binary = "";
@@ -584,5 +795,84 @@ export class ViewerMediaBinding {
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
+  }
+
+  /**
+   * Resolve the target media session for a join request based on compare
+   * correlation fields from the viewer's payload.
+   *
+   * Three scenarios:
+   * 1. Neither field → legacy mode, use the primary stream.mediaSessionId.
+   * 2. Only mediaSessionId → validate it belongs to this stream (primary,
+   *    variant A descriptor, or variant B descriptor).
+   * 3. Only compareVariantId → resolve from variant descriptor, falling
+   *    back to primary for variant A if no explicit descriptor exists.
+   * 4. Both fields → ensure consistency, reject mismatches.
+   *
+   * Returns null when the requested combination is invalid or unavailable.
+   */
+  private resolveTargetMediaSession(
+    stream: StreamAnnouncement,
+    compareVariantId?: string,
+    requestedMediaSessionId?: string,
+  ): { mediaSessionId: string; variantId?: string } | null {
+    // ── Case 1: Legacy join (no compare fields) ─────────────────────
+    if (!compareVariantId && !requestedMediaSessionId) {
+      return { mediaSessionId: stream.mediaSessionId };
+    }
+
+    // ── Case 4: Both fields provided — ensure consistency ──────────
+    if (compareVariantId && requestedMediaSessionId) {
+      const fromVariant = this.resolveMediaSessionFromVariant(stream, compareVariantId);
+      if (!fromVariant || fromVariant.mediaSessionId !== requestedMediaSessionId) {
+        return null; // mismatch — reject rather than guess
+      }
+      return fromVariant;
+    }
+
+    // ── Case 2: Only mediaSessionId — validate it belongs to stream ─
+    if (requestedMediaSessionId) {
+      // Check primary stream session
+      if (requestedMediaSessionId === stream.mediaSessionId) {
+        return { mediaSessionId: requestedMediaSessionId, variantId: stream.primaryVariant };
+      }
+      // Check variant A descriptor
+      if (stream.variantADescriptor?.mediaSessionId === requestedMediaSessionId) {
+        return { mediaSessionId: requestedMediaSessionId, variantId: "A" };
+      }
+      // Check variant B descriptor
+      if (stream.variantBDescriptor?.mediaSessionId === requestedMediaSessionId) {
+        return { mediaSessionId: requestedMediaSessionId, variantId: "B" };
+      }
+      return null; // requested session not found in this stream
+    }
+
+    // ── Case 3: Only compareVariantId — resolve from variant ───────
+    return compareVariantId
+      ? this.resolveMediaSessionFromVariant(stream, compareVariantId)
+      : null;
+  }
+
+  /**
+   * Resolve media session ID from a compare variant identifier.
+   *
+   * Variant A: uses variantADescriptor.mediaSessionId or falls back to
+   * the primary stream.mediaSessionId if no explicit A descriptor exists.
+   * Variant B: requires variantBDescriptor.mediaSessionId (B is never
+   * the primary stream); returns null if not configured.
+   */
+  private resolveMediaSessionFromVariant(
+    stream: StreamAnnouncement,
+    variantId: string,
+  ): { mediaSessionId: string; variantId: string } | null {
+    if (variantId === "A") {
+      const msId = stream.variantADescriptor?.mediaSessionId ?? stream.mediaSessionId;
+      return { mediaSessionId: msId, variantId: "A" };
+    }
+    if (variantId === "B") {
+      if (!stream.variantBDescriptor?.mediaSessionId) return null;
+      return { mediaSessionId: stream.variantBDescriptor.mediaSessionId, variantId: "B" };
+    }
+    return null; // unknown variant
   }
 }

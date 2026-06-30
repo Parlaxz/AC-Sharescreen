@@ -42,6 +42,11 @@ export interface JoinResponseData {
   bindingToken?: string;
   reason?: string;
   requestId?: string;
+  /**
+   * Compare variant ID ("A" or "B") echoed from the join request.
+   * Present when the viewer joined a specific Easy Compare variant.
+   */
+  compareVariantId?: string;
 }
 
 export interface RecentMemberEvent {
@@ -237,6 +242,7 @@ export class GroupMessageRouter {
             bindingToken: joinData.bindingToken,
             reason: joinData.reason,
             requestId: joinData.requestId,
+            compareVariantId: joinData.compareVariantId,
           });
         }
       }
@@ -254,8 +260,17 @@ export class GroupMessageRouter {
         // — preventing a delayed leave from a prior Watch attempt from
         // clobbering a newer rejoin mapping.
         const viewerSessionId = leaveData.data.viewerSessionId;
+        // Compare mode: exact media session ID for precise targeting.
+        // When present, use removeViewerMapping() instead of the legacy
+        // removeViewer() so the leave targets exactly one media session
+        // and does not accidentally affect the other variant's binding.
+        const mediaSessionId = leaveData.data.mediaSessionId;
         if (viewerDeviceId) {
-          this.viewerBinding.removeViewer(viewerDeviceId, viewerSessionId);
+          if (mediaSessionId) {
+            this.viewerBinding.removeViewerMapping(viewerDeviceId, mediaSessionId, viewerSessionId);
+          } else {
+            this.viewerBinding.removeViewer(viewerDeviceId, viewerSessionId);
+          }
         }
       }
       return;

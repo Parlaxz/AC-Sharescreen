@@ -6,6 +6,7 @@
 #include <cstring>
 #include <new>
 #include <string>
+#include <cstdio>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -55,6 +56,21 @@ std::string StatusMessage(const char* operation, NvCV_Status status) {
 #endif
 
 } // namespace
+
+namespace {
+
+#ifndef NDEBUG
+void WarnIfSteadyStateAllocationObserved(uint64_t allocations, const char* stage) {
+    if (allocations != 0) {
+        fprintf(stderr,
+                "[NvidiaVfxContext] unexpected steady-state allocation during %s: %llu\n",
+                stage,
+                static_cast<unsigned long long>(allocations));
+    }
+}
+#endif
+
+}
 
 bool NvidiaVfxContext::IsCompiled() {
 #ifdef SCREENLINK_NVIDIA_VFX_ENABLED
@@ -116,7 +132,15 @@ std::string NvidiaVfxContext::FindModelDir(const std::string& sdkRoot) {
     return {};
 }
 
-NvidiaVfxContext::NvidiaVfxContext() = default;
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+std::atomic<uint32_t> NvidiaVfxContext::contextCount_{0};
+#endif
+
+NvidiaVfxContext::NvidiaVfxContext() {
+#ifdef SCREENLINK_NVIDIA_VFX_ENABLED
+    contextCount_++;
+#endif
+}
 
 NvidiaVfxContext::~NvidiaVfxContext() {
     Destroy();
@@ -196,7 +220,20 @@ NvVfxResult NvidiaVfxContext::Initialize(const NvVfxConfig& config) {
             lastError_ = StatusMessage("NvVFX_CudaStreamCreate", streamStatus);
             // Nonfatal — will use default stream if unavailable
             cudaStream_ = nullptr;
+        } else {
+            configAllocations_++;
         }
+    }
+
+    // Create persistent staging buffer for NvCVImage_Transfer (replaces nullptr tmp).
+    // Default-constructed (empty); the SDK reshapes internally on first use as needed.
+    if (!staging_) {
+        staging_ = new (std::nothrow) NvCVImage();
+        if (!staging_) {
+            lastError_ = "Could not allocate persistent staging NvCVImage descriptor";
+            return NvVfxResult::kErrorInvalidInput;
+        }
+        configAllocations_++;
     }
 
     initialized_ = true;
@@ -290,6 +327,97 @@ NvVfxResult NvidiaVfxContext::AllocateNvImage(
     return NvVfxResult::kSuccess;
 }
 
+NvVfxResult NvidiaVfxContext::AllocatePinnedInput(const NvVfxImage& desc) {
+    if (desc.width == 0 || desc.height == 0) {
+        lastError_ = "Cannot allocate a zero-sized pinned input buffer";
+        return NvVfxResult::kErrorInvalidInput;
+    }
+
+    // Free previous pinned input if reallocating (e.g. resolution change)
+    if (pinnedInput_) {
+        pinnedBytes_ -= static_cast<NvCVImage*>(pinnedInput_)->bufferBytes;
+        FreeNvImage(pinnedInput_);
+    }
+
+    auto* image = new (std::nothrow) NvCVImage();
+    if (!image) {
+        lastError_ = "Could not allocate NvCVImage descriptor for pinned input";
+        return NvVfxResult::kErrorInvalidInput;
+    }
+
+    const NvCV_Status status = NvCVImage_Alloc(
+        image,
+        desc.width,
+        desc.height,
+        ToNvFormat(desc.format),
+        NVCV_U8,
+        NVCV_INTERLEAVED,
+        NVCV_CPU_PINNED,
+        1);
+
+    if (status != NVCV_SUCCESS) {
+        lastError_ = StatusMessage("NvCVImage_Alloc(pinned input)", status);
+        delete image;
+        return NvVfxResult::kErrorInvalidInput;
+    }
+
+    pinnedInput_ = image;
+    pinnedBytes_ += image->bufferBytes;
+    configAllocations_++;
+    return NvVfxResult::kSuccess;
+}
+
+NvVfxResult NvidiaVfxContext::AllocatePinnedOutput(const NvVfxImage& desc) {
+    if (desc.width == 0 || desc.height == 0) {
+        lastError_ = "Cannot allocate a zero-sized pinned output buffer";
+        return NvVfxResult::kErrorInvalidInput;
+    }
+
+    if (pinnedOutput_) {
+        pinnedBytes_ -= static_cast<NvCVImage*>(pinnedOutput_)->bufferBytes;
+        FreeNvImage(pinnedOutput_);
+    }
+
+    auto* image = new (std::nothrow) NvCVImage();
+    if (!image) {
+        lastError_ = "Could not allocate NvCVImage descriptor for pinned output";
+        return NvVfxResult::kErrorInvalidInput;
+    }
+
+    const NvCV_Status status = NvCVImage_Alloc(
+        image,
+        desc.width,
+        desc.height,
+        ToNvFormat(desc.format),
+        NVCV_U8,
+        NVCV_INTERLEAVED,
+        NVCV_CPU_PINNED,
+        1);
+
+    if (status != NVCV_SUCCESS) {
+        lastError_ = StatusMessage("NvCVImage_Alloc(pinned output)", status);
+        delete image;
+        return NvVfxResult::kErrorInvalidInput;
+    }
+
+    pinnedOutput_ = image;
+    pinnedBytes_ += image->bufferBytes;
+    configAllocations_++;
+    return NvVfxResult::kSuccess;
+}
+
+void NvidiaVfxContext::FreePinnedResources() {
+    if (pinnedInput_) {
+        pinnedBytes_ -= static_cast<NvCVImage*>(pinnedInput_)->bufferBytes;
+        FreeNvImage(pinnedInput_);
+    }
+    if (pinnedOutput_) {
+        pinnedBytes_ -= static_cast<NvCVImage*>(pinnedOutput_)->bufferBytes;
+        FreeNvImage(pinnedOutput_);
+    }
+    // staging is freed separately in Destroy since it lives across config changes
+}
+
 NvVfxResult NvidiaVfxContext::LoadConfiguredEffect() {
     if (effectLoaded_) {
         return NvVfxResult::kSuccess;
@@ -375,9 +503,17 @@ NvVfxResult NvidiaVfxContext::AllocateInput(const NvVfxImage& desc) {
 
     effectLoaded_ = false;
 
-    const NvVfxResult allocation = AllocateNvImage(inputImage_, inputDesc_);
-    if (allocation != NvVfxResult::kSuccess) {
-        return allocation;
+    // Allocate GPU input image (persistent, reused every frame)
+    const NvVfxResult gpuResult = AllocateNvImage(inputImage_, inputDesc_);
+    if (gpuResult != NvVfxResult::kSuccess) {
+        return gpuResult;
+    }
+    configAllocations_++;
+
+    // Allocate persistent pinned CPU input buffer
+    const NvVfxResult pinnedResult = AllocatePinnedInput(inputDesc_);
+    if (pinnedResult != NvVfxResult::kSuccess) {
+        return pinnedResult;
     }
 
     return LoadConfiguredEffect();
@@ -393,8 +529,16 @@ NvVfxResult NvidiaVfxContext::AllocateOutput(const NvVfxImage& desc) {
     outputDesc_.stride = outputDesc_.width * 4;
     effectLoaded_ = false;
 
-    const NvVfxResult allocation = AllocateNvImage(outputImage_, outputDesc_);
-    if (allocation != NvVfxResult::kSuccess) {
+    // Allocate GPU output image (persistent, reused every frame)
+    const NvVfxResult gpuResult = AllocateNvImage(outputImage_, outputDesc_);
+    if (gpuResult != NvVfxResult::kSuccess) {
+        return NvVfxResult::kErrorInvalidOutput;
+    }
+    configAllocations_++;
+
+    // Allocate persistent pinned CPU output fallback buffer
+    const NvVfxResult pinnedResult = AllocatePinnedOutput(outputDesc_);
+    if (pinnedResult != NvVfxResult::kSuccess) {
         return NvVfxResult::kErrorInvalidOutput;
     }
 
@@ -407,7 +551,7 @@ NvVfxResult NvidiaVfxContext::UploadInput(
     uint32_t srcHeight,
     uint32_t srcStride,
     NvVfxPixelFormat srcFormat) {
-    if (!effectLoaded_ || !inputImage_ || !srcPixels) {
+    if (!effectLoaded_ || !inputImage_ || !pinnedInput_ || !srcPixels) {
         lastError_ = "VSR input is not ready";
         return NvVfxResult::kErrorInvalidInput;
     }
@@ -419,39 +563,53 @@ NvVfxResult NvidiaVfxContext::UploadInput(
         return NvVfxResult::kErrorInvalidInput;
     }
 
-    // Direct-wrap the incoming RGBA CPU buffer. The backing storage must
-    // remain valid until stream sync completes (via the sync point in RunFrame).
-    NvCVImage cpuInput;
-    NvCV_Status status = NvCVImage_Init(
-        &cpuInput,
-        srcWidth,
-        srcHeight,
-        srcStride,
-        const_cast<void*>(srcPixels),
-        ToNvFormat(srcFormat),
-        NVCV_U8,
-        NVCV_INTERLEAVED,
-        NVCV_CPU);
-
-    if (status != NVCV_SUCCESS) {
-        lastError_ = StatusMessage("NvCVImage_Init(input)", status);
+    if (srcFormat != inputDesc_.format) {
+        lastError_ = "Input pixel format does not match AllocateInput";
         return NvVfxResult::kErrorInvalidInput;
     }
 
-    status = NvCVImage_Transfer(
-        &cpuInput,
+    // Step 1: Copy incoming pixels into the persistent pinned CPU input buffer.
+    // This avoids wrapping the caller's buffer and lets us use pinned memory
+    // for the GPU transfer, enabling faster DMA without per-frame allocations.
+    auto* pinnedSrc = static_cast<NvCVImage*>(pinnedInput_);
+    const uint32_t rowBytes = srcWidth * 4;
+    if (srcStride == rowBytes) {
+        // Common case: contiguous rows — single memcpy
+        memcpy(pinnedSrc->pixels, srcPixels,
+               static_cast<size_t>(srcHeight) * rowBytes);
+    } else {
+        // Stride differs from row bytes — copy row by row
+        auto* dstRow = static_cast<uint8_t*>(pinnedSrc->pixels);
+        auto* srcRow = static_cast<const uint8_t*>(srcPixels);
+        for (uint32_t y = 0; y < srcHeight; ++y) {
+            memcpy(dstRow, srcRow, rowBytes);
+            dstRow += pinnedSrc->pitch;
+            srcRow += srcStride;
+        }
+    }
+
+    // Step 2: Transfer from pinned CPU buffer to GPU input image using
+    // the persistent staging buffer (avoiding per-frame ephemeral allocation).
+    NvCV_Status status = NvCVImage_Transfer(
+        pinnedSrc,
         static_cast<NvCVImage*>(inputImage_),
         1.0f,
         reinterpret_cast<CUstream>(cudaStream_),
-        nullptr);
+        static_cast<NvCVImage*>(staging_));
 
     if (status != NVCV_SUCCESS) {
         lastError_ = StatusMessage(
-            "NvCVImage_Transfer(CPU to GPU)",
+            "NvCVImage_Transfer(pinned CPU to GPU)",
             status);
         return NvVfxResult::kErrorInvalidInput;
     }
 
+    // Count steady-state resource reuse
+    inputSlotReuseCount_++;
+    stagingReuseCount_++;
+#ifndef NDEBUG
+    WarnIfSteadyStateAllocationObserved(steadyStateAllocations_, "UploadInput");
+#endif
     return NvVfxResult::kSuccess;
 }
 
@@ -474,6 +632,9 @@ NvVfxResult NvidiaVfxContext::RunFrame() {
         return NvVfxResult::kErrorRun;
     }
 
+#ifndef NDEBUG
+    WarnIfSteadyStateAllocationObserved(steadyStateAllocations_, "RunFrame");
+#endif
     return NvVfxResult::kSuccess;
 }
 
@@ -482,7 +643,7 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
     uint32_t dstStride,
     uint32_t& outWidth,
     uint32_t& outHeight) {
-    if (!effectLoaded_ || !outputImage_ || !dstPixels) {
+    if (!effectLoaded_ || !outputImage_ || !pinnedOutput_ || !dstPixels) {
         lastError_ = "VSR output is not ready";
         return NvVfxResult::kErrorInvalidOutput;
     }
@@ -492,40 +653,25 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
         return NvVfxResult::kErrorInvalidOutput;
     }
 
-    NvCVImage cpuOutput;
-    NvCV_Status status = NvCVImage_Init(
-        &cpuOutput,
-        outputDesc_.width,
-        outputDesc_.height,
-        dstStride,
-        dstPixels,
-        ToNvFormat(outputDesc_.format),
-        NVCV_U8,
-        NVCV_INTERLEAVED,
-        NVCV_CPU);
-
-    if (status != NVCV_SUCCESS) {
-        lastError_ = StatusMessage("NvCVImage_Init(output)", status);
-        return NvVfxResult::kErrorInvalidOutput;
-    }
-
-    // Download GPU→CPU on the persistent CUDA stream
-    status = NvCVImage_Transfer(
+    // Step 1: Transfer GPU output → pinned CPU fallback buffer using the
+    // persistent staging buffer (avoids per-frame ephemeral allocation).
+    auto* pinnedDst = static_cast<NvCVImage*>(pinnedOutput_);
+    NvCV_Status status = NvCVImage_Transfer(
         static_cast<NvCVImage*>(outputImage_),
-        &cpuOutput,
+        pinnedDst,
         1.0f,
         reinterpret_cast<CUstream>(cudaStream_),
-        nullptr);
+        static_cast<NvCVImage*>(staging_));
 
     if (status != NVCV_SUCCESS) {
         lastError_ = StatusMessage(
-            "NvCVImage_Transfer(GPU to CPU)",
+            "NvCVImage_Transfer(GPU to pinned CPU)",
             status);
         return NvVfxResult::kErrorInvalidOutput;
     }
 
-    // Synchronize the CUDA stream to ensure upload → run → download all complete
-    // before CPU reads the output pixel buffer.
+    // Step 2: Synchronize the CUDA stream to ensure upload → run → download
+    // all complete before CPU reads the output pixel buffer.
     if (cudaStream_) {
         NvCV_Status syncStatus = NvVFX_CudaStreamSynchronize(
             reinterpret_cast<CUstream>(cudaStream_));
@@ -534,6 +680,30 @@ NvVfxResult NvidiaVfxContext::DownloadOutput(
             return NvVfxResult::kErrorRun;
         }
     }
+
+    // Step 3: Copy from pinned output buffer to caller's destination buffer.
+    const uint32_t rowBytes = outputDesc_.width * 4;
+    if (dstStride == rowBytes) {
+        memcpy(dstPixels, pinnedDst->pixels,
+               static_cast<size_t>(outputDesc_.height) * rowBytes);
+    } else {
+        auto* srcRow = static_cast<uint8_t*>(pinnedDst->pixels);
+        auto* dstRow = static_cast<uint8_t*>(dstPixels);
+        for (uint32_t y = 0; y < outputDesc_.height; ++y) {
+            memcpy(dstRow, srcRow, rowBytes);
+            srcRow += pinnedDst->pitch;
+            dstRow += dstStride;
+        }
+    }
+
+    // Count steady-state resource reuse
+    outputFallbackSlotReuseCount_++;
+    stagingReuseCount_++;
+    cpuDownloadCount_++;
+
+#ifndef NDEBUG
+    WarnIfSteadyStateAllocationObserved(steadyStateAllocations_, "DownloadOutput");
+#endif
 
     outWidth = outputDesc_.width;
     outHeight = outputDesc_.height;
@@ -571,14 +741,32 @@ void NvidiaVfxContext::Destroy() {
     FreeNvImage(inputImage_);
     FreeNvImage(outputImage_);
 
-    inputBuffer_.clear();
+    // -- Slice 6: Free persistent resources --
+    FreePinnedResources();
+    if (staging_) {
+        FreeNvImage(staging_);
+    }
+
     inputDesc_ = {};
     outputDesc_ = {};
     config_ = {};
 
+    // Reset counters
+    configAllocations_ = 0;
+    steadyStateAllocations_ = 0;
+    pinnedBytes_ = 0;
+    stagingReuseCount_ = 0;
+    inputSlotReuseCount_ = 0;
+    outputFallbackSlotReuseCount_ = 0;
+    cpuDownloadCount_ = 0;
+
     effectCreated_ = false;
     initialized_ = false;
     lastError_.clear();
+
+    if (contextCount_.load() > 0) {
+        contextCount_--;
+    }
 }
 
 #endif

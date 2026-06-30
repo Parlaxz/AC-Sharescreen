@@ -12,12 +12,18 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
-import { Info, Copy, Check, FolderOpen, BarChart3 } from "lucide-react";
+import { Info, Copy, Check, FolderOpen, BarChart3, Gauge } from "lucide-react";
 import type { ViewerSession } from "@/services/viewer-session.js";
 import {
   getNvidiaCapabilitySnapshot,
   subscribeToNvidiaCapability,
 } from "@/services/nvidia-capability-store";
+import {
+  nvidiaBenchmarkService,
+  getBenchmarkProgressSnapshot,
+  subscribeToBenchmarkProgress,
+  type BenchmarkAggregateResult,
+} from "@/services/viewer-image-processing/nvidia-benchmark-service";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -217,6 +223,65 @@ function useDiagnosticsPoller(
   }, [session, extraQuality]);
 
   return snapshot;
+}
+
+// ─── Benchmark Results Summary Section ────────────────────────────────────
+
+/**
+ * Compact benchmark results summary shown in the diagnostics panel.
+ * Reads the last aggregate result from the benchmark service.  Only renders
+ * when an aggregate result is available and has at least one scenario.
+ */
+function BenchmarkResultsSummary() {
+  const progress = useSyncExternalStore(
+    subscribeToBenchmarkProgress,
+    getBenchmarkProgressSnapshot,
+    getBenchmarkProgressSnapshot,
+  );
+  const aggregate = nvidiaBenchmarkService.aggregate;
+
+  // Guard: only show when we have completed results
+  if (!aggregate || aggregate.scenarios.length === 0) return null;
+
+  const completedCount = aggregate.scenarios.filter((s) => !s.timedOut && s.framesCollected > 0).length;
+  const totalCount = aggregate.scenarios.length;
+
+  const fmtMs = (v: number | null | undefined): string =>
+    v != null ? `${v.toFixed(1)} ms` : "\u2014";
+
+  return (
+    <div>
+      <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
+        Last Benchmark
+      </p>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+        <span className="text-text-muted">Scenarios</span>
+        <span className="text-text-primary text-right">
+          {completedCount}/{totalCount} completed
+        </span>
+        <span className="text-text-muted">Duration</span>
+        <span className="text-text-primary text-right">
+          {(aggregate.totalDurationMs / 1000).toFixed(1)}s
+        </span>
+        {aggregate.bestLatency && (
+          <>
+            <span className="text-text-muted">Best latency</span>
+            <span className="text-text-primary text-right text-[10px] truncate" title={aggregate.bestLatency.label}>
+              {fmtMs(aggregate.bestLatency.avgMs)}
+            </span>
+          </>
+        )}
+        {aggregate.highestQuality && (
+          <>
+            <span className="text-text-muted">Best quality</span>
+            <span className="text-text-primary text-right text-[10px] truncate" title={aggregate.highestQuality.label}>
+              {aggregate.highestQuality.label}
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ─── NVIDIA Diagnostics Mini Section ──────────────────────────────────────
@@ -516,6 +581,11 @@ export function DiagnosticsPanel({
           </div>
         </div>
       </div>
+
+      <Separator />
+
+      {/* Benchmark results summary – only shown when aggregate is available */}
+      <BenchmarkResultsSummary />
 
       {/* NVIDIA RTX Video section – only shown when capability has been probed */}
       <NvidiaDiagnosticsSection />

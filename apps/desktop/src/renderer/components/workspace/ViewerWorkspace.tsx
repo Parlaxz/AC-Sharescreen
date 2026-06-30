@@ -48,6 +48,7 @@ import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@
 import { getRuntime } from "@/services/phase3-runtime.js";
 import { navigateToGroupOverview } from "@/services/group-navigation";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
+import { CompareViewerSurface } from "@/components/workspace/CompareViewerSurface";
 import type { ProcessorState, ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
 import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
@@ -61,6 +62,70 @@ import {
   subscribeToBenchmarkProgress,
   type BenchmarkHost,
 } from "@/services/viewer-image-processing/nvidia-benchmark-service";
+import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
+import { getNvidiaCapabilitySnapshot } from "@/services/nvidia-capability-store";
+
+type NativeBenchmarkStatusShape = {
+  benchmarkActive: boolean;
+  benchmarkTargetFrames: number;
+  benchmarkFramesCompleted: number;
+  benchmarkTotalTimeUs: number;
+  benchmarkAvgTimeUs?: number;
+  benchmarkComplete?: boolean;
+};
+
+type NativeBenchmarkAggregateShape = {
+  success: boolean;
+  error?: string;
+  framesProcessed: number;
+  framesDropped: number;
+  framesFailed: number;
+  totalTimeUs: number;
+  avgTimeUs: number;
+  minTimeUs: number;
+  maxTimeUs: number;
+  avgInputReceiveUs: number;
+  avgUploadUs: number;
+  avgEffectUs: number;
+  avgDownloadUs: number;
+  avgOutputWriteUs: number;
+  avgFps: number;
+};
+
+type SavedBenchmarkResult = {
+  success: boolean;
+  id?: string;
+  error?: string;
+};
+
+type SavedBenchmarkRecord = {
+  id: string;
+  config: {
+    processingMode: "vsr" | "high-bitrate" | "denoise" | "deblur";
+    qualityLevel: "low" | "medium" | "high" | "ultra";
+    inputWidth: number;
+    inputHeight: number;
+    frames: number;
+    frameTimeoutMs?: number;
+  };
+  status: "idle" | "running" | "completed" | "failed";
+  startedAt: number;
+  completedAt?: number;
+  framesProcessed: number;
+  framesDropped: number;
+  framesFailed: number;
+  avgProcessingTimeMs: number;
+  minProcessingTimeMs: number;
+  maxProcessingTimeMs: number;
+  p50ProcessingTimeMs: number;
+  p95ProcessingTimeMs: number;
+  p99ProcessingTimeMs: number;
+  avgFps: number;
+  avgNativeInputReceiveMs?: number;
+  avgNativeUploadMs?: number;
+  avgNativeEffectMs?: number;
+  avgNativeDownloadMs?: number;
+};
 
 // ─── Reduced motion hook ──────────────────────────────────────────────────
 
@@ -289,6 +354,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     getBenchmarkProgressSnapshot,
     getBenchmarkProgressSnapshot,
   );
+  /** Ref populated by EnhancedVideoSurface when the processor is ready. */
+  const processorApiRef = useRef<ProcessorAPI | null>(null);
 
   // ── Discord shortcut bindings (loaded from settings) ──
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
@@ -653,9 +720,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Benchmark helpers and handlers ───────────────────────────────────
 
   /**
-   * Build a BenchmarkHost from the current processor refs.
+   * Build a BenchmarkHost from the current processor refs and the
+   * processorApiRef (populated by EnhancedVideoSurface).
+   *
    * applySettings maps to handleEnhancementChange; readStats maps to
-   * the latest ProcessorStats snapshot.
+   * the latest ProcessorStats snapshot; subscribeFrameEvents and
+   * waitForConfigApplied delegate to the active processor via the
+   * processorApiRef.
    */
   const buildBenchmarkHost = useCallback((): BenchmarkHost => ({
     applySettings: (settings) => {
@@ -679,6 +750,77 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         nativeFailures: stats.nativeFailures,
       };
     },
+    /**
+     * Subscribe to real per-frame lifecycle events from the active
+     * ViewerImageProcessor (via processorApiRef).  Falls back to a
+     * no-op when no processor is available (safe for no-live-stream).
+     */
+    subscribeFrameEvents: (listener) => {
+      const api = processorApiRef.current;
+      return api
+        ? api.subscribeFrameEvents(listener)
+        : (() => {});
+    },
+    /**
+     * Wait for the next configuration acknowledgement from the active
+     * processor.  Returns null on timeout or when no processor is
+     * available (safe for no-live-stream).
+     */
+    waitForConfigApplied: async (timeoutMs) => {
+      const api = processorApiRef.current;
+      return api
+        ? api.waitForConfigApplied(timeoutMs)
+        : null;
+    },
+    /**
+     * Gather environment info using the NVIDIA capability store and
+     * processor stats.  Returns null when no stats are available
+     * (safe for no-live-stream).
+     */
+    getEnvironment: () => {
+      const capability = getNvidiaCapabilitySnapshot();
+      if (!capability.probed) return null;
+      return {
+        nvidiaAvailable: capability.available,
+        nvidiaAdapterName: capability.adapterName ?? null,
+        nvidiaDriverVersion: capability.driverVersion ?? null,
+      } satisfies Partial<import("@/services/viewer-image-processing/nvidia-benchmark-service").BenchmarkEnvironmentInfo>;
+    },
+    runNativeBenchmark: async (config) => {
+      const api = (window as unknown as { screenlink?: {
+        nvidiaRunBenchmark: (cfg: {
+          processingMode: "vsr" | "high-bitrate" | "denoise" | "deblur";
+          qualityLevel: "low" | "medium" | "high" | "ultra";
+          inputWidth: number;
+          inputHeight: number;
+          frames: number;
+          frameTimeoutMs?: number;
+        }) => Promise<{ success: boolean; error?: string; targetFrames?: number }>;
+      } }).screenlink;
+      if (!api?.nvidiaRunBenchmark) {
+        return { success: false, error: "native-benchmark-api-unavailable" };
+      }
+      return api.nvidiaRunBenchmark({
+        processingMode: config.processingMode,
+        qualityLevel: config.qualityLevel,
+        inputWidth: config.inputWidth,
+        inputHeight: config.inputHeight,
+        frames: config.targetFrames,
+        frameTimeoutMs: config.frameTimeoutMs,
+      });
+    },
+    getNativeBenchmarkStatus: async () => {
+      const api = (window as unknown as { screenlink?: { nvidiaGetBenchmarkStatus: () => Promise<NativeBenchmarkStatusShape | null> } }).screenlink;
+      return api?.nvidiaGetBenchmarkStatus ? api.nvidiaGetBenchmarkStatus() : null;
+    },
+    cancelNativeBenchmark: async () => {
+      const api = (window as unknown as { screenlink?: { nvidiaCancelBenchmark: () => Promise<boolean> } }).screenlink;
+      return api?.nvidiaCancelBenchmark ? api.nvidiaCancelBenchmark() : false;
+    },
+    getNativeBenchmarkAggregateResults: async () => {
+      const api = (window as unknown as { screenlink?: { nvidiaGetBenchmarkAggregateResults: () => Promise<NativeBenchmarkAggregateShape | null> } }).screenlink;
+      return api?.nvidiaGetBenchmarkAggregateResults ? api.nvidiaGetBenchmarkAggregateResults() : null;
+    },
   }), [handleEnhancementChange]);
 
   /**
@@ -696,6 +838,59 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     // Start the run
     nvidiaBenchmarkService.start(host);
   }, [buildBenchmarkHost]);
+
+  /**
+   * Export handler — called by the benchmark service after successful
+   * aggregation.  Opens the native benchmark results folder and attempts
+   * to persist the run via the IPC export API.
+   */
+  useEffect(() => {
+    nvidiaBenchmarkService.onExport = async (aggregate, samples) => {
+      const api = (window as unknown as { screenlink?: {
+        nvidiaSaveBenchmarkResult: (record: SavedBenchmarkRecord) => Promise<SavedBenchmarkResult>;
+        nvidiaExportBenchmarkResult: (resultId: string) => Promise<string | null>;
+        nvidiaOpenBenchmarkFolder: () => Promise<boolean>;
+      } }).screenlink;
+      const record: SavedBenchmarkRecord = {
+        id: crypto.randomUUID(),
+        config: {
+          processingMode: "vsr",
+          qualityLevel: (aggregate.recommendedSettings?.nvidiaQuality as SavedBenchmarkRecord["config"]["qualityLevel"] | undefined) ?? "high",
+          inputWidth: aggregate.environment?.nativeOutputWidth ? Math.max(1, Math.floor(aggregate.environment.nativeOutputWidth / 2)) : 1280,
+          inputHeight: aggregate.environment?.nativeOutputHeight ? Math.max(1, Math.floor(aggregate.environment.nativeOutputHeight / 2)) : 720,
+          frames: samples.reduce((sum, sample) => sum + sample.framesCollected, 0),
+        },
+        status: aggregate.scenarios.every((scenario) => !scenario.timedOut) ? "completed" : "failed",
+        startedAt: Date.now() - aggregate.totalDurationMs,
+        completedAt: Date.now(),
+        framesProcessed: samples.reduce((sum, sample) => sum + sample.framesCollected, 0),
+        framesDropped: samples.reduce((sum, sample) => sum + sample.framesDropped, 0),
+        framesFailed: samples.filter((sample) => sample.timedOut).length,
+        avgProcessingTimeMs: aggregate.bestLatency?.avgMs ?? 0,
+        minProcessingTimeMs: Math.min(...samples.map((sample) => sample.p50ProcessingTimeMs ?? Infinity).filter(Number.isFinite), 0),
+        maxProcessingTimeMs: Math.max(...samples.map((sample) => sample.p95ProcessingTimeMs ?? 0), 0),
+        p50ProcessingTimeMs: aggregate.bestLatency?.avgMs ?? 0,
+        p95ProcessingTimeMs: Math.max(...samples.map((sample) => sample.p95ProcessingTimeMs ?? 0), 0),
+        p99ProcessingTimeMs: Math.max(...samples.map((sample) => sample.p95ProcessingTimeMs ?? 0), 0),
+        avgFps: Math.max(...samples.map((sample) => sample.achievedFps ?? 0), 0),
+        avgNativeInputReceiveMs: aggregate.nativeBenchmarks[0]?.avgInputReceiveUs ? aggregate.nativeBenchmarks[0].avgInputReceiveUs / 1000 : undefined,
+        avgNativeUploadMs: aggregate.nativeBenchmarks[0]?.avgUploadUs ? aggregate.nativeBenchmarks[0].avgUploadUs / 1000 : undefined,
+        avgNativeEffectMs: aggregate.nativeBenchmarks[0]?.avgEffectUs ? aggregate.nativeBenchmarks[0].avgEffectUs / 1000 : undefined,
+        avgNativeDownloadMs: aggregate.nativeBenchmarks[0]?.avgDownloadUs ? aggregate.nativeBenchmarks[0].avgDownloadUs / 1000 : undefined,
+      };
+
+      if (api?.nvidiaSaveBenchmarkResult) {
+        const save: SavedBenchmarkResult = await api.nvidiaSaveBenchmarkResult(record).catch(() => ({ success: false }));
+        if (save?.success && save.id && api.nvidiaExportBenchmarkResult) {
+          await api.nvidiaExportBenchmarkResult(save.id).catch(() => null);
+        }
+      }
+      await api?.nvidiaOpenBenchmarkFolder?.().catch(() => {});
+    };
+    return () => {
+      nvidiaBenchmarkService.onExport = null;
+    };
+  }, []);
 
   /** Cancel the running benchmark. */
   const handleCancelBenchmark = useCallback(() => {
@@ -1001,6 +1196,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setCurrentStreamId(currentStream.logicalStreamId);
     }
   }, [currentStream, currentStreamId]);
+
+  // ── Compare stream detection ──────────────────────────────────
+  const isCompareStream = useMemo(() => {
+    if (!currentStream) return false;
+    return !!(currentStream as unknown as Record<string, unknown>).compareMode;
+  }, [currentStream]);
 
   // Watched stream info from explicit target
   const watchedInfo = useMemo(() => {
@@ -1672,6 +1873,38 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     );
   }
 
+  // ── Compare stream branch ────────────────────────────────────────
+  if (isCompareStream && currentStream) {
+    const ann = currentStream as unknown as Record<string, unknown>;
+    return (
+      <ViewerShell className={className} onExit={handleExit}>
+        <CompareViewerSurface
+          streamAnnouncement={ann as never}
+          mediaSessionA={
+            (
+              ann.variantADescriptor as
+                | { mediaSessionId?: string }
+                | undefined
+            )?.mediaSessionId ?? ""
+          }
+          mediaSessionB={
+            (
+              ann.variantBDescriptor as
+                | { mediaSessionId?: string }
+                | undefined
+            )?.mediaSessionId ?? ""
+          }
+          groupId={selectedGroupId ?? currentStream.groupId}
+          hostDeviceId={
+            watchingTarget?.hostDeviceId ?? currentStream.hostDeviceId
+          }
+          hostName={sharerName}
+          onExit={handleExit}
+        />
+      </ViewerShell>
+    );
+  }
+
   // ── Watching / default state: Video stage with controls ────────
 
   return (
@@ -1718,6 +1951,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             onContextRestored={handleEnhancementContextRestored}
             onFirstFrame={handleEnhancementFirstFrame}
             onStatsUpdate={handleEnhancementStatsUpdate}
+            processorApiRef={processorApiRef}
           />
 
           {/* ── Paused overlay (frozen frame poster + play icon + label) ── */}

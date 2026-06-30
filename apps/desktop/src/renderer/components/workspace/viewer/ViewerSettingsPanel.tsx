@@ -62,6 +62,10 @@ import {
   type BenchmarkScenarioResult,
 } from "@/services/viewer-image-processing/nvidia-benchmark-service";
 
+type ExportableBenchmarkRecord = {
+  id: string;
+};
+
 //  Viewer quality request state 
 
 // ─── Benchmark section ──────────────────────────────────────────────────────
@@ -231,6 +235,25 @@ function BenchmarkSection({
     }
   }, []);
 
+  const handleExportLatest = useCallback(async () => {
+    try {
+      const api = (window as unknown as { screenlink?: {
+        nvidiaGetBenchmarkResults: () => Promise<ExportableBenchmarkRecord[]>;
+        nvidiaExportBenchmarkResult: (resultId: string) => Promise<string | null>;
+      } }).screenlink;
+      if (!api?.nvidiaGetBenchmarkResults || !api?.nvidiaExportBenchmarkResult) {
+        return;
+      }
+      const results = await api.nvidiaGetBenchmarkResults();
+      const latest = results.at(-1);
+      if (latest?.id) {
+        await api.nvidiaExportBenchmarkResult(latest.id);
+      }
+    } catch {
+      // Best-effort
+    }
+  }, []);
+
   return (
     <div className="pt-2 border-t border-border-subtle">
       <div className="flex items-center justify-between mb-2">
@@ -340,6 +363,14 @@ function BenchmarkSection({
               >
                 <FolderOpen className="h-3 w-3 mr-1" />
                 Open Folder
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 text-[10px] h-7"
+                onClick={handleExportLatest}
+              >
+                Export Latest
               </Button>
               <Button
                 variant="outline"
