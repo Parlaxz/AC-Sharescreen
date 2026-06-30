@@ -172,34 +172,39 @@ describe("ViewerClient — pause / resume", () => {
     vi.restoreAllMocks();
   });
 
-  it("pauseMedia stops viewing and sets isUserPaused", async () => {
+  it("pauseMedia marks paused without calling stopViewing", async () => {
     expect(client.isUserPaused).toBe(false);
+    expect(client.activeStreamId).toBe("stream-1");
     await client.pauseMedia();
     expect(client.isUserPaused).toBe(true);
-    expect(mockSDK.stopViewing).toHaveBeenCalledWith("stream-1");
+    // The connection stays alive — stopViewing should NOT be called
+    expect(mockSDK.stopViewing).not.toHaveBeenCalled();
     // SDK should still be connected (not disconnected)
     expect(mockSDK.disconnect).not.toHaveBeenCalled();
+    // active stream ID is preserved for the new pause
   });
 
-  it("resumeMedia re-establishes viewing after pause", async () => {
+  it("resumeMedia clears pause state without calling view()", async () => {
     await client.pauseMedia();
     expect(client.isUserPaused).toBe(true);
+
+    // Clear the view spy (was called once during beforeEach setup)
+    mockSDK.view.mockClear();
 
     await client.resumeMedia();
     expect(client.isUserPaused).toBe(false);
-    expect(mockSDK.view).toHaveBeenCalledWith(
-      "stream-1",
-      expect.objectContaining({ audio: true, video: true }),
-    );
+    // The existing connection is reused — view() should NOT be called again
+    expect(mockSDK.view).not.toHaveBeenCalled();
   });
 
   it("pauseMedia while already paused is idempotent", async () => {
     await client.pauseMedia();
-    const stopViewingCallsBefore = mockSDK.stopViewing.mock.calls.length;
+    expect(client.isUserPaused).toBe(true);
 
     await client.pauseMedia(); // should be no-op
-    expect(mockSDK.stopViewing.mock.calls.length).toBe(stopViewingCallsBefore);
     expect(client.isUserPaused).toBe(true);
+    // stopViewing should never be called during any pause
+    expect(mockSDK.stopViewing).not.toHaveBeenCalled();
   });
 
   it("resumeMedia without prior pause throws", async () => {
@@ -239,33 +244,11 @@ describe("ViewerClient — pause / resume", () => {
     );
   });
 
-  it("pauseMedia preserves resume with streamIdOverride", async () => {
+  it("pauseMedia preserves activeStreamId for reconnect path", async () => {
     await client.pauseMedia();
-    // Host restarted while paused — new stream ID
-    await client.resumeMedia("New Viewer", "stream-2-new");
-    expect(mockSDK.view).toHaveBeenCalledWith(
-      "stream-2-new",
-      expect.objectContaining({ label: "New Viewer" }),
-    );
-  });
-
-  it("pauseMedia failure restores isUserPaused to false", async () => {
-    // Make stopViewing reject
-    mockSDK.stopViewing.mockRejectedValueOnce(new Error("stop failed"));
-    await expect(client.pauseMedia()).rejects.toThrow("stopViewing failed");
-    // isUserPaused should remain false since pause didn't complete
-    expect(client.isUserPaused).toBe(false);
-  });
-
-  it("resumeMedia failure restores isUserPaused to true (retryable)", async () => {
-    await client.pauseMedia();
-    expect(client.isUserPaused).toBe(true);
-
-    // Make view reject
-    mockSDK.view.mockRejectedValueOnce(new Error("view failed"));
-    await expect(client.resumeMedia()).rejects.toThrow("view failed");
-    // Should still be paused for retry
-    expect(client.isUserPaused).toBe(true);
+    // The active stream ID is preserved (not nulled) so the reconnect
+    // path can still use it if the connection genuinely fails.
+    expect(client.activeStreamId).toBe("stream-1");
   });
 
   it("pause during shutdown is no-op when shutdown started", async () => {
@@ -276,7 +259,7 @@ describe("ViewerClient — pause / resume", () => {
     await shutdownPromise;
   });
 
-  it("stopViewing during shutdownSequence clears resume state", async () => {
+  it("shutdown clears pause state", async () => {
     await client.pauseMedia();
     expect(client.isUserPaused).toBe(true);
 
@@ -287,21 +270,17 @@ describe("ViewerClient — pause / resume", () => {
     await expect(client.resumeMedia()).rejects.toThrow("shutting down");
   });
 
-  it("pauseMedia clears stale open-state so resume waits for a fresh channel", async () => {
-    vi.useFakeTimers();
-    try {
-      mockSDK._fire("dataChannelOpen", { detail: { uuid: "publisher-1" } });
-      await client.pauseMedia();
+  it("pauseMedia preserves data channel state for the existing connection", async () => {
+    // Simulate an already-open data channel
+    mockSDK._fire("dataChannelOpen", { detail: { uuid: "publisher-1" } });
 
-      const waitPromise = client.waitForDataChannelOpen("publisher-1", 500);
-      vi.advanceTimersByTime(600);
+    // Pause does NOT clear data channel state — the connection stays alive
+    await client.pauseMedia();
 
-      await expect(waitPromise).rejects.toThrow(
-        "Data channel open timed out for peer publisher-1",
-      );
-    } finally {
-      vi.useRealTimers();
-    }
+    // The same data channel should still be tracked (generation did not change)
+    await expect(
+      client.waitForDataChannelOpen("publisher-1", 500),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -371,13 +350,10 @@ describe("ViewerClient — shutdown reconnect prevention", () => {
     // Simulate paused state before shutdown
     (client as any)._userPaused = true;
     (client as any)._pausedStreamId = "stream-1";
-    (client as any)._pausedDisplayName = "Viewer";
-
     await client.shutdown();
 
     expect((client as any)._userPaused).toBe(false);
     expect((client as any)._pausedStreamId).toBeNull();
-    expect((client as any)._pausedDisplayName).toBeNull();
   });
 
   it("shutdown resolves data channel waiters", async () => {

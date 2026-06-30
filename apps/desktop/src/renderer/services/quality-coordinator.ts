@@ -104,7 +104,7 @@ export async function applySenderSettings(
   enc.maxBitrate = settings.maxBitrate * 1000;
   enc.maxFramerate = settings.maxFramerate;
   if (settings.degradationPreference) {
-    (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
+    (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
       settings.degradationPreference as RTCDegradationPreference;
   }
   if (settings.scaleResolutionDownBy !== undefined && settings.scaleResolutionDownBy >= 1) {
@@ -431,14 +431,29 @@ export class QualityCoordinator {
       }
     }
 
-    // 6. Apply scaleResolutionDownBy
-    //    Stage 6: Correct scaling using actual source width/height, not maxWidth/maxWidth bug
-    const scale = groupSettings.video.scaleResolutionDownBy;
-    const scaleWidth = Math.round(width / scale);
-    const scaleHeight = Math.round(height / scale);
+    // 6. Apply scaleResolutionDownBy only when using group defaults.
+    //    When the viewer explicitly requested dimensions (and host allows it),
+    //    those ARE the final output dimensions — do NOT compound group-level
+    //    scaling on top. The sender-side applyToSender() computes one
+    //    source-to-target scaleResolutionDownBy, which is the correct single
+    //    scaling operation.
+    //    Stage 6: Correct scaling using actual source width/height.
+    const usingViewerDimensions = viewerRequest && hostLimits.allowViewerQualityRequests;
+    let outputWidth: number;
+    let outputHeight: number;
+    if (usingViewerDimensions) {
+      // Viewer specified final dimensions — do not apply group scaling
+      outputWidth = width;
+      outputHeight = height;
+    } else {
+      // Group defaults — apply group-level scaleResolutionDownBy
+      const scale = groupSettings.video.scaleResolutionDownBy;
+      outputWidth = Math.round(width / scale);
+      outputHeight = Math.round(height / scale);
+    }
 
     return {
-      requested: viewerRequest && hostLimits.allowViewerQualityRequests
+      requested: usingViewerDimensions
         ? {
             videoBitrateKbps: viewerRequest.videoBitrateKbps,
             maxWidth: viewerRequest.maxWidth,
@@ -449,8 +464,8 @@ export class QualityCoordinator {
         : null,
       effective: {
         videoBitrateKbps: bitrate,
-        maxWidth: scaleWidth,
-        maxHeight: scaleHeight,
+        maxWidth: outputWidth,
+        maxHeight: outputHeight,
         maxFps: fps,
         degradationPreference: degradation,
       },
@@ -484,6 +499,11 @@ export class QualityCoordinator {
 
     // Stage 6: Fix maxWidth/maxWidth → maxWidth bug.
     // Compute scale from source track settings down to effective target.
+    // Apply scaling exactly once: if the viewer explicitly requested dimensions,
+    // calculate one source-to-target scaleResolutionDownBy.
+    // Do NOT compound with a prior group-level scale — the effective maxWidth/maxHeight
+    // from calculateEffectiveQuality already represent the final target when viewer
+    // explicitly requests those dimensions.
     const settings = sender.track?.getSettings();
     const sourceWidth = settings?.width ?? 1920;
     const sourceHeight = settings?.height ?? 1080;
@@ -495,7 +515,10 @@ export class QualityCoordinator {
       enc.scaleResolutionDownBy = 1;
     }
 
-    (enc as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = effective.degradationPreference as RTCDegradationPreference;
+    // degradationPreference is a top-level RTCRtpSendParameters field, NOT per-encoding.
+    // Setting it on the encoding level is incorrect — Chromium may ignore or throw.
+    (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
+      effective.degradationPreference as RTCDegradationPreference;
     // Preserve existing priority rather than overwriting it
     enc.priority = existingPriority ?? "medium";
 

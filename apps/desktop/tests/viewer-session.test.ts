@@ -263,6 +263,59 @@ describe("ViewerSession — generation counter", () => {
     );
   });
 
+  it("destroy waits for stream.leave delivery before shutting down the viewer client", async () => {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+
+    let resolveLeave!: () => void;
+    const sendOrder: string[] = [];
+    (runtime as any).__sendToPeer.mockImplementation(
+      async (_peer: string, payload: { type?: string }) => {
+        if (payload.type === "stream.leave") {
+          sendOrder.push("leave-started");
+          await new Promise<void>((resolve) => {
+            resolveLeave = () => {
+              sendOrder.push("leave-finished");
+              resolve();
+            };
+          });
+        }
+      },
+    );
+    mockViewerClientMethods.shutdown.mockImplementation(async () => {
+      sendOrder.push("shutdown");
+    });
+
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+
+    const destroyPromise = session.destroy();
+
+    expect(sendOrder).toEqual(["leave-started"]);
+
+    resolveLeave();
+    await destroyPromise;
+
+    expect(sendOrder).toEqual(["leave-started", "leave-finished", "shutdown"]);
+  });
+
   it("retry() bumps generation and creates a new ViewerClient", async () => {
     mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
       accepted: true,
@@ -663,7 +716,7 @@ describe("ViewerSession — destroy lifecycle", () => {
     vi.restoreAllMocks();
   });
 
-  it("destroy clears video.srcObject and pauses the video element", () => {
+  it("destroy clears video.srcObject and pauses the video element", async () => {
     const mockVideo = {
       pause: vi.fn(),
       srcObject: "fake-stream",
@@ -678,46 +731,46 @@ describe("ViewerSession — destroy lifecycle", () => {
     // Simulate having a received stream
     Object.defineProperty(session, "_receivedStream", { value: "some-stream", writable: true });
 
-    session.destroy();
+    await session.destroy();
 
     // video.pause and srcObject cleared
     expect(mockVideo.pause).toHaveBeenCalled();
     expect((mockVideo as any).srcObject).toBeNull();
   });
 
-  it("destroy cancels readiness timer", () => {
+  it("destroy cancels readiness timer", async () => {
     const cancelSpy = vi.fn();
     (session as any).cancelReadinessTimer = cancelSpy;
 
-    session.destroy();
+    await session.destroy();
 
     expect(cancelSpy).toHaveBeenCalled();
   });
 
-  it("destroy clears status interval", () => {
+  it("destroy clears status interval", async () => {
     const clearSpy = vi.fn();
     (session as any).clearStatusInterval = clearSpy;
 
-    session.destroy();
+    await session.destroy();
 
     expect(clearSpy).toHaveBeenCalled();
   });
 
-  it("destroy cancels pending join", () => {
+  it("destroy cancels pending join", async () => {
     const cancelSpy = vi.fn();
     (session as any).cancelPendingJoin = cancelSpy;
 
-    session.destroy();
+    await session.destroy();
 
     expect(cancelSpy).toHaveBeenCalled();
   });
 
-  it("destroy clears callback references (onStateChange, onStreamReceived, onError)", () => {
+  it("destroy clears callback references (onStateChange, onStreamReceived, onError)", async () => {
     session.onStateChange = vi.fn();
     session.onStreamReceived = vi.fn();
     session.onError = vi.fn();
 
-    session.destroy();
+    await session.destroy();
 
     // After final teardown, callbacks should be nulled
     expect(session.onStateChange).toBeNull();
@@ -725,37 +778,37 @@ describe("ViewerSession — destroy lifecycle", () => {
     expect(session.onError).toBeNull();
   });
 
-  it("destroy is idempotent", () => {
-    session.destroy();
+  it("destroy is idempotent", async () => {
+    await session.destroy();
     // Second destroy should not throw
-    expect(() => session.destroy()).not.toThrow();
+    await expect(session.destroy()).resolves.toBeUndefined();
     // State should be "ended"
     expect(session.state).toBe("ended");
   });
 
-  it("destroy clears received stream", () => {
+  it("destroy clears received stream", async () => {
     Object.defineProperty(session, "_receivedStream", { value: "some-stream", writable: true });
 
-    session.destroy();
+    await session.destroy();
 
     expect((session as any)._receivedStream).toBeNull();
   });
 
-  it("destroy clears pause state and poster", () => {
+  it("destroy clears pause state and poster", async () => {
     Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
     Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
 
-    session.destroy();
+    await session.destroy();
 
     expect(session.pauseState).toBe("playing");
     expect(session.pausePoster).toBeNull();
   });
 
-  it("destroy clears bind token and mediaSessionId", () => {
+  it("destroy clears bind token and mediaSessionId", async () => {
     Object.defineProperty(session, "_bindToken", { value: "token-123", writable: true });
     Object.defineProperty(session, "_bindMediaSessionId", { value: "ms-1", writable: true });
 
-    session.destroy();
+    await session.destroy();
 
     expect((session as any)._bindToken).toBeNull();
     expect((session as any)._bindMediaSessionId).toBeNull();
@@ -1082,7 +1135,7 @@ describe("ViewerSession — instance-local generations", () => {
     expect((sessionB as any)._pauseGeneration).toBe(pauseGenB);
   });
 
-  it("each session cleans only its own video element on destroy", () => {
+  it("each session cleans only its own video element on destroy", async () => {
     const videoA = {
       pause: vi.fn(), srcObject: "stream-a",
       autoplay: false, playsInline: false, muted: false, volume: 1,
@@ -1099,7 +1152,7 @@ describe("ViewerSession — instance-local generations", () => {
     Object.defineProperty(sessionA, "_receivedStream", { value: "stream-a", writable: true });
     Object.defineProperty(sessionB, "_receivedStream", { value: "stream-b", writable: true });
 
-    sessionA.destroy();
+    await sessionA.destroy();
 
     // Only A's video should be paused and cleared
     expect(videoA.pause).toHaveBeenCalled();

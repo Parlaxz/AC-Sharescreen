@@ -8,6 +8,8 @@ export interface QualityTarget {
   targetWidth: number;
   targetHeight: number;
   degradationPreference: DegradationPreference;
+  /** When true, reactivate the sender encoding. When false, deactivate. */
+  active?: boolean;
 }
 
 export type QualityResult =
@@ -45,6 +47,10 @@ export async function applyQualityToSender(
   encoding.maxBitrate = target.videoCeilingKbps * 1000;
   encoding.maxFramerate = target.maxFps;
   encoding.scaleResolutionDownBy = scale;
+  // Active state: when explicitly provided, set it. Otherwise leave as-is.
+  if (target.active !== undefined) {
+    encoding.active = target.active;
+  }
   params.degradationPreference = target.degradationPreference;
 
   try {

@@ -21,7 +21,6 @@ import { AppShell } from "./components/layout/AppShell.js";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts.js";
 import { usePreloadEvents } from "./hooks/use-preload-events.js";
 import { initializeAppRuntime } from "./services/initialize-app-runtime.js";
-import { acquirePhase3Runtime, releasePhase3Runtime } from "./services/phase3-runtime.js";
 import { initGroupShortcutListener } from "./services/group-shortcut-service.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
 
@@ -99,11 +98,12 @@ export function App() {
         return;
       }
       console.error("[App] Runtime startup failed:", err);
-      void releasePhase3Runtime();
     });
     return () => {
       cancelled = true;
-      void releasePhase3Runtime();
+      // Do NOT release the phase3 runtime on React cleanup/remount.
+      // The runtime is a global singleton that survives component
+      // unmount — it is released only on actual app shutdown.
     };
   }, []);
 

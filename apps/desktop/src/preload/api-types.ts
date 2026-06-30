@@ -134,7 +134,7 @@ export interface ScreenLinkAPI {
   updateQuickShareConfig: (partial: Partial<QuickShareConfigDTO>) => Promise<void>;
   onQuickShareOpen: (callback: () => void) => () => void;
 
-  // Tray-originated mainâ†’renderer events
+  // Tray-originated main→renderer events
   onOpenSourcePicker: (callback: () => void) => () => void;
   onStopSharing: (callback: () => void) => () => void;
   onOpenDiagnostics: (callback: () => void) => () => void;
@@ -207,15 +207,15 @@ export interface ScreenLinkAPI {
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 
-// â”€â”€â”€ Quick Share types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Quick Share types ───────────────────────────────────────────────────────
 
-// â”€â”€â”€ Group IPC response DTOs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Group IPC response DTOs ───────────────────────────────────────────
 
 /**
  * Record returned from createGroup / joinGroup / listGroups / getGroup IPC
  * handlers. Mirrors the main-process `LocalGroupRecord` from `group-store.ts`.
  *
- * `encryptedGroupSecret` is the safe-to-serialize ciphertext form â€” the
+ * `encryptedGroupSecret` is the safe-to-serialize ciphertext form — the
  * decrypted group secret is never exposed through this DTO.
  */
 export interface GroupRecordDTO {
@@ -250,7 +250,7 @@ export interface GroupConnectionConfigDTO {
   nodeId: string;
 }
 
-// â”€â”€â”€ Quick Share types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Quick Share types ─────────────────────────────────────────────────
 
 export interface QuickShareConfigDTO {
   shortcutEnabled: boolean;
@@ -375,7 +375,7 @@ export interface ShortcutValidationDTO {
   normalized: string;
 }
 
-// â”€â”€â”€ Update types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Update types ─────────────────────────────────────────────────────────
 
 export type UpdatePhase =
   | "unsupported"
@@ -407,7 +407,7 @@ export interface UpdateStatusDTO {
   updaterSupported: boolean;
 }
 
-// â”€â”€â”€ Existing types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Existing types ────────────────────────────────────────────────────────
 
 export type AudioStateDTO =
   | "disabled"

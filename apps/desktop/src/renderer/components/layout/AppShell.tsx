@@ -145,22 +145,24 @@ export function AppShell({ children, className }: AppShellProps) {
 
         {/* ─── Primary Workspace ─────────────────────────── */}
         <ResizablePanel className="flex-1 min-w-0 min-h-0 bg-canvas overflow-hidden relative">
-          {isViewing && currentPage === "viewer" ? (
-            <ViewerWorkspace />
-          ) : (
-            <main className="h-full min-h-0 overflow-auto">{children}</main>
-          )}
-          {/* When viewing a stream but on a non-viewer page (home, settings, etc.),
-              keep ViewerWorkspace mounted in the background so the WebRTC session
-              stays alive. Hidden via opacity/pointer-events, not display:none,
+          {/* Single ViewerWorkspace instance — always mounted while isViewing
+              so the WebRTC session stays alive across page switches. Hidden via
+              opacity/pointer-events (not display:none) when on a non-viewer page,
               so Chromium continues decoding video frames. */}
-          {isViewing && currentPage !== "viewer" && (
+          {isViewing && (
             <div
-              className="absolute inset-0 pointer-events-none opacity-0"
-              aria-hidden="true"
+              className={cn(
+                currentPage !== "viewer" && "absolute inset-0 pointer-events-none opacity-0",
+              )}
+              aria-hidden={currentPage !== "viewer"}
             >
               <ViewerWorkspace />
             </div>
+          )}
+          {/* Primary content — visible when not viewing, or when on a non-viewer
+              page with the viewer hidden in the background. */}
+          {(!isViewing || currentPage !== "viewer") && (
+            <main className="h-full min-h-0 overflow-auto">{children}</main>
           )}
         </ResizablePanel>
 

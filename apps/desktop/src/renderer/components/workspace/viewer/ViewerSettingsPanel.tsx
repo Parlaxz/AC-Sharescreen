@@ -442,6 +442,7 @@ export interface ViewerRequestState {
   maxWidth: number;
   maxHeight: number;
   maxFps: number;
+  degradationPreference?: string;
 }
 
 export const VIEWER_REQUEST_PRESETS: Array<{

@@ -78,7 +78,6 @@ export class ViewerClient {
    * Populated by pauseMedia(), consumed and cleared by resumeMedia().
    */
   private _pausedStreamId: string | null = null;
-  private _pausedDisplayName: string | null = null;
 
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
@@ -323,9 +322,6 @@ export class ViewerClient {
     // to the SDK. Stored before the SDK call so that an error during view()
     // still leaves a recoverable ID for cleanup.
     this._activeStreamId = streamId;
-    // Also store the display name so pauseMedia() → resumeMedia() can
-    // restore the original label without the caller having to remember it.
-    this._pausedDisplayName = displayName ?? null;
 
     // Stage 8: Apply codec preferences to any pre-existing viewer transceivers.
     this.applyCodecPreferencesOnExistingConnections();
@@ -372,95 +368,57 @@ export class ViewerClient {
   }
 
   /**
-   * Pause media playback while keeping the SDK signaling connection alive.
+   * Pause media playback — mark state only, keep the WebRTC connection alive.
    *
-   * Saves the active stream parameters so resumeMedia() can re-establish the
-   * media connection without rejoining the group or re-authenticating with the
-   * VDO signaling server.
+   * Unlike the old implementation, this does NOT call stopViewing() on the SDK.
+   * The media connection stays intact; the host-side disables the sender
+   * encoding (active=false). On resume the host re-enables it with the stored
+   * quality configuration.
    *
    * Safe to call when already paused (no-op), when shutting down (no-op), or
-   * when no stream is active (no-op). If stopViewing() fails, the saved resume
-   * state is nevertheless retained so the caller can retry resume.
+   * when no stream is active (no-op).
    *
    * State machine:
-   *   playing → pauseMedia() → stopViewing() → paused
+   *   playing → pauseMedia() → paused  (connection kept alive)
    *   paused  → pauseMedia() → (no-op, still paused)
    */
   async pauseMedia(): Promise<void> {
     if (this._shuttingDown || this._shutdownPromise) return;
     if (this._userPaused) return;     // already paused — idempotent
-    if (!this.sdk || !this._activeStreamId) return; // nothing to pause
 
-    // Save parameters for resume before touching the SDK
+    // Save resume parameters (the current stream remains active in the SDK)
     this._pausedStreamId = this._activeStreamId;
-    this.beginNewMediaConnectionGeneration();
-
-    try {
-      await this.sdk.stopViewing(this._activeStreamId);
-    } catch {
-      // Saved resume state retained so caller can retry
-      throw new CompatibilityError("pauseMedia: stopViewing failed — media may still be active");
-    }
-
-    this._activeStreamId = null;
     this._userPaused = true;
+    // Do NOT call stopViewing() — the WebRTC connection, data channel,
+    // sender, binding, and metrics registration all stay alive.
   }
 
   /**
-   * Resume a user-paused media stream.
+   * Resume a user-paused media stream — mark state only.
    *
-   * Re-invokes view() with the stream parameters saved during pauseMedia().
-   * The SDK signaling connection has stayed alive throughout the pause, so no
-   * rejoin handshake is needed — the host receives a fresh invite and
-   * re-establishes the WebRTC connection.
-   *
-   * If `streamIdOverride` is provided, it takes precedence over the saved
-   * stream ID. This allows resuming against a new VDO stream ID after the
-   * host restarted or replaced the share while the viewer was paused.
+   * The WebRTC connection was never torn down during pause, so no
+   * view() call, no fresh token, and no media.bind are needed.
+   * The host-side re-activates the sender encoding with the stored
+   * quality configuration.
    *
    * State machine:
-   *   paused → resumeMedia() → view(…) → playing
-   *   paused → resumeMedia() → view(…) fails → paused (error thrown, retryable)
+   *   paused → resumeMedia() → playing  (existing connection reused)
    *
-   * @param displayName - Optional display name label for the view call.
-   * @param streamIdOverride - If provided, resume against this stream ID
-   *   instead of the one saved during pause. Use when the host has
-   *   restarted their share while the viewer was paused.
-   * @throws CompatibilityError if not paused, shutting down, or view() fails
+   * @throws CompatibilityError if not paused or shutting down
    */
-  async resumeMedia(displayName?: string, streamIdOverride?: string): Promise<void> {
+  async resumeMedia(): Promise<void> {
     if (this._shuttingDown || this._shutdownPromise) {
       throw new CompatibilityError("ViewerClient is shutting down — cannot resume");
     }
     if (!this._userPaused) {
       throw new CompatibilityError("resumeMedia called but viewer was not paused");
     }
-    if (!this.sdk) {
-      throw new CompatibilityError("Not connected — SDK disconnected during pause");
-    }
 
-    const streamId = streamIdOverride ?? this._pausedStreamId;
-    const label = displayName ?? this._pausedDisplayName;
-    if (!streamId) {
-      this._userPaused = false;
-      throw new CompatibilityError("No saved stream ID — cannot resume");
-    }
-
-    // Optimistically clear pause state so a subsequent pauseMedia() call
-    // during the view() negotiation won't be silently ignored.
+    // Restore the active stream ID that was preserved during pause
+    this._activeStreamId = this._pausedStreamId;
     this._userPaused = false;
     this._pausedStreamId = null;
-    this._pausedDisplayName = null;
-
-    try {
-      await this.view(streamId, label ?? undefined);
-    } catch (err) {
-      // view() failed — restore pause state so the caller can retry resume
-      this._pausedStreamId = streamIdOverride ?? streamId;
-      this._pausedDisplayName = label;
-      this._userPaused = true;
-      throw err;
-    }
+    // Do NOT call view() — the existing peer connection and sender are intact.
   }
 
   /** True while the user has intentionally paused media. */
@@ -592,7 +550,6 @@ export class ViewerClient {
       //    stale resume parameters behind.
       this._userPaused = false;
       this._pausedStreamId = null;
-      this._pausedDisplayName = null;
 
       // 5) Clear data-channel waiter state. Resolve any outstanding
       //    waiters so any awaiter (e.g. sendMediaBind) wakes up and

@@ -89,20 +89,23 @@ export type ViewerSessionState =
   | "ended"
   | "error";
 
-/**
- * Pause lifecycle state machine.
- *
- *   playing → pause() → pausing → (stopViewing) → paused
- *   paused  → resume() → resuming → (view()) → playing
- *
- * Transitions are async and guarded by a generation counter so that rapid
- * pause() → resume() → pause() sequences cannot overlap.
- */
-export type ViewerPauseState =
-  | "playing"
-  | "pausing"
-  | "paused"
-  | "resuming";
+  /**
+   * Pause lifecycle state machine.
+   *
+   *   playing → pause() → pausing → paused  (connection kept alive)
+   *   paused  → resume() → resuming → playing (same connection)
+   *
+   * The WebRTC connection, sender, binding, and data channel all stay alive
+   * through pause/resume. The host disables/re-enables the sender encoding.
+   *
+   * Transitions are async and guarded by a generation counter so that rapid
+   * pause() → resume() → pause() sequences cannot overlap.
+   */
+  export type ViewerPauseState =
+    | "playing"
+    | "pausing"
+    | "paused"
+    | "resuming";
 
 export interface ViewerSessionOptions {
   groupId: string;
@@ -314,14 +317,15 @@ export class ViewerSession {
   }
 
   /**
-   * Pause media playback.
+   * Pause media playback — connection stays alive.
    *
-   * Captures the current video frame as a poster, then calls
-   * viewerClient.pauseMedia() to stop the WebRTC media connection while
-   * keeping the signaling channel alive.
+   * Captures the current video frame as a poster, then marks the viewer as
+   * paused locally and notifies the host. The host disables the sender
+   * encoding (active=false) so no video packets are sent. The WebRTC peer
+   * connection, data channel, sender, binding, and metrics registration all
+   * remain intact.
    *
    * State machine: playing → pausing → paused
-   *   or: playing → pausing → (error) → playing (reversible)
    *
    * Rapid calls collapse: a second pause() while already paused is a
    * no-op. A pause() while pausing/resuming awaits the previous
@@ -345,18 +349,21 @@ export class ViewerSession {
     this.setPauseState("pausing");
 
     try {
-      // 1) Capture the current video frame before stopping the media connection
+      // 1) Capture the current video frame before disabling the sender
       this.capturePosterFrame();
 
-      // 2) Stop the media connection (keeps SDK signaling alive)
+      // 2) Mark state only — viewerClient.pauseMedia() no longer calls
+      //    stopViewing(). The WebRTC connection, sender, and data channel
+      //    all stay alive. The host will disable the sender encoding.
       await this.viewerClient.pauseMedia();
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) return;
 
-      // Notify host that we paused
-      this.clearStatusInterval();
-      void this.buildAndSendViewerStatus("paused");
+      // 3) Notify host that we paused so it disables sender active=false
+      void this.buildAndSendViewerPaused(true);
+
+      // 4) Keep status interval running — the connection is alive
       this.setPauseState("paused");
     } catch (err) {
       // Pause failed — return to playing (reversible)
@@ -368,21 +375,17 @@ export class ViewerSession {
   }
 
   /**
-   * Resume a paused media stream.
+   * Resume a paused media stream — reuses the existing connection.
    *
-   * Re-invokes view() on the ViewerClient to re-establish the WebRTC
-   * media connection. If the host has restarted or replaced the stream
-   * while we were paused, the current StreamAnnouncement's stream ID is
-   * used instead of the stale saved value.
+   * The WebRTC peer connection was never torn down during pause, so no
+   * view() call, no fresh token, no media.bind re-send is needed.
+   * Notifies the host, which re-enables the sender encoding (active=true)
+   * and restores the stored quality settings in one setParameters() call.
    *
    * State machine: paused → resuming → playing
    *   or: paused → resuming → (error) → paused (retryable)
-   *
-   * @param currentStreamId - The host's current logical stream ID, to
-   *   handle host restarts that happened while paused. Omit to use the
-   *   stream ID saved at pause time.
    */
-  async resume(vdoStreamIdOverride?: string): Promise<void> {
+  async resume(): Promise<void> {
     if (this._destructed) return;
     if (this._pauseState !== "paused") return; // no-op if not paused (also covers resuming)
 
@@ -398,56 +401,29 @@ export class ViewerSession {
         throw new Error("ViewerClient destroyed during pause");
       }
 
-      // ── 1) Clear stale stream state ────────────────────────────────
-      // The old _receivedStream's tracks ended when stopViewing() was called.
-      // Reusing that MediaStream object — even with new tracks added — can
-      // cause a black screen on some browsers. We discard it so the track
-      // handler creates a fresh MediaStream for the new RTC connection.
-      this._receivedStream = null;
-      this._trackIdsInStream.clear();
-
-      // NOTE: We deliberately do NOT clear the video element's srcObject here.
-      // The old ended-track MediaStream still shows the last received frame,
-      // which keeps the video area non-black until the new tracks arrive.
-      // The track handler (from runJoinFlow) will set el.srcObject = newStream
-      // when the SDK fires trackAdded on the new connection.
-
-      // ── 2) Obtain a fresh join token ────────────────────────────────
-      // The original _bindToken was consumed by the host during the initial
-      // bind and cannot be reused. Send a new stream.join.request over group
-      // control to get a fresh token for the resumed media connection.
-      const freshToken = await this.getFreshJoinToken();
-      if (!freshToken) {
-        throw new Error("Failed to obtain fresh join token for resume");
-      }
-      // Update the saved token so resendMediaBind uses the fresh one
-      this._bindToken = freshToken;
-
-      // ── 3) Re-establish the WebRTC media connection ──────────────
-      //     view() on the SDK invites the host again. The SDK signaling
-      //     stayed alive during pause, so no rejoin handshake is needed.
-      const resumeDisplayName = this.hostName || undefined;
-      await vc.resumeMedia(resumeDisplayName, vdoStreamIdOverride);
+      // ── 1) Mark state only — the existing connection is reused ─────
+      //     viewerClient.resumeMedia() no longer calls view(). It just
+      //     clears the pause flag. The peer connection, sender, data
+      //     channel, and binding are all intact.
+      await vc.resumeMedia();
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) return;
 
-      // ── 4) Re-send media.bind over the new data channel ─────────────
-      //     After stopViewing() the old data channel is gone and the new
-      //     RTC connection establishes a fresh one. The host requires
-      //     media.bind to authorise media delivery — without it the host
-      //     sees a connected viewer but does not forward video/audio.
-      //     The fresh join token from step 2 is used so the host can
-      //     authorise this bind (the old token was already consumed).
-      await this.resendMediaBind(vc);
+      // ── 2) Notify host to re-enable sender with stored quality ─────
+      //     The host's handleViewerPaused(false) will set encoding
+      //     active=true and apply the complete stored quality config in
+      //     one setParameters() call, then send quality.effective and
+      //     quality.configured back.
+      void this.buildAndSendViewerPaused(false);
 
-      // GENERATION CHECK
-      if (!this.isPauseGenerationCurrent()) return;
-
-      // ── 5) Notify host that we resumed ─────────────────────────────
+      // ── 3) Clear poster and mark as playing ────────────────────────
+      //     The received stream is still valid — no need to discard or
+      //     recreate it. The track handler does NOT fire because the
+      //     connection is the same one. The host's re-enabled sender
+      //     will resume sending video packets on the existing RTP stream.
       this.clearPosterFrame();
       this.setPauseState("playing");
-      this.startStatusInterval();
     } catch (err) {
       // Resume failed — stay paused so the user can retry
       console.error("[ViewerSession] resume failed, remaining paused:", err);
@@ -457,76 +433,30 @@ export class ViewerSession {
   }
 
   /**
-   * Obtain a fresh join token from the host by sending a new
-   * stream.join.request over group control. The host generates a new
-   * one-time token and sends it back in stream.join.response.
+   * Send a viewer.paused message to the host over the group control channel.
    *
-   * Returns the token string, or null if the request failed.
+   * When paused=true, the host will find the viewer's video sender and set
+   * its encoding active=false. When paused=false, the host will re-enable
+   * the sender with the stored quality configuration.
    */
-  private async getFreshJoinToken(): Promise<string | null> {
-    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return null;
-
+  private buildAndSendViewerPaused(paused: boolean): void {
     const runtime = getRuntime();
-    if (!runtime || runtime.isDestroyed()) return null;
+    if (!runtime || runtime.isDestroyed()) return;
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
 
-    const connManager = runtime.getConnectionManager();
-    const conn = connManager.getConnection(this.groupId);
-    if (!conn) return null;
+    const conn = runtime.getConnectionManager().getConnection(this.groupId);
+    if (!conn) return;
 
     const peerUuid = conn.peerForDevice(this.hostDeviceId);
-    if (!peerUuid) return null;
+    if (!peerUuid) return;
 
-    // Register response waiter before sending the request
-    const requestId = crypto.randomUUID();
-    const joinResponsePromise = runtime.waitForJoinResponse(requestId, 15_000).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message === "Join response cancelled") return null;
-      throw error;
-    });
-
-    // Send stream.join.request with the existing session ID so the host
-    // correlates this with the original join.
-    await conn.sendToPeer(peerUuid, {
-      type: "stream.join.request",
+    void conn.sendToPeer(peerUuid, {
+      type: "viewer.paused",
       logicalStreamId: this.logicalStreamId,
-      mediaSessionId: this.mediaSessionId,
       viewerDeviceId: runtime.deviceId ?? "viewer",
-      viewerDisplayName: runtime.displayName ?? "Viewer",
-      requestId,
-      ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
-    });
-
-    const response = await joinResponsePromise;
-    if (!response || !response.accepted) return null;
-
-    return response.mediaJoinMetadata ?? null;
-  }
-
-  /**
-   * Re-send media.bind over the new VDO data channel after resume.
-   * The host will not deliver video/audio until the bind is re-authorised.
-   */
-  private async resendMediaBind(vc: ViewerClient): Promise<void> {
-    const sdk = vc.getSDK();
-    const token = this._bindToken;
-    const mediaSessionId = this._bindMediaSessionId;
-    if (!sdk || !token) return;
-
-    for (const [publisherUuid] of sdk.connections) {
-      try {
-        await vc.sendMediaBind(
-          publisherUuid,
-          token,
-          mediaSessionId ?? undefined,
-          this._viewerSessionId ?? undefined,
-        );
-        console.log('[ViewerSession] media.bind re-sent after resume to', publisherUuid.slice(0, 8) + '…');
-      } catch (err) {
-        // Non-fatal — the connection is up, and the host may still accept
-        // the viewer based on the original bind. Log and continue.
-        console.warn('[ViewerSession] media.bind re-send failed for', publisherUuid.slice(0, 8) + '…', err);
-      }
-    }
+      viewerSessionId: this._viewerSessionId ?? undefined,
+      paused,
+    }).catch(() => {});
   }
 
   /**
@@ -862,10 +792,9 @@ export class ViewerSession {
 		this._nextGeneration++;
 
         // 1) Send the leave message FIRST, while the group-control
-        //    channel is still healthy. sendLeave() is fire-and-forget;
-        //    we do not await it because the group channel can be slow
-        //    and we want the SDK teardown to begin immediately.
-        this.sendLeave();
+        //    channel is still healthy. Await delivery so the host
+        //    receives a clean leave before the VDO connection drops.
+        await this.sendLeave();
 
         // 2) Cancel waiters and timers so any pending operation bails.
         this.cancelReadinessTimer();
@@ -1670,17 +1599,16 @@ export class ViewerSession {
   }
 
   /**
-   * Send a stream.leave message over the group-control channel.
-   * Includes the per-attempt session ID so the host can ignore a
-   * late leave from a prior Watch attempt that no longer matches
-   * the active mapping.
+   * Send a stream.leave message over the group-control channel and await
+   * delivery.  The caller (beginTeardown) awaits this before proceeding
+   * to ViewerClient.shutdown() so the host receives the leave before the
+   * VDO connection drops.
    *
-   * Fire-and-forget by design — the group channel is best-effort and
-   * the leave is informational for the host's cleanup path. The host
-   * also reacts to peerDisconnected on the VDO media SDK, so a missed
-   * leave is recoverable.
+   * Includes the per-attempt session ID so the host can ignore a late
+   * leave from a prior Watch attempt that no longer matches the active
+   * mapping.
    */
-  private sendLeave(): void {
+  private async sendLeave(): Promise<void> {
     if (this.leaveAnnounced) return;
     const runtime = getRuntime();
     if (!runtime || runtime.isDestroyed()) return;
@@ -1693,13 +1621,17 @@ export class ViewerSession {
     if (!peerUuid) return;
 
     this.leaveAnnounced = true;
-    void conn.sendToPeer(peerUuid, {
-      type: "stream.leave",
-      logicalStreamId: this.logicalStreamId,
-      mediaSessionId: this.mediaSessionId,
-      viewerDeviceId: runtime.deviceId ?? "viewer",
-      ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
-    }).catch(() => {});
+    try {
+      await conn.sendToPeer(peerUuid, {
+        type: "stream.leave",
+        logicalStreamId: this.logicalStreamId,
+        mediaSessionId: this.mediaSessionId,
+        viewerDeviceId: runtime.deviceId ?? "viewer",
+        ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
+      });
+    } catch {
+      // Best-effort — the host also reacts to peerDisconnected on VDO.
+    }
   }
 
   /**

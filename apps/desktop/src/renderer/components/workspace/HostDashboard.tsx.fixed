@@ -1,4 +1,4 @@
-ï»¿import { useCallback, useMemo, useState, useEffect } from "react";
+ÿimport { useCallback, useMemo, useState, useEffect } from "react";
 import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {

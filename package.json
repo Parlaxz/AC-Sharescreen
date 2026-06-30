@@ -1,7 +1,7 @@
 {
 	"name": "screenlink",
 	"private": true,
-	"version": "0.6.3",
+	"version": "0.6.4",
 	"description": "ScreenLink - Private screen sharing with permanent links",
 	"scripts": {
 		"build": "pnpm build:shared && pnpm build:vdo-adapter && node scripts/check-version-consistency.mjs && pnpm build:desktop",
@@ -24,13 +24,11 @@
 		"video-enhancer:self-test": "native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe --self-test",
 		"video-enhancer:clean": "powershell -NoProfile -Command \"if (Test-Path 'native/video-enhancer/build') { Remove-Item -Recurse -Force 'native/video-enhancer/build' }\"",
 		"video-enhancer:check": "pnpm video-enhancer:build && pnpm video-enhancer:self-test",
-
 		"frame-ring:configure": "pnpm dlx cmake-js configure --runtime=electron --runtime-version=42.4.1 --arch=x64 -d native/video-frame-ring",
 		"frame-ring:build": "pnpm dlx cmake-js build --runtime=electron --runtime-version=42.4.1 --arch=x64 -d native/video-frame-ring",
 		"frame-ring:rebuild": "pnpm dlx cmake-js rebuild --runtime=electron --runtime-version=42.4.1 --arch=x64 -d native/video-frame-ring",
 		"frame-ring:clean": "powershell -NoProfile -Command \"if (Test-Path 'native/video-frame-ring/build') { Remove-Item -Recurse -Force 'native/video-frame-ring/build' }\"",
 		"frame-ring:check": "pnpm frame-ring:build && echo frame-ring built successfully",
-
 		"test": "pnpm --filter @screenlink/shared test",
 		"test:run": "pnpm test",
 		"typecheck": "pnpm -r typecheck",

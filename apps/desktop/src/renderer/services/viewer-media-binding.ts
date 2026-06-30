@@ -837,8 +837,10 @@ export class ViewerMediaBinding {
       ? sender.getParameters() ?? {}
       : {}) as Partial<RTCRtpSendParameters> & { degradationPreference?: string };
     const encoding = params.encodings?.[0];
-    const degradationPreference = (encoding as unknown as { degradationPreference?: string } | undefined)?.degradationPreference
-      ?? (params as unknown as { degradationPreference?: string }).degradationPreference
+    // degradationPreference is a top-level RTCRtpSendParameters field.
+    // Prefer it from params level; fall back to encoding for backward compat.
+    const degradationPreference = (params as unknown as { degradationPreference?: string }).degradationPreference
+      ?? (encoding as unknown as { degradationPreference?: string } | undefined)?.degradationPreference
       ?? "balanced";
 
     return {
@@ -848,6 +850,177 @@ export class ViewerMediaBinding {
       degradationPreference,
       priority: encoding?.priority ?? "medium",
     };
+  }
+
+  // ─── Pause / Resume (host-side) ─────────────────────────────────
+
+  /**
+   * Map from viewerDeviceId to whether the viewer is currently paused.
+   * Used to detect state transitions for sender enable/disable.
+   */
+  private viewerPausedStates = new Map<string, boolean>();
+
+  /**
+   * Handle a viewer pause state transition. Called when the host receives
+   * a viewer.paused message from a known viewer.
+   *
+   * When paused=true: find the viewer's video sender and set encoding
+   * active=false. When paused=false: re-enable the sender with stored
+   * quality settings.
+   *
+   * Returns a ReconcileResult describing what happened.
+   */
+  async handleViewerPaused(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    paused: boolean,
+  ): Promise<ReconcileResult> {
+    if (this.destroyed) return { status: "mapping-missing" };
+
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    const mapping = this.viewerMap.get(key);
+    if (!mapping || !mapping.videoSender) {
+      return { status: "mapping-missing" };
+    }
+
+    const sender = mapping.videoSender;
+
+    if (paused) {
+      // ── Pause: disable sender encoding ──
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          return { status: "sender-not-ready" };
+        }
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        const enc = params.encodings[0]!;
+        enc.active = false;
+        await sender.setParameters(params);
+        this.viewerPausedStates.set(viewerDeviceId, true);
+        return { status: "applied", configured: this.readConfiguredSenderState(sender) };
+      } catch (err) {
+        return {
+          status: "apply-failed",
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    } else {
+      // ── Resume: re-enable sender with stored quality ──
+      return this.applyResumeWithQuality(viewerDeviceId, mediaSessionId, sender, mapping);
+    }
+  }
+
+  /**
+   * Apply resume quality: reactivate the sender and restore stored quality settings
+   * in a single setParameters() call. Sends quality feedback afterward.
+   */
+  private async applyResumeWithQuality(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    sender: RTCRtpSender,
+    mapping: ViewerMapping,
+  ): Promise<ReconcileResult> {
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        return { status: "sender-not-ready" };
+      }
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      const enc = params.encodings[0]!;
+
+      // 1) Reactivate the encoding
+      enc.active = true;
+
+      // 2) Apply stored quality settings
+      const qualityCoordinator = this.runtime.getQualityCoordinator();
+      if (qualityCoordinator) {
+        const request = qualityCoordinator.getViewerRequest(
+          mapping.groupId,
+          mapping.logicalStreamId,
+          viewerDeviceId,
+        );
+
+        if (request) {
+          // Recalculate effective quality from the stored request
+          const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+          const q = syncState?.state?.defaultQuality?.value;
+          const groupSettings = q ?? createDefaultGroupQualitySettings();
+          const ssm = this.runtime.getStreamSessionManager();
+          const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+          const sourceDimensions = {
+            width: actualDims.width || groupSettings.video.sendWidth || 1920,
+            height: actualDims.height || groupSettings.video.sendHeight || 1080,
+          };
+          const runtimeLimits = this.runtime.getHostQualityLimits();
+          const hostLimits: HostQualityLimits = {
+            maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+            maxWidth: runtimeLimits.maxWidth,
+            maxHeight: runtimeLimits.maxHeight,
+            maxFps: runtimeLimits.maxFps,
+            allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+          };
+
+          const effective = qualityCoordinator.calculateEffectiveQuality(
+            groupSettings, hostLimits, request, sourceDimensions,
+          );
+
+          // Apply all quality parameters to the encoding
+          enc.maxBitrate = effective.effective.videoBitrateKbps * 1000;
+          enc.maxFramerate = effective.effective.maxFps;
+
+          // Calculate scale from source to target (exactly once)
+          if (effective.effective.maxWidth > 0 && effective.effective.maxHeight > 0 &&
+              sourceDimensions.width > 0 && sourceDimensions.height > 0) {
+            const widthScale = sourceDimensions.width / effective.effective.maxWidth;
+            const heightScale = sourceDimensions.height / effective.effective.maxHeight;
+            enc.scaleResolutionDownBy = Math.max(1, widthScale, heightScale);
+          }
+
+          // degradationPreference is top-level RTCRtpSendParameters
+          (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
+            effective.effective.degradationPreference as RTCDegradationPreference;
+        }
+      }
+
+      // 3) Apply in a single setParameters call (active=true + complete quality)
+      await sender.setParameters(params);
+
+      // 4) Read back
+      this.viewerPausedStates.set(viewerDeviceId, false);
+      const configured = this.readConfiguredSenderState(sender);
+
+      // 5) Send quality feedback
+      const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+      const peerUuid = conn?.peerForDevice(viewerDeviceId);
+      if (conn && peerUuid) {
+        void conn.sendToPeer(peerUuid, {
+          type: "quality.effective",
+          streamSessionId: mapping.logicalStreamId,
+          videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+          maxWidth: undefined,
+          maxHeight: undefined,
+          maxFps: configured.maxFramerate ?? undefined,
+          degradationPreference: configured.degradationPreference ?? undefined,
+          clampReasons: [],
+        }).catch(() => {});
+
+        void conn.sendToPeer(peerUuid, {
+          type: "quality.configured",
+          streamSessionId: mapping.logicalStreamId,
+          videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+          maxFramerate: configured.maxFramerate ?? undefined,
+          scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
+          degradationPreference: configured.degradationPreference ?? undefined,
+        }).catch(() => {});
+      }
+
+      return { status: "applied", configured };
+    } catch (err) {
+      return {
+        status: "apply-failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   // ─── Legacy single-key methods (backward compat) ──────────────────

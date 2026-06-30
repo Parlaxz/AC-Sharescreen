@@ -42,7 +42,7 @@ export function clearCurrentVdoCredentials(): void {
   currentVdoPassword = "";
 }
 
-// â”€â”€ Audio helper state (set by main process lifecycle) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Audio helper state (set by main process lifecycle) ──────────────────────
 
 let currentAudioHelper: AudioHelperManager | null = null;
 let currentAudioState: string = "disabled";
@@ -110,7 +110,7 @@ export function registerIpcHandlers(
   onQuickShareConfigUpdated?: (enabled: boolean, accelerator: string) => void,
   groupShortcutManager?: GroupShortcutManager,
 ): void {
-  // â”€â”€ VDO session credentials (for LAN testing) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── VDO session credentials (for LAN testing) ─────────────────────────
 
   ipcMain.handle("get-vdo-credentials", () => {
     return {
@@ -130,7 +130,7 @@ export function registerIpcHandlers(
     clearCurrentVdoCredentials();
   });
 
-  // â”€â”€ Desktop capture sources â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Desktop capture sources ──────────────────────────────────────────────
 
   ipcMain.handle("get-sources", async () => {
     try {
@@ -154,7 +154,7 @@ export function registerIpcHandlers(
     return getSourceFingerprint(source);
   });
 
-  // â”€â”€ Settings persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Settings persistence ─────────────────────────────────────────────────
 
   ipcMain.handle("get-settings", () => {
     return settings.get();
@@ -167,7 +167,7 @@ export function registerIpcHandlers(
     },
   );
 
-  // â”€â”€ Secure storage (token encryption) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Secure storage (token encryption) ────────────────────────────────────
 
   ipcMain.handle("encrypt-token", (_event, plaintext: string) => {
     const encrypted = secureStore.encrypt(plaintext);
@@ -179,13 +179,13 @@ export function registerIpcHandlers(
     return secureStore.decrypt(buf);
   });
 
-  // â”€â”€ Window management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Window management ────────────────────────────────────────────────────
 
   ipcMain.handle("minimize-to-tray", () => {
     window.hide();
   });
 
-  // â”€â”€ Window controls (Stage 3.7B custom title bar) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Window controls (Stage 3.7B custom title bar) ─────────────────────────
 
   ipcMain.handle("window:minimize", () => {
     window.minimize();
@@ -205,7 +205,7 @@ export function registerIpcHandlers(
     window.close();
   });
 
-  // â”€â”€ Device identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Device identity ──────────────────────────────────────────────────────
 
   ipcMain.handle("safe-storage-available", () => {
     return secureStore.isEncryptionAvailable();
@@ -215,12 +215,12 @@ export function registerIpcHandlers(
     return settings.get().deviceIdentity;
   });
 
-  // â”€â”€ Clipboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Clipboard ────────────────────────────────────────────────────
   //
   // The renderer's `navigator.clipboard.writeText` is blocked in
   // many Electron contexts with "Write permission denied" because
   // the document must be focused and the user gesture policy is
-  // strict. Use the main-process clipboard module instead â€” it
+  // strict. Use the main-process clipboard module instead — it
   // always works inside the desktop app.
   ipcMain.handle("clipboard-write-text", (_event, text: string) => {
     if (typeof text !== "string") {
@@ -243,7 +243,7 @@ export function registerIpcHandlers(
     return settings.get().deviceIdentity;
   });
 
-  // â”€â”€ Groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Groups ──────────────────────────────────────────────────────────────
 
   if (groupStore) {
     ipcMain.handle("list-groups", () => groupStore.list());
@@ -454,7 +454,7 @@ export function registerIpcHandlers(
     );
   }
 
-  // â”€â”€ Quick Share config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Quick Share config ──────────────────────────────────────────────────
 
   ipcMain.handle("get-quick-share-config", () => {
     const s = settings.get();
@@ -489,7 +489,7 @@ export function registerIpcHandlers(
     },
   );
 
-  // â”€â”€ Application info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Application info ─────────────────────────────────────────────────────
 
   ipcMain.handle("get-app-info", () => {
     return {
@@ -500,19 +500,19 @@ export function registerIpcHandlers(
     };
   });
 
-  // â”€â”€ NVIDIA RTX VSR capability â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── NVIDIA RTX VSR capability ────────────────────────────────────────────
 
   ipcMain.handle("nvidia:probe-capability", async () => {
     return await probeNvidiaVsrCapability();
   });
 
-  // â”€â”€ Audio capabilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Audio capabilities ────────────────────────────────────────────────────
 
   ipcMain.handle("get-audio-capabilities", async () => {
     return getAudioCapabilities();
   });
 
-  // â”€â”€ Audio pipeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Audio pipeline ─────────────────────────────────────────────────────
 
   ipcMain.handle("ensure-audio-helper", async () => {
     try {
@@ -1124,7 +1124,7 @@ export function registerIpcHandlers(
     window.webContents.send("select-preset", presetId);
   });
 
-  // â”€â”€ Shortcut simulation (Discord mute/deafen) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Shortcut simulation (Discord mute/deafen) ──────────────────────────────
 
   ipcMain.handle("send-shortcut", async (_event, binding: ShortcutBinding) => {
     try {
@@ -1139,7 +1139,7 @@ export function registerIpcHandlers(
     }
   });
 
-  // â”€â”€ Fullscreen (native Electron) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Fullscreen (native Electron) ──────────────────────────────────────────
 
   ipcMain.handle("toggle-fullscreen", () => {
     const newState = !window.isFullScreen();

@@ -104,7 +104,6 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
   }, [activeStreamsByGroup, groupsById, share.groupId, share.logicalStreamId, hostDeviceId]);
 
   const handleWatch = useCallback(() => {
-    if (isViewing) return;
     // Set explicit watching target — no first-entry heuristics
     const target = {
       groupId: share.groupId,
@@ -192,11 +191,10 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
               size="sm"
               className="h-7 text-xs px-3"
               onClick={handleWatch}
-              disabled={isViewing}
-              aria-label={`Watch ${share.hostDisplayName}'s stream`}
+              aria-label={`${isViewing ? "View" : "Watch"} ${share.hostDisplayName}'s stream`}
             >
               <Eye className="h-3 w-3 mr-1" />
-              Watch
+              {isViewing ? "View" : "Watch"}
             </Button>
           </div>
         </CardContent>

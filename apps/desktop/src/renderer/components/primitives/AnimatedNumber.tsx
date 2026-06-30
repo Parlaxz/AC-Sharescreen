@@ -3,7 +3,7 @@ import { motion, useMotionValue, useSpring } from "motion/react";
 import { cn } from "@/lib/utils";
 
 /**
- * AnimatedNumber â€” Smoothly tweens between numeric values using framer-motion.
+ * AnimatedNumber — Smoothly tweens between numeric values using framer-motion.
  *
  * Uses useMotionValue + useSpring to interpolate the displayed number
  * with a spring animation. Renders in a <motion.span> with monospace +

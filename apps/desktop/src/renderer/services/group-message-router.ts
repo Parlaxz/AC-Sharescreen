@@ -321,6 +321,32 @@ export class GroupMessageRouter {
       return;
     }
 
+    // viewer.paused → host-side pause/resume handling
+    if (type === "viewer.paused") {
+      if (this.viewerBinding) {
+        const parsed = parseGroupMessagePayload("viewer.paused", envelope.payload);
+        if (parsed.ok) {
+          const data = parsed.data;
+          // Find the viewer's media session ID from the binding
+          // First try exact lookup using mediaSessionId from payload (if present)
+          // Otherwise scan entries for matching viewerDeviceId
+          const mapping = this.findViewerMappingForLogicalStream(
+            this.viewerBinding,
+            data.viewerDeviceId,
+            data.logicalStreamId,
+          );
+          if (mapping) {
+            void this.viewerBinding.handleViewerPaused(
+              data.viewerDeviceId,
+              mapping.mediaSessionId,
+              data.paused,
+            );
+          }
+        }
+      }
+      return;
+    }
+
     // ── quality.* → QualityCoordinator (Stage 6) ──────────────────
     if (
       type.startsWith("quality.viewer.") ||

@@ -242,7 +242,7 @@ export function SettingsPage() {
   const validateForm = useCallback((): string | null => {
     const trimmedName = form.displayName.trim();
     if (trimmedName.length < 1 || trimmedName.length > 100) {
-      return "Display Name must be 1â€“100 characters";
+      return "Display Name must be 1–100 characters";
     }
     if (!isNonNegativeInteger(form.maxVideoBitrateKbps)) {
       return "Maximum bitrate must be a nonnegative integer";

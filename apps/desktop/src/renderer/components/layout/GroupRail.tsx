@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Plus, Home } from "lucide-react";
+import { Plus, Home, Eye } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,8 @@ export function GroupRail() {
   const setSelectedGroupId = useStore((s) => s.setSelectedGroupId);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   const navigate = useStore((s) => s.navigate);
+  const isViewing = useStore((s) => s.isViewing);
+  const currentPage = useStore((s) => s.currentPage);
 
   const setOpenCreateGroupDialog = useStore((s) => s.setOpenCreateGroupDialog);
   const setOpenJoinGroupDialog = useStore((s) => s.setOpenJoinGroupDialog);
@@ -82,6 +84,24 @@ export function GroupRail() {
         </TooltipTrigger>
         <TooltipContent side="right">Home</TooltipContent>
       </Tooltip>
+
+      {/* ─── Return to stream button — visible when viewing on a non-viewer page ── */}
+      {isViewing && currentPage !== "viewer" && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-10 w-10 rounded-lg text-accent hover:text-accent-foreground flex-shrink-0"
+              aria-label="Return to stream"
+              onClick={() => navigate("viewer")}
+            >
+              <Eye className="h-5 w-5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Return to stream</TooltipContent>
+        </Tooltip>
+      )}
 
       {/* ─── Groups list ──────────────────────────────────── */}
       <div className="flex-1 min-h-0 flex flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1 w-full px-2 min-w-0">

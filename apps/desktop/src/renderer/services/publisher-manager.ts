@@ -468,10 +468,9 @@ export class PublisherManager {
             if (!sender) continue;
             const params = sender.getParameters();
             if (params) {
+              // degradationPreference is a top-level RTCRtpSendParameters field.
+              // Setting it on the encoding level is incorrect.
               (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
-              if (params.encodings?.[0]) {
-                (params.encodings[0] as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
-              }
               try {
                 await sender.setParameters(params);
               } catch (err) {

@@ -46,6 +46,8 @@ import {
 } from "./viewer/viewer-quality-helpers.js";
 import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
+import { initializeAppRuntime } from "@/services/initialize-app-runtime.js";
+import type { ScreenLinkAPI } from "../../../preload/api-types.js";
 import { navigateToGroupOverview } from "@/services/group-navigation";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
 import { CompareViewerSurface, type CompareDisplayMode } from "@/components/workspace/CompareViewerSurface";
@@ -652,17 +654,116 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     [],
   );
 
-  const handleRetry = useCallback(() => {
+  /**
+   * Ensure the Phase3Runtime singleton is initialized before starting or
+   * retrying a viewer session.  If no runtime exists (e.g. after app
+   * startup race or runtime destruction), reinitialize it from the
+   * screenlink API.
+   */
+  const ensureAppRuntimeInitialized = useCallback(async (): Promise<void> => {
+    const runtime = getRuntime();
+    if (!runtime || runtime.isDestroyed()) {
+      const api = (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink;
+      if (!api) return;
+      try {
+        await initializeAppRuntime(api);
+      } catch {
+        // Non-fatal — the retry/start below will fail gracefully
+      }
+    }
+  }, []);
+
+  /**
+   * Create and start a new ViewerSession when the existing session ref is
+   * null (e.g. after the previous session was destroyed and the user
+   * retries).  Extracted from the useEffect so it can be called both from
+   * the isViewing effect and from the retry handler.
+   */
+  const startViewerSession = useCallback(async (shouldAbort: () => boolean = () => false): Promise<void> => {
+    await ensureAppRuntimeInitialized();
+
+    if (lastDestroyRef.current) {
+      const pendingDestroy = lastDestroyRef.current;
+      lastDestroyRef.current = null;
+      try {
+        await pendingDestroy;
+      } catch {
+        // Best-effort — a fresh session can still proceed.
+      }
+    }
+
+    if (shouldAbort() || sessionRef.current || !useStore.getState().isViewing) {
+      return;
+    }
+
+    const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
+
+    const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
+    const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
+    const targetLogicalStreamId = cStream?.logicalStreamId;
+
+    if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
+      setViewStatus("error: missing stream target");
+      return;
+    }
+
+    const session = new ViewerSession();
+    sessionRef.current = session;
+
+    session.onStateChange = (state: ViewerSessionState) => {
+      setSessionState(state);
+      const status = sessionStateToViewStatus(state);
+      setViewStatus(status);
+    };
+
+    session.onPauseStateChange = (pauseState: ViewerPauseState) => {
+      setStreamPauseState(pauseState);
+    };
+    session.onPosterFrameChange = (poster: string | null) => {
+      if (enhancementSettingsRef.current?.enabled && !enhancementFallbackRef.current) {
+        const canvas = document.querySelector('[data-enhanced-canvas]') as HTMLCanvasElement | null;
+        if (canvas && canvas.width > 0 && canvas.height > 0) {
+          try {
+            const enhancedPoster = canvas.toDataURL("image/jpeg", 0.85);
+            setStreamPausePoster(enhancedPoster);
+            return;
+          } catch {
+            // Fall through to use video element poster
+          }
+        }
+      }
+      setStreamPausePoster(poster);
+    };
+
+    session.onError = (error: string) => {
+      setViewStatus(`error: ${error}`);
+    };
+
+    await session.start({
+      groupId: gId,
+      hostDeviceId: targetHostDeviceId,
+      logicalStreamId: targetLogicalStreamId,
+      mediaSessionId: targetSessionId,
+      hostName: sName,
+      videoElement: videoRef.current,
+    }).catch((err: unknown) => {
+      setViewStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }, [ensureAppRuntimeInitialized, setViewStatus, setSessionState, setStreamPauseState, setStreamPausePoster]);
+
+  const handleRetry = useCallback(async () => {
     if (viewerHistoryIdRef.current) {
       StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "reconnecting");
     }
+    setViewStatus("connecting");
+
     if (sessionRef.current) {
-      setViewStatus("connecting");
+      await ensureAppRuntimeInitialized();
       void sessionRef.current.retry();
     } else {
-      setViewStatus("connecting");
+      await startViewerSession();
     }
-  }, [setViewStatus]);
+  }, [setViewStatus, ensureAppRuntimeInitialized, startViewerSession]);
 
   // ── Pause/resume callbacks (media op first, marker via setSessionState) ──
   const handlePauseStream = useCallback(async () => {
@@ -686,14 +787,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       if (viewerHistoryIdRef.current) {
         const svc = StreamMetricsService.getInstance();
         svc.setSessionState(viewerHistoryIdRef.current, "playing");
-        const newPc = session.getPeerConnection();
-        if (newPc) {
-          svc.replaceConnectionPeer(
-            viewerHistoryIdRef.current,
-            `viewer-${viewerHistoryIdRef.current}`,
-            newPc,
-          );
-        }
+        // The peer connection stayed alive through pause — no need to
+        // replace it or re-register. The same connection is reused.
       }
     } catch (err) {
       console.error("[ViewerWorkspace] resume failed:", err);
@@ -1421,6 +1516,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
       // Send through the authenticated group control channel with explicit fields
       const requestId = crypto.randomUUID();
+      // Use the viewer's actual degradation preference; do not hardcode "balanced".
+      // When no explicit preference exists and dimensions are specified, default
+      // to "maintain-resolution" to preserve the selected output quality.
+      const effectiveDegradation = newRequest.degradationPreference
+        ?? (newRequest.maxWidth || newRequest.maxHeight ? "maintain-resolution" : "balanced");
       const payload = {
         type: "quality.viewer.request" as const,
         streamSessionId: logicalStreamId,
@@ -1430,7 +1530,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         maxWidth: newRequest.maxWidth,
         maxHeight: newRequest.maxHeight,
         maxFps: newRequest.maxFps,
-        degradationPreference: "balanced",
+        degradationPreference: effectiveDegradation,
       };
 
       if (hostPeerUuid) {
@@ -1557,82 +1657,30 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const targetRef = useRef({ selectedGroupId, watchedInfo, currentStream, sharerName });
   targetRef.current = { selectedGroupId, watchedInfo, currentStream, sharerName };
 
+  /**
+   * Holds the promise from the previous session's destroy() so the next
+   * effect run can await it before creating a new ViewerSession. This
+   * prevents the old session's async teardown from blanking the shared
+   * <video> element's srcObject after the new stream has been attached.
+   */
+  const lastDestroyRef = useRef<Promise<void> | null>(null);
+
   useEffect(() => {
     if (!isViewing || sessionRef.current) return;
-
-    const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
-
-    // Determine the watch target from watched info or active stream.
-    // Use watchedInfo.sessionId if available, otherwise fall back to
-    // currentStream.mediaSessionId. This ensures local self-preview works
-    // when the host watches their own stream without sending remote join requests.
-    const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
-    const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
-    const targetLogicalStreamId = cStream?.logicalStreamId;
-
-    if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
-      // Cannot start session without complete target info
-      setViewStatus("error: missing stream target");
-      return;
-    }
-
-    const session = new ViewerSession();
-    sessionRef.current = session;
-
-    // Listen for state changes
-    session.onStateChange = (state: ViewerSessionState) => {
-      setSessionState(state);
-      const status = sessionStateToViewStatus(state);
-      setViewStatus(status);
-    };
-
-    // Wire pause state events for reactive UI updates
-    session.onPauseStateChange = (pauseState: ViewerPauseState) => {
-      setStreamPauseState(pauseState);
-    };
-    session.onPosterFrameChange = (poster: string | null) => {
-      // When GPU enhancements are active and running, capture poster from enhanced canvas
-      // instead of the (possibly hidden) native video element
-      if (enhancementSettingsRef.current?.enabled && !enhancementFallbackRef.current) {
-        const canvas = document.querySelector('[data-enhanced-canvas]') as HTMLCanvasElement | null;
-        if (canvas && canvas.width > 0 && canvas.height > 0) {
-          try {
-            const enhancedPoster = canvas.toDataURL("image/jpeg", 0.85);
-            setStreamPausePoster(enhancedPoster);
-            return;
-          } catch {
-            // Fall through to use video element poster
-          }
-        }
-      }
-      setStreamPausePoster(poster);
-    };
-
-    // Handle errors
-    session.onError = (error: string) => {
-      setViewStatus(`error: ${error}`);
-    };
-
-    // Start the session
-    session.start({
-      groupId: gId,
-      hostDeviceId: targetHostDeviceId,
-      logicalStreamId: targetLogicalStreamId,
-      mediaSessionId: targetSessionId,
-      hostName: sName,
-      videoElement: videoRef.current,
-    }).catch((err) => {
-      setViewStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    let cancelled = false;
+    void startViewerSession(() => cancelled);
 
     return () => {
-      // Cleanup on unmount
-      if (sessionRef.current) {
-        sessionRef.current.destroy();
+      cancelled = true;
+      // Cleanup on unmount: store the destroy promise so a subsequent
+      // mount can await it before creating a new ViewerSession.
+      const s = sessionRef.current;
+      if (s) {
         sessionRef.current = null;
+        lastDestroyRef.current = s.destroy().catch(() => {});
       }
     };
-  }, [isViewing]);
+  }, [isViewing, startViewerSession]);
 
   // ── Detect exact watched stream stop using explicit target — do NOT eject on other streams ──
   useEffect(() => {
@@ -1668,7 +1716,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         );
         if (!stillExists) {
           // Our stream is gone — destroy session and show ended
-          sessionRef.current.destroy();
+          lastDestroyRef.current = sessionRef.current.destroy().catch(() => {});
           sessionRef.current = null;
           setViewStatus("ended");
           setActivePanel(null);
@@ -1696,7 +1744,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       const currWatched = state.watchedStreamsBySessionId;
       if (exactMediaSessionId && prevWatched[exactMediaSessionId] && !currWatched[exactMediaSessionId]) {
         if (sessionRef.current) {
-          sessionRef.current.destroy();
+          lastDestroyRef.current = sessionRef.current.destroy().catch(() => {});
           sessionRef.current = null;
         }
         setViewStatus("ended");
