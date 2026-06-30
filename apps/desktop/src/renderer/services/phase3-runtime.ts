@@ -12,7 +12,6 @@ import type { GroupSharedState, GroupMemberRecord, HybridTimestamp, HostQualityL
 import { createDefaultHostQualityLimits } from "@screenlink/shared";
 import type { PublisherManager } from "./publisher-manager.js";
 import type { VdoSessionConfig } from "./stream-session-manager.js";
-import { CompareSessionManager } from "./compare-session-manager.js";
 
 /**
  * Phase3Runtime owns all Phase 3 services:
@@ -39,7 +38,6 @@ export class Phase3Runtime {
   private restartCoordinator!: RestartCoordinator;
   private qualityCoordinator!: QualityCoordinator;
   private mediaStatsService!: MediaStatsPoller;
-  private _compareSessionManager: CompareSessionManager | null = null;
   private destroyed = false;
   private initialized = false;
   private initGen = 0;
@@ -371,7 +369,6 @@ export class Phase3Runtime {
     this.initGen++;
     this.destroyPromise = (async () => {
       this.activeStreamRegistry.destroy();
-      this._compareSessionManager?.destroy();
       this.streamSessionManager.destroy();
       this.viewerMediaBinding.destroy();
       this.restartCoordinator.destroy();
@@ -416,21 +413,10 @@ export class Phase3Runtime {
   }
 
   /**
-   * Get the CompareSessionManager (lazily created).
-   */
-  getCompareSessionManager(): CompareSessionManager | null {
-    if (!this._compareSessionManager) {
-      this._compareSessionManager = new CompareSessionManager(this);
-    }
-    return this._compareSessionManager;
-  }
-
-  /**
    * Resolve the local publication for a given media session.
    *
-   * For compare mode, checks active compare variants first (precise
-   * media-session-to-variant mapping).
-   * For normal (non-compare) mode, falls back to the current StreamSessionManager.
+   * All compare is now viewer-only — this only resolves the normal
+   * StreamSessionManager publication.
    *
    * @param mediaSessionId - The media session to resolve.
    * @returns Publication context or null if no matching local publication exists.
@@ -438,34 +424,10 @@ export class Phase3Runtime {
   resolveLocalPublication(mediaSessionId: string): {
     mediaSessionId: string;
     logicalStreamId: string;
-    variantId?: string;
     publisherManager: PublisherManager;
     vdoConfig: VdoSessionConfig;
   } | null {
-    // ── Check CompareSessionManager for active compare variants first ──
-    const csm = this._compareSessionManager;
-    if (csm?.isActive()) {
-      // Check both variants by media session ID
-      for (const vid of ["A", "B"] as const) {
-        const pub = csm.getVariantPublication(vid);
-        if (pub && pub.mediaSessionId === mediaSessionId) {
-          return pub;
-        }
-      }
-      // Fallback: try resolve by media session directly
-      const resolved = csm.resolveVariant(mediaSessionId);
-      if (resolved) {
-        return {
-          mediaSessionId: resolved.mediaSessionId,
-          logicalStreamId: resolved.logicalStreamId,
-          variantId: resolved.variantId,
-          publisherManager: resolved.publisherManager,
-          vdoConfig: resolved.vdoConfig,
-        };
-      }
-    }
-
-    // ── Fall back to normal stream session ──────────────────────────
+    // ── Check normal stream session ────────────────────────────────
     const ssm = this.streamSessionManager;
     if (!ssm) return null;
     const ssmMediaSessionId = ssm.currentMediaSessionId;

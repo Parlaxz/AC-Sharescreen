@@ -313,14 +313,6 @@ export class StreamSessionManager {
     if (this._state !== "idle" && this._state !== "failed") return;
     if (this.destroyed) return;
 
-    // Mutual exclusivity with compare mode
-    const compareSessionManager = (this.runtime as Phase3Runtime & {
-      getCompareSessionManager?: () => { isActive: () => boolean } | null;
-    }).getCompareSessionManager?.();
-    if (compareSessionManager?.isActive()) {
-      throw new Error("Cannot start normal stream while compare mode is active");
-    }
-
     if (input.qualityOverride) {
       const err = validateSessionQualityOverride(input.qualityOverride);
       if (err) {

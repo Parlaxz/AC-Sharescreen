@@ -99,7 +99,6 @@ export interface AppState {
   isViewing: boolean;
   viewStatus: string;
   focusMode: boolean;
-  isCompareView: boolean;
 
   /** Explicit watched target — replaces first-entry heuristics */
   watchingTarget: WatchingTarget | null;
@@ -152,7 +151,6 @@ export interface AppState {
   setTotalBytesSent: (bytes: number) => void;
   setIsViewing: (isViewing: boolean) => void;
   setViewStatus: (status: string) => void;
-  setIsCompareView: (v: boolean) => void;
   setSelectedGroupId: (id: string | null) => void;
   setQualityPresets: (presets: unknown[]) => void;
   reset: () => void;
@@ -219,7 +217,6 @@ const initialState = {
   isViewing: false,
   viewStatus: "",
   focusMode: false,
-  isCompareView: false,
   watchingTarget: null as WatchingTarget | null,
   selectedGroupId: null as string | null,
   groupsById: {} as Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>,
@@ -291,7 +288,6 @@ export const useStore = create<AppState>((set, get) => ({
   setSessionDuration: (ms) => set({ sessionDuration: ms }),
   setTotalBytesSent: (bytes) => set({ totalBytesSent: bytes }),
   setIsViewing: (isViewing) => set({ isViewing: isViewing, focusMode: false }),
-  setIsCompareView: (isCompareView) => set({ isCompareView }),
   toggleFocusMode: () => set((s) => ({ focusMode: !s.focusMode })),
   setFocusMode: (focusMode) => set({ focusMode }),
   setViewStatus: (status) => set({ viewStatus: status }),

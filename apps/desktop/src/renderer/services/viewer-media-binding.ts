@@ -83,21 +83,13 @@ const COMPOSITE_KEY_SEP = "::";
  * - Duplicate request idempotency via requestId tracking
  * - getAllViewers() for cleanup on stream stop
  * - Viewer disconnect preserves other viewers
- *
- * Compare-mode (Task 2):
- * - viewerMap uses composite key `viewerDeviceId::mediaSessionId` so one device
- *   may hold A and B bindings simultaneously.
- * - Explicit composite-key methods for exact leave/remove/disconnect.
- * - Legacy removeViewer path is safe for non-compare messages.
- * - Unique human counting deduplicates by viewerDeviceId.
  */
 export class ViewerMediaBinding {
   private tokens = new Map<string, BindingToken>();
   /**
    * Composite-keyed viewer mapping.
    * Key format: `${viewerDeviceId}::${mediaSessionId}`
-   * This allows one device to hold bindings for multiple media sessions
-   * simultaneously (compare mode A + B).
+   * This allows one device to hold bindings for multiple media sessions.
    */
   private viewerMap = new Map<string, ViewerMapping>();
   /** Track processed requestIds for idempotency */
@@ -137,15 +129,12 @@ export class ViewerMediaBinding {
     const payload = envelope.payload as Record<string, unknown> | undefined;
     const logicalStreamId = payload?.logicalStreamId as string | undefined;
     const requestId = payload?.requestId as string | undefined;
-    // Optional per-attempt session ID. If the viewer is on an older build
-    // that doesn't generate one, we synthesize a stable identifier from
-    // the envelope's messageId so the token still carries something the
-    // host can use to reject stale leaves for THIS specific attempt.
+    // Per-attempt session ID for stale leave rejection
     const viewerSessionId =
       (payload?.viewerSessionId as string | undefined) ??
       (envelope.messageId ?? `legacy-${viewerDeviceId ?? "unknown"}-${requestId ?? Date.now().toString()}`);
-    // Compare correlation fields (optional — viewer omits for legacy A-only join)
-    const compareVariantId = payload?.compareVariantId as string | undefined;
+    // Media session ID the viewer intends to join (optional — falls back to
+    // the stream's primary media session if not specified)
     const requestedMediaSessionId = payload?.mediaSessionId as string | undefined;
 
     if (!viewerDeviceId || !logicalStreamId) {
@@ -154,8 +143,6 @@ export class ViewerMediaBinding {
         envelope,
         requestId,
         !viewerDeviceId ? "Invalid viewer identity" : "Missing stream identifier",
-        compareVariantId,
-        requestedMediaSessionId,
       );
       return null;
     }
@@ -185,31 +172,13 @@ export class ViewerMediaBinding {
         envelope,
         requestId,
         "There is no active share for this stream",
-        compareVariantId,
-        requestedMediaSessionId,
       );
       return null;
     }
 
-    // ── Compare-mode target media session resolution ──────────────
-    // If the viewer included compare correlation fields, resolve the
-    // exact media session they intend to join (A variant or B variant).
-    // Legacy requests (no compare fields) use the primary stream session.
-    const resolved = this.resolveTargetMediaSession(
-      stream,
-      compareVariantId,
-      requestedMediaSessionId,
-    );
-    if (!resolved) {
-      const reason = requestedMediaSessionId && !compareVariantId
-        ? `Requested media session "${requestedMediaSessionId}" not found`
-        : compareVariantId
-          ? `Requested compare variant "${compareVariantId}" is not available`
-          : "Could not resolve a valid media session for this request";
-      this.sendJoinRejection(envelope, requestId, reason, compareVariantId, requestedMediaSessionId);
-      return null;
-    }
-    const effectiveMediaSessionId = resolved.mediaSessionId;
+    // Determine effective media session — use the one the viewer requested,
+    // or fall back to the stream's primary media session.
+    const effectiveMediaSessionId = requestedMediaSessionId ?? stream.mediaSessionId;
 
     // Generate 32 random bytes → Base64URL token
     const rawBytes = new Uint8Array(32);
@@ -237,7 +206,7 @@ export class ViewerMediaBinding {
     }
 
     // Send join response back to the requesting viewer
-    this.sendJoinResponse(envelope, token, effectiveMediaSessionId, requestId, viewerSessionId, resolved.variantId).catch(() => {});
+    this.sendJoinResponse(envelope, token, effectiveMediaSessionId, requestId, viewerSessionId).catch(() => {});
 
     return {
       mediaSessionId: effectiveMediaSessionId,
@@ -255,8 +224,6 @@ export class ViewerMediaBinding {
     requestEnvelope: GroupControlEnvelope,
     requestId: string | undefined,
     reason: string,
-    compareVariantId?: string,
-    requestedMediaSessionId?: string,
   ): Promise<void> {
     const conn = this.runtime.getConnectionManager().getConnection(requestEnvelope.groupId);
     if (!conn) return;
@@ -276,8 +243,6 @@ export class ViewerMediaBinding {
         reason,
         requestId: requestId ?? "",
         ...(viewerSessionId ? { viewerSessionId } : {}),
-        ...(compareVariantId ? { compareVariantId } : {}),
-        ...(requestedMediaSessionId ? { mediaSessionId: requestedMediaSessionId } : {}),
       });
     } catch {
       // Best-effort rejection — if the connection is gone the viewer will time out
@@ -290,7 +255,7 @@ export class ViewerMediaBinding {
    * viewer can connect directly via ViewerClient without local host config.
    *
    * Uses resolveLocalPublication() to find the correct publication for the
-   * given media session, which works for both normal and compare mode variants.
+   * given media session.
    */
   private async sendJoinResponse(
     requestEnvelope: GroupControlEnvelope,
@@ -298,16 +263,13 @@ export class ViewerMediaBinding {
     mediaSessionId: string,
     requestId?: string,
     viewerSessionId?: string,
-    compareVariantId?: string,
   ): Promise<void> {
     const conn = this.runtime.getConnectionManager().getConnection(requestEnvelope.groupId);
     if (!conn) return;
     const peerUuid = conn.peerForDevice(requestEnvelope.senderDeviceId);
     if (!peerUuid) return;
 
-    // Resolve the publication for this media session (works for both normal
-    // and compare mode). The runtime checks compare variants first, then
-    // falls back to the normal StreamSessionManager.
+    // Resolve the publication for this media session.
     const publication = this.runtime.resolveLocalPublication(mediaSessionId);
     const streamId = publication?.vdoConfig.streamId;
     const password = publication?.vdoConfig.password;
@@ -324,7 +286,6 @@ export class ViewerMediaBinding {
       bindingToken: token,
       requestId: requestId ?? "",
       ...(viewerSessionId ? { viewerSessionId } : {}),
-      ...(compareVariantId ? { compareVariantId } : {}),
     });
   }
 
@@ -712,6 +673,13 @@ export class ViewerMediaBinding {
   }
 
   /**
+   * Get a binding token by its token string.
+   */
+  getBindingToken(token: string): BindingToken | undefined {
+    return this.tokens.get(token);
+  }
+
+  /**
    * Stage 5: Get all mapped viewers.
    * Used by StreamSessionManager.stopStream() to clean up on stream stop.
    */
@@ -720,10 +688,27 @@ export class ViewerMediaBinding {
   }
 
   /**
-   * Get the binding token for diagnostics/debugging.
+   * Get composite human-readable viewers (deduplicated by viewerDeviceId).
    */
-  getBindingToken(token: string): BindingToken | undefined {
-    return this.tokens.get(token);
+  getHumanViewerCount(): number {
+    return this.getHumanViewers().length;
+  }
+
+  /**
+   * Get all unique viewer device IDs watching any stream on this host.
+   */
+  getHumanViewers(): Array<{ viewerDeviceId: string }> {
+    const seen = new Set<string>();
+    const result: Array<{ viewerDeviceId: string }> = [];
+    for (const [, mapping] of this.viewerMap) {
+      if (!seen.has(mapping.viewerDeviceId)) {
+        seen.add(mapping.viewerDeviceId);
+        result.push({
+          viewerDeviceId: mapping.viewerDeviceId,
+        });
+      }
+    }
+    return result;
   }
 
   /**
@@ -795,84 +780,5 @@ export class ViewerMediaBinding {
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
-  }
-
-  /**
-   * Resolve the target media session for a join request based on compare
-   * correlation fields from the viewer's payload.
-   *
-   * Three scenarios:
-   * 1. Neither field → legacy mode, use the primary stream.mediaSessionId.
-   * 2. Only mediaSessionId → validate it belongs to this stream (primary,
-   *    variant A descriptor, or variant B descriptor).
-   * 3. Only compareVariantId → resolve from variant descriptor, falling
-   *    back to primary for variant A if no explicit descriptor exists.
-   * 4. Both fields → ensure consistency, reject mismatches.
-   *
-   * Returns null when the requested combination is invalid or unavailable.
-   */
-  private resolveTargetMediaSession(
-    stream: StreamAnnouncement,
-    compareVariantId?: string,
-    requestedMediaSessionId?: string,
-  ): { mediaSessionId: string; variantId?: string } | null {
-    // ── Case 1: Legacy join (no compare fields) ─────────────────────
-    if (!compareVariantId && !requestedMediaSessionId) {
-      return { mediaSessionId: stream.mediaSessionId };
-    }
-
-    // ── Case 4: Both fields provided — ensure consistency ──────────
-    if (compareVariantId && requestedMediaSessionId) {
-      const fromVariant = this.resolveMediaSessionFromVariant(stream, compareVariantId);
-      if (!fromVariant || fromVariant.mediaSessionId !== requestedMediaSessionId) {
-        return null; // mismatch — reject rather than guess
-      }
-      return fromVariant;
-    }
-
-    // ── Case 2: Only mediaSessionId — validate it belongs to stream ─
-    if (requestedMediaSessionId) {
-      // Check primary stream session
-      if (requestedMediaSessionId === stream.mediaSessionId) {
-        return { mediaSessionId: requestedMediaSessionId, variantId: stream.primaryVariant };
-      }
-      // Check variant A descriptor
-      if (stream.variantADescriptor?.mediaSessionId === requestedMediaSessionId) {
-        return { mediaSessionId: requestedMediaSessionId, variantId: "A" };
-      }
-      // Check variant B descriptor
-      if (stream.variantBDescriptor?.mediaSessionId === requestedMediaSessionId) {
-        return { mediaSessionId: requestedMediaSessionId, variantId: "B" };
-      }
-      return null; // requested session not found in this stream
-    }
-
-    // ── Case 3: Only compareVariantId — resolve from variant ───────
-    return compareVariantId
-      ? this.resolveMediaSessionFromVariant(stream, compareVariantId)
-      : null;
-  }
-
-  /**
-   * Resolve media session ID from a compare variant identifier.
-   *
-   * Variant A: uses variantADescriptor.mediaSessionId or falls back to
-   * the primary stream.mediaSessionId if no explicit A descriptor exists.
-   * Variant B: requires variantBDescriptor.mediaSessionId (B is never
-   * the primary stream); returns null if not configured.
-   */
-  private resolveMediaSessionFromVariant(
-    stream: StreamAnnouncement,
-    variantId: string,
-  ): { mediaSessionId: string; variantId: string } | null {
-    if (variantId === "A") {
-      const msId = stream.variantADescriptor?.mediaSessionId ?? stream.mediaSessionId;
-      return { mediaSessionId: msId, variantId: "A" };
-    }
-    if (variantId === "B") {
-      if (!stream.variantBDescriptor?.mediaSessionId) return null;
-      return { mediaSessionId: stream.variantBDescriptor.mediaSessionId, variantId: "B" };
-    }
-    return null; // unknown variant
   }
 }

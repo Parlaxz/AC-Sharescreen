@@ -42,11 +42,6 @@ export interface JoinResponseData {
   bindingToken?: string;
   reason?: string;
   requestId?: string;
-  /**
-   * Compare variant ID ("A" or "B") echoed from the join request.
-   * Present when the viewer joined a specific Easy Compare variant.
-   */
-  compareVariantId?: string;
 }
 
 export interface RecentMemberEvent {
@@ -242,7 +237,6 @@ export class GroupMessageRouter {
             bindingToken: joinData.bindingToken,
             reason: joinData.reason,
             requestId: joinData.requestId,
-            compareVariantId: joinData.compareVariantId,
           });
         }
       }

@@ -1205,7 +1205,6 @@ static int RunServe(const std::vector<std::string>& args) {
                 transport.WriteControlResponse(sv::SerializeJson(response));
 
                 // Process the slot synchronously (blocks control loop)
-                auto& diag = sv::GetDiagnosticsCounters();
                 bool procOk = ProcessSlotFromShm(slotIdx);
 
                 // Send completion event asynchronously over control pipe

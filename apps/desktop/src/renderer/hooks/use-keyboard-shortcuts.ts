@@ -20,7 +20,11 @@ import { useStore } from "@/stores/main-store";
  * | M              | Toggle mute                     |
  * | I              | Toggle diagnostics panel        |
  * | S              | Toggle viewer settings panel    |
- * | Shift+Tab      | Cycle compare mode (compare stream only) |
+ * | C              | Toggle compare mode             |
+ * | V              | Vertical wipe (in compare mode) |
+ * | 1              | Show variant A only (compare)   |
+ * | 2              | Show variant B only (compare)   |
+ * | 0              | Exit compare mode               |
  * | Esc            | Leave fullscreen → close overlays |
  *
  * All shortcuts are ignored while the user is typing in an input, textarea,
@@ -141,27 +145,47 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      // C — Open comparison settings B
+      if ((event.key === "c" || event.key === "C") && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:compare-open-settings-b"));
+        return;
+      }
+
+      // V — Vertical wipe (compare mode)
+      if ((event.key === "v" || event.key === "V") && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:compare-mode", { detail: "vertical-wipe" }));
+        return;
+      }
+
+      // 1 — Side A only (compare mode)
+      if (event.key === "1" && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:compare-mode", { detail: "side-a" }));
+        return;
+      }
+
+      // 2 — Side B only (compare mode)
+      if (event.key === "2" && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:compare-mode", { detail: "side-b" }));
+        return;
+      }
+
+      // 0 — Center compare divider
+      if (event.key === "0" && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent("screenlink:compare-center"));
+        return;
+      }
+
       // Space — Toggle pause/resume (only when not typing in inputs)
       // Guard: no modifiers, no repeat, prevent page scroll
       if (event.key === " " && !ctrl && !alt && !event.shiftKey && !event.repeat) {
         event.preventDefault();
-        // Dispatch compare pause if a compare viewer is active, otherwise use the legacy event
-        if (document.querySelector("[data-compare-viewer]")) {
-          window.dispatchEvent(new CustomEvent("screenlink:compare-toggle-pause"));
-        } else {
-          window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-pause"));
-        }
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-pause"));
         return;
-      }
-
-      // Shift+Tab — Cycle compare mode (A-only ↔ Side-by-side ↔ B-only)
-      // Only fires when a compare viewer element is present in the DOM
-      if (event.shiftKey && event.key === "Tab" && !ctrl && !alt && !event.repeat) {
-        if (document.querySelector("[data-compare-viewer]")) {
-          event.preventDefault();
-          window.dispatchEvent(new CustomEvent("screenlink:compare-cycle-mode"));
-          return;
-        }
       }
 
       // Esc — Leave fullscreen first, then close overlays if not fullscreen

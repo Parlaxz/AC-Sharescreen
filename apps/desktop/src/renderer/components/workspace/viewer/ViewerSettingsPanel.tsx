@@ -525,6 +525,12 @@ interface ViewerSettingsPanelProps {
   onCancelBenchmark?: () => void;
   /** Called when the user clicks "Apply Recommended Settings". */
   onApplyBenchmarkRecommendation?: () => void;
+
+  /**
+   * Compare variant identifier. When "B", the panel renders with a tinted
+   * appearance and "Comparison Configuration B" header.
+   */
+  variant?: "A" | "B";
 }
 
 //  Helpers 
@@ -651,6 +657,7 @@ export function ViewerSettingsPanel({
   onRunBenchmark = () => {},
   onCancelBenchmark = () => {},
   onApplyBenchmarkRecommendation = () => {},
+  variant,
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
   const [effectiveMaxBitrate, setEffectiveMaxBitrate] = useState(maxSliderBitrateKbps);
@@ -795,6 +802,11 @@ export function ViewerSettingsPanel({
 
   const content = (
     <Tabs defaultValue="general" className="w-full">
+      {variant === "B" && (
+        <div className="text-[10px] font-medium text-accent/80 uppercase tracking-wide mb-2 pb-1 border-b border-accent/20">
+          Comparison Configuration B
+        </div>
+      )}
       <TabsList className="w-full mb-2">
         <TabsTrigger value="general" className="flex-1 text-xs">General</TabsTrigger>
         <TabsTrigger value="enhancements" className="flex-1 text-xs">Image Enhancements</TabsTrigger>
@@ -1491,7 +1503,10 @@ export function ViewerSettingsPanel({
   );
 
   if (contentOnly) {
-    return <div className="w-[750px] p-4 max-h-[80vh] overflow-y-auto">{content}</div>;
+    const containerClass = variant === "B"
+      ? "w-[750px] p-4 max-h-[80vh] overflow-y-auto border-l-2 border-accent/30 bg-accent/[0.02]"
+      : "w-[750px] p-4 max-h-[80vh] overflow-y-auto";
+    return <div className={containerClass}>{content}</div>;
   }
 
   return (

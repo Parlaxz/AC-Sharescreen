@@ -690,7 +690,10 @@ export class GroupControlConnection {
 
         try {
           const result = await validateEnvelope(data, this.opts.groupId, this.opts.groupSecret, this.dedupSet);
-          if (!result.ok) return;
+          if (!result.ok) {
+            console.warn("[group-control] envelope validation failed:", result.reason, "type:", (data as Record<string, unknown>)?.type ?? "unknown");
+            return;
+          }
           const validatedEnvelope = result.data;
 
           if (!this.checkSenderIdentity(uuid, validatedEnvelope)) {

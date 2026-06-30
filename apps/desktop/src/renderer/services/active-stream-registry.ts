@@ -25,14 +25,6 @@ export interface StreamAnnouncement {
   appliedLiveSettingsRevision?: string;
   /** HLC stamp of the last restart-applied settings. */
   appliedRestartSettingsRevision?: string;
-  /** Compare mode when this stream is part of an Easy Compare session. */
-  compareMode?: string;
-  /** Which variant is the primary (backward-compatible) stream. */
-  primaryVariant?: string;
-  /** Descriptor for variant A (may be the same as the primary stream). */
-  variantADescriptor?: { mediaSessionId?: string; configSnapshot?: unknown };
-  /** Descriptor for variant B (the secondary compare stream). */
-  variantBDescriptor?: { mediaSessionId?: string; configSnapshot?: unknown };
 }
 
 interface InternalStream {

@@ -98,8 +98,9 @@ struct PresenterSlot {
 // ── Bounded SPSC queue for frame handoff ───────────────────────────────
 //
 // Single-producer (processing thread), single-consumer (presenter thread).
-// Fixed-size ring buffer of slot indices.  When full, the producer drops
-// the incoming frame (no allocation, no CUDA copy wasted).
+// Fixed-size ring buffer of slot indices.  When full, the EnqueueSlot
+// caller drops the OLDEST queued frame (coalesce-to-newest) rather than
+// the incoming frame, ensuring the presenter always shows the latest frame.
 
 class PresenterQueue {
 public:

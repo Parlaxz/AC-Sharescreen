@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MIT
 /**
- * CompareViewerSurface — Dual-video viewer for Easy Compare streams.
+ * CompareViewerSurface — Viewer-side A/B compare with vertical wipe.
  *
- * Renders two video panes (A and B) side-by-side or in single-pane mode,
- * with auto-hiding overlay controls, mode toggle, and session management
- * for both variants.
+ * Renders a single video source through two independent GPU enhancement
+ * pipelines (A and B). The user can toggle between side-a, side-b, or
+ * a vertical wipe divider using CSS clip-path.
  *
- * Layout modes:
- *   - side-by-side (default): both panes fill 50% width each
- *   - a-only: variant A fills the full viewport
- *   - b-only: variant B fills the full viewport
+ * Key design:
+ * - One video source, one audio path, one ViewerSession.
+ * - Two processing outputs (EnhancedVideoSurface) mounted simultaneously.
+ * - Switching between A and B is instant (no reconnect).
+ * - Vertical wipe with pointer capture + keyboard slider.
+ * - DOM-compositable presentation (native presenter disabled for compare).
+ * - Only one side may use NVIDIA at a time when helper is single-config.
  */
 
 import {
@@ -18,6 +21,8 @@ import {
   useState,
   useCallback,
   type ReactElement,
+  type PointerEvent as ReactPointerEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { motion } from "motion/react";
 import {
@@ -37,48 +42,43 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { ViewerSession } from "@/services/viewer-session.js";
-import { getRuntime } from "@/services/phase3-runtime.js";
-import type { CompareConfigSnapshot } from "@screenlink/shared";
-import type { StreamAnnouncement } from "@/stores/main-store";
+import type { ViewerImageEnhancementSettings, ProcessingBackend } from "@/services/viewer-image-processing/viewer-image-settings";
+import type { ProcessorState, ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
+import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
+import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
-export type CompareDisplayMode = "side-by-side" | "a-only" | "b-only";
-
-export interface CompareStreamAnnouncement extends StreamAnnouncement {
-  compareMode?: string;
-  primaryVariant?: string;
-  variantADescriptor?: {
-    mediaSessionId?: string;
-    configSnapshot?: CompareConfigSnapshot;
-  };
-  variantBDescriptor?: {
-    mediaSessionId?: string;
-    configSnapshot?: CompareConfigSnapshot;
-  };
-}
+export type CompareDisplayMode = "side-a" | "side-b" | "vertical-wipe";
 
 export interface CompareViewerSurfaceProps {
-  /** The Easy Compare stream announcement with variant metadata */
-  streamAnnouncement: CompareStreamAnnouncement;
-  /** Media session ID for variant A */
-  mediaSessionA: string;
-  /** Media session ID for variant B */
-  mediaSessionB: string;
-  /** Group ID the streams belong to */
-  groupId: string;
-  /** Host device ID */
-  hostDeviceId: string;
-  /** Host display name */
-  hostName: string;
-  /** Called when user exits the compare viewer */
+  /** The shared source <video> element */
+  videoElement: HTMLVideoElement | null;
+  /** Settings for variant A (from standard persistence) */
+  settingsA: ViewerImageEnhancementSettings;
+  /** Settings for variant B (from separate B persistence) */
+  settingsB: ViewerImageEnhancementSettings;
+  /** Called when user exits compare mode */
   onExit: () => void;
   /** Called when fullscreen state changes */
   onFullscreenChange?: (isFullscreen: boolean) => void;
+  /** Whether the stream is paused */
+  paused: boolean;
+  /** Called to toggle pause */
+  onTogglePause?: () => void;
+
+  // Processing telemetry
+  onStatsUpdateA?: (stats: ProcessorStats) => void;
+  onStatsUpdateB?: (stats: ProcessorStats) => void;
+  onProcessorStateChangeA?: (state: ProcessorState) => void;
+  onProcessorStateChangeB?: (state: ProcessorState) => void;
+
+  // Benchmark integration (passed through to EnhancedVideoSurface)
+  processorApiRefA?: React.MutableRefObject<ProcessorAPI | null>;
+  processorApiRefB?: React.MutableRefObject<ProcessorAPI | null>;
 }
 
-// ─── Auto-hide timeout hook (local copy — mirrors ViewerWorkspace) ────────
+// ─── Auto-hide timeout hook ────────────────────────────────────────────────
 
 function useControlsAutoHide({
   delayMs = 3000,
@@ -130,138 +130,155 @@ function useControlsAutoHide({
   return { visible, show, keepVisible, hide };
 }
 
-// ─── Format helpers ─────────────────────────────────────────────────────────
+// ─── Wipe Controller ──────────────────────────────────────────────────────
+// Manages the vertical divider position with pointer capture and keyboard.
 
-function formatLabel(
-  variantId: string,
-  config?: CompareConfigSnapshot,
-): string {
-  if (!config) return variantId;
-  return `${variantId} — ${config.resolutionWidth}×${config.resolutionHeight} @ ${config.fps}fps · ${config.videoBitrateKbps}kbps`;
+function useWipeController() {
+  const [dividerPosition, setDividerPosition] = useState(0.5);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const draggingRef = useRef(false);
+  const clamp = (value: number) => Math.max(0, Math.min(1, value));
+
+  const handlePointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    draggingRef.current = true;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const x = (e.clientX - rect.left) / rect.width;
+    setDividerPosition(clamp(x));
+  }, []);
+
+  const handlePointerMove = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = (e.clientX - rect.left) / rect.width;
+    setDividerPosition(clamp(x));
+  }, []);
+
+  const handlePointerUp = useCallback((e?: ReactPointerEvent<HTMLDivElement>) => {
+    draggingRef.current = false;
+    if (e) {
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+    }
+  }, []);
+
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    setDividerPosition((prev) => {
+      const delta = e.deltaY > 0 ? -0.02 : 0.02;
+      return clamp(prev + delta);
+    });
+  }, []);
+
+  const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = 0.03;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+      setDividerPosition((prev) => clamp(prev - step));
+    } else if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+      setDividerPosition((prev) => clamp(prev + step));
+    } else if (e.key === "Home") {
+      setDividerPosition(0);
+    } else if (e.key === "End") {
+      setDividerPosition(1);
+    }
+  }, []);
+
+  const centerDivider = useCallback(() => {
+    setDividerPosition(0.5);
+  }, []);
+
+  return {
+    dividerPosition,
+    containerRef,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handleWheel,
+    handleKeyDown,
+    centerDivider,
+  };
 }
 
-function formatInfoLine(
-  variantId: string,
-  config?: CompareConfigSnapshot,
-  state?: string,
-): string {
-  if (state === "loading") return `${variantId}: Connecting...`;
-  if (state === "error") return `${variantId}: Error`;
-  if (!config) return `${variantId}: Live`;
-  return `${variantId}: ${config.resolutionWidth}×${config.resolutionHeight} @ ${config.fps}fps · ${config.videoBitrateKbps}kbps`;
+// ─── NVIDIA single-config validation ───────────────────────────────────────
+
+/**
+ * Enforce that only one side may use NVIDIA per processing backend.
+ * When helper is single-config (nvidia-vsr), only one EnhancedVideoSurface
+ * may be active with nvidia-vsr at a time.
+ */
+export function getEffectiveBackend(
+  settings: ViewerImageEnhancementSettings,
+  otherSideBackend: ProcessingBackend | null,
+): { effectiveBackend: ProcessingBackend; nvidiaForcedOff: boolean } {
+  if (settings.processingBackend !== "nvidia-vsr") {
+    return { effectiveBackend: settings.processingBackend, nvidiaForcedOff: false };
+  }
+  // If the other side is already using nvidia-vsr, this side must fall back to webgl2
+  if (otherSideBackend === "nvidia-vsr") {
+    return { effectiveBackend: "webgl2", nvidiaForcedOff: true };
+  }
+  return { effectiveBackend: "nvidia-vsr", nvidiaForcedOff: false };
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export function CompareViewerSurface({
-  streamAnnouncement,
-  mediaSessionA,
-  mediaSessionB,
-  groupId,
-  hostDeviceId,
-  hostName,
+  videoElement,
+  settingsA,
+  settingsB,
   onExit,
   onFullscreenChange,
+  paused,
+  onTogglePause,
+  onStatsUpdateA,
+  onStatsUpdateB,
+  onProcessorStateChangeA,
+  onProcessorStateChangeB,
+  processorApiRefA,
+  processorApiRefB,
 }: CompareViewerSurfaceProps): ReactElement {
   // ── Layout mode ─────────────────────────────────────────────────
-  const [displayMode, setDisplayMode] = useState<CompareDisplayMode>(
-    "side-by-side",
-  );
+  const [displayMode, setDisplayMode] = useState<CompareDisplayMode>("vertical-wipe");
   const [fullscreen, setFullscreen] = useState(false);
+  const [forceDisabled, setForceDisabled] = useState(false);
 
-  // ── Pause state (shared across both variants) ────────────────────
-  const [paused, setPaused] = useState(false);
+  // ── Wipe state ──────────────────────────────────────────────────
+  const {
+    dividerPosition,
+    containerRef: wipeContainerRef,
+    handlePointerDown,
+    handlePointerMove,
+    handlePointerUp,
+    handleWheel,
+    handleKeyDown,
+    centerDivider,
+  } = useWipeController();
 
-  // ── Per-variant stream readiness ─────────────────────────────────
-  const [streamAStatus, setStreamAStatus] = useState<
-    "loading" | "ready" | "ended" | "error"
-  >("loading");
-  const [streamBStatus, setStreamBStatus] = useState<
-    "loading" | "ready" | "ended" | "error"
-  >("loading");
+  useEffect(() => {
+    const handleMode = (event: Event) => {
+      const detail = (event as CustomEvent<CompareDisplayMode>).detail;
+      if (detail === "side-a" || detail === "side-b" || detail === "vertical-wipe") {
+        setDisplayMode(detail);
+      }
+    };
+    const handleCenter = () => centerDivider();
+    window.addEventListener("screenlink:compare-mode", handleMode as EventListener);
+    window.addEventListener("screenlink:compare-center", handleCenter);
+    return () => {
+      window.removeEventListener("screenlink:compare-mode", handleMode as EventListener);
+      window.removeEventListener("screenlink:compare-center", handleCenter);
+    };
+  }, [centerDivider]);
 
-  // ── Video refs ───────────────────────────────────────────────────
-  const videoARef = useRef<HTMLVideoElement>(null);
-  const videoBRef = useRef<HTMLVideoElement>(null);
-
-  // ── Session refs ─────────────────────────────────────────────────
-  const sessionARef = useRef<ViewerSession | null>(null);
-  const sessionBRef = useRef<ViewerSession | null>(null);
-  const sessionsDestroyedRef = useRef(false);
-
-  // ── Extracted config ─────────────────────────────────────────────
-  const configA = streamAnnouncement.variantADescriptor?.configSnapshot;
-  const configB = streamAnnouncement.variantBDescriptor?.configSnapshot;
-  const labelA = formatLabel("A", configA);
-  const labelB = formatLabel("B", configB);
+  // ── NVIDIA enforcement: only one side may use NVIDIA at a time ──
+  const backendA = settingsA.processingBackend;
+  const backendB = settingsB.processingBackend;
+  const enforcedA = getEffectiveBackend(settingsA, backendB === "nvidia-vsr" ? "nvidia-vsr" : null);
+  const enforcedB = getEffectiveBackend(settingsB, enforcedA.effectiveBackend === "nvidia-vsr" ? "nvidia-vsr" : null);
 
   // ── Auto-hide controls ───────────────────────────────────────────
   const { visible: controlsVisible, show: showControls, hide: hideControls } =
     useControlsAutoHide({ delayMs: 3000 });
-
-  // ── Create sessions on mount ─────────────────────────────────────
-  useEffect(() => {
-    const runtime = getRuntime();
-    if (!runtime || runtime.isDestroyed()) return;
-
-    const logicalStreamId = streamAnnouncement.logicalStreamId;
-
-    // ── Session A ──────────────────────────────────────────────
-    const sessionA = new ViewerSession();
-    sessionARef.current = sessionA;
-
-    sessionA.onStateChange = (state) => {
-      if (state === "watching") setStreamAStatus("ready");
-      else if (state === "ended") setStreamAStatus("ended");
-      else if (state === "error") setStreamAStatus("error");
-    };
-
-    sessionA
-      .start({
-        groupId,
-        hostDeviceId,
-        logicalStreamId,
-        mediaSessionId: mediaSessionA,
-        hostName,
-        videoElement: videoARef.current,
-        compareVariantId: "A",
-      })
-      .catch(() => setStreamAStatus("error"));
-
-    // ── Session B ──────────────────────────────────────────────
-    const sessionB = new ViewerSession();
-    sessionBRef.current = sessionB;
-
-    sessionB.onStateChange = (state) => {
-      if (state === "watching") setStreamBStatus("ready");
-      else if (state === "ended") setStreamBStatus("ended");
-      else if (state === "error") setStreamBStatus("error");
-    };
-
-    sessionB
-      .start({
-        groupId,
-        hostDeviceId,
-        logicalStreamId,
-        mediaSessionId: mediaSessionB,
-        hostName,
-        videoElement: videoBRef.current,
-        compareVariantId: "B",
-      })
-      .catch(() => setStreamBStatus("error"));
-
-    // ── Cleanup on unmount ──────────────────────────────────────
-    return () => {
-      sessionsDestroyedRef.current = true;
-      const sA = sessionARef.current;
-      const sB = sessionBRef.current;
-      sessionARef.current = null;
-      sessionBRef.current = null;
-      if (sA) void sA.destroy();
-      if (sB) void sB.destroy();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── Fullscreen toggle ──────────────────────────────────────────
   const handleToggleFullscreen = useCallback(() => {
@@ -269,9 +286,7 @@ export function CompareViewerSurface({
       window as unknown as {
         screenlink?: {
           toggleFullscreen: () => Promise<boolean>;
-          onFullscreenChanged?: (
-            cb: (isFullscreen: boolean) => void,
-          ) => () => void;
+          onFullscreenChanged?: (cb: (isFullscreen: boolean) => void) => () => void;
         };
       }
     ).screenlink;
@@ -293,72 +308,11 @@ export function CompareViewerSurface({
     void toggle();
   }, [onFullscreenChange]);
 
-  // ── Pause / Resume ────────────────────────────────────────────
-  const handleTogglePause = useCallback(() => {
-    setPaused((prev) => {
-      const next = !prev;
-
-      const vA = videoARef.current;
-      const vB = videoBRef.current;
-
-      if (next) {
-        // Pause both
-        if (vA && !vA.paused) vA.pause();
-        if (vB && !vB.paused) vB.pause();
-      } else {
-        // Resume both
-        if (vA && vA.paused) void vA.play().catch(() => {});
-        if (vB && vB.paused) void vB.play().catch(() => {});
-      }
-
-      return next;
-    });
-  }, []);
-
-  // ── Cycle display mode ─────────────────────────────────────────
-  const cycleDisplayMode = useCallback(() => {
-    setDisplayMode((prev) => {
-      const modes: CompareDisplayMode[] = ["a-only", "side-by-side", "b-only"];
-      const idx = modes.indexOf(prev);
-      return modes[(idx + 1) % modes.length];
-    });
-  }, []);
-
-  // ── Keyboard listeners (compare-specific) ──────────────────────
-  useEffect(() => {
-    const handleCycleMode = () => cycleDisplayMode();
-    const handleTogglePauseEvent = () => handleTogglePause();
-
-    // Shift+Tab, Space, F, and Esc are all handled by use-keyboard-shortcuts
-    // which dispatches custom events or uses the Electron API directly.
-    // We only listen for the custom events here.
-    window.addEventListener("screenlink:compare-cycle-mode", handleCycleMode);
-    window.addEventListener(
-      "screenlink:compare-toggle-pause",
-      handleTogglePauseEvent,
-    );
-
-    return () => {
-      window.removeEventListener(
-        "screenlink:compare-cycle-mode",
-        handleCycleMode,
-      );
-      window.removeEventListener(
-        "screenlink:compare-toggle-pause",
-        handleTogglePauseEvent,
-      );
-    };
-  }, [cycleDisplayMode, handleTogglePause]);
-
-  // ── Fullscreen change listener (Electron API) ──────────────────
+  // ── Fullscreen change listener ──────────────────────────────────
   useEffect(() => {
     const api = (
       window as unknown as {
-        screenlink?: {
-          onFullscreenChanged: (
-            cb: (isFullscreen: boolean) => void,
-          ) => () => void;
-        };
+        screenlink?: { onFullscreenChanged: (cb: (isFullscreen: boolean) => void) => () => void };
       }
     ).screenlink;
     if (api) {
@@ -375,49 +329,86 @@ export function CompareViewerSurface({
     return () => document.removeEventListener("fullscreenchange", handler);
   }, [onFullscreenChange]);
 
-  // ── Modes for quick access ──────────────────────────────────────
-  const isSideBySide = displayMode === "side-by-side";
-  const isAOnly = displayMode === "a-only";
-  const isBOnly = displayMode === "b-only";
+  // ── Display mode helpers ─────────────────────────────────────────
+  const showWipe = displayMode === "vertical-wipe";
+  const showA = displayMode === "side-a";
+  const showB = displayMode === "side-b";
+  const showBoth = showWipe; // both canvases always rendered
 
-  // ── Pane visibility flags ────────────────────────────────────────
-  const showPaneA = isSideBySide || isAOnly;
-  const showPaneB = isSideBySide || isBOnly;
+  // CSS clip for vertical wipe: left = shown, right = hidden
+  const clipStyleA = showWipe
+    ? { clipPath: `inset(0 ${(1 - dividerPosition) * 100}% 0 0)` }
+    : showA
+    ? { clipPath: "inset(0 0 0 0)" }
+    : { clipPath: "inset(0 0 0 100%)" };
+
+  const clipStyleB = showWipe
+    ? { clipPath: `inset(0 0 0 ${dividerPosition * 100}%)` }
+    : showB
+    ? { clipPath: "inset(0 0 0 0)" }
+    : { clipPath: "inset(0 100% 0 0)" };
+
+  // Wipe handle style
+  const handleStyle = showWipe
+    ? { left: `${dividerPosition * 100}%` }
+    : { display: "none" };
+
+  // ── Pause overlay ─────────────────────────────────────────────────
+  const showPauseOverlay = paused;
 
   // ── Render ──────────────────────────────────────────────────────
 
   return (
     <div
+      ref={wipeContainerRef}
       className="relative h-full w-full overflow-hidden bg-black select-none"
       data-compare-viewer
       onMouseMove={showControls}
       onMouseEnter={showControls}
       onMouseLeave={hideControls}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={handlePointerUp}
+      onWheel={handleWheel}
+      onKeyDown={handleKeyDown}
+      tabIndex={0}
+      role="application"
+      aria-label="Video comparison viewer"
     >
       {/* ── Video Stage ─────────────────────────────────────────── */}
-      <div className="absolute inset-0 flex">
-        {/* Pane A */}
-        {showPaneA && (
-          <div
-            className={cn(
-              "relative flex items-center justify-center overflow-hidden bg-black",
-              isSideBySide && "w-1/2",
-              isAOnly && "w-full",
-            )}
-          >
-            <video
-              ref={videoARef}
-              data-compare-video="a"
-              className={cn(
-                "h-full w-full",
-                isSideBySide ? "object-contain" : "object-contain",
-                paused && "opacity-30",
-              )}
-              playsInline
-              autoPlay
-              muted={false}
-              aria-label="Variant A stream"
+      <div className="absolute inset-0">
+        {/* Variant A — overlays full area, clipped */}
+        <div className="absolute inset-0" style={clipStyleA}>
+          <div className="relative w-full h-full bg-black">
+            <EnhancedVideoSurface
+              videoElement={videoElement}
+              enabled
+              presentationMode="dom-only"
+              settings={{
+                ...settingsA,
+                processingBackend: enforcedA.effectiveBackend,
+              }}
+              className="w-full h-full"
+              onStatsUpdate={onStatsUpdateA}
+              onProcessorStateChange={onProcessorStateChangeA}
+              processorApiRef={processorApiRefA}
             />
+            {/* Fallback: raw video when EnhancedVideoSurface returns null */}
+            {!settingsA.enabled && videoElement && (
+              <video
+                ref={(el) => {
+                  if (el && videoElement.srcObject) {
+                    el.srcObject = videoElement.srcObject;
+                  }
+                }}
+                className="absolute inset-0 w-full h-full object-contain"
+                autoPlay
+                playsInline
+                muted
+                aria-label="Variant A raw video"
+              />
+            )}
 
             {/* Label overlay — top-left */}
             <div
@@ -426,55 +417,41 @@ export function CompareViewerSurface({
                 "bg-black/60 text-white/90 backdrop-blur-sm border border-white/10",
               )}
             >
-              {labelA}
+              {`A ${enforcedA.nvidiaForcedOff ? "(NVIDIA off)" : ""}`}
             </div>
-
-            {/* Status overlay when not ready */}
-            {streamAStatus === "loading" && (
-              <div className="absolute inset-0 z-5 flex items-center justify-center bg-black/40">
-                <span className="text-xs text-white/60 font-mono">
-                  Connecting A...
-                </span>
-              </div>
-            )}
-
-            {streamAStatus === "error" && (
-              <div className="absolute inset-0 z-5 flex items-center justify-center bg-black/60">
-                <span className="text-xs text-danger/80 font-mono">
-                  A: Error
-                </span>
-              </div>
-            )}
           </div>
-        )}
+        </div>
 
-        {/* Hairline divider — only in side-by-side mode */}
-        {isSideBySide && (
-          <div className="absolute left-1/2 top-0 bottom-0 w-px z-20 bg-white/20 pointer-events-none -translate-x-px" />
-        )}
-
-        {/* Pane B */}
-        {showPaneB && (
-          <div
-            className={cn(
-              "relative flex items-center justify-center overflow-hidden bg-black",
-              isSideBySide && "w-1/2",
-              isBOnly && "w-full",
-            )}
-          >
-            <video
-              ref={videoBRef}
-              data-compare-video="b"
-              className={cn(
-                "h-full w-full",
-                isSideBySide ? "object-contain" : "object-contain",
-                paused && "opacity-30",
-              )}
-              playsInline
-              autoPlay
-              muted
-              aria-label="Variant B stream"
+        {/* Variant B — overlays full area, clipped */}
+        <div className="absolute inset-0" style={clipStyleB}>
+          <div className="relative w-full h-full bg-black">
+            <EnhancedVideoSurface
+              videoElement={videoElement}
+              enabled
+              presentationMode="dom-only"
+              settings={{
+                ...settingsB,
+                processingBackend: enforcedB.effectiveBackend,
+              }}
+              className="w-full h-full"
+              onStatsUpdate={onStatsUpdateB}
+              onProcessorStateChange={onProcessorStateChangeB}
+              processorApiRef={processorApiRefB}
             />
+            {!settingsB.enabled && videoElement && (
+              <video
+                ref={(el) => {
+                  if (el && videoElement.srcObject) {
+                    el.srcObject = videoElement.srcObject;
+                  }
+                }}
+                className="absolute inset-0 w-full h-full object-contain"
+                autoPlay
+                playsInline
+                muted
+                aria-label="Variant B raw video"
+              />
+            )}
 
             {/* Label overlay — top-left */}
             <div
@@ -483,31 +460,34 @@ export function CompareViewerSurface({
                 "bg-black/60 text-white/90 backdrop-blur-sm border border-white/10",
               )}
             >
-              {labelB}
+              {`B ${enforcedB.nvidiaForcedOff ? "(NVIDIA off)" : ""}`}
             </div>
+          </div>
+        </div>
 
-            {/* Status overlay when not ready */}
-            {streamBStatus === "loading" && (
-              <div className="absolute inset-0 z-5 flex items-center justify-center bg-black/40">
-                <span className="text-xs text-white/60 font-mono">
-                  Connecting B...
-                </span>
-              </div>
-            )}
-
-            {streamBStatus === "error" && (
-              <div className="absolute inset-0 z-5 flex items-center justify-center bg-black/60">
-                <span className="text-xs text-danger/80 font-mono">
-                  B: Error
-                </span>
-              </div>
-            )}
+        {/* ── Wipe handle ──────────────────────────────────────────── */}
+        {showWipe && (
+          <div
+            className="absolute top-0 bottom-0 z-20 w-1 bg-white/60 cursor-col-resize -translate-x-px pointer-events-none"
+            style={handleStyle}
+            role="slider"
+            aria-label="Comparison divider"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(dividerPosition * 100)}
+          >
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-12 rounded-md bg-white/80 flex items-center justify-center shadow-lg pointer-events-auto cursor-col-resize">
+              <svg width="12" height="20" viewBox="0 0 12 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 4L8 10L4 16" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M8 4L4 10L8 16" stroke="#333" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" opacity="0.5"/>
+              </svg>
+            </div>
           </div>
         )}
       </div>
 
       {/* ── Pause overlay ───────────────────────────────────────── */}
-      {paused && (
+      {showPauseOverlay && (
         <div
           className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/40 pointer-events-none"
           aria-label="Paused"
@@ -560,10 +540,10 @@ export function CompareViewerSurface({
           size="sm"
           className="h-8 gap-1.5 bg-black/60 backdrop-blur-sm border-white/10 text-white/80 hover:text-white hover:bg-white/10"
           onClick={onExit}
-          aria-label="Exit viewer"
+          aria-label="Exit compare mode"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          <span className="text-[11px]">Exit</span>
+          <span className="text-[11px]">Exit Compare</span>
         </Button>
       </motion.div>
 
@@ -577,17 +557,16 @@ export function CompareViewerSurface({
         transition={{ duration: 0.2, ease: "easeInOut" }}
         className="absolute bottom-0 left-0 right-0 z-30 bg-gradient-to-t from-black/80 via-black/50 to-transparent"
       >
-        {/* Controls row */}
         <div className="flex items-center justify-center gap-2 px-4 pb-3 pt-8">
           <div className="flex items-center gap-1 rounded-standard bg-black/60 backdrop-blur-sm px-2 py-1.5 border border-white/10 max-w-3xl w-full">
-            {/* ── Left: Play/Pause ──────────────────────────────── */}
+            {/* ── Play/Pause ──────────────────────────────────────── */}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-white hover:bg-white/10"
-                  onClick={handleTogglePause}
+                  onClick={onTogglePause}
                   aria-label={paused ? "Resume" : "Pause"}
                 >
                   {paused ? (
@@ -602,7 +581,7 @@ export function CompareViewerSurface({
               </TooltipContent>
             </Tooltip>
 
-            {/* ── Center: Mode toggle segmented control ────────── */}
+            {/* ── Mode toggle ────────────────────────────────────── */}
             <div className="flex items-center gap-0.5 mx-auto">
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -611,19 +590,17 @@ export function CompareViewerSurface({
                     size="icon"
                     className={cn(
                       "h-7 w-7",
-                      isAOnly
+                      displayMode === "side-a"
                         ? "text-accent bg-accent/10"
                         : "text-white/60 hover:text-white hover:bg-white/10",
                     )}
-                    onClick={() => setDisplayMode("a-only")}
+                    onClick={() => setDisplayMode("side-a")}
                     aria-label="Show variant A only"
                   >
-                    <Monitor className="h-3.5 w-3.5" />
+                    <span className="text-[11px] font-bold">A</span>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="top">
-                  A only
-                </TooltipContent>
+                <TooltipContent side="top">Variant A</TooltipContent>
               </Tooltip>
 
               <Tooltip>
@@ -633,19 +610,17 @@ export function CompareViewerSurface({
                     size="icon"
                     className={cn(
                       "h-7 w-7",
-                      isSideBySide
+                      displayMode === "vertical-wipe"
                         ? "text-accent bg-accent/10"
                         : "text-white/60 hover:text-white hover:bg-white/10",
                     )}
-                    onClick={() => setDisplayMode("side-by-side")}
-                    aria-label="Show both variants side by side"
+                    onClick={() => setDisplayMode("vertical-wipe")}
+                    aria-label="Vertical compare"
                   >
                     <Columns className="h-3.5 w-3.5" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="top">
-                  Side by side
-                </TooltipContent>
+                <TooltipContent side="top">Vertical Compare</TooltipContent>
               </Tooltip>
 
               <Tooltip>
@@ -655,23 +630,21 @@ export function CompareViewerSurface({
                     size="icon"
                     className={cn(
                       "h-7 w-7",
-                      isBOnly
+                      displayMode === "side-b"
                         ? "text-accent bg-accent/10"
                         : "text-white/60 hover:text-white hover:bg-white/10",
                     )}
-                    onClick={() => setDisplayMode("b-only")}
+                    onClick={() => setDisplayMode("side-b")}
                     aria-label="Show variant B only"
                   >
-                    <Monitor className="h-3.5 w-3.5" />
+                    <span className="text-[11px] font-bold">B</span>
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent side="top">
-                  B only
-                </TooltipContent>
+                <TooltipContent side="top">Variant B</TooltipContent>
               </Tooltip>
             </div>
 
-            {/* ── Right: Fullscreen ────────────────────────────── */}
+            {/* ── Fullscreen ────────────────────────────────────── */}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -689,7 +662,7 @@ export function CompareViewerSurface({
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="top">
-                {fullscreen ? "Exit fullscreen" : "Fullscreen (F)"}
+                {fullscreen ? "Exit fullscreen (F)" : "Fullscreen (F)"}
               </TooltipContent>
             </Tooltip>
           </div>
@@ -698,13 +671,15 @@ export function CompareViewerSurface({
         {/* ── Info strip ──────────────────────────────────────────── */}
         <div className="flex items-center justify-center gap-4 px-4 pb-2">
           <span className="text-[10px] text-white/40 font-mono tabular-nums">
-            {formatInfoLine("A", configA, streamAStatus)}
+            {displayMode === "side-b" ? "B" : `A ${enforcedA.nvidiaForcedOff ? "(webgl2)" : ""}`}
           </span>
-          {isSideBySide && (
-            <span className="text-[10px] text-white/20">|</span>
+          {showWipe && (
+            <span className="text-[10px] text-white/20">
+              | {Math.round(dividerPosition * 100)}%
+            </span>
           )}
           <span className="text-[10px] text-white/40 font-mono tabular-nums">
-            {formatInfoLine("B", configB, streamBStatus)}
+            {displayMode === "side-a" ? "A" : `B ${enforcedB.nvidiaForcedOff ? "(webgl2)" : ""}`}
           </span>
         </div>
       </motion.div>

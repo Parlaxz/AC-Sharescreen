@@ -526,6 +526,7 @@ export function validateSettings(
 // ─── localStorage persistence ────────────────────────────────────────────────
 
 const STORAGE_KEY = "screenlink:viewer-image-enhancement";
+const STORAGE_KEY_B = "screenlink:viewer-image-enhancement-b";
 
 /**
  * Load image enhancement settings from localStorage.
@@ -563,4 +564,51 @@ export function resetImageEnhancementSettings(): ViewerImageEnhancementSettings 
   const defaults = { ...VIEWER_IMAGE_ENHANCEMENT_DEFAULTS };
   saveImageEnhancementSettings(defaults);
   return defaults;
+}
+
+// ─── Compare settings B persistence ──────────────────────────────────────────
+
+/**
+ * Load compare settings B from localStorage.
+ * On first use (no persisted value), initializes from settings A so the user
+ * starts with a known baseline rather than raw defaults.
+ * Returns the loaded settings (not saved — the caller must call
+ * saveImageEnhancementSettingsB() to persist any changes).
+ */
+export function loadImageEnhancementSettingsB(): ViewerImageEnhancementSettings {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_B);
+    if (raw === null) {
+      // First use: seed from settings A
+      const seed = loadImageEnhancementSettings();
+      return { ...seed };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    return validateSettings(parsed);
+  } catch {
+    const seed = loadImageEnhancementSettings();
+    return { ...seed };
+  }
+}
+
+/**
+ * Persist compare settings B to localStorage.
+ */
+export function saveImageEnhancementSettingsB(
+  settings: ViewerImageEnhancementSettings,
+): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_B, JSON.stringify(settings));
+  } catch {
+    // silently ignore
+  }
+}
+
+/**
+ * Reset compare settings B to a copy of current settings A.
+ * Does NOT persist — caller must call saveImageEnhancementSettingsB().
+ */
+export function resetImageEnhancementSettingsB(): ViewerImageEnhancementSettings {
+  const seed = loadImageEnhancementSettings();
+  return { ...seed };
 }

@@ -266,6 +266,12 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
   /** Stable monotonically increasing instance identifier */
   readonly instanceId: number = nextMonotonicId();
 
+  constructor(
+    private readonly options: {
+      preferDomPresentation?: boolean;
+    } = {},
+  ) {}
+
   private canvas: HTMLCanvasElement | null = null;
 
   private captureCanvas: HTMLCanvasElement | null = null;
@@ -1039,7 +1045,7 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
       // Try to activate native presenter (GPU-resident display path)
       // This is best-effort — failure here just means we fall back to WebGL
       this.nativePresenterActive = false;
-      this.nativePresenterSupported = Boolean(api?.nativePresenterAttach && api?.nativePresenterDetach);
+      this.nativePresenterSupported = !this.options.preferDomPresentation && Boolean(api?.nativePresenterAttach && api?.nativePresenterDetach);
       if (this.nativePresenterSupported) {
         try {
           // Use full window size as initial surface; will be refined via resizeOutput

@@ -18,7 +18,7 @@ import {
   getNvidiaCapabilitySnapshot,
   probeNvidiaCapability,
 } from "../nvidia-capability-store.js";
-import { FallbackChainController, type FallbackStage } from "./fallback-chain-controller.js";
+import { FallbackChainController, type FallbackChainOptions, type FallbackStage } from "./fallback-chain-controller.js";
 
 export type BackendSelection = "auto" | "webgl2" | "nvidia-vsr";
 
@@ -39,6 +39,7 @@ export interface BackendSelectionResult {
 export function createImageProcessingBackend(
   settings: ViewerImageEnhancementSettings,
   capabilities?: ImageProcessingCapabilities,
+  options?: FallbackChainOptions,
 ): BackendSelectionResult {
   const caps = capabilities ?? getImageProcessingCapabilities();
 
@@ -55,7 +56,7 @@ export function createImageProcessingBackend(
 
   // If NVIDIA requested and capability store says available, create chain
   if (requested === "nvidia-vsr" || (requested === "auto" && nvidiaCaps.probed && nvidiaCaps.available)) {
-    const chain = new FallbackChainController("nvidia-vsr", caps);
+    const chain = new FallbackChainController("nvidia-vsr", caps, undefined, options);
     const fbReason = chain.reason ?? undefined;
 
     return {

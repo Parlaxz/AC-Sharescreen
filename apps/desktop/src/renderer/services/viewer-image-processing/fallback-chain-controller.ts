@@ -38,6 +38,10 @@ export interface FallbackChainCallbacks {
   onFatalError?: (reason: string) => void;
 }
 
+export interface FallbackChainOptions {
+  preferDomPresentation?: boolean;
+}
+
 // ─── Chain ───────────────────────────────────────────────────────────────────
 
 export class FallbackChainController {
@@ -46,13 +50,16 @@ export class FallbackChainController {
   private destroyed = false;
   private consecutiveFailures = 0;
   private readonly MAX_FAILURES = 3;
+  private readonly options: FallbackChainOptions;
 
   constructor(
     requestedKind: BackendKind,
     capabilities: ImageProcessingCapabilities,
     callbacks?: FallbackChainCallbacks,
+    options?: FallbackChainOptions,
   ) {
     this.callbacks = callbacks ?? {};
+    this.options = options ?? {};
     this.state = this.resolveInitialStage(requestedKind, capabilities);
   }
 
@@ -127,7 +134,9 @@ export class FallbackChainController {
       const nvidiaAvailable = isNvidiaVsrAvailable();
       if (nvidiaAvailable) {
         base.activeStage = "nvidia-vsr";
-        base.activeBackend = new NvidiaVsrBackend();
+        base.activeBackend = new NvidiaVsrBackend({
+          preferDomPresentation: this.options.preferDomPresentation,
+        });
         base.activeKind = "nvidia-vsr";
       } else {
         base.reason = "NVIDIA VSR not available — SDK not built";

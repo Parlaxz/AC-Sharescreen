@@ -38,7 +38,7 @@ import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
 import { ViewerPanelShell } from "./viewer/ViewerPanelShell.js";
 import type { ActivePanel } from "./viewer/ViewerPanelShell.js";
-import type { ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
+import { ViewerSettingsPanel, type ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
 import {
   getViewerQualityDispatchError,
@@ -48,13 +48,16 @@ import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@
 import { getRuntime } from "@/services/phase3-runtime.js";
 import { navigateToGroupOverview } from "@/services/group-navigation";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
-import { CompareViewerSurface } from "@/components/workspace/CompareViewerSurface";
+import { CompareViewerSurface, type CompareDisplayMode } from "@/components/workspace/CompareViewerSurface";
 import type { ProcessorState, ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
 import type { ViewerImageEnhancementSettings } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   loadImageEnhancementSettings,
+  loadImageEnhancementSettingsB,
   saveImageEnhancementSettings,
+  saveImageEnhancementSettingsB,
   resetImageEnhancementSettings,
+  resetImageEnhancementSettingsB,
 } from "@/services/viewer-image-processing/viewer-image-settings";
 import {
   nvidiaBenchmarkService,
@@ -334,9 +337,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     return loadImageEnhancementSettings();
   });
   const [enhancementStats, setEnhancementStats] = useState<ProcessorStats | null>(null);
+  const [enhancementStatsB, setEnhancementStatsB] = useState<ProcessorStats | null>(null);
   const [enhancementFallback, setEnhancementFallback] = useState(false);
   /** Tracks whether at least one GPU-enhanced frame has been successfully rendered */
   const [enhancementActive, setEnhancementActive] = useState(false);
+
+  // ── Compare mode state ───────────────────────────────────────────────────
+  const [isCompareActive, setIsCompareActive] = useState(false);
+  const [compareSettingsBOpen, setCompareSettingsBOpen] = useState(false);
+  const [settingsB, setSettingsB] = useState<ViewerImageEnhancementSettings>(() => {
+    return loadImageEnhancementSettingsB();
+  });
 
   // Refs for closure-safe access in callbacks
   const enhancementSettingsRef = useRef(enhancementSettings);
@@ -356,6 +367,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   );
   /** Ref populated by EnhancedVideoSurface when the processor is ready. */
   const processorApiRef = useRef<ProcessorAPI | null>(null);
+  const processorApiRefB = useRef<ProcessorAPI | null>(null);
 
   // ── Discord shortcut bindings (loaded from settings) ──
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
@@ -717,6 +729,55 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     enhancementStatsRef.current = stats;
   }, []);
 
+  const handleEnhancementStatsUpdateB = useCallback((stats: ProcessorStats) => {
+    setEnhancementStatsB(stats);
+  }, []);
+
+  // ── Compare mode handlers ──────────────────────────────────────────────
+  const handleCompareToggle = useCallback(() => {
+    setIsCompareActive((prev) => !prev);
+  }, []);
+
+  const handleCompareExit = useCallback(() => {
+    setIsCompareActive(false);
+    setCompareSettingsBOpen(false);
+  }, []);
+
+  // Activate compare mode AND open B settings panel
+  const handleCompareToggleWithSettingsB = useCallback(() => {
+    setIsCompareActive((prev) => {
+      if (!prev) {
+        // Opening compare — also open B settings panel
+        setCompareSettingsBOpen(true);
+      }
+      return !prev;
+    });
+  }, []);
+
+  const handleOpenCompareSettingsB = useCallback(() => {
+    setIsCompareActive(true);
+    setCompareSettingsBOpen(true);
+  }, []);
+
+  const handleCloseCompareSettingsB = useCallback(() => {
+    setCompareSettingsBOpen(false);
+  }, []);
+
+  const handleEnhancementChangeB = useCallback((partial: Partial<ViewerImageEnhancementSettings>) => {
+    setSettingsB((prev) => ({ ...prev, ...partial }));
+  }, []);
+
+  const handleCompareSettingsBReset = useCallback(() => {
+    setSettingsB(resetImageEnhancementSettingsB());
+  }, []);
+
+  // Persist settings B when changed
+  useEffect(() => {
+    try {
+      saveImageEnhancementSettingsB(settingsB);
+    } catch { /* ignore */ }
+  }, [settingsB]);
+
   // ── Benchmark helpers and handlers ───────────────────────────────────
 
   /**
@@ -1069,6 +1130,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
       // ignore pausing/resuming — operation already in flight
     };
+    const handleCompareToggleEvent = () => handleCompareToggleWithSettingsB();
+    const handleCompareModeEvent = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail === "side-a" || detail === "side-b" || detail === "vertical-wipe") {
+        setIsCompareActive(true);
+      }
+    };
+    const handleCompareExitEvent = () => setIsCompareActive(false);
+    const handleCompareOpenSettingsBEvent = () => handleOpenCompareSettingsB();
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isFullscreen) {
         handleToggleFullscreen();
@@ -1093,6 +1163,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     window.addEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
     window.addEventListener("screenlink:viewer-toggle-info", handleToggleInfo);
     window.addEventListener("screenlink:viewer-escape", handlePanelEscape);
+    window.addEventListener("screenlink:compare-toggle", handleCompareToggleEvent);
+    window.addEventListener("screenlink:compare-mode", handleCompareModeEvent);
+    window.addEventListener("screenlink:compare-exit", handleCompareExitEvent);
+    window.addEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
@@ -1100,9 +1174,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       window.removeEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
       window.removeEventListener("screenlink:viewer-toggle-info", handleToggleInfo);
       window.removeEventListener("screenlink:viewer-escape", handlePanelEscape);
+      window.removeEventListener("screenlink:compare-toggle", handleCompareToggleEvent);
+      window.removeEventListener("screenlink:compare-mode", handleCompareModeEvent);
+      window.removeEventListener("screenlink:compare-exit", handleCompareExitEvent);
+      window.removeEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleToggleFullscreen, handleToggleMute, isFullscreen, streamPauseState]);
+  }, [handleOpenCompareSettingsB, handleToggleFullscreen, handleToggleMute, isFullscreen, streamPauseState]);
 
   // Sync volume — routes to gain node when active, native path otherwise.
   // NOTE: This effect NEVER creates AudioContext. Boost is created by
@@ -1196,12 +1274,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setCurrentStreamId(currentStream.logicalStreamId);
     }
   }, [currentStream, currentStreamId]);
-
-  // ── Compare stream detection ──────────────────────────────────
-  const isCompareStream = useMemo(() => {
-    if (!currentStream) return false;
-    return !!(currentStream as unknown as Record<string, unknown>).compareMode;
-  }, [currentStream]);
 
   // Watched stream info from explicit target
   const watchedInfo = useMemo(() => {
@@ -1831,7 +1903,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }
 
   // Fatal error state — Destructive Alert + retry
-  if (displayStatus === "error") {
+  // Some error states carry a detail message prefixed with "error:"
+  // (e.g. "error: missing stream target") that the exact match misses.
+  const isFatalError = displayStatus === "error" || (typeof displayStatus === "string" && displayStatus.startsWith("error:"));
+  if (isFatalError) {
     return (
       <ViewerShell className={className} onExit={handleExit}>
         <motion.div
@@ -1873,38 +1948,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     );
   }
 
-  // ── Compare stream branch ────────────────────────────────────────
-  if (isCompareStream && currentStream) {
-    const ann = currentStream as unknown as Record<string, unknown>;
-    return (
-      <ViewerShell className={className} onExit={handleExit}>
-        <CompareViewerSurface
-          streamAnnouncement={ann as never}
-          mediaSessionA={
-            (
-              ann.variantADescriptor as
-                | { mediaSessionId?: string }
-                | undefined
-            )?.mediaSessionId ?? ""
-          }
-          mediaSessionB={
-            (
-              ann.variantBDescriptor as
-                | { mediaSessionId?: string }
-                | undefined
-            )?.mediaSessionId ?? ""
-          }
-          groupId={selectedGroupId ?? currentStream.groupId}
-          hostDeviceId={
-            watchingTarget?.hostDeviceId ?? currentStream.hostDeviceId
-          }
-          hostName={sharerName}
-          onExit={handleExit}
-        />
-      </ViewerShell>
-    );
-  }
-
   // ── Watching / default state: Video stage with controls ────────
 
   return (
@@ -1922,74 +1965,126 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       >
         {/* ── Video stage ──────────────────────────────────────────── */}
         <div className="relative flex-1 flex items-center justify-center bg-black">
-          <video
-            ref={videoRef}
-            data-video-native
-            className={cn(
-              "h-full object-contain",
-              streamPauseState === "paused" && "opacity-30",
-              // Hide native video when GPU canvas is actively rendering
-              // Hide native video only after GPU canvas has rendered at least one frame
-              enhancementActive && !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
-            )}
-            playsInline
-            autoPlay
-            aria-label={`${sharerName}'s stream - ${sourceName}`}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              handleToggleFullscreen();
-            }}
-          />
-
-          {/* ── GPU-enhanced display surface ────────────────────── */}
-          <EnhancedVideoSurface
-            videoElement={videoRef.current}
-            enabled={!enhancementFallback && enhancementSettings.enabled}
-            settings={enhancementSettings}
-            onProcessorStateChange={handleEnhancementProcessorStateChange}
-            onProcessingError={handleEnhancementProcessingError}
-            onContextRestored={handleEnhancementContextRestored}
-            onFirstFrame={handleEnhancementFirstFrame}
-            onStatsUpdate={handleEnhancementStatsUpdate}
-            processorApiRef={processorApiRef}
-          />
-
-          {/* ── Paused overlay (frozen frame poster + play icon + label) ── */}
-          {(streamPauseState === "paused" || streamPauseState === "resuming") && (
-            <div
-              className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/40"
-              aria-label={streamPauseState === "paused" ? "Stream paused" : "Resuming stream"}
-              role="status"
-            >
-              {/* Poster frame as background image */}
-              {streamPausePoster && (
-                <div
-                  className="absolute inset-0 bg-cover bg-center opacity-60"
-                  style={{ backgroundImage: `url(${streamPausePoster})` }}
-                />
-              )}
-
-              {/* Centered icon + label */}
-              <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
-                {streamPauseState === "paused" ? (
-                  <>
-                    <div className="h-16 w-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
-                      <Play className="h-8 w-8 text-white" />
-                    </div>
-                    <p className="text-sm text-white/80 font-medium">
-                      Paused — Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-xs font-mono">Space</kbd> to resume
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <div className="h-12 w-12 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
-                      <RefreshCw className="h-6 w-6 text-white animate-spin" />
-                    </div>
-                    <p className="text-sm text-white/80 font-medium">
-                      Resuming stream...
-                    </p>
-                  </>
+          {isCompareActive ? (
+            <div className="absolute inset-0">
+              <CompareViewerSurface
+                videoElement={videoRef.current}
+                settingsA={enhancementSettings}
+                settingsB={settingsB}
+                onExit={handleCompareExit}
+                paused={streamPauseState === "paused"}
+                onTogglePause={handleToggleStreamPause}
+                onStatsUpdateA={handleEnhancementStatsUpdate}
+                onStatsUpdateB={handleEnhancementStatsUpdateB}
+                processorApiRefA={processorApiRef}
+                processorApiRefB={processorApiRefB}
+              />
+            </div>
+          ) : (
+            <>
+              <video
+                ref={videoRef}
+                data-video-native
+                className={cn(
+                  "h-full object-contain",
+                  streamPauseState === "paused" && "opacity-30",
+                  // Hide native video when GPU canvas is actively rendering
+                  // Hide native video only after GPU canvas has rendered at least one frame
+                  enhancementActive && !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
                 )}
+                playsInline
+                autoPlay
+                aria-label={`${sharerName}'s stream - ${sourceName}`}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  handleToggleFullscreen();
+                }}
+              />
+
+              {/* ── GPU-enhanced display surface ────────────────────── */}
+              <EnhancedVideoSurface
+                videoElement={videoRef.current}
+                enabled={!enhancementFallback && enhancementSettings.enabled}
+                settings={enhancementSettings}
+                onProcessorStateChange={handleEnhancementProcessorStateChange}
+                onProcessingError={handleEnhancementProcessingError}
+                onContextRestored={handleEnhancementContextRestored}
+                onFirstFrame={handleEnhancementFirstFrame}
+                onStatsUpdate={handleEnhancementStatsUpdate}
+                processorApiRef={processorApiRef}
+              />
+
+              {/* ── Paused overlay ── */}
+              {(streamPauseState === "paused" || streamPauseState === "resuming") && (
+                <div
+                  className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/40"
+                  aria-label={streamPauseState === "paused" ? "Stream paused" : "Resuming stream"}
+                  role="status"
+                >
+                  {streamPausePoster && (
+                    <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: `url(${streamPausePoster})` }} />
+                  )}
+                  <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
+                    {streamPauseState === "paused" ? (
+                      <>
+                        <div className="h-16 w-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
+                          <Play className="h-8 w-8 text-white" />
+                        </div>
+                        <p className="text-sm text-white/80 font-medium">
+                          Paused — Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-xs font-mono">Space</kbd> to resume
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <div className="h-12 w-12 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
+                          <RefreshCw className="h-6 w-6 text-white animate-spin" />
+                        </div>
+                        <p className="text-sm text-white/80 font-medium">Resuming stream...</p>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          </div> {/* ── End video stage ── */}
+
+          {isCompareActive && compareSettingsBOpen && (
+            <div
+              className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 px-4"
+              onClick={handleCloseCompareSettingsB}
+            >
+              <div
+                className="w-full max-w-4xl rounded-2xl border border-accent/30 bg-surface/95 p-4 shadow-2xl backdrop-blur-md"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-text-primary">Comparison Configuration B</div>
+                    <div className="text-xs text-text-secondary">Viewer-local settings for the second processing path.</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" size="sm" onClick={handleCompareSettingsBReset}>Reset B</Button>
+                    <Button variant="ghost" size="sm" onClick={handleCloseCompareSettingsB}>Close</Button>
+                  </div>
+                </div>
+                <ViewerSettingsPanel
+                  requestState={viewerRequest}
+                  onRequestChange={handleQualityRequestChange}
+                  requestPending={qualityRequestPending}
+                  lastRequestAccepted={lastQualityAccepted}
+                  requestFeedback={qualityFeedback}
+                  enhancementSettings={settingsB}
+                  onEnhancementChange={setSettingsB}
+                  onEnhancementReset={handleCompareSettingsBReset}
+                  enhancementStats={enhancementStatsB}
+                  hideQuality
+                  contentOnly
+                  variant="B"
+                  benchmarkRunning={false}
+                >
+                  <span />
+                </ViewerSettingsPanel>
               </div>
             </div>
           )}
@@ -2074,9 +2169,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               maxVolumePercent={maxVolumePercent}
               activePanel={activePanel}
               onActivePanelChange={setActivePanel}
+              onCompareToggle={handleCompareToggleWithSettingsB}
             />
           </ViewerPanelShell>
-        </div>
       </motion.div>
     </ViewerShell>
   );
@@ -2140,6 +2235,7 @@ function VideoControlsOverlay({
   maxVolumePercent,
   activePanel,
   onActivePanelChange,
+  onCompareToggle,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
@@ -2169,6 +2265,7 @@ function VideoControlsOverlay({
   maxVolumePercent?: number;
   activePanel: ActivePanel | null;
   onActivePanelChange: (panel: ActivePanel | null) => void;
+  onCompareToggle?: () => void;
 }) {
   return (
     <VideoControls
@@ -2199,6 +2296,7 @@ function VideoControlsOverlay({
       maxVolumePercent={maxVolumePercent}
       activePanel={activePanel}
       onActivePanelChange={onActivePanelChange}
+      onCompareToggle={onCompareToggle}
     />
   );
 }

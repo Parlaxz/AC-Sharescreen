@@ -585,7 +585,28 @@ bool NativePresenter::EnqueueSlot(uint32_t slotIndex) {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (!frameQueue_.TryPush(slotIndex)) {
-            return false;
+            // Queue full: coalesce to newest by dropping the oldest queued frame.
+            // This ensures the presenter always shows the latest frame rather than
+            // silently dropping the newest.
+            uint32_t droppedSlot;
+            if (frameQueue_.TryPop(droppedSlot)) {
+                // Release the dropped slot back to the pool
+                if (droppedSlot < kPresenterSlotCount) {
+                    slots_[droppedSlot].available.store(true, std::memory_order_release);
+                }
+                diag_.framesDropped++;
+                diag_.queueOverflowDrops++;
+
+                // Now push the new slot (should always succeed after freeing capacity)
+                if (!frameQueue_.TryPush(slotIndex)) {
+                    // Unexpected: should not happen after TryPop succeeded
+                    return false;
+                }
+            } else {
+                // Rare race: queue became empty between the two checks
+                // Fall back to dropping the incoming frame
+                return false;
+            }
         }
     }
 

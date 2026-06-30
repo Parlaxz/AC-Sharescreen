@@ -71,6 +71,7 @@ export interface EnhancedVideoSurfaceProps {
    * orchestration.  Cleared to null when the processor is destroyed.
    */
   processorApiRef?: React.MutableRefObject<ProcessorAPI | null>;
+  presentationMode?: "default" | "dom-only";
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -87,6 +88,7 @@ export function EnhancedVideoSurface({
   onStatsUpdate,
   onBackendChange,
   processorApiRef,
+  presentationMode = "default",
 }: EnhancedVideoSurfaceProps): ReactElement | null {
   const instanceId = useRef<number>(nextMonotonicId());
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -225,7 +227,9 @@ export function EnhancedVideoSurface({
       try {
         // Create the appropriate backend based on settings + capabilities.
         // No retry loop: a single failure immediately falls back.
-        const result = createImageProcessingBackend(settings);
+        const result = createImageProcessingBackend(settings, undefined, {
+          preferDomPresentation: presentationMode === "dom-only",
+        });
         const backend = result.backend;
         const effective = result.effective;
         const fallbackReason = result.fallbackReason;
@@ -391,7 +395,9 @@ export function EnhancedVideoSurface({
       const proc = processorRef.current;
       try {
         const { backend, effective, fallbackReason } =
-          createImageProcessingBackend(settings);
+          createImageProcessingBackend(settings, undefined, {
+            preferDomPresentation: presentationMode === "dom-only",
+          });
         onBackendChange?.(effective, fallbackReason);
         proc.setBackend(backend);
         proc.updateSettings(settings);
@@ -403,7 +409,7 @@ export function EnhancedVideoSurface({
         );
       }
     }
-  }, [settings]);
+  }, [settings, presentationMode, onBackendChange, onProcessingError]);
 
   // ─── Live settings update (non-backend changes) ───────────────────────
 

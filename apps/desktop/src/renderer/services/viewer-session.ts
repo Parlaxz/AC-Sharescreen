@@ -111,14 +111,6 @@ export interface ViewerSessionOptions {
   mediaSessionId: string;
   hostName: string;
   videoElement?: HTMLVideoElement | null;
-  /**
-   * Compare variant ID ("A" or "B") when this viewer is joining a specific
-   * variant of an Easy Compare session. When present, the join request,
-   * leave, and status messages carry the variant ID and exact media session
-   * ID so the host can issue the correct credentials and route leave/status
-   * to the right variant.
-   */
-  compareVariantId?: string;
 }
 
 export interface ViewerSessionEvents {
@@ -240,11 +232,6 @@ export class ViewerSession {
   private logicalStreamId = "";
   private mediaSessionId = "";
   private hostName = "";
-  /**
-   * Compare variant ID for Easy Compare A/B sessions.
-   * Set from options.compareVariantId; null for single-stream (legacy) flows.
-   */
-  private _compareVariantId: string | null = null;
   private leaveAnnounced = false;
 
   /**
@@ -564,7 +551,6 @@ export class ViewerSession {
     this.logicalStreamId = options.logicalStreamId;
     this.mediaSessionId = options.mediaSessionId;
     this.hostName = options.hostName;
-    this._compareVariantId = options.compareVariantId ?? null;
     this.leaveAnnounced = false;
     // Fresh session ID per Watch attempt — the host uses this to tell
     // leaves from prior attempts apart from the active one.
@@ -1032,15 +1018,17 @@ export class ViewerSession {
       //    leaves from prior attempts. In compare mode, also carries
       //    the variant ID and exact media session ID so the host issues
       //    the correct credentials.
+      //    IMPORTANT: never include undefined property values — the
+      //    envelope HMAC is computed over canonical JSON which matches
+      //    JSON.stringify by omitting undefined keys. An undefined value
+      //    serialized in the HMAC but stripped by transport breaks signing.
       await conn.sendToPeer(peerUuid, {
         type: "stream.join.request",
         logicalStreamId: this.logicalStreamId,
         viewerDeviceId: runtime.deviceId ?? "viewer",
         viewerDisplayName: runtime.displayName ?? "Viewer",
         requestId,
-        viewerSessionId: this._viewerSessionId ?? undefined,
-        compareVariantId: this._compareVariantId ?? undefined,
-        mediaSessionId: this._compareVariantId ? this.mediaSessionId : undefined,
+        ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
       });
 
       // GENERATION CHECK
@@ -1068,12 +1056,6 @@ export class ViewerSession {
       if (!joinToken) {
         this.setError("no join token in response");
         return;
-      }
-
-      // Preserve compare variant ID from response (if any) for correlation
-      // in leave/status messages.
-      if (response.compareVariantId) {
-        this._compareVariantId = response.compareVariantId;
       }
 
       this.setState("accepted");
@@ -1431,14 +1413,12 @@ export class ViewerSession {
       viewerDeviceId: runtime.deviceId ?? "viewer",
       streamId: this.logicalStreamId,
       state,
-      viewerDisplayName: runtime.displayName ?? undefined,
+      ...(runtime.displayName ? { viewerDisplayName: runtime.displayName } : {}),
       receivedBitrateKbps,
       receivedWidth,
       receivedHeight,
       displayedFps,
       sampledAt: Date.now(),
-      mediaSessionId: this._compareVariantId ? this.mediaSessionId : undefined,
-      compareVariantId: this._compareVariantId ?? undefined,
     }).catch(() => {});
   }
 
@@ -1494,9 +1474,7 @@ export class ViewerSession {
       type: "stream.leave",
       logicalStreamId: this.logicalStreamId,
       viewerDeviceId: runtime.deviceId ?? "viewer",
-      viewerSessionId: this._viewerSessionId ?? undefined,
-      mediaSessionId: this._compareVariantId ? this.mediaSessionId : undefined,
-      compareVariantId: this._compareVariantId ?? undefined,
+      ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
     }).catch(() => {});
   }
 

@@ -120,6 +120,8 @@ interface VideoControlsProps {
   discordDeafenBinding?: ShortcutBinding;
   /** Whether Discord deafen should also mute ScreenLink playback */
   syncScreenLinkDeafen?: boolean;
+  /** Called when the user clicks the Compare button */
+  onCompareToggle?: () => void;
 }
 
 // ─── VideoControls ────────────────────────────────────────────────────────
@@ -165,6 +167,7 @@ export function VideoControls({
   discordMuteBinding = { modifiers: ["alt"], key: "M" },
   discordDeafenBinding = { modifiers: ["alt"], key: "D" },
   syncScreenLinkDeafen = true,
+  onCompareToggle,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),
@@ -480,6 +483,26 @@ export function VideoControls({
 
             {/* Separator */}
             <span className="w-px h-5 bg-white/10 mx-0.5" />
+
+            {/* Compare (only when onCompareToggle is provided) */}
+            {onCompareToggle && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10 data-[state=active]:text-accent data-[state=active]:bg-accent/10"
+                    onClick={onCompareToggle}
+                    aria-label="Toggle A/B compare mode"
+                  >
+                    <span className="text-[11px] font-bold leading-none">A/B</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  Compare (C)
+                </TooltipContent>
+              </Tooltip>
+            )}
 
             {/* Settings cog */}
             <Tooltip>

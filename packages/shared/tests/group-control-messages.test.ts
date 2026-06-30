@@ -175,146 +175,11 @@ import {
   StreamBindAckPayloadSchema,
   ViewerStatusPayloadSchema,
   ViewerPausedPayloadSchema,
-  CompareVariantUpdatedPayloadSchema,
   parseGroupMessagePayload,
 } from "@screenlink/shared";
 
-describe("compare.variant.updated", () => {
-  it("is listed in GROUP_CONTROL_MESSAGE_TYPES", () => {
-    expect(GROUP_CONTROL_MESSAGE_TYPES).toContain("compare.variant.updated");
-  });
-
-  it("accepts a valid payload", () => {
-    const result = CompareVariantUpdatedPayloadSchema.safeParse({
-      logicalStreamId: "ls-1",
-      mediaSessionId: "ms-1",
-      variantId: "A",
-      revision: 1,
-      configSnapshot: {
-        resolutionWidth: 1920,
-        resolutionHeight: 1080,
-        fps: 30,
-        videoBitrateKbps: 5000,
-        sourceKind: "screen",
-        sourceName: "Display 1",
-      },
-      appliedAt: 1234567890,
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("accepts payload with optional status", () => {
-    const result = CompareVariantUpdatedPayloadSchema.safeParse({
-      logicalStreamId: "ls-1",
-      mediaSessionId: "ms-1",
-      variantId: "B",
-      revision: 2,
-      configSnapshot: {
-        resolutionWidth: 1280,
-        resolutionHeight: 720,
-        fps: 30,
-        videoBitrateKbps: 3000,
-        sourceKind: "window",
-        sourceName: "Browser",
-      },
-      appliedAt: 1234567891,
-      status: "active",
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects invalid variantId", () => {
-    const result = CompareVariantUpdatedPayloadSchema.safeParse({
-      logicalStreamId: "ls-1",
-      mediaSessionId: "ms-1",
-      variantId: "C",
-      revision: 1,
-      configSnapshot: {
-        resolutionWidth: 1920,
-        resolutionHeight: 1080,
-        fps: 30,
-        videoBitrateKbps: 5000,
-        sourceKind: "screen",
-        sourceName: "Display 1",
-      },
-      appliedAt: 1234567890,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects invalid config snapshot", () => {
-    const result = CompareVariantUpdatedPayloadSchema.safeParse({
-      logicalStreamId: "ls-1",
-      mediaSessionId: "ms-1",
-      variantId: "A",
-      revision: 1,
-      configSnapshot: {
-        resolutionWidth: -1,
-        resolutionHeight: 1080,
-        fps: 30,
-        videoBitrateKbps: 5000,
-      },
-      appliedAt: 1234567890,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects missing required fields", () => {
-    const result = CompareVariantUpdatedPayloadSchema.safeParse({});
-    expect(result.success).toBe(false);
-  });
-
-  it("payload contains no secrets", () => {
-    const shape = CompareVariantUpdatedPayloadSchema.shape;
-    expect(shape.password).toBeUndefined();
-    expect(shape.token).toBeUndefined();
-    expect(shape.bindingToken).toBeUndefined();
-    expect(shape.streamId).toBeUndefined();
-    // configSnapshot is the nested config; its schema separately forbids secrets
-  });
-
-  it("config snapshot in payload forbids secrets", () => {
-    const result = CompareVariantUpdatedPayloadSchema.safeParse({
-      logicalStreamId: "ls-1",
-      mediaSessionId: "ms-1",
-      variantId: "A",
-      revision: 1,
-      configSnapshot: {
-        resolutionWidth: 1920,
-        resolutionHeight: 1080,
-        fps: 30,
-        videoBitrateKbps: 5000,
-        sourceKind: "screen",
-        sourceName: "Display 1",
-        password: "secret",
-      },
-      appliedAt: 1234567890,
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("parses via parseGroupMessagePayload", () => {
-    const result = parseGroupMessagePayload("compare.variant.updated", {
-      logicalStreamId: "ls-1",
-      mediaSessionId: "ms-1",
-      variantId: "A",
-      revision: 1,
-      configSnapshot: {
-        resolutionWidth: 1920,
-        resolutionHeight: 1080,
-        fps: 30,
-        videoBitrateKbps: 5000,
-        sourceKind: "screen",
-        sourceName: "Display 1",
-      },
-      appliedAt: 1234567890,
-    });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.data.variantId).toBe("A");
-    }
-  });
-});
+// compare.variant.updated tests removed — all compare is now viewer-only,
+// no protocol messages needed.
 
 describe("Backward compatibility — old payloads still parse", () => {
   it("stream.started without compare metadata", () => {
@@ -535,32 +400,6 @@ describe("Compare correlation fields", () => {
     expect(result.success).toBe(true);
   });
 
-  it("viewer.paused accepts optional mediaSessionId and compareVariantId", () => {
-    const payload = {
-      logicalStreamId: "ls-1",
-      viewerDeviceId: "dev-2",
-      paused: true,
-      mediaSessionId: "ms-1",
-      compareVariantId: "A",
-    };
-    const result = ViewerPausedPayloadSchema.safeParse(payload);
-    expect(result.success).toBe(true);
-  });
-
-  it("viewer.status accepts optional mediaSessionId and compareVariantId", () => {
-    const payload = {
-      viewerDeviceId: "dev-2",
-      streamId: "s-1",
-      state: "playing" as const,
-      receivedBitrateKbps: 5000,
-      receivedWidth: 1920,
-      receivedHeight: 1080,
-      displayedFps: 30,
-      sampledAt: 1000,
-      mediaSessionId: "ms-1",
-      compareVariantId: "B",
-    };
-    const result = ViewerStatusPayloadSchema.safeParse(payload);
-    expect(result.success).toBe(true);
-  });
+  // viewer.paused and viewer.status compare correlation tests removed —
+  // all compare is now viewer-only, no protocol compare fields needed.
 });

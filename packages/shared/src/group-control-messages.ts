@@ -1,12 +1,6 @@
 import { z } from "zod";
 import type { HybridTimestamp } from "./hybrid-logical-clock.js";
 import { HybridTimestampSchema } from "./hybrid-logical-clock.js";
-import {
-  CompareVariantIdSchema,
-  CompareModeSchema,
-  CompareConfigSnapshotSchema,
-  VariantDescriptorSchema,
-} from "./compare-config.js";
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -43,7 +37,6 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "quality.effective",
   "quality.configured",
   "quality.observed",
-  "compare.variant.updated",
   "ping",
   "pong",
 ] as const;
@@ -396,20 +389,6 @@ export const StreamStartedPayloadSchema = z.object({
   /** Wall-time the host asserts the lease is still valid through. */
   leaseValidUntil: z.number().optional(),
   isAudioDegraded: z.boolean().optional(),
-  /** Compare mode when this stream is part of an Easy Compare session. */
-  compareMode: CompareModeSchema.optional(),
-  /** Compare protocol version number. */
-  compareVersion: z.number().int().positive().optional(),
-  /** Which variant is the primary (backward-compatible) stream. */
-  primaryVariant: CompareVariantIdSchema.optional(),
-  /** Descriptor for variant A (may be the same as the primary stream). */
-  variantADescriptor: VariantDescriptorSchema.optional(),
-  /** Descriptor for variant B (the secondary compare stream). */
-  variantBDescriptor: VariantDescriptorSchema.optional(),
-  /** Transport-safe config snapshot applied to the compare session. */
-  appliedConfigSnapshot: CompareConfigSnapshotSchema.optional(),
-  /** Revision number of the applied compare configuration. */
-  appliedCompareRevision: z.number().int().nonnegative().optional(),
 });
 
 export const StreamHeartbeatPayloadSchema = z.object({
@@ -504,13 +483,7 @@ export const StreamJoinRequestPayloadSchema = z.object({
    */
   viewerSessionId: z.string().optional(),
   /**
-   * Compare variant ID the viewer wants to join ("A" or "B").
-   * When present the host routes the viewer to the correct media session.
-   */
-  compareVariantId: CompareVariantIdSchema.optional(),
-  /**
    * Exact media session ID the viewer intends to join.
-   * Used together with compareVariantId for disambiguation in compare mode.
    */
   mediaSessionId: z.string().optional(),
 });
@@ -534,11 +507,6 @@ export const StreamJoinResponsePayloadSchema = z.object({
    * the response with its own state. Optional for backward compatibility.
    */
   viewerSessionId: z.string().optional(),
-  /**
-   * Compare variant ID this join response is for ("A" or "B").
-   * Present when the viewer requested a specific compare variant.
-   */
-  compareVariantId: CompareVariantIdSchema.optional(),
 });
 
 export const StreamBindAckPayloadSchema = z.object({
@@ -552,8 +520,6 @@ export const StreamBindAckPayloadSchema = z.object({
   boundMediaPeer: z.string().optional(),
   /** Echo of viewer's per-attempt session ID for ack correlation. */
   viewerSessionId: z.string().optional(),
-  /** Compare variant ID this bind ack is for ("A" or "B"). */
-  compareVariantId: CompareVariantIdSchema.optional(),
 });
 
 export const StreamLeavePayloadSchema = z.object({
@@ -568,14 +534,8 @@ export const StreamLeavePayloadSchema = z.object({
   viewerSessionId: z.string().optional(),
   /**
    * Exact media session ID the viewer is leaving.
-   * Present in compare mode to disambiguate which session the leave targets.
    */
   mediaSessionId: z.string().optional(),
-  /**
-   * Compare variant ID the viewer is leaving ("A" or "B").
-   * Present when the viewer joined a specific compare variant.
-   */
-  compareVariantId: CompareVariantIdSchema.optional(),
 });
 
 // ─── Viewer paused payload schema ───────────────────────────────────────────
@@ -587,10 +547,6 @@ export const ViewerPausedPayloadSchema = z.object({
   viewerSessionId: z.string().optional(),
   /** True when paused, false when resumed. */
   paused: z.boolean(),
-  /** Exact media session ID for correlation in compare mode. */
-  mediaSessionId: z.string().optional(),
-  /** Compare variant ID ("A" or "B") this pause event relates to. */
-  compareVariantId: CompareVariantIdSchema.optional(),
 }).strict();
 
 // ─── Viewer status payload schema ────────────────────────────────────────────
@@ -605,30 +561,7 @@ export const ViewerStatusPayloadSchema = z.object({
   receivedHeight: z.number().nullable(),
   displayedFps: z.number().nullable(),
   sampledAt: z.number(),
-  /** Exact media session ID for correlation in compare mode. */
-  mediaSessionId: z.string().optional(),
-  /** Compare variant ID ("A" or "B") this status update relates to. */
-  compareVariantId: CompareVariantIdSchema.optional(),
 });
-
-// ─── Compare variant updated payload schema ─────────────────────────────────
-
-export const CompareVariantUpdatedPayloadSchema = z.object({
-  /** Logical stream ID this variant belongs to. */
-  logicalStreamId: z.string(),
-  /** The media session ID for this variant's stream. */
-  mediaSessionId: z.string(),
-  /** Variant ID ("A" or "B") that was updated. */
-  variantId: CompareVariantIdSchema,
-  /** Monotonically increasing revision number of the variant config. */
-  revision: z.number().int().nonnegative(),
-  /** Transport-safe configuration snapshot applied to this variant. */
-  configSnapshot: CompareConfigSnapshotSchema,
-  /** Wall-clock timestamp when the config was applied. */
-  appliedAt: z.number().int().positive(),
-  /** Optional status indicator (e.g. "active", "inactive", "degraded"). */
-  status: z.string().optional(),
-}).strict();
 
 // ─── Media bind payload schema ─────────────────────────────────────────────
 
@@ -728,7 +661,6 @@ export type GroupControlPayloadMap = {
   "media.bind": z.infer<typeof MediaBindPayloadSchema>;
   "viewer.paused": z.infer<typeof ViewerPausedPayloadSchema>;
   "viewer.status": z.infer<typeof ViewerStatusPayloadSchema>;
-  "compare.variant.updated": z.infer<typeof CompareVariantUpdatedPayloadSchema>;
   "quality.viewer.request": z.infer<typeof QualityViewerRequestPayloadSchema>;
   "quality.viewer.clear": z.infer<typeof QualityViewerClearPayloadSchema>;
   "quality.effective": z.infer<typeof QualityEffectivePayloadSchema>;
@@ -764,7 +696,6 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "media.bind": MediaBindPayloadSchema,
   "viewer.paused": ViewerPausedPayloadSchema,
   "viewer.status": ViewerStatusPayloadSchema,
-  "compare.variant.updated": CompareVariantUpdatedPayloadSchema,
   "quality.viewer.request": QualityViewerRequestPayloadSchema,
   "quality.viewer.clear": QualityViewerClearPayloadSchema,
   "quality.effective": QualityEffectivePayloadSchema,
@@ -873,10 +804,15 @@ function canonicalJsonStringify(value: unknown): string {
   }
   if (typeof value === "object") {
     const keys = Object.keys(value as Record<string, unknown>).sort();
-    const pairs = keys.map(
-      (k) =>
-        `${JSON.stringify(k)}:${canonicalJsonStringify((value as Record<string, unknown>)[k])}`,
-    );
+    // Skip undefined properties to match JSON.stringify behavior —
+    // otherwise the canonical string includes keys JSON.stringify
+    // omits, breaking HMAC verification after transport serialization.
+    const pairs = keys
+      .filter((k) => (value as Record<string, unknown>)[k] !== undefined)
+      .map(
+        (k) =>
+          `${JSON.stringify(k)}:${canonicalJsonStringify((value as Record<string, unknown>)[k])}`,
+      );
     return `{${pairs.join(",")}}`;
   }
   return JSON.stringify(value);

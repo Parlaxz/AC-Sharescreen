@@ -21,71 +21,35 @@ export function isValidCompareVariantId(
   return id === COMPARE_VARIANT_A || id === COMPARE_VARIANT_B;
 }
 
-// ─── Compare Modes ─────────────────────────────────────────────────────────
+// ─── Viewer-Only Compare Wipe Mode ─────────────────────────────────────────
 
-export const COMPARE_MODES = ["side-by-side", "single"] as const;
+export const COMPARE_WIPE_MODES = ["vertical-wipe", "side-a", "side-b"] as const;
 
-export type CompareMode = (typeof COMPARE_MODES)[number];
+export type CompareWipeMode = (typeof COMPARE_WIPE_MODES)[number];
 
-export const CompareModeSchema = z.enum(COMPARE_MODES);
+export const CompareWipeModeSchema = z.enum(COMPARE_WIPE_MODES);
 
-// ─── Protocol Version ──────────────────────────────────────────────────────
-
-export const COMPARE_PROTOCOL_VERSION = 1;
-
-// ─── Transport-safe config snapshot ───────────────────────────────────────
-// This is a strict subset of GroupQualitySettings containing only the fields
-// safe for transport over the group-control channel. No secrets (passwords,
-// tokens, media credentials) are included.
-
-export interface CompareConfigSnapshot {
-  resolutionWidth: number;
-  resolutionHeight: number;
-  fps: number;
-  videoBitrateKbps: number;
-  sourceKind: string;
-  sourceName: string;
-}
-
-export const CompareConfigSnapshotSchema: z.ZodType<CompareConfigSnapshot> =
-  z.object({
-    resolutionWidth: z.number().int().positive(),
-    resolutionHeight: z.number().int().positive(),
-    fps: z.number().int().positive(),
-    videoBitrateKbps: z.number().int().nonnegative(),
-    sourceKind: z.string().min(1),
-    sourceName: z.string().min(1),
-  }).strict();
-
-export type CompareConfigSnapshotParsed = z.infer<
-  typeof CompareConfigSnapshotSchema
->;
+// ─── Viewer Compare State ──────────────────────────────────────────────────
 
 /**
- * Create a default CompareConfigSnapshot with sensible defaults.
- * Returns a fresh object each call (safe to mutate).
+ * Local viewer-only compare state.
+ * The viewer maintains two sets of enhancement settings (A and B) and
+ * toggles between them or shows a vertical wipe across the same video stream.
+ * No host involvement, no protocol messages, one ViewerSession.
  */
-export function createDefaultCompareConfigSnapshot(): CompareConfigSnapshot {
-  return {
-    resolutionWidth: 854,
-    resolutionHeight: 480,
-    fps: 15,
-    videoBitrateKbps: 650,
-    sourceKind: "screen",
-    sourceName: "Screen",
-  };
+export interface ViewerCompareState {
+  /** Whether compare mode is currently active */
+  active: boolean;
+  /** Which wipe/presentation mode is active */
+  wipeMode: CompareWipeMode;
+  /** Position of the vertical divider (0–1, where 0.5 = center) */
+  dividerPosition: number;
 }
 
-// ─── Variant Descriptor ────────────────────────────────────────────────────
-// Used in stream.started compare metadata to describe each variant's session
-// and configuration.
+// ─── Persistence keys ──────────────────────────────────────────────────────
 
-export interface VariantDescriptor {
-  mediaSessionId?: string;
-  configSnapshot?: CompareConfigSnapshot;
-}
+/** localStorage key for compare settings B (initialized from A on first use) */
+export const COMPARE_SETTINGS_B_KEY = "screenlink:viewer-image-enhancement-b";
 
-export const VariantDescriptorSchema: z.ZodType<VariantDescriptor> = z.object({
-  mediaSessionId: z.string().optional(),
-  configSnapshot: CompareConfigSnapshotSchema.optional(),
-}).strict();
+/** localStorage key for compare UI state */
+export const COMPARE_UI_STATE_KEY = "screenlink:compare-ui-state";
