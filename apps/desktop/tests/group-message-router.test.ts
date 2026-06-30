@@ -563,4 +563,51 @@ describe("Stage 6: Quality message routing through GroupMessageRouter", () => {
     const afterClear = qualityCoordinator.getViewerRequest(GROUP_ID, "session-1", "sender-dev");
     expect(afterClear).toBeNull();
   });
+
+  it("sends an explicit response when quality.viewer.request has no viewer mapping", async () => {
+    const sendToPeer = vi.fn().mockResolvedValue(undefined);
+    const viewerBinding = {
+      getViewerMapping: vi.fn().mockReturnValue(null),
+      reconcileViewerQuality: vi.fn(),
+    };
+    const runtime = {
+      getViewerMediaBinding: () => viewerBinding,
+      getSyncService: () => ({ getSyncState: vi.fn().mockReturnValue(null) }),
+      getStreamSessionManager: () => ({ getActualCaptureDimensions: vi.fn().mockReturnValue({ width: 1920, height: 1080 }) }),
+      getHostQualityLimits: () => ({ maxVideoBitrateKbps: 20000, maxWidth: 3840, maxHeight: 2160, maxFps: 60, allowViewerQualityRequests: true }),
+      getConnectionManager: () => ({
+        getConnection: vi.fn().mockReturnValue({
+          peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+          sendToPeer,
+        }),
+      }),
+    };
+
+    router.setQualityCoordinator(qualityCoordinator);
+    router.setRuntime(runtime as any);
+
+    const envelope = makeEnvelope("quality.viewer.request", {
+      streamSessionId: "session-1",
+      requestId: "req-missing",
+      revision: 1,
+      videoBitrateKbps: 2000,
+      maxWidth: 1280,
+      maxHeight: 720,
+      maxFps: 30,
+      degradationPreference: "balanced",
+      requestedAt: Date.now(),
+    }, ts(100, 0, "sender-dev"));
+
+    router.routeMessage(GROUP_ID, envelope);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sendToPeer).toHaveBeenCalledWith(
+      "peer-uuid",
+      expect.objectContaining({
+        type: "quality.effective",
+        streamSessionId: "session-1",
+        clampReasons: expect.arrayContaining([expect.stringContaining("mapping")]),
+      }),
+    );
+  });
 });

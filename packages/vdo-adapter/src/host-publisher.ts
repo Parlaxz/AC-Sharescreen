@@ -30,6 +30,8 @@ export class HostPublisher {
   private pendingHandlers = new Map<SDKEvent, Set<(...args: unknown[]) => void>>();
   /** Stage 8: Tracked requested codec for applying preferences on new connections */
   private _requestedCodec: string = "auto";
+  /** Set when the SDK fires the `connected` event (WebSocket opened). Used for error classification. */
+  private _webSocketConnected = false;
   /**
    * Bound handler for SDK "error" events that filters out expected
    * RTCErrorEvent "Close called" errors during teardown.
@@ -106,9 +108,67 @@ export class HostPublisher {
     };
     this.sdk.on("error", this._boundErrorHandler);
 
-    await withTimeout(this.sdk.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
+    // Track WebSocket connection status so connectWithTimeout() can classify
+    // whether the signaling handshake ever started.
+    this._webSocketConnected = false;
+    this.sdk.on("connected", () => {
+      this._webSocketConnected = true;
+    });
+
+    await this.connectWithTimeout(35_000);
 
     console.log('[HostPublisher] SDK connected, sdk still set:', this.sdk !== null);
+  }
+
+  /**
+   * Connect to the VDO signaling server with a bounded timeout, early
+   * failure on reconnectFailed, and explicit disconnect teardown.
+   */
+  private async connectWithTimeout(maxMs: number): Promise<void> {
+    const sdk = this.sdk!;
+
+    let rejectEarly: ((reason: Error) => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const onReconnectFailed = (...args: unknown[]): void => {
+      const err = args.length > 0 ? args[0] : undefined;
+      const msg = err instanceof Error ? err.message : String(err ?? "Reconnect failed");
+      rejectEarly?.(new CompatibilityError(msg));
+      rejectEarly = null;
+    };
+    sdk.on("reconnectFailed", onReconnectFailed);
+
+    try {
+      const connectPromise: Promise<void> = sdk.connect();
+
+      const earlyExit = new Promise<never>((_, reject) => {
+        rejectEarly = reject;
+
+        timer = setTimeout(() => {
+          rejectEarly = null;
+          let message: string;
+          if (this._webSocketConnected) {
+            message = "SDK connect timed out — the WebSocket to the signaling server opened but the SDK did not complete initialization within the time limit. This suggests a slow network or an SDK lifecycle issue.";
+          } else {
+            message = "Connection failed — the WebSocket to the signaling server (wss://wss.vdo.ninja) never opened. The server may be blocked or unreachable.";
+          }
+          reject(new CompatibilityError(message));
+        }, maxMs);
+      });
+
+      await Promise.race([connectPromise, earlyExit]);
+    } catch (err) {
+      try {
+        await sdk.disconnect();
+      } catch {
+        // Best-effort cleanup
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      sdk.off("reconnectFailed", onReconnectFailed);
+      rejectEarly = null;
+    }
   }
 
   /**

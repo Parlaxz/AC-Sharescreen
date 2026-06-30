@@ -64,6 +64,20 @@ export interface ConsumeBindingInput {
   mediaPeerUuid: string;
 }
 
+export interface SenderSettingsReadback {
+  maxBitrate: number;
+  maxFramerate: number;
+  scaleResolutionDownBy: number;
+  degradationPreference: string;
+  priority: string;
+}
+
+export type ReconcileResult =
+  | { status: "applied"; configured: SenderSettingsReadback }
+  | { status: "mapping-missing" }
+  | { status: "sender-not-ready" }
+  | { status: "apply-failed"; error: string };
+
 /**
  * Composite-key separator for viewer mappings.
  * Used to construct keys of the form `${viewerDeviceId}::${mediaSessionId}`.
@@ -699,30 +713,34 @@ export class ViewerMediaBinding {
   async reconcileViewerQuality(
     viewerDeviceId: string,
     mediaSessionId: string,
-  ): Promise<boolean> {
-    if (this.destroyed) return false;
+  ): Promise<ReconcileResult> {
+    if (this.destroyed) return { status: "mapping-missing" };
 
     const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
     const mapping = this.viewerMap.get(key);
-    if (!mapping) return false;
+    if (!mapping) return { status: "mapping-missing" };
 
     // Re-resolve senders from the live SDK connection
     const senderFound = this.resolveSendersForMapping(mapping);
-    if (!senderFound) return false;
+    if (!senderFound || !mapping.videoSender) return { status: "sender-not-ready" };
 
     // Start stats polling if not already running
     this.startStatsForMapping(mapping);
 
     // Check for a stored viewer quality request and apply it
     const qualityCoordinator = this.runtime.getQualityCoordinator();
-    if (!qualityCoordinator) return true; // sender resolved, but no quality to apply
+    if (!qualityCoordinator) {
+      return { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) };
+    }
 
     const request = qualityCoordinator.getViewerRequest(
       mapping.groupId,
       mapping.logicalStreamId,
       mapping.viewerDeviceId,
     );
-    if (!request || !mapping.videoSender) return true; // no stored request
+    if (!request) {
+      return { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) };
+    }
 
     // Apply the stored request — compute effective quality from group
     // settings, host limits, and source dimensions
@@ -732,7 +750,7 @@ export class ViewerMediaBinding {
       const groupSettings = quality ?? createDefaultGroupQualitySettings();
 
       const ssm = this.runtime.getStreamSessionManager();
-      const actualDims = ssm.getActualCaptureDimensions();
+      const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
       const sourceDimensions = {
         width: actualDims.width || groupSettings.video.sendWidth || 1920,
         height: actualDims.height || groupSettings.video.sendHeight || 1080,
@@ -759,39 +777,40 @@ export class ViewerMediaBinding {
         mapping.mediaPeerUuid,
         mapping.videoSender,
         effective.effective,
-      ).catch(() => null);
+      ) as SenderSettingsReadback;
 
       // Send quality feedback back to the viewer
-      if (configured) {
-        const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
-        const peerUuid = conn?.peerForDevice(mapping.viewerDeviceId);
-        if (conn && peerUuid) {
-          await conn.sendToPeer(peerUuid, {
-            type: "quality.effective",
-            streamSessionId: mapping.logicalStreamId,
-            videoBitrateKbps: effective.effective.videoBitrateKbps,
-            maxWidth: effective.effective.maxWidth,
-            maxHeight: effective.effective.maxHeight,
-            maxFps: effective.effective.maxFps,
-            degradationPreference: effective.effective.degradationPreference,
-            clampReasons: effective.clampReasons,
-          }).catch(() => {});
+      const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+      const peerUuid = conn?.peerForDevice(mapping.viewerDeviceId);
+      if (conn && peerUuid) {
+        await conn.sendToPeer(peerUuid, {
+          type: "quality.effective",
+          streamSessionId: mapping.logicalStreamId,
+          videoBitrateKbps: effective.effective.videoBitrateKbps,
+          maxWidth: effective.effective.maxWidth,
+          maxHeight: effective.effective.maxHeight,
+          maxFps: effective.effective.maxFps,
+          degradationPreference: effective.effective.degradationPreference,
+          clampReasons: effective.clampReasons,
+        }).catch(() => {});
 
-          await conn.sendToPeer(peerUuid, {
-            type: "quality.configured",
-            streamSessionId: mapping.logicalStreamId,
-            videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
-            maxFramerate: configured.maxFramerate ?? undefined,
-            scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
-            degradationPreference: configured.degradationPreference ?? undefined,
-          }).catch(() => {});
+        await conn.sendToPeer(peerUuid, {
+          type: "quality.configured",
+          streamSessionId: mapping.logicalStreamId,
+          videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+          maxFramerate: configured.maxFramerate ?? undefined,
+          scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
+          degradationPreference: configured.degradationPreference ?? undefined,
+        }).catch(() => {});
         }
-      }
-    } catch {
-      // quality application is best-effort during reconciliation
-    }
 
-    return true;
+      return { status: "applied", configured };
+    } catch (error) {
+      return {
+        status: "apply-failed",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   /**
@@ -806,11 +825,29 @@ export class ViewerMediaBinding {
     let reconciled = false;
     for (const [, mapping] of this.viewerMap) {
       if (mapping.mediaPeerUuid === mediaPeerUuid) {
-        const ok = await this.reconcileViewerQuality(mapping.viewerDeviceId, mapping.mediaSessionId);
-        if (ok) reconciled = true;
+        const result = await this.reconcileViewerQuality(mapping.viewerDeviceId, mapping.mediaSessionId);
+        if (result.status === "applied") reconciled = true;
       }
     }
     return reconciled;
+  }
+
+  private readConfiguredSenderState(sender: RTCRtpSender): SenderSettingsReadback {
+    const params = (typeof sender.getParameters === "function"
+      ? sender.getParameters() ?? {}
+      : {}) as Partial<RTCRtpSendParameters> & { degradationPreference?: string };
+    const encoding = params.encodings?.[0];
+    const degradationPreference = (encoding as unknown as { degradationPreference?: string } | undefined)?.degradationPreference
+      ?? (params as unknown as { degradationPreference?: string }).degradationPreference
+      ?? "balanced";
+
+    return {
+      maxBitrate: encoding?.maxBitrate ?? 0,
+      maxFramerate: encoding?.maxFramerate ?? 0,
+      scaleResolutionDownBy: encoding?.scaleResolutionDownBy ?? 1,
+      degradationPreference,
+      priority: encoding?.priority ?? "medium",
+    };
   }
 
   // ─── Legacy single-key methods (backward compat) ──────────────────

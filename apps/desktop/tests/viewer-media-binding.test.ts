@@ -1427,4 +1427,98 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     expect(result!.mediaSessionId).toBe("remote-ms-1");
     expect(result!.token).toBeTruthy();
   });
+
+  it("reconcileViewerQuality reports apply-failed when sender.setParameters throws", async () => {
+    const sendToPeer = vi.fn().mockResolvedValue(undefined);
+    const failingSender = {
+      track: {
+        kind: "video",
+        getSettings: () => ({ width: 1920, height: 1080 }),
+      },
+      getParameters: vi.fn(() => ({
+        encodings: [{ active: true, priority: "medium" }],
+        codecs: [],
+        headerExtensions: [],
+        rtcp: {},
+        transactionId: "tx-1",
+      })),
+      setParameters: vi.fn().mockRejectedValue(new Error("setParameters failed")),
+    } as unknown as RTCRtpSender;
+    const mockPc = {
+      getSenders: vi.fn().mockReturnValue([failingSender]),
+    } as unknown as RTCPeerConnection;
+    const mockSDK = {
+      connections: new Map([
+        ["peer-uuid-1", { publisher: { pc: mockPc }, viewer: null }],
+      ]),
+    };
+    const mockPublisher = { getSDK: vi.fn().mockReturnValue(mockSDK) };
+    const mockPubManager = { getPublisher: vi.fn().mockReturnValue(mockPublisher) };
+    const qualityCoordinator = {
+      getViewerRequest: vi.fn().mockReturnValue({
+        streamSessionId: "stream-1",
+        requestId: "req-1",
+        revision: 1,
+        videoBitrateKbps: 1200,
+        maxWidth: 1280,
+        maxHeight: 720,
+        maxFps: 24,
+        degradationPreference: "balanced",
+      }),
+      calculateEffectiveQuality: vi.fn().mockReturnValue({
+        effective: {
+          videoBitrateKbps: 1200,
+          maxWidth: 1280,
+          maxHeight: 720,
+          maxFps: 24,
+          degradationPreference: "balanced",
+        },
+        clampReasons: [],
+      }),
+      applyToExactViewer: vi.fn().mockRejectedValue(new Error("setParameters failed")),
+    };
+
+    const runtimeAny = runtime as any;
+    runtimeAny.getQualityCoordinator = () => qualityCoordinator;
+    runtimeAny.getConnectionManager = () => ({
+      getConnection: vi.fn().mockReturnValue({
+        peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+        sendToPeer,
+      }),
+    });
+    runtimeAny.getSyncService = () => ({ getSyncState: vi.fn().mockReturnValue(null) });
+    runtimeAny.getHostQualityLimits = () => ({
+      maxVideoBitrateKbps: 20000,
+      maxWidth: 3840,
+      maxHeight: 2160,
+      maxFps: 60,
+      allowViewerQualityRequests: true,
+    });
+    runtimeAny.resolveLocalPublication = vi.fn().mockReturnValue({
+      mediaSessionId: "ms-1",
+      logicalStreamId: "stream-1",
+      publisherManager: mockPubManager,
+      vdoConfig: { streamId: "vdo-stream-abc", password: "vdo-password-xyz" },
+    });
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "viewer-session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: mockPc,
+      videoSender: null,
+      audioSender: null,
+    });
+
+    await expect(binding.reconcileViewerQuality("viewer-1", "ms-1")).resolves.toEqual(
+      expect.objectContaining({
+        status: "apply-failed",
+        error: expect.stringContaining("setParameters failed"),
+      }),
+    );
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
 });

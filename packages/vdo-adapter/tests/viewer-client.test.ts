@@ -114,6 +114,25 @@ describe("ViewerClient — dataChannelOpen per-UUID waiters", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("requires a fresh open after dataChannelClose for the same UUID", async () => {
+    vi.useFakeTimers();
+    try {
+      await client.createAndConnect("pw");
+
+      mockSDK._fire("dataChannelOpen", { detail: { uuid: "uuid-pre" } });
+      mockSDK._fire("dataChannelClose", { detail: { uuid: "uuid-pre" } });
+
+      const waitPromise = client.waitForDataChannelOpen("uuid-pre", 500);
+      vi.advanceTimersByTime(600);
+
+      await expect(waitPromise).rejects.toThrow(
+        "Data channel open timed out for peer uuid-pre",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects on timeout when data channel never opens", async () => {
     vi.useFakeTimers();
     try {
@@ -267,6 +286,23 @@ describe("ViewerClient — pause / resume", () => {
     // After shutdown, no further operations should work
     await expect(client.resumeMedia()).rejects.toThrow("shutting down");
   });
+
+  it("pauseMedia clears stale open-state so resume waits for a fresh channel", async () => {
+    vi.useFakeTimers();
+    try {
+      mockSDK._fire("dataChannelOpen", { detail: { uuid: "publisher-1" } });
+      await client.pauseMedia();
+
+      const waitPromise = client.waitForDataChannelOpen("publisher-1", 500);
+      vi.advanceTimersByTime(600);
+
+      await expect(waitPromise).rejects.toThrow(
+        "Data channel open timed out for peer publisher-1",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ─── Shutdown reconnect prevention ───────────────────────────────────────
@@ -355,5 +391,25 @@ describe("ViewerClient — shutdown reconnect prevention", () => {
   it("view() after shutdown throws", async () => {
     await client.shutdown();
     await expect(client.view("stream-2")).rejects.toThrow("shutting down");
+  });
+
+  it("sendMediaBind disables WebSocket fallback", async () => {
+    mockSDK._fire("dataChannelOpen", { detail: { uuid: "publisher-1" } });
+
+    await client.sendMediaBind("publisher-1", "bind-token", "media-session-1", "viewer-session-1");
+
+    expect(mockSDK.sendData).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "media.bind",
+        token: "bind-token",
+        mediaSessionId: "media-session-1",
+        viewerSessionId: "viewer-session-1",
+      }),
+      expect.objectContaining({
+        uuid: "publisher-1",
+        preference: "any",
+        allowFallback: false,
+      }),
+    );
   });
 });

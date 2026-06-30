@@ -17,6 +17,7 @@ export async function sendControlMessage(
   sdk: VDONinjaSDK,
   payload: unknown,
   targetUuid: string,
+  allowFallback = true,
 ): Promise<void> {
   const serialized = JSON.stringify(payload);
   if (serialized.length > MAX_CONTROL_PAYLOAD_SIZE) {
@@ -26,6 +27,6 @@ export async function sendControlMessage(
   await sdk.sendData(payload, {
     uuid: targetUuid,
     preference: "any",
-    allowFallback: true,
+    allowFallback,
   });
 }

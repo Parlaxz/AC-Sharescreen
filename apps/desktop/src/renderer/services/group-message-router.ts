@@ -3,6 +3,7 @@ import { parseGroupMessagePayload, createDefaultGroupQualitySettings } from "@sc
 import type { GroupSyncService } from "./group-sync-service.js";
 import type { ActiveStreamRegistry } from "./active-stream-registry.js";
 import type { ViewerMediaBinding } from "./viewer-media-binding.js";
+import type { ReconcileResult, ViewerMapping } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
 import type { QualityCoordinator, EffectiveQuality } from "./quality-coordinator.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
@@ -476,63 +477,17 @@ export class GroupMessageRouter {
       //    applied when peerConnected fires via reconciliation.
       if (this.runtime) {
         const viewerBinding = this.runtime.getViewerMediaBinding();
-        const mapping = viewerBinding.getViewerMapping(envelope.senderDeviceId);
-        if (mapping && this.qualityCoordinator) {
-          // Try reconciliation which re-resolves from live SDK and applies
-          const reconciled = await viewerBinding.reconcileViewerQuality(
-            envelope.senderDeviceId,
-            mapping.mediaSessionId,
-          );
-          // If reconciliation failed (no sender yet), the request is stored
-          // and will be applied when peerConnected fires.
-          if (!reconciled && this.qualityCoordinator) {
-            // Send at least the effective values so the viewer knows
-            // the request was received, even if we can't apply yet.
-            const request = this.qualityCoordinator.getViewerRequest(
-              groupId,
-              logicalStreamId,
-              envelope.senderDeviceId,
-            );
-            if (request) {
-              const syncState = this.runtime.getSyncService().getSyncState(groupId);
-              const quality = syncState?.state?.defaultQuality?.value;
-              const groupSettings = quality ?? createDefaultGroupQualitySettings();
-              const ssm = this.runtime.getStreamSessionManager();
-              const actualDims = ssm.getActualCaptureDimensions();
-              const sourceDimensions = {
-                width: actualDims.width || groupSettings.video.sendWidth || 1920,
-                height: actualDims.height || groupSettings.video.sendHeight || 1080,
-              };
-              const runtimeLimits = this.runtime.getHostQualityLimits();
-              const hostLimits: HostQualityLimits = {
-                maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
-                maxWidth: runtimeLimits.maxWidth,
-                maxHeight: runtimeLimits.maxHeight,
-                maxFps: runtimeLimits.maxFps,
-                allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
-              };
-              const effective = this.qualityCoordinator.calculateEffectiveQuality(
-                groupSettings, hostLimits, request, sourceDimensions,
-              );
-              // Send effective values even without configured (sender not ready)
-              // This prevents the viewer from waiting indefinitely.
-              const conn = this.runtime.getConnectionManager().getConnection(groupId);
-              const peerUuid = conn?.peerForDevice(envelope.senderDeviceId);
-              if (conn && peerUuid) {
-                await conn.sendToPeer(peerUuid, {
-                  type: "quality.effective",
-                  streamSessionId: logicalStreamId,
-                  videoBitrateKbps: effective.effective.videoBitrateKbps,
-                  maxWidth: effective.effective.maxWidth,
-                  maxHeight: effective.effective.maxHeight,
-                  maxFps: effective.effective.maxFps,
-                  degradationPreference: effective.effective.degradationPreference,
-                  clampReasons: [...effective.clampReasons, "sender not ready, will apply on connect"],
-                }).catch(() => {});
-              }
-            }
-          }
+        const mapping = this.findViewerMappingForLogicalStream(viewerBinding, envelope.senderDeviceId, logicalStreamId);
+        if (!mapping) {
+          await this.sendQualityPendingResponse(groupId, envelope.senderDeviceId, logicalStreamId, "mapping missing");
+          return;
         }
+
+        const result = await viewerBinding.reconcileViewerQuality(
+          envelope.senderDeviceId,
+          mapping.mediaSessionId,
+        );
+        await this.respondToReconcileResult(groupId, envelope.senderDeviceId, logicalStreamId, result);
       }
       return;
     }
@@ -553,14 +508,18 @@ export class GroupMessageRouter {
       // re-resolves from the live SDK connection.
       if (this.runtime) {
         const viewerBinding = this.runtime.getViewerMediaBinding();
-        const mapping = viewerBinding.getViewerMapping(envelope.senderDeviceId);
-        if (mapping && this.qualityCoordinator) {
-          // Use reconciliation to re-resolve sender from live SDK
-          const reconciled = await viewerBinding.reconcileViewerQuality(
+        const mapping = this.findViewerMappingForLogicalStream(viewerBinding, envelope.senderDeviceId, logicalStreamId);
+        if (!mapping) {
+          await this.sendQualityPendingResponse(groupId, envelope.senderDeviceId, logicalStreamId, "mapping missing");
+          return;
+        }
+
+        if (this.qualityCoordinator) {
+          const result = await viewerBinding.reconcileViewerQuality(
             envelope.senderDeviceId,
             mapping.mediaSessionId,
           );
-          if (reconciled) {
+          if (result.status === "applied") {
             // After reconciliation, re-apply group defaults (null request = defaults)
             const freshMapping = viewerBinding.getViewerMapping(envelope.senderDeviceId, mapping.mediaSessionId);
             const sender = freshMapping?.videoSender;
@@ -594,6 +553,8 @@ export class GroupMessageRouter {
                 ).catch(() => {});
               }
             }
+          } else {
+            await this.respondToReconcileResult(groupId, envelope.senderDeviceId, logicalStreamId, result);
           }
         }
       }
@@ -633,6 +594,89 @@ export class GroupMessageRouter {
   }
 
   // ── Private ──────────────────────────────────────────────────
+
+  private findViewerMappingForLogicalStream(
+    viewerBinding: ViewerMediaBinding,
+    viewerDeviceId: string,
+    logicalStreamId: string,
+  ): ViewerMapping | null {
+    const allViewers = typeof viewerBinding.getAllViewers === "function"
+      ? viewerBinding.getAllViewers()
+      : [];
+
+    return allViewers.find(
+      (mapping) => mapping.viewerDeviceId === viewerDeviceId && mapping.logicalStreamId === logicalStreamId,
+    ) ?? viewerBinding.getViewerMapping(viewerDeviceId);
+  }
+
+  private async respondToReconcileResult(
+    groupId: string,
+    viewerDeviceId: string,
+    logicalStreamId: string,
+    result: ReconcileResult,
+  ): Promise<void> {
+    if (result.status === "applied") return;
+
+    const reason = result.status === "apply-failed"
+      ? `application failed: ${result.error}`
+      : result.status === "sender-not-ready"
+        ? "sender not ready, will apply on connect"
+        : "mapping missing";
+
+    await this.sendQualityPendingResponse(groupId, viewerDeviceId, logicalStreamId, reason);
+  }
+
+  private async sendQualityPendingResponse(
+    groupId: string,
+    viewerDeviceId: string,
+    logicalStreamId: string,
+    reason: string,
+  ): Promise<void> {
+    if (!this.runtime || !this.qualityCoordinator) return;
+
+    const request = this.qualityCoordinator.getViewerRequest(
+      groupId,
+      logicalStreamId,
+      viewerDeviceId,
+    );
+    const syncState = this.runtime.getSyncService().getSyncState(groupId);
+    const quality = syncState?.state?.defaultQuality?.value;
+    const groupSettings = quality ?? createDefaultGroupQualitySettings();
+    const ssm = this.runtime.getStreamSessionManager();
+    const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+    const sourceDimensions = {
+      width: actualDims.width || groupSettings.video.sendWidth || 1920,
+      height: actualDims.height || groupSettings.video.sendHeight || 1080,
+    };
+    const runtimeLimits = this.runtime.getHostQualityLimits();
+    const hostLimits: HostQualityLimits = {
+      maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+      maxWidth: runtimeLimits.maxWidth,
+      maxHeight: runtimeLimits.maxHeight,
+      maxFps: runtimeLimits.maxFps,
+      allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+    };
+    const effective = this.qualityCoordinator.calculateEffectiveQuality(
+      groupSettings,
+      hostLimits,
+      request,
+      sourceDimensions,
+    );
+    const conn = this.runtime.getConnectionManager().getConnection(groupId);
+    const peerUuid = conn?.peerForDevice(viewerDeviceId);
+    if (conn && peerUuid) {
+      await conn.sendToPeer(peerUuid, {
+        type: "quality.effective",
+        streamSessionId: logicalStreamId,
+        videoBitrateKbps: effective.effective.videoBitrateKbps,
+        maxWidth: effective.effective.maxWidth,
+        maxHeight: effective.effective.maxHeight,
+        maxFps: effective.effective.maxFps,
+        degradationPreference: effective.effective.degradationPreference,
+        clampReasons: [...effective.clampReasons, reason],
+      }).catch(() => {});
+    }
+  }
 
   /**
    * Envelope-group / payload-group safety check. Every stream-scoped

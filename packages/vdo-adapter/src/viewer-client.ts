@@ -31,7 +31,8 @@ export class ViewerClient {
    * string UUID as the first argument.
    */
   private _dataChannelWaiters = new Map<string, { promise: Promise<void>; resolve: () => void }>();
-  private _dataChannelsOpened = new Set<string>();
+  private _dataChannelsOpened = new Map<string, number>();
+  private _mediaConnectionGeneration = 0;
 
   /**
    * The VDO stream ID currently being viewed. Stored so that shutdown()
@@ -56,6 +57,14 @@ export class ViewerClient {
    */
   private _shuttingDown = false;
   private _shutdownPromise: Promise<void> | null = null;
+
+  /**
+   * Set to true when the SDK fires the `connected` event (WebSocket opened).
+   * Used by connectWithTimeout() to classify timeout errors:
+   *   - connected never fired → signaling server unreachable
+   *   - connected fired but connect() promise didn't resolve → SDK lifecycle issue
+   */
+  private _webSocketConnected = false;
 
   /**
    * True while the user has intentionally paused media playback.
@@ -152,11 +161,86 @@ export class ViewerClient {
     this.sdk.on("error", errorHandler);
     this._internalHandlers.push({ event: "error", handler: errorHandler });
 
+    // Track WebSocket connection status so connectWithTimeout() can classify
+    // whether the signaling handshake ever started or got stuck post-connect.
+    this._webSocketConnected = false;
+    const wsConnectedHandler = (): void => {
+      this._webSocketConnected = true;
+    };
+    this.sdk.on("connected", wsConnectedHandler);
+    this._internalHandlers.push({ event: "connected", handler: wsConnectedHandler });
+
     // Set up dataChannelOpen tracking.
     // In SDK 1.3.18, this fires as a CustomEvent with detail = { uuid }.
     this.setupDataChannelOpenHandler();
 
-    await withTimeout(this.sdk!.connect(), 15000, "SDK connect timed out — check your internet and that wss://wss.vdo.ninja is reachable");
+    await this.connectWithTimeout(35_000);
+  }
+
+  /**
+   * Connect to the VDO signaling server with a bounded timeout, early
+   * failure on reconnectFailed, and explicit disconnect teardown so the
+   * SDK does not continue connecting in the background after an error.
+   *
+   * Error classification:
+   *   - WebSocket `connected` event never fired → signaling server unreachable.
+   *   - `connected` fired but connect() promise didn't resolve → SDK lifecycle
+   *     or slow-network issue after the WebSocket handshake.
+   *   - SDK `reconnectFailed` event fired → all reconnect attempts exhausted,
+   *     underlying SDK error is surfaced.
+   *   - Generic error from sdk.connect() → passed through as-is.
+   */
+  private async connectWithTimeout(maxMs: number): Promise<void> {
+    const sdk = this.sdk!;
+
+    // Bridge the SDK reconnectFailed event to a promise rejection so we
+    // fail early instead of waiting for the full timeout.
+    let rejectEarly: ((reason: Error) => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const onReconnectFailed = (...args: unknown[]): void => {
+      const err = args.length > 0 ? args[0] : undefined;
+      const msg = err instanceof Error ? err.message : String(err ?? "Reconnect failed");
+      rejectEarly?.(new CompatibilityError(msg));
+      rejectEarly = null;
+    };
+    sdk.on("reconnectFailed", onReconnectFailed);
+
+    try {
+      const connectPromise: Promise<void> = sdk.connect();
+
+      const earlyExit = new Promise<never>((_, reject) => {
+        rejectEarly = reject;
+
+        timer = setTimeout(() => {
+          rejectEarly = null;
+          let message: string;
+          if (this._webSocketConnected) {
+            message = "SDK connect timed out — the WebSocket to the signaling server opened but the SDK did not complete initialization within the time limit. This suggests a slow network or an SDK lifecycle issue.";
+          } else {
+            message = "Connection failed — the WebSocket to the signaling server (wss://wss.vdo.ninja) never opened. The server may be blocked or unreachable.";
+          }
+          reject(new CompatibilityError(message));
+        }, maxMs);
+      });
+
+      await Promise.race([connectPromise, earlyExit]);
+    } catch (err) {
+      // On timeout/error, explicitly disconnect the SDK so it does not
+      // continue connecting in the background and race a subsequent retry
+      // or teardown.  Without this, the Promise.race-based timeout leaves
+      // the connect() promise dangling.
+      try {
+        await sdk.disconnect();
+      } catch {
+        // Best-effort cleanup
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      sdk.off("reconnectFailed", onReconnectFailed);
+      rejectEarly = null;
+    }
   }
 
   /**
@@ -167,23 +251,10 @@ export class ViewerClient {
   private setupDataChannelOpenHandler(): void {
     if (!this.sdk) return;
     const handler = (...args: unknown[]): void => {
-      const raw = args[0];
-      let uuid: string | undefined;
-
-      // 1) Direct string UUID (defensive fallback for legacy / tests)
-      if (typeof raw === "string" && raw.trim().length > 0 && raw.trim() !== "[object Object]") {
-        uuid = raw.trim();
-      }
-      // 2) EventTarget / CustomEvent with detail.uuid (SDK 1.3.18 standard path)
-      else if (raw && typeof raw === "object") {
-        const detail = (raw as { detail?: { uuid?: string } }).detail;
-        if (detail && typeof detail.uuid === "string") {
-          uuid = detail.uuid;
-        }
-      }
+      const uuid = this.extractEventUuid(args[0]);
 
       if (uuid) {
-        this._dataChannelsOpened.add(uuid);
+        this._dataChannelsOpened.set(uuid, this._mediaConnectionGeneration);
         const waiter = this._dataChannelWaiters.get(uuid);
         if (waiter) {
           waiter.resolve();
@@ -193,6 +264,44 @@ export class ViewerClient {
     };
     this.sdk.on("dataChannelOpen", handler);
     this._internalHandlers.push({ event: "dataChannelOpen", handler });
+
+    const closeHandler = (...args: unknown[]): void => {
+      const uuid = this.extractEventUuid(args[0]);
+      this.beginNewMediaConnectionGeneration(uuid);
+    };
+    this.sdk.on("dataChannelClose", closeHandler);
+    this._internalHandlers.push({ event: "dataChannelClose", handler: closeHandler });
+
+    const peerDisconnectedHandler = (...args: unknown[]): void => {
+      const uuid = this.extractEventUuid(args[0]);
+      this.beginNewMediaConnectionGeneration(uuid);
+    };
+    this.sdk.on("peerDisconnected", peerDisconnectedHandler);
+    this._internalHandlers.push({ event: "peerDisconnected", handler: peerDisconnectedHandler });
+  }
+
+  private extractEventUuid(raw: unknown): string | undefined {
+    if (typeof raw === "string" && raw.trim().length > 0 && raw.trim() !== "[object Object]") {
+      return raw.trim();
+    }
+    if (raw && typeof raw === "object") {
+      const detail = (raw as { detail?: { uuid?: string } }).detail;
+      if (detail && typeof detail.uuid === "string") {
+        return detail.uuid;
+      }
+    }
+    return undefined;
+  }
+
+  private beginNewMediaConnectionGeneration(targetUuid?: string): void {
+    this._mediaConnectionGeneration++;
+    if (targetUuid) {
+      this._dataChannelsOpened.delete(targetUuid);
+      this._dataChannelWaiters.delete(targetUuid);
+      return;
+    }
+    this._dataChannelsOpened.clear();
+    this._dataChannelWaiters.clear();
   }
 
   /**
@@ -284,6 +393,7 @@ export class ViewerClient {
 
     // Save parameters for resume before touching the SDK
     this._pausedStreamId = this._activeStreamId;
+    this.beginNewMediaConnectionGeneration();
 
     try {
       await this.sdk.stopViewing(this._activeStreamId);
@@ -536,8 +646,10 @@ export class ViewerClient {
     if (this._shuttingDown || this._shutdownPromise) {
       throw new CompatibilityError("ViewerClient is shutting down");
     }
-    // Already open
-    if (this._dataChannelsOpened.has(targetUuid)) return;
+    const generation = this._mediaConnectionGeneration;
+
+    // Already open for the current media-connection generation
+    if (this._dataChannelsOpened.get(targetUuid) === generation) return;
 
     // Get or create a per-UUID waiter
     let waiter = this._dataChannelWaiters.get(targetUuid);
@@ -554,6 +666,14 @@ export class ViewerClient {
       timeout,
       `Data channel open timed out for peer ${targetUuid}`,
     );
+
+    if (this._shuttingDown || this._shutdownPromise) {
+      return;
+    }
+
+    if (this._dataChannelsOpened.get(targetUuid) !== generation) {
+      throw new Error(`Data channel open timed out for peer ${targetUuid}`);
+    }
   }
 
   /**
@@ -598,7 +718,7 @@ export class ViewerClient {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        await sendControlMessage(this.sdk, payload, targetUuid);
+        await sendControlMessage(this.sdk, payload, targetUuid, false);
         return; // Success — stop
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
