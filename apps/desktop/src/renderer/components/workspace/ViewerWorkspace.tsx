@@ -538,7 +538,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
       if (sample.segmentStart && next.length > 0) {
         next.push({
-          timestamp: Math.max(timestamp - 1, 0),
+          timestamp: Math.max(now - 1, 0),
           displayedFps: null,
           decodedFps: null,
           frameIntervalMs: null,
@@ -1706,7 +1706,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     const video = videoRef.current;
     if (!video) return;
 
-    const actualVolume = isMuted ? 0 : volume;
+    // During pause, audio must be inaudible regardless of saved
+    // volume/mute/deafen preferences. Do NOT alter the user's saved
+    // preferences — this is a transient override.
+    const isPausedState = streamPauseState === "paused" || streamPauseState === "pausing";
+    const actualVolume = isPausedState ? 0 : (isMuted ? 0 : volume);
 
     if (gainNodeRef.current) {
       // Boost mode: gain node controls volume, native path stays silenced.
@@ -1720,8 +1724,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
     // Normal mode: spec-safe [0, 1] range
     video.volume = Math.min(1, actualVolume);
-    video.muted = isMuted;
-  }, [volume, isMuted, sessionState]);
+    video.muted = isPausedState ? true : isMuted;
+  }, [volume, isMuted, sessionState, streamPauseState]);
 
   // Tear down boost on unmount
   useEffect(() => {

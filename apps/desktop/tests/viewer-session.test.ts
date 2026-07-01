@@ -29,6 +29,8 @@ const mockRuntimeMethods = vi.hoisted(() => ({
   getStreamSessionManager: vi.fn(),
   waitForJoinResponse: vi.fn(),
   cancelJoinResponse: vi.fn(),
+  waitForViewerPauseResult: vi.fn(),
+  cancelViewerPauseResult: vi.fn(),
   isDestroyed: vi.fn(),
   deviceId: "my-device",
   displayName: "Test Viewer",
@@ -68,6 +70,8 @@ function makeMockRuntime() {
     getStreamSessionManager: () => ssm,
     waitForJoinResponse: mockRuntimeMethods.waitForJoinResponse,
     cancelJoinResponse: mockRuntimeMethods.cancelJoinResponse,
+    waitForViewerPauseResult: mockRuntimeMethods.waitForViewerPauseResult,
+    cancelViewerPauseResult: mockRuntimeMethods.cancelViewerPauseResult,
     deviceId: mockRuntimeMethods.deviceId,
     displayName: mockRuntimeMethods.displayName,
     isDestroyed: mockRuntimeMethods.isDestroyed,
@@ -1122,9 +1126,20 @@ describe("ViewerSession — instance-local generations", () => {
     const pauseGenA = (sessionA as any)._pauseGeneration;
     const pauseGenB = (sessionB as any)._pauseGeneration;
 
+    mockRuntimeMethods.waitForViewerPauseResult.mockImplementation((operationId: string) => Promise.resolve({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: sessionA.viewerSessionId ?? "",
+      viewerDeviceId: "my-device",
+      operationId,
+      paused: true,
+      success: true,
+    }));
+
     // Simulate pause on A (viewerClient mock needed)
     (sessionA as any).viewerClient = {
-      pauseMedia: vi.fn().mockResolvedValue(undefined),
+      pauseMedia: vi.fn(),
       getSDK: vi.fn(),
       resumeMedia: vi.fn(),
       sendMediaBind: vi.fn(),
@@ -1747,9 +1762,13 @@ describe("ViewerSession — stream attachment (grey-screen fix)", () => {
 
 describe("ViewerSession — pause/resume video element", () => {
   let session: ViewerSession;
+  let runtime: ReturnType<typeof makeMockRuntime>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtime = makeMockRuntime();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
     session = new ViewerSession();
   });
 
@@ -1758,47 +1777,362 @@ describe("ViewerSession — pause/resume video element", () => {
     vi.restoreAllMocks();
   });
 
-  it("pause() pauses the bound video element and resume() resumes it without detaching srcObject", async () => {
-    // Mock video element with zero dimensions so capturePosterFrame avoids DOM canvas
-    const videoEl = {
+  function mockVideoEl(): HTMLVideoElement {
+    return {
       pause: vi.fn(),
       play: vi.fn().mockResolvedValue(undefined),
       srcObject: { id: "stream-1" },
       videoWidth: 0,
       videoHeight: 0,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
     } as unknown as HTMLVideoElement;
+  }
 
-    // Mimic a started session with a viewerClient that supports pause/resume
+  function setupNonSelfViewSession(videoEl: HTMLVideoElement) {
     Object.defineProperty(session, "_state", { value: "watching", writable: true });
     (session as any).viewerClient = {
-      pauseMedia: vi.fn().mockResolvedValue(undefined),
-      resumeMedia: vi.fn().mockResolvedValue(undefined),
+      pauseMedia: vi.fn(),
+      resumeMedia: vi.fn(),
     };
+    Object.defineProperty(session, "groupId", { value: "g-1", writable: true });
+    Object.defineProperty(session, "hostDeviceId", { value: "host-1", writable: true });
+    Object.defineProperty(session, "logicalStreamId", { value: "ls-1", writable: true });
+    Object.defineProperty(session, "mediaSessionId", { value: "ms-1", writable: true });
+    Object.defineProperty(session, "_viewerSessionId", { value: "vsid-1", writable: true });
+    session.bindVideoElement(videoEl);
+  }
+
+  function makePauseAck(operationId: string, paused: boolean) {
+    return {
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vsid-1",
+      viewerDeviceId: "my-device",
+      operationId,
+      paused,
+      success: true,
+    };
+  }
+
+  it("pause() transitions playing → pausing → paused only after host ack", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+
+    // Host will acknowledge with result
+    let resolvePauseResult!: (data: unknown) => void;
+    mockRuntimeMethods.waitForViewerPauseResult.mockReturnValue(
+      new Promise((resolve) => { resolvePauseResult = resolve; }),
+    );
+
+    // Start pause (do not await yet — it's waiting on the host ack)
+    const pausePromise = session.pause();
+
+    // Should now be in "pausing" state, NOT "paused"
+    expect(session.pauseState).toBe("pausing");
+    expect(videoEl.pause).toHaveBeenCalled();
+    expect((session as any).viewerClient.pauseMedia).toHaveBeenCalled();
+
+    // Confirm that a viewer.pause.request message was sent with operationId
+    const sendCalls = (runtime as any).__sendToPeer.mock.calls;
+    const pauseMsg = sendCalls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "viewer.pause.request",
+    );
+    expect(pauseMsg).toBeDefined();
+    const pausePayload = pauseMsg[1] as Record<string, unknown>;
+    expect(pausePayload.paused).toBe(true);
+    expect(pausePayload.operationId).toBeDefined();
+    expect(typeof pausePayload.operationId).toBe("string");
+    expect(pausePayload.groupId).toBe("g-1");
+    expect(pausePayload.logicalStreamId).toBe("ls-1");
+    expect(pausePayload.mediaSessionId).toBe("ms-1");
+    expect(pausePayload.viewerSessionId).toBe("vsid-1");
+    expect(pausePayload.viewerDeviceId).toBe("my-device");
+
+    // State is still "pausing" — NOT yet "paused"
+    expect(session.pauseState).toBe("pausing");
+
+    // Host acknowledges
+    resolvePauseResult(makePauseAck(String(pausePayload.operationId), true));
+    await pausePromise;
+
+    // Now truly paused
+    expect(session.pauseState).toBe("paused");
+  });
+
+  it("pause timeout reverts to playing", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+
+    mockRuntimeMethods.waitForViewerPauseResult.mockReturnValue(
+      Promise.reject(new Error("Pause result timed out")),
+    );
+
+    await expect(session.pause()).rejects.toThrow("Pause result timed out");
+
+    // State reverted to playing
+    expect(session.pauseState).toBe("playing");
+    // Poster should be cleared on failure
+    expect(session.pausePoster).toBeNull();
+  });
+
+  it("resume transitions paused → resuming → playing only after host ack", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+
+    // Start paused
+    Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
+    Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
+
+    // Host will acknowledge resume
+    let resolveResumeResult!: (data: unknown) => void;
+    mockRuntimeMethods.waitForViewerPauseResult.mockReturnValue(
+      new Promise((resolve) => { resolveResumeResult = resolve; }),
+    );
+
+    const resumePromise = session.resume();
+
+    // Should now be in "resuming"
+    expect(session.pauseState).toBe("resuming");
+    expect((session as any).viewerClient.resumeMedia).toHaveBeenCalled();
+
+    // viewer.pause.request message sent with paused=false and operationId
+    const sendCalls = (runtime as any).__sendToPeer.mock.calls;
+    const resumeMsg = sendCalls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "viewer.pause.request",
+    );
+    expect(resumeMsg).toBeDefined();
+    const resumePayload = resumeMsg[1] as Record<string, unknown>;
+    expect(resumePayload.paused).toBe(false);
+    expect(resumePayload.operationId).toBeDefined();
+
+    // Poster is NOT cleared yet — stays visible during resume
+    expect(session.pausePoster).not.toBeNull();
+
+    // Host acknowledges
+    resolveResumeResult(makePauseAck(String(resumePayload.operationId), false));
+    await resumePromise;
+
+    // State is playing, BUT poster may still be set until fresh frame arrives
+    expect(session.pauseState).toBe("playing");
+  });
+
+  it("resume timeout stays paused", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+    Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
+    Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
+
+    // Timeout
+    mockRuntimeMethods.waitForViewerPauseResult.mockReturnValue(
+      Promise.reject(new Error("Resume result timed out")),
+    );
+
+    await expect(session.resume()).rejects.toThrow("Resume result timed out");
+
+    // Stays paused
+    expect(session.pauseState).toBe("paused");
+    // Poster is still showing
+    expect(session.pausePoster).not.toBeNull();
+  });
+
+  it("pause during self-view is local-only (no host message sent)", async () => {
+    const videoEl = mockVideoEl();
+
+    // Self-view: hostDeviceId === runtime.deviceId
+    Object.defineProperty(session, "_state", { value: "watching", writable: true });
+    Object.defineProperty(session, "hostDeviceId", { value: "my-device", writable: true });
+    Object.defineProperty(session, "_viewerSessionId", { value: "vsid-self", writable: true });
+    (session as any).viewerClient = {
+      pauseMedia: vi.fn(),
+      resumeMedia: vi.fn(),
+    };
+    Object.defineProperty(session, "groupId", { value: "g-1", writable: true });
+    Object.defineProperty(session, "logicalStreamId", { value: "ls-1", writable: true });
+    Object.defineProperty(session, "mediaSessionId", { value: "ms-1", writable: true });
 
     session.bindVideoElement(videoEl);
 
-    // ── Pause ────────────────────────────────────────────────────────
+    // Self-view pause must NOT call waitForViewerPauseResult
     await session.pause();
 
-    // viewerClient.pauseMedia was called
-    expect((session as any).viewerClient.pauseMedia).toHaveBeenCalled();
-    // The video element itself was paused
-    expect(videoEl.pause).toHaveBeenCalled();
-    // srcObject is NOT detached during pause (unlike destroy which clears it)
-    expect(videoEl.srcObject).not.toBeNull();
-    // Session pause state is "paused"
     expect(session.pauseState).toBe("paused");
+    // No viewer.pause.request message sent to host
+    const sendCalls = (runtime as any).__sendToPeer.mock.calls;
+    const pauseMsg = sendCalls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "viewer.pause.request",
+    );
+    expect(pauseMsg).toBeUndefined();
+    // waitForViewerPauseResult should NOT have been called
+    expect(mockRuntimeMethods.waitForViewerPauseResult).not.toHaveBeenCalled();
+  });
 
-    // ── Resume ───────────────────────────────────────────────────────
+  it("resume during self-view is local-only (no host message sent)", async () => {
+    const videoEl = mockVideoEl();
+
+    Object.defineProperty(session, "_state", { value: "watching", writable: true });
+    Object.defineProperty(session, "hostDeviceId", { value: "my-device", writable: true });
+    Object.defineProperty(session, "_viewerSessionId", { value: "vsid-self", writable: true });
+    (session as any).viewerClient = {
+      pauseMedia: vi.fn(),
+      resumeMedia: vi.fn(),
+    };
+    Object.defineProperty(session, "groupId", { value: "g-1", writable: true });
+    Object.defineProperty(session, "logicalStreamId", { value: "ls-1", writable: true });
+    Object.defineProperty(session, "mediaSessionId", { value: "ms-1", writable: true });
+    Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
+
+    session.bindVideoElement(videoEl);
+
     await session.resume();
 
-    // viewerClient.resumeMedia was called
-    expect((session as any).viewerClient.resumeMedia).toHaveBeenCalled();
-    // The video element was played
-    expect(videoEl.play).toHaveBeenCalled();
-    // srcObject is STILL not detached after resume
-    expect(videoEl.srcObject).not.toBeNull();
-    // Session pause state is back to "playing"
     expect(session.pauseState).toBe("playing");
+    // No viewer.pause.request message sent
+    const sendCalls = (runtime as any).__sendToPeer.mock.calls;
+    const resumeMsg = sendCalls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "viewer.pause.request",
+    );
+    expect(resumeMsg).toBeUndefined();
+  });
+
+  it("stale pause result after newer pause operation is ignored", async () => {
+    // Simulate two rapid pause calls; the first should be abandoned
+    mockRuntimeMethods.waitForViewerPauseResult.mockImplementation((operationId: string) =>
+      Promise.resolve(makePauseAck(operationId, true))
+    );
+
+    Object.defineProperty(session, "_state", { value: "watching", writable: true });
+    (session as any).viewerClient = {
+      pauseMedia: vi.fn(),
+      resumeMedia: vi.fn(),
+    };
+    Object.defineProperty(session, "groupId", { value: "g-1", writable: true });
+    Object.defineProperty(session, "hostDeviceId", { value: "host-1", writable: true });
+    Object.defineProperty(session, "logicalStreamId", { value: "ls-1", writable: true });
+    Object.defineProperty(session, "mediaSessionId", { value: "ms-1", writable: true });
+    Object.defineProperty(session, "_viewerSessionId", { value: "vsid-1", writable: true });
+
+    // Set up first pause to be slow
+    let resolveFirst!: (data: unknown) => void;
+    mockRuntimeMethods.waitForViewerPauseResult
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementation((operationId: string) => Promise.resolve(makePauseAck(operationId, true)));
+
+    const firstPause = session.pause();
+    // Second pause should collapse (or cancel first)
+    const secondPause = session.pause();
+
+    const firstOperationId = ((runtime as any).__sendToPeer.mock.calls[0][1] as Record<string, unknown>).operationId as string;
+    resolveFirst(makePauseAck(firstOperationId, true));
+    await firstPause.catch(() => {});
+    await secondPause;
+
+    // The second pause's generation is current; final state should reflect it
+    expect(session.pauseState).toBe("paused");
+  });
+
+  it("sendViewerPauseRequest sends exact identity in new format", async () => {
+    // Direct test of the message format
+    Object.defineProperty(session, "groupId", { value: "g-1", writable: true });
+    Object.defineProperty(session, "hostDeviceId", { value: "host-1", writable: true });
+    Object.defineProperty(session, "logicalStreamId", { value: "ls-1", writable: true });
+    Object.defineProperty(session, "mediaSessionId", { value: "ms-1", writable: true });
+    Object.defineProperty(session, "_viewerSessionId", { value: "vsid-1", writable: true });
+    // Ensure runtime mock returns valid connection
+    const conn = runtime.getConnectionManager().getConnection("g-1");
+    conn.peerForDevice = vi.fn().mockReturnValue("peer-uuid-host");
+
+    const opId = "test-op-123";
+    (session as any).sendViewerPauseRequest(true, opId);
+
+    const sendCalls = (runtime as any).__sendToPeer.mock.calls;
+    const msg = sendCalls.find(
+      (c: unknown[]) => (c[1] as Record<string, unknown>)?.type === "viewer.pause.request",
+    );
+    expect(msg).toBeDefined();
+    const payload = msg[1] as Record<string, unknown>;
+    expect(payload.groupId).toBe("g-1");
+    expect(payload.logicalStreamId).toBe("ls-1");
+    expect(payload.mediaSessionId).toBe("ms-1");
+    expect(payload.viewerSessionId).toBe("vsid-1");
+    expect(payload.viewerDeviceId).toBe("my-device");
+    expect(payload.operationId).toBe("test-op-123");
+    expect(payload.paused).toBe(true);
+  });
+
+  it("poster is NOT cleared on resume; cleared when video element plays (fresh frame)", async () => {
+    mockRuntimeMethods.waitForViewerPauseResult.mockImplementation((operationId: string) =>
+      Promise.resolve(makePauseAck(operationId, false))
+    );
+
+    let capturedPlayingHandler: (() => void) | null = null;
+    const videoEl = mockVideoEl();
+    // Override addEventListener to capture the playing handler
+    videoEl.addEventListener = vi.fn((event: string, handler: () => void) => {
+      if (event === "playing") {
+        capturedPlayingHandler = handler;
+      }
+    }) as unknown as typeof videoEl.addEventListener;
+
+    setupNonSelfViewSession(videoEl);
+    Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
+    Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
+
+    await session.resume();
+
+    // State is playing but poster should still be set (not cleared immediately)
+    expect(session.pauseState).toBe("playing");
+    expect(session.pausePoster).not.toBeNull();
+
+    // The playing event handler should have been registered
+    expect(capturedPlayingHandler).not.toBeNull();
+
+    // Simulate the video element starting to play (fresh frame)
+    capturedPlayingHandler!();
+    expect(session.pausePoster).toBeNull();
+  });
+
+  it("poster is NOT cleared on resume; cleared when track handler fires via runJoinFlow", async () => {
+    // Full integration: start a session, fire a trackAdded event,
+    // verify the track handler clears the poster
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+    });
+
+    // Set poster (simulating pause)
+    Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
+
+    // Fire a fresh video track — track handler should clear poster
+    const trackAddedHandler = mockViewerClientMethods.on.mock.calls.find(
+      ([event]: [string]) => event === "trackAdded",
+    )?.[1] as ((event: { detail: unknown }) => void) | undefined;
+    expect(trackAddedHandler).toBeDefined();
+
+    const mockAddTrack = vi.fn();
+    const mockStream = {
+      addTrack: mockAddTrack,
+      getTracks: vi.fn().mockReturnValue([]),
+    };
+    const freshTrack = { kind: "video", id: "vt-fresh", enabled: true, readyState: "live" };
+    trackAddedHandler!({ detail: { track: freshTrack, streams: [mockStream], uuid: "peer-1" } });
+
+    // After fresh video track arrives, poster should be cleared
+    expect(session.pausePoster).toBeNull();
   });
 });

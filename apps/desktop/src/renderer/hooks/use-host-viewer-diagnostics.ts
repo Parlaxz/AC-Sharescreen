@@ -284,13 +284,19 @@ export function useHostViewerDiagnostics(
       const seen = new Set<string>();
 
       const peerToViewer = new Map<string, string>();
+      const boundViewers = new Set<string>();
       for (const b of bindingRef.current) {
         peerToViewer.set(b.mediaPeerUuid, b.viewerDeviceId);
+        boundViewers.add(b.viewerDeviceId);
       }
 
-      // 1) Emit rows for viewers from status events (primary source)
+      // 1) Emit rows for viewers from status events (primary source).
+      //    Only show viewers that have an active binding — kicked viewers
+      //    (whose bindings have been removed) are excluded even if they
+      //    continue sending status reports over the group control channel.
       for (const [viewerDeviceId, status] of statusMapRef.current) {
         if (seen.has(viewerDeviceId)) continue;
+        if (!boundViewers.has(viewerDeviceId)) continue;
         seen.add(viewerDeviceId);
 
         const isStale = (now - status.sampledAt) > STALE_STATUS_MS;

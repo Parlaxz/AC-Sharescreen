@@ -1,7 +1,7 @@
 import { GroupConnectionManager } from "./group-connection-manager.js";
 import { GroupSyncService, type SyncPersistenceAdapter } from "./group-sync-service.js";
 import { ActiveStreamRegistry } from "./active-stream-registry.js";
-import { GroupMessageRouter, type JoinResponseData } from "./group-message-router.js";
+import { GroupMessageRouter, type JoinResponseData, type ViewerPauseResultData } from "./group-message-router.js";
 import { StreamSessionManager } from "./stream-session-manager.js";
 import { ViewerMediaBinding } from "./viewer-media-binding.js";
 import { RestartCoordinator } from "./restart-coordinator.js";
@@ -472,6 +472,14 @@ export class Phase3Runtime {
    */
   cancelJoinResponse(requestId: string): void {
     this.messageRouter.cancelJoinResponse(requestId);
+  }
+
+  waitForViewerPauseResult(operationId: string, timeoutMs?: number): Promise<ViewerPauseResultData> {
+    return this.messageRouter.waitForViewerPauseResult(operationId, timeoutMs);
+  }
+
+  cancelViewerPauseResult(operationId: string): void {
+    this.messageRouter.cancelViewerPauseResult(operationId);
   }
 
   /**

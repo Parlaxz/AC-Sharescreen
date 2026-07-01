@@ -505,16 +505,38 @@ describe("parseGroupMessagePayload", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("parses viewer.paused payload", () => {
-    const r = parseGroupMessagePayload("viewer.paused", {
+  it("parses viewer.pause.request payload", () => {
+    const r = parseGroupMessagePayload("viewer.pause.request", {
+      groupId: "g-1",
       logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
       viewerDeviceId: "dev-2",
+      operationId: "op-1",
       paused: true,
     });
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.data.paused).toBe(true);
-      expect(r.data.logicalStreamId).toBe("stream-1");
+      expect(r.data.operationId).toBe("op-1");
+    }
+  });
+
+  it("parses viewer.pause.result payload", () => {
+    const r = parseGroupMessagePayload("viewer.pause.result", {
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "dev-2",
+      operationId: "op-1",
+      paused: true,
+      success: true,
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.data.success).toBe(true);
+      expect(r.data.operationId).toBe("op-1");
     }
   });
 

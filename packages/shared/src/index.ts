@@ -117,6 +117,8 @@ export {
   StreamLeavePayloadSchema,
   MediaBindPayloadSchema,
   ViewerPausedPayloadSchema,
+  ViewerPauseRequestPayloadSchema,
+  ViewerPauseResultPayloadSchema,
   ViewerStatusPayloadSchema,
   StreamViewerReadyPayloadSchema,
   VIEWER_READY_PRESENTATIONS,

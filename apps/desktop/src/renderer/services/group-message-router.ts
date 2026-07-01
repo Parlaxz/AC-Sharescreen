@@ -34,6 +34,18 @@ import { uiSoundService } from "./ui-sound-service.js";
  *   ping / pong                           → connection health tracking
  *   stream.* (generic)                    → ActiveStreamRegistry (lifecycle)
  */
+export interface ViewerPauseResultData {
+  groupId: string;
+  logicalStreamId: string;
+  mediaSessionId: string;
+  viewerSessionId: string;
+  viewerDeviceId: string;
+  operationId: string;
+  paused: boolean;
+  success: boolean;
+  failureReason?: string;
+}
+
 export interface JoinResponseData {
   logicalStreamId: string;
   accepted: boolean;
@@ -71,6 +83,13 @@ export class GroupMessageRouter {
   /** Pending join request resolvers keyed by requestId */
   private joinResponseResolvers = new Map<string, {
     resolve: (data: JoinResponseData) => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+
+  /** Pending viewer pause result resolvers keyed by operationId */
+  private viewerPauseResultResolvers = new Map<string, {
+    resolve: (data: ViewerPauseResultData) => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
@@ -142,6 +161,39 @@ export class GroupMessageRouter {
       clearTimeout(resolver.timer);
       this.joinResponseResolvers.delete(requestId);
       resolver.reject(new Error("Join response cancelled"));
+    }
+  }
+
+  /**
+   * Wait for a viewer.pause.result matching the given operationId.
+   * Returns a promise that resolves with the result data or rejects
+   * after the timeout (default 30 seconds).
+   */
+  waitForViewerPauseResult(operationId: string, timeoutMs = 30_000): Promise<ViewerPauseResultData> {
+    const existing = this.viewerPauseResultResolvers.get(operationId);
+    if (existing) {
+      throw new Error("Duplicate waitForViewerPauseResult for operationId");
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.viewerPauseResultResolvers.delete(operationId);
+        reject(new Error(`Viewer pause result timeout for operation ${operationId.slice(0, 8)}`));
+      }, timeoutMs);
+      this.viewerPauseResultResolvers.set(operationId, { resolve, reject, timer });
+    });
+  }
+
+  /**
+   * Cancel a pending viewer pause result waiter. Removes the timer and rejects
+   * the pending promise. Idempotent — safe to call after the result
+   * already arrived or the timeout fired.
+   */
+  cancelViewerPauseResult(operationId: string): void {
+    const resolver = this.viewerPauseResultResolvers.get(operationId);
+    if (resolver) {
+      clearTimeout(resolver.timer);
+      this.viewerPauseResultResolvers.delete(operationId);
+      resolver.reject(new Error("Viewer pause result cancelled"));
     }
   }
 
@@ -336,27 +388,76 @@ export class GroupMessageRouter {
       return;
     }
 
-    // viewer.paused → host-side pause/resume handling
-    if (type === "viewer.paused") {
+    // viewer.pause.request → host-side pause/resume handling (exact routing)
+    if (type === "viewer.pause.request") {
       if (this.viewerBinding) {
-        const parsed = parseGroupMessagePayload("viewer.paused", envelope.payload);
+        const parsed = parseGroupMessagePayload("viewer.pause.request", envelope.payload);
         if (parsed.ok) {
           const data = parsed.data;
-          // Find the viewer's media session ID from the binding
-          // First try exact lookup using mediaSessionId from payload (if present)
-          // Otherwise scan entries for matching viewerDeviceId
-          const mapping = this.findViewerMappingForLogicalStream(
-            this.viewerBinding,
-            data.viewerDeviceId,
-            data.logicalStreamId,
-          );
-          if (mapping) {
-            void this.viewerBinding.handleViewerPaused(
+          void (async () => {
+            const result = await this.viewerBinding!.handleViewerPaused(
               data.viewerDeviceId,
-              mapping.mediaSessionId,
+              data.mediaSessionId,
               data.paused,
             );
-          }
+
+            const conn = this.connManager.getConnection(groupId);
+            const peerUuid = conn?.peerForDevice(data.viewerDeviceId);
+            if (!conn || !peerUuid) return;
+
+            const success = result.status === "applied";
+            const failureReason = success
+              ? undefined
+              : result.status === "apply-failed"
+                ? result.error
+                : result.status === "sender-not-ready"
+                  ? "sender not ready"
+                  : "mapping missing";
+
+            await Promise.resolve(conn.sendToPeer(peerUuid, {
+              type: "viewer.pause.result",
+              groupId: data.groupId,
+              logicalStreamId: data.logicalStreamId,
+              mediaSessionId: data.mediaSessionId,
+              viewerSessionId: data.viewerSessionId,
+              viewerDeviceId: data.viewerDeviceId,
+              operationId: data.operationId,
+              paused: success ? data.paused : !data.paused,
+              success,
+              ...(failureReason ? { failureReason } : {}),
+            })).catch(() => {});
+          })();
+        }
+      }
+      return;
+    }
+
+    // viewer.pause.result → resolve pending waiter or dispatch browser event
+    if (type === "viewer.pause.result") {
+      const parsed = parseGroupMessagePayload("viewer.pause.result", envelope.payload);
+      if (!parsed.ok) return;
+      const resultData = parsed.data;
+      const operationId = resultData.operationId;
+      const resolver = this.viewerPauseResultResolvers.get(operationId);
+      if (resolver) {
+        clearTimeout(resolver.timer);
+        this.viewerPauseResultResolvers.delete(operationId);
+        resolver.resolve({
+          groupId: resultData.groupId,
+          logicalStreamId: resultData.logicalStreamId,
+          mediaSessionId: resultData.mediaSessionId,
+          viewerSessionId: resultData.viewerSessionId,
+          viewerDeviceId: resultData.viewerDeviceId,
+          operationId: resultData.operationId,
+          paused: resultData.paused,
+          success: resultData.success,
+          failureReason: resultData.failureReason,
+        });
+      } else {
+        if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+          window.dispatchEvent(new CustomEvent("screenlink:viewer-pause-result", {
+            detail: resultData,
+          }));
         }
       }
       return;

@@ -5,12 +5,15 @@ cd /d "%~dp0"
 
 set "AUDIO_HELPER=native\audio-helper\build\Release\screenlink-audio-helper.exe"
 set "VIDEO_HELPER=native\video-enhancer\build\Release\screenlink-video-enhancer.exe"
-set "TRAY_ICON=apps\desktop\assets\tray-icon.png"
+set "TRAY_ICONS=apps\desktop\assets\tray-icon-blue.png;apps\desktop\assets\tray-icon-green.png;apps\desktop\assets\tray-icon-orange.png;apps\desktop\assets\tray-icon-red.png"
 set "DESKTOP=apps\desktop"
 set "BUILD_OUTPUT=release"
 set "PACKAGED_AUDIO_HELPER=%BUILD_OUTPUT%\win-unpacked\resources\screenlink-audio-helper.exe"
 set "PACKAGED_VIDEO_HELPER=%BUILD_OUTPUT%\win-unpacked\resources\screenlink-video-enhancer.exe"
-set "PACKAGED_TRAY_ICON=%BUILD_OUTPUT%\win-unpacked\resources\tray-icon.png"
+set "PACKAGED_TRAY_ICON_BLUE=%BUILD_OUTPUT%\win-unpacked\resources\tray-icon-blue.png"
+set "PACKAGED_TRAY_ICON_GREEN=%BUILD_OUTPUT%\win-unpacked\resources\tray-icon-green.png"
+set "PACKAGED_TRAY_ICON_ORANGE=%BUILD_OUTPUT%\win-unpacked\resources\tray-icon-orange.png"
+set "PACKAGED_TRAY_ICON_RED=%BUILD_OUTPUT%\win-unpacked\resources\tray-icon-red.png"
 
 echo.
 echo === ScreenLink Windows x64 build ===
@@ -31,10 +34,12 @@ where cmake >nul 2>&1 || (
     exit /b 1
 )
 
-if not exist "%TRAY_ICON%" (
-    echo ERROR: Tray icon was not found:
-    echo        %TRAY_ICON%
-    exit /b 1
+for %%f in (%TRAY_ICONS%) do (
+    if not exist "%%f" (
+        echo ERROR: Tray icon was not found:
+        echo        %%f
+        exit /b 1
+    )
 )
 
 :: ── Audio helper ────────────────────────────────────────────────────────────
@@ -172,9 +177,24 @@ if not exist "%PACKAGED_VIDEO_HELPER%" (
     goto :fail
 )
 
-if not exist "%PACKAGED_TRAY_ICON%" (
+if not exist "%PACKAGED_TRAY_ICON_BLUE%" (
     echo ERROR: Build completed, but the packaged tray icon is missing:
-    echo        %PACKAGED_TRAY_ICON%
+    echo        %PACKAGED_TRAY_ICON_BLUE%
+    goto :fail
+)
+if not exist "%PACKAGED_TRAY_ICON_GREEN%" (
+    echo ERROR: Build completed, but the packaged tray icon is missing:
+    echo        %PACKAGED_TRAY_ICON_GREEN%
+    goto :fail
+)
+if not exist "%PACKAGED_TRAY_ICON_ORANGE%" (
+    echo ERROR: Build completed, but the packaged tray icon is missing:
+    echo        %PACKAGED_TRAY_ICON_ORANGE%
+    goto :fail
+)
+if not exist "%PACKAGED_TRAY_ICON_RED%" (
+    echo ERROR: Build completed, but the packaged tray icon is missing:
+    echo        %PACKAGED_TRAY_ICON_RED%
     goto :fail
 )
 
@@ -193,8 +213,11 @@ echo.
 echo Packaged video enhancer:
 echo   %PACKAGED_VIDEO_HELPER%
 echo.
-echo Packaged tray icon:
-echo   %PACKAGED_TRAY_ICON%
+echo Packaged tray icons:
+echo   %PACKAGED_TRAY_ICON_BLUE%
+echo   %PACKAGED_TRAY_ICON_GREEN%
+echo   %PACKAGED_TRAY_ICON_ORANGE%
+echo   %PACKAGED_TRAY_ICON_RED%
 echo.
 echo app-update.yml:
 echo   %BUILD_OUTPUT%\win-unpacked\resources\app-update.yml

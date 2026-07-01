@@ -238,13 +238,11 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     return () => clearInterval(interval);
   }, [mediaSessionId]);
 
-  const viewerBindings = useMemo(() => {
-    return runtime
-      ?.getViewerMediaBinding()
-      ?.getAllViewers()
-      ?.map((v) => ({ viewerDeviceId: v.viewerDeviceId, mediaPeerUuid: v.mediaPeerUuid }))
-      ?? [];
-  }, [runtime]);
+  const viewerBindings = runtime
+    ?.getViewerMediaBinding()
+    ?.getAllViewers()
+    ?.map((v) => ({ viewerDeviceId: v.viewerDeviceId, mediaPeerUuid: v.mediaPeerUuid }))
+    ?? [];
 
   const viewerRows = useHostViewerDiagnostics(
     sdk,
@@ -390,38 +388,25 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       [viewerDeviceId]: kickedAt,
     }));
 
-    // 1) Send stream.stopped to the viewer so they see the stream as gone
-    const conn = selectedGroupId
-      ? currentRuntime?.getConnectionManager().getConnection(selectedGroupId)
-      : null;
-    const peerUuid = conn?.peerForDevice(viewerDeviceId);
-    if (conn && peerUuid && selectedGroupId && logicalStreamId) {
-      await conn.sendToPeer(peerUuid, {
-        type: "stream.stopped",
-        groupId: selectedGroupId,
-        hostDeviceId: currentRuntime?.deviceId ?? "local",
-        logicalStreamId,
-      }).catch(() => {});
-    }
-
-    // 2) Force-close the viewer's RTCPeerConnection to cut media immediately
-    //    removeViewer() deliberately does NOT close the PC (it's owned by
-    //    the VDO SDK).  For a kick we close it anyway — the viewer's
-    //    track-ended handler will detect the drop and tear down their
-    //    ViewerSession after a 2s debounce.
+    // 1) Force-close the viewer's RTCPeerConnection to cut media immediately.
+    //    This triggers the viewer's track-ended handler → ViewerSession.stop()
+    //    after a 2s debounce. We do NOT send stream.stopped — that message
+    //    type is a broadcast meaning "the entire stream stopped" and would
+    //    remove the stream from the viewer's ActiveStreamRegistry with a
+    //    tombstone, making the group page show "no active shares".
     for (const v of viewerBinding.getAllViewers()) {
       if (v.viewerDeviceId === viewerDeviceId && v.pc) {
         try { v.pc.close(); } catch { /* best effort */ }
       }
     }
 
-    // 3) Remove the viewer binding (mapping + stats polling)
+    // 2) Remove the viewer binding (mapping + stats polling)
     viewerBinding.removeViewer(viewerDeviceId);
 
     if (reason === "manual") {
       toast.success("Viewer kicked out");
     }
-  }, [logicalStreamId, selectedGroupId]);
+  }, []);
 
   useEffect(() => {
     const now = Date.now();

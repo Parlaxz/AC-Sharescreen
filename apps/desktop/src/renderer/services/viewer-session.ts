@@ -235,6 +235,8 @@ export class ViewerSession {
 	 */
 	private _nextPauseGeneration = 0;
 	private _pauseGeneration = -1;
+  /** Current pending pause operation ID, for cancellation on teardown. */
+  private _pendingPauseOperationId: string | null = null;
 
   // Events
   public onStateChange: ((state: ViewerSessionState) => void) | null = null;
@@ -279,31 +281,26 @@ export class ViewerSession {
   }
 
   /**
-   * Pause media playback — connection stays alive.
+   * Pause media playback — acknowledged transaction with host.
    *
    * Captures the current video frame as a poster, then marks the viewer as
-   * paused locally and notifies the host. The host disables the sender
-   * encoding (active=false) so no video packets are sent. The WebRTC peer
-   * connection, data channel, sender, binding, and metrics registration all
-   * remain intact.
+   * paused locally and sends an acknowledged pause request to the host.
+   * The host disables the sender encoding (active=false) and responds with
+   * viewer.paused.result. Only after receiving the host's acknowledgement
+   * does the session transition to the "paused" state.
    *
-   * State machine: playing → pausing → paused
+   * State machine: playing → pausing → paused (after host ack)
+   *   or: playing → pausing → playing (on host failure/timeout)
    *
-   * Rapid calls collapse: a second pause() while already paused is a
-   * no-op. A pause() while pausing/resuming awaits the previous
-   * operation and then applies unless the state changed.
+   * Self-view pause is local-only — no host message sent.
    */
   async pause(): Promise<void> {
     if (this._destructed || !this.viewerClient) return;
     if (this._pauseState === "paused") return; // idempotent
-    if (this._pauseState === "pausing") return; // already in flight — wait for it
+    if (this._pauseState === "pausing") return; // already in flight
 
-    // If currently resuming, wait for that to settle first
-    if (this._pauseState === "resuming") {
-      // The resuming caller will see the updated state after it completes;
-      // we just bail so the caller can retry the shortcut.
-      return;
-    }
+    // If currently resuming, bail so the caller can retry
+    if (this._pauseState === "resuming") return;
 
     this._nextPauseGeneration++;
     this._pauseGeneration = this._nextPauseGeneration;
@@ -314,25 +311,50 @@ export class ViewerSession {
       // 1) Capture the current video frame before disabling the sender
       this.capturePosterFrame();
 
-      // 1b) Pause the bound video element locally so it holds the last frame.
-      //     Do NOT clear srcObject — the stream stays attached for quick resume.
+      // 2) Pause the bound video element locally so it holds the last frame
       this.videoElement?.pause();
 
-      // 2) Mark state only — viewerClient.pauseMedia() no longer calls
-      //    stopViewing(). The WebRTC connection, sender, and data channel
-      //    all stay alive. The host will disable the sender encoding.
-      await this.viewerClient.pauseMedia();
+      // 3) Mark local intent — synchronous, no SDK calls
+      this.viewerClient.pauseMedia();
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) return;
 
-      // 3) Notify host that we paused so it disables sender active=false
-      void this.buildAndSendViewerPaused(true);
+      // 4) Self-view: skip host confirmation
+      if (this.hostDeviceId === getRuntime()?.deviceId) {
+        this.setPauseState("paused");
+        return;
+      }
 
-      // 4) Keep status interval running — the connection is alive
+      // 5) Send acknowledged pause request to host with operationId
+      const operationId = crypto.randomUUID();
+      this._pendingPauseOperationId = operationId;
+      this.sendViewerPauseRequest(true, operationId);
+
+      // GENERATION CHECK
+      if (!this.isPauseGenerationCurrent()) {
+        this._pendingPauseOperationId = null;
+        return;
+      }
+
+      // 6) Wait for host acknowledgement (5s timeout)
+      const runtime = getRuntime();
+      if (runtime && !runtime.isDestroyed()) {
+        try {
+          const result = await runtime.waitForViewerPauseResult(operationId, 5_000);
+          this.assertPauseResult(result, operationId, true);
+        } finally {
+          this._pendingPauseOperationId = null;
+        }
+      }
+
+      // GENERATION CHECK
+      if (!this.isPauseGenerationCurrent()) return;
+
+      // 7) Host confirmed — transition to paused
       this.setPauseState("paused");
     } catch (err) {
-      // Pause failed — return to playing (reversible)
+      // Pause failed or timed out — revert to playing
       this.clearPosterFrame();
       this.setPauseState("playing");
       console.error("[ViewerSession] pause failed, returning to playing:", err);
@@ -341,19 +363,21 @@ export class ViewerSession {
   }
 
   /**
-   * Resume a paused media stream — reuses the existing connection.
+   * Resume a paused media stream — acknowledged transaction with host.
    *
-   * The WebRTC peer connection was never torn down during pause, so no
-   * view() call, no fresh token, no media.bind re-send is needed.
-   * Notifies the host, which re-enables the sender encoding (active=true)
-   * and restores the stored quality settings in one setParameters() call.
+   * Notifies the host which re-enables the sender encoding (active=true).
+   * Only after receiving viewer.paused.result from the host does the
+   * session transition to "playing". The poster frame remains visible
+   * until a fresh video frame arrives via the track handler.
    *
-   * State machine: paused → resuming → playing
-   *   or: paused → resuming → (error) → paused (retryable)
+   * State machine: paused → resuming → playing (after host ack)
+   *   or: paused → resuming → paused (on host failure/timeout)
+   *
+   * Self-view resume is local-only — no host message sent.
    */
   async resume(): Promise<void> {
     if (this._destructed) return;
-    if (this._pauseState !== "paused") return; // no-op if not paused (also covers resuming)
+    if (this._pauseState !== "paused") return; // no-op if not paused
 
     this._nextPauseGeneration++;
     this._pauseGeneration = this._nextPauseGeneration;
@@ -367,38 +391,65 @@ export class ViewerSession {
         throw new Error("ViewerClient destroyed during pause");
       }
 
-      // ── 1) Mark state only — the existing connection is reused ─────
-      //     viewerClient.resumeMedia() no longer calls view(). It just
-      //     clears the pause flag. The peer connection, sender, data
-      //     channel, and binding are all intact.
-      await vc.resumeMedia();
+      // 1) Mark local intent — synchronous, no SDK calls
+      vc.resumeMedia();
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) return;
 
-      // ── 2) Notify host to re-enable sender with stored quality ─────
-      //     The host's handleViewerPaused(false) will set encoding
-      //     active=true and apply the complete stored quality config in
-      //     one setParameters() call, then send quality.effective and
-      //     quality.configured back.
-      void this.buildAndSendViewerPaused(false);
+      // 2) Self-view: skip host confirmation
+      if (this.hostDeviceId === getRuntime()?.deviceId) {
+        void this.videoElement?.play().catch(() => {});
+        this.setPauseState("playing");
+        return;
+      }
 
-      // ── 3) Clear poster and mark as playing ────────────────────────
-      //     The received stream is still valid — no need to discard or
-      //     recreate it. The track handler does NOT fire because the
-      //     connection is the same one. The host's re-enabled sender
-      //     will resume sending video packets on the existing RTP stream.
-      this.clearPosterFrame();
+      // 3) Send acknowledged resume request to host with operationId
+      const operationId = crypto.randomUUID();
+      this._pendingPauseOperationId = operationId;
+      this.sendViewerPauseRequest(false, operationId);
 
-      // 3b) Resume the video element playback. The stream is still attached
-      //     (srcObject was never cleared), so this is a simple play() call.
-      void this.videoElement?.play().catch(() => {});
+      // GENERATION CHECK
+      if (!this.isPauseGenerationCurrent()) {
+        this._pendingPauseOperationId = null;
+        return;
+      }
+
+      // 4) Wait for host acknowledgement (5s timeout)
+      const runtime = getRuntime();
+      if (runtime && !runtime.isDestroyed()) {
+        try {
+          const result = await runtime.waitForViewerPauseResult(operationId, 5_000);
+          this.assertPauseResult(result, operationId, false);
+        } finally {
+          this._pendingPauseOperationId = null;
+        }
+      }
+
+      // GENERATION CHECK
+      if (!this.isPauseGenerationCurrent()) return;
+
+      // 5) Host confirmed — transition to playing.
+      //    Do NOT clear poster here — keep it visible until the video element
+      //    actually starts rendering fresh frames (playing event).
+      //    Resume the video element playback so the live stream shows through.
+      const videoEl = this.videoElement;
+      if (videoEl) {
+        const onPlaying = () => {
+          videoEl.removeEventListener("playing", onPlaying);
+          this.clearPosterFrame();
+        };
+        videoEl.addEventListener("playing", onPlaying, { once: true });
+        void videoEl.play().catch(() => {
+          videoEl.removeEventListener("playing", onPlaying);
+        });
+      }
 
       this.setPauseState("playing");
     } catch (err) {
-      // Resume failed — stay paused so the user can retry
+      // Resume failed — revert to paused so the user can retry
+      this.setPauseState("paused");
       console.error("[ViewerSession] resume failed, remaining paused:", err);
-      // Keep pause state as-is so the UI shows the retryable error
       throw err;
     }
   }
@@ -406,11 +457,17 @@ export class ViewerSession {
   /**
    * Send a viewer.paused message to the host over the group control channel.
    *
-   * When paused=true, the host will find the viewer's video sender and set
-   * its encoding active=false. When paused=false, the host will re-enable
-   * the sender with the stored quality configuration.
+   * Includes the full transaction identity: groupId, logicalStreamId,
+   * mediaSessionId, viewerSessionId, viewerDeviceId, operationId, and
+   * the paused flag. The host responds with viewer.paused.result carrying
+   * the same operationId for correlation.
+   *
+   * Fire-and-forget — errors are caught internally.
+   *
+   * @param paused true to pause, false to resume
+   * @param operationId unique operation identifier for result correlation
    */
-  private buildAndSendViewerPaused(paused: boolean): void {
+  private sendViewerPauseRequest(paused: boolean, operationId: string): void {
     const runtime = getRuntime();
     if (!runtime || runtime.isDestroyed()) return;
     if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
@@ -422,12 +479,56 @@ export class ViewerSession {
     if (!peerUuid) return;
 
     void conn.sendToPeer(peerUuid, {
-      type: "viewer.paused",
+      type: "viewer.pause.request",
+      groupId: this.groupId,
       logicalStreamId: this.logicalStreamId,
+      mediaSessionId: this.mediaSessionId,
+      viewerSessionId: this._viewerSessionId ?? "",
       viewerDeviceId: runtime.deviceId ?? "viewer",
-      viewerSessionId: this._viewerSessionId ?? undefined,
+      operationId,
       paused,
     }).catch(() => {});
+  }
+
+  private assertPauseResult(
+    result: {
+      groupId: string;
+      logicalStreamId: string;
+      mediaSessionId: string;
+      viewerSessionId: string;
+      viewerDeviceId: string;
+      operationId: string;
+      paused: boolean;
+      success: boolean;
+      failureReason?: string;
+    },
+    operationId: string,
+    expectedPaused: boolean,
+  ): void {
+    const runtime = getRuntime();
+    const expectedViewerDeviceId = runtime?.deviceId ?? "viewer";
+
+    if (result.operationId !== operationId) {
+      throw new Error("stale pause result");
+    }
+
+    if (
+      result.groupId !== this.groupId ||
+      result.logicalStreamId !== this.logicalStreamId ||
+      result.mediaSessionId !== this.mediaSessionId ||
+      result.viewerSessionId !== (this._viewerSessionId ?? "") ||
+      result.viewerDeviceId !== expectedViewerDeviceId
+    ) {
+      throw new Error("pause result identity mismatch");
+    }
+
+    if (!result.success) {
+      throw new Error(result.failureReason || "pause request rejected");
+    }
+
+    if (result.paused !== expectedPaused) {
+      throw new Error("pause result state mismatch");
+    }
   }
 
   /**
@@ -880,6 +981,7 @@ export class ViewerSession {
         this.cancelReadinessTimer();
         this.clearStatusInterval();
         this.cancelPendingJoin();
+        this.cancelPendingPauseResult();
         this.cancelRemoteTrackEndedTimer();
         this.cancelSelfViewRetryTimer();
 
@@ -1661,6 +1763,20 @@ export class ViewerSession {
         runtime.cancelJoinResponse(this._pendingRequestId);
       }
       this._pendingRequestId = null;
+    }
+  }
+
+  /**
+   * Cancel any pending pause result waiter so the abandoned promise is
+   * rejected cleanly rather than left dangling until timeout.
+   */
+  private cancelPendingPauseResult(): void {
+    if (this._pendingPauseOperationId) {
+      const runtime = getRuntime();
+      if (runtime && !runtime.isDestroyed()) {
+        runtime.cancelViewerPauseResult(this._pendingPauseOperationId);
+      }
+      this._pendingPauseOperationId = null;
     }
   }
 

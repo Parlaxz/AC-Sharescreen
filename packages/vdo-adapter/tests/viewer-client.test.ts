@@ -197,6 +197,30 @@ describe("ViewerClient — pause / resume", () => {
     expect(mockSDK.view).not.toHaveBeenCalled();
   });
 
+  it("pauseMedia is synchronous (no async SDK ops)", () => {
+    mockSDK.view.mockClear();
+    // Should not return a promise — synchronous state setter
+    const result = client.pauseMedia();
+    expect(result).toBeUndefined();
+    expect(client.isUserPaused).toBe(true);
+    // No SDK calls of any kind
+    expect(mockSDK.stopViewing).not.toHaveBeenCalled();
+    expect(mockSDK.view).not.toHaveBeenCalled();
+  });
+
+  it("resumeMedia is synchronous (no async SDK ops)", () => {
+    mockSDK.view.mockClear();
+    client.pauseMedia();
+    expect(client.isUserPaused).toBe(true);
+
+    const result = client.resumeMedia();
+    expect(result).toBeUndefined();
+    expect(client.isUserPaused).toBe(false);
+    // No SDK calls
+    expect(mockSDK.stopViewing).not.toHaveBeenCalled();
+    expect(mockSDK.view).not.toHaveBeenCalled();
+  });
+
   it("pauseMedia while already paused is idempotent", async () => {
     await client.pauseMedia();
     expect(client.isUserPaused).toBe(true);
@@ -207,41 +231,37 @@ describe("ViewerClient — pause / resume", () => {
     expect(mockSDK.stopViewing).not.toHaveBeenCalled();
   });
 
-  it("resumeMedia without prior pause throws", async () => {
+  it("resumeMedia without prior pause throws", () => {
     // client is still viewing (not paused)
-    await expect(client.resumeMedia()).rejects.toThrow(
-      "resumeMedia called but viewer was not paused",
-    );
+    expect(() => client.resumeMedia()).toThrow("resumeMedia called but viewer was not paused");
     expect(client.isUserPaused).toBe(false);
   });
 
-  it("rapid pause → resume cycle is safe (no overlapping operations)", async () => {
+  it("rapid pause → resume cycle is safe (no overlapping operations)", () => {
     // Both start simultaneously — the second should be idempotent no-op
-    await expect(client.pauseMedia()).resolves.toBeUndefined();
+    expect(client.pauseMedia()).toBeUndefined();
     // Second concurrent pause is idempotent
-    await expect(client.pauseMedia()).resolves.toBeUndefined();
+    expect(client.pauseMedia()).toBeUndefined();
     expect(client.isUserPaused).toBe(true);
 
     // Now resume
-    await expect(client.resumeMedia()).resolves.toBeUndefined();
+    expect(client.resumeMedia()).toBeUndefined();
     // Second resume without being paused throws
-    await expect(client.resumeMedia()).rejects.toThrow("not paused");
+    expect(() => client.resumeMedia()).toThrow("not paused");
     expect(client.isUserPaused).toBe(false);
   });
 
   it("pauseMedia after shutdown is a no-op", async () => {
     await client.shutdown();
     // SDK should be null now
-    await expect(client.pauseMedia()).resolves.toBeUndefined();
+    expect(client.pauseMedia()).toBeUndefined();
     expect(client.isUserPaused).toBe(false);
   });
 
   it("resumeMedia after shutdown throws", async () => {
     await client.pauseMedia();
     await client.shutdown();
-    await expect(client.resumeMedia()).rejects.toThrow(
-      "ViewerClient is shutting down",
-    );
+    expect(() => client.resumeMedia()).toThrow("ViewerClient is shutting down");
   });
 
   it("pauseMedia preserves activeStreamId for reconnect path", async () => {
@@ -254,7 +274,7 @@ describe("ViewerClient — pause / resume", () => {
   it("pause during shutdown is no-op when shutdown started", async () => {
     // Start shutdown but don't await — simulate concurrent pause
     const shutdownPromise = client.shutdown();
-    await expect(client.pauseMedia()).resolves.toBeUndefined();
+    expect(client.pauseMedia()).toBeUndefined();
     expect(client.isUserPaused).toBe(false);
     await shutdownPromise;
   });
@@ -267,7 +287,7 @@ describe("ViewerClient — pause / resume", () => {
     expect(client.isUserPaused).toBe(false);
 
     // After shutdown, no further operations should work
-    await expect(client.resumeMedia()).rejects.toThrow("shutting down");
+    expect(() => client.resumeMedia()).toThrow("shutting down");
   });
 
   it("pauseMedia preserves data channel state for the existing connection", async () => {

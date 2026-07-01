@@ -11,7 +11,10 @@ exports.default = async function (context) {
   const requiredResources = [
     "screenlink-audio-helper.exe",
     "screenlink-video-enhancer.exe",
-    "tray-icon.png",
+    "tray-icon-blue.png",
+    "tray-icon-green.png",
+    "tray-icon-orange.png",
+    "tray-icon-red.png",
   ];
 
   for (const resource of requiredResources) {

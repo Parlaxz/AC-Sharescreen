@@ -611,3 +611,243 @@ describe("Stage 6: Quality message routing through GroupMessageRouter", () => {
     );
   });
 });
+
+// ─── Viewer Pause Request / Result routing ──────────────────────────────
+
+describe("viewer.pause.request/result routing", () => {
+  let router: GroupMessageRouter;
+  let syncService: any;
+  let streamRegistry: any;
+  let connManager: any;
+  let viewerBinding: any;
+
+  beforeEach(() => {
+    vi.stubGlobal("window", {
+      dispatchEvent: vi.fn(),
+      addEventListener: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function makePauseRequestEnvelope(
+    overrides: Record<string, unknown> = {},
+  ): GroupControlEnvelope {
+    return makeEnvelope("viewer.pause.request", {
+      groupId: GROUP_ID,
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      ...overrides,
+    }, ts(100, 0, "vd-1"));
+  }
+
+  function makePauseResultEnvelope(
+    overrides: Record<string, unknown> = {},
+  ): GroupControlEnvelope {
+    return makeEnvelope("viewer.pause.result", {
+      groupId: GROUP_ID,
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      success: true,
+      ...overrides,
+    }, ts(100, 0, "host-dev"));
+  }
+
+  beforeEach(() => {
+    viewerBinding = {
+      handleViewerPaused: vi.fn().mockResolvedValue({ status: "applied" }),
+    };
+    syncService = { handleGroupMessage: vi.fn() };
+    streamRegistry = {
+      handleStarted: vi.fn(),
+      handleHeartbeat: vi.fn(),
+      handleStopped: vi.fn(),
+      handleSnapshot: vi.fn(),
+      getAllStreams: vi.fn().mockReturnValue([]),
+    };
+    connManager = {
+      getConnection: vi.fn().mockReturnValue({
+        peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+        sendToPeer: vi.fn(),
+      }),
+    };
+
+    router = new GroupMessageRouter(
+      syncService as any,
+      streamRegistry as any,
+      connManager as any,
+      viewerBinding as any,
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── waiter methods ──────────────────────────────────────────────────
+
+  it("provides waitForViewerPauseResult and cancelViewerPauseResult", () => {
+    expect(typeof router.waitForViewerPauseResult).toBe("function");
+    expect(typeof router.cancelViewerPauseResult).toBe("function");
+  });
+
+  it("waitForViewerPauseResult resolves when viewer.pause.result arrives", async () => {
+    const waiter = router.waitForViewerPauseResult("op-1", 5000);
+    const envelope = makePauseResultEnvelope({ operationId: "op-1" });
+    router.routeMessage(GROUP_ID, envelope);
+    const result = await waiter;
+    expect(result.operationId).toBe("op-1");
+    expect(result.success).toBe(true);
+    expect(result.paused).toBe(true);
+  });
+
+  it("waitForViewerPauseResult rejects on timeout", async () => {
+    const waiter = router.waitForViewerPauseResult("op-timeout", 10);
+    await expect(waiter).rejects.toThrow(/timeout/i);
+  });
+
+  it("cancelViewerPauseResult rejects the pending promise", async () => {
+    const waiter = router.waitForViewerPauseResult("op-cancel", 5000);
+    waiter.catch(() => {});
+    router.cancelViewerPauseResult("op-cancel");
+    await expect(waiter).rejects.toThrow(/cancel/i);
+  });
+
+  it("cancelViewerPauseResult is idempotent", async () => {
+    const waiter = router.waitForViewerPauseResult("op-safe", 5000);
+    waiter.catch(() => {});
+    expect(() => {
+      router.cancelViewerPauseResult("op-safe");
+      router.cancelViewerPauseResult("op-safe");
+    }).not.toThrow();
+    await expect(waiter).rejects.toThrow();
+  });
+
+  it("rejects duplicate waitForViewerPauseResult for same operationId", () => {
+    const w = router.waitForViewerPauseResult("op-dup", 5000);
+    w.catch(() => {});
+    expect(() => {
+      router.waitForViewerPauseResult("op-dup", 5000);
+    }).toThrow(/duplicate/i);
+    router.cancelViewerPauseResult("op-dup");
+  });
+
+  it("viewer.pause.result without waiter dispatches browser event", () => {
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+
+    const envelope = makePauseResultEnvelope({ operationId: "op-no-waiter" });
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "screenlink:viewer-pause-result",
+      }),
+    );
+    const event = dispatchSpy.mock.calls[0][0] as CustomEvent;
+    expect(event.detail.operationId).toBe("op-no-waiter");
+    expect(event.detail.success).toBe(true);
+  });
+
+  it("viewer.pause.result with waiter does not dispatch browser event", () => {
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+
+    router.waitForViewerPauseResult("op-no-event", 5000);
+    const envelope = makePauseResultEnvelope({ operationId: "op-no-event" });
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(dispatchSpy).not.toHaveBeenCalled();
+  });
+
+  // ── request routing ──────────────────────────────────────────────────
+
+  it("routes viewer.pause.request to viewerBinding.handleViewerPaused with exact mediaSessionId", () => {
+    const envelope = makePauseRequestEnvelope();
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(viewerBinding.handleViewerPaused).toHaveBeenCalledWith(
+      "vd-1",
+      "ms-1",
+      true,
+    );
+  });
+
+  it("routes viewer.pause.request with paused=false for resume", () => {
+    const envelope = makePauseRequestEnvelope({ paused: false });
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(viewerBinding.handleViewerPaused).toHaveBeenCalledWith(
+      "vd-1",
+      "ms-1",
+      false,
+    );
+  });
+
+  it("rejects malformed viewer.pause.request (missing required fields)", () => {
+    const envelope = makeEnvelope("viewer.pause.request", {
+      logicalStreamId: "ls-1",
+    }, ts(100, 0, "vd-1"));
+
+    router.routeMessage(GROUP_ID, envelope);
+    expect(viewerBinding.handleViewerPaused).not.toHaveBeenCalled();
+  });
+
+  it("does not route viewer.pause.request when viewerBinding is not set", () => {
+    const routerNoBinding = new GroupMessageRouter(
+      syncService as any,
+      streamRegistry as any,
+      connManager as any,
+    );
+    const envelope = makePauseRequestEnvelope();
+    expect(() => routerNoBinding.routeMessage(GROUP_ID, envelope)).not.toThrow();
+  });
+
+  it("viewer.pause.request does not trigger fuzzy scan (no findViewerMappingForLogicalStream)", () => {
+    const envelope = makePauseRequestEnvelope({ viewerDeviceId: "different-vd" });
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(viewerBinding.handleViewerPaused).toHaveBeenCalledWith(
+      "different-vd",
+      "ms-1",
+      true,
+    );
+  });
+
+  // ── result routing resolves correct waiter by operationId ───────────
+
+  it("viewer.pause.result resolves correct waiter when multiple are pending", async () => {
+    const waiter1 = router.waitForViewerPauseResult("op-a", 5000);
+    const waiter2 = router.waitForViewerPauseResult("op-b", 5000);
+
+    const resultEnvelope = makePauseResultEnvelope({
+      operationId: "op-b",
+      success: false,
+      failureReason: "Host busy",
+    });
+    router.routeMessage(GROUP_ID, resultEnvelope);
+
+    const result = await waiter2;
+    expect(result.operationId).toBe("op-b");
+    expect(result.success).toBe(false);
+    expect(result.failureReason).toBe("Host busy");
+
+    // waiter1 should still be pending
+    let waiter1Rejected = false;
+    waiter1.catch(() => { waiter1Rejected = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(waiter1Rejected).toBe(false);
+
+    // Clean up
+    router.cancelViewerPauseResult("op-a");
+    await expect(waiter1).rejects.toThrow(/cancel/i);
+  });
+});

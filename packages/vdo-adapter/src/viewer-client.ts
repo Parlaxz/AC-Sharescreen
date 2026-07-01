@@ -368,12 +368,15 @@ export class ViewerClient {
   }
 
   /**
-   * Pause media playback — mark state only, keep the WebRTC connection alive.
+   * Pause media playback — synchronous local intent marker only.
    *
-   * Unlike the old implementation, this does NOT call stopViewing() on the SDK.
-   * The media connection stays intact; the host-side disables the sender
-   * encoding (active=false). On resume the host re-enables it with the stored
-   * quality configuration.
+   * Does NOT call stopViewing() on the SDK. The media connection stays intact;
+   * the host-side disables the sender encoding (active=false). On resume the
+   * host re-enables it with the stored quality configuration.
+   *
+   * This is NOT authoritative proof of pause — it is a synchronous local-state
+   * marker. The authoritative pause confirmation comes from the host via
+   * the viewer.paused.result message (handled by ViewerSession).
    *
    * Safe to call when already paused (no-op), when shutting down (no-op), or
    * when no stream is active (no-op).
@@ -382,7 +385,7 @@ export class ViewerClient {
    *   playing → pauseMedia() → paused  (connection kept alive)
    *   paused  → pauseMedia() → (no-op, still paused)
    */
-  async pauseMedia(): Promise<void> {
+  pauseMedia(): void {
     if (this._shuttingDown || this._shutdownPromise) return;
     if (this._userPaused) return;     // already paused — idempotent
 
@@ -394,19 +397,23 @@ export class ViewerClient {
   }
 
   /**
-   * Resume a user-paused media stream — mark state only.
+   * Resume a user-paused media stream — synchronous local intent marker only.
    *
    * The WebRTC connection was never torn down during pause, so no
    * view() call, no fresh token, and no media.bind are needed.
    * The host-side re-activates the sender encoding with the stored
    * quality configuration.
    *
+   * This is NOT authoritative proof of resume — it is a synchronous local-state
+   * marker. The authoritative resume confirmation comes from the host via
+   * the viewer.paused.result message (handled by ViewerSession).
+   *
    * State machine:
    *   paused → resumeMedia() → playing  (existing connection reused)
    *
    * @throws CompatibilityError if not paused or shutting down
    */
-  async resumeMedia(): Promise<void> {
+  resumeMedia(): void {
     if (this._shuttingDown || this._shutdownPromise) {
       throw new CompatibilityError("ViewerClient is shutting down — cannot resume");
     }

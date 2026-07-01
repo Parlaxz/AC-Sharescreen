@@ -175,6 +175,8 @@ import {
   StreamBindAckPayloadSchema,
   ViewerStatusPayloadSchema,
   ViewerPausedPayloadSchema,
+  ViewerPauseRequestPayloadSchema,
+  ViewerPauseResultPayloadSchema,
   parseGroupMessagePayload,
 } from "@screenlink/shared";
 
@@ -402,4 +404,202 @@ describe("Compare correlation fields", () => {
 
   // viewer.paused and viewer.status compare correlation tests removed —
   // all compare is now viewer-only, no protocol compare fields needed.
+});
+
+// ─── Viewer Pause Request / Result Schemas ──────────────────────────────
+
+describe("ViewerPauseRequestPayloadSchema", () => {
+  it("accepts valid pause request", () => {
+    const result = ViewerPauseRequestPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts valid resume request", () => {
+    const result = ViewerPauseRequestPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-2",
+      paused: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects missing groupId", () => {
+    const result = ViewerPauseRequestPayloadSchema.safeParse({
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects missing paused field", () => {
+    const result = ViewerPauseRequestPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects extra unknown fields (strict mode)", () => {
+    const result = ViewerPauseRequestPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      extra: "should-not-be-here",
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("ViewerPauseResultPayloadSchema", () => {
+  it("accepts successful pause result", () => {
+    const result = ViewerPauseResultPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      success: true,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts failed pause result with failureReason", () => {
+    const result = ViewerPauseResultPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      success: false,
+      failureReason: "Host rejected pause",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects missing success field", () => {
+    const result = ViewerPauseResultPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects missing operationId", () => {
+    const result = ViewerPauseResultPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      paused: true,
+      success: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects extra unknown fields (strict mode)", () => {
+    const result = ViewerPauseResultPayloadSchema.safeParse({
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      success: true,
+      extra: "should-not-be-here",
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("viewer.pause.request/result in GROUP_CONTROL_MESSAGE_TYPES", () => {
+  it("includes viewer.pause.request in the message types list", () => {
+    expect(GROUP_CONTROL_MESSAGE_TYPES).toContain("viewer.pause.request");
+  });
+
+  it("includes viewer.pause.result in the message types list", () => {
+    expect(GROUP_CONTROL_MESSAGE_TYPES).toContain("viewer.pause.result");
+  });
+
+  it("no longer includes viewer.paused in the message types list", () => {
+    expect(GROUP_CONTROL_MESSAGE_TYPES).not.toContain("viewer.paused");
+  });
+});
+
+describe("parseGroupMessagePayload for viewer.pause.request/result", () => {
+  it("parses viewer.pause.request successfully", () => {
+    const result = parseGroupMessagePayload("viewer.pause.request", {
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.paused).toBe(true);
+      expect(result.data.operationId).toBe("op-1");
+    }
+  });
+
+  it("parses viewer.pause.result successfully", () => {
+    const result = parseGroupMessagePayload("viewer.pause.result", {
+      groupId: "g-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      viewerSessionId: "vs-1",
+      viewerDeviceId: "vd-1",
+      operationId: "op-1",
+      paused: true,
+      success: true,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.success).toBe(true);
+      expect(result.data.operationId).toBe("op-1");
+    }
+  });
+
+  it("returns ok:false for viewer.pause.request with invalid payload", () => {
+    const result = parseGroupMessagePayload("viewer.pause.request", {
+      logicalStreamId: "ls-1",
+    });
+    expect(result.ok).toBe(false);
+  });
 });

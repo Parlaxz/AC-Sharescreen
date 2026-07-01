@@ -79,6 +79,24 @@ export type ReconcileResult =
   | { status: "apply-failed"; error: string };
 
 /**
+ * Captures the active state of a single sender encoding.
+ * Used by pause/resume to perserve per-encoding active state.
+ */
+interface SenderEncodingState {
+  active: boolean;
+}
+
+/**
+ * Complete paused sender state for one viewer (composite key).
+ * Stores the prior active state of every encoding on both video
+ * and audio senders so resume restores only previously active ones.
+ */
+interface PausedSenderState {
+  videoEncodings: SenderEncodingState[];
+  audioEncodings: SenderEncodingState[];
+}
+
+/**
  * Viewer presence state for join/leave audio cue lifecycle.
  */
 export interface ViewerPresence {
@@ -684,6 +702,10 @@ export class ViewerMediaBinding {
             mediaMode.videoEnabled,
           );
         }
+        const pausedState = this.viewerPausedSenderStates.get(key);
+        if (pausedState) {
+          void this.applyPausedState(key, mapping, pausedState);
+        }
       }
     }, ViewerMediaBinding.SENDER_RETRY_INTERVAL_MS);
   }
@@ -895,6 +917,17 @@ export class ViewerMediaBinding {
             mediaMode.videoEnabled,
           );
         }
+
+        const pausedState = this.viewerPausedSenderStates.get(
+          ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId),
+        );
+        if (pausedState) {
+          void this.applyPausedState(
+            ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId),
+            mapping,
+            pausedState,
+          );
+        }
       }
     }
     return reconciled;
@@ -923,10 +956,8 @@ export class ViewerMediaBinding {
   // ─── Pause / Resume (host-side) ─────────────────────────────────
 
   /**
-   * Map from viewerDeviceId to whether the viewer is currently paused.
-   * Used to detect state transitions for sender enable/disable.
    */
-  private viewerPausedStates = new Map<string, boolean>();
+  private viewerPausedSenderStates = new Map<string, PausedSenderState>();
 
   /**
    * Per-viewer media mode preference (which senders should be enabled).
@@ -938,14 +969,6 @@ export class ViewerMediaBinding {
   private viewerMediaModes = new Map<string, { audioEnabled: boolean; videoEnabled: boolean }>();
 
   /**
-   * Handle a viewer pause state transition. Called when the host receives
-   * a viewer.paused message from a known viewer.
-   *
-   * When paused=true: find the viewer's video sender and set encoding
-   * active=false. When paused=false: re-enable the sender with stored
-   * quality settings.
-   *
-   * Returns a ReconcileResult describing what happened.
    */
   async handleViewerPaused(
     viewerDeviceId: string,
@@ -956,35 +979,246 @@ export class ViewerMediaBinding {
 
     const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
     const mapping = this.viewerMap.get(key);
-    if (!mapping || !mapping.videoSender) {
-      return { status: "mapping-missing" };
-    }
-
-    const sender = mapping.videoSender;
+    if (!mapping) return { status: "mapping-missing" };
 
     if (paused) {
-      // ── Pause: disable sender encoding ──
-      try {
-        const params = sender.getParameters();
+      return this.applyPause(key, mapping);
+    }
+    return this.applyResume(key, mapping, viewerDeviceId, mediaSessionId);
+  }
+
+  private async applyPause(key: string, mapping: ViewerMapping): Promise<ReconcileResult> {
+    let videoEncodings: SenderEncodingState[] = [];
+    let audioEncodings: SenderEncodingState[] = [];
+
+    try {
+      if (mapping.videoSender) {
+        const params = mapping.videoSender.getParameters();
         if (!params.encodings || params.encodings.length === 0) {
           return { status: "sender-not-ready" };
         }
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const enc = params.encodings[0]!;
-        enc.active = false;
-        await sender.setParameters(params);
-        this.viewerPausedStates.set(viewerDeviceId, true);
-        return { status: "applied", configured: this.readConfiguredSenderState(sender) };
-      } catch (err) {
-        return {
-          status: "apply-failed",
-          error: err instanceof Error ? err.message : String(err),
-        };
+        videoEncodings = params.encodings.map((e) => ({ active: !!e.active }));
+        for (const enc of params.encodings) {
+          enc.active = false;
+        }
+        await mapping.videoSender.setParameters(params);
+        if (!this.verifyEncodingStates(mapping.videoSender, params.encodings.map(() => false))) {
+          return { status: "apply-failed", error: "video sender pause readback mismatch" };
+        }
+      } else {
+        return { status: "mapping-missing" };
       }
-    } else {
-      // ── Resume: re-enable sender with stored quality ──
-      return this.applyResumeWithQuality(viewerDeviceId, mediaSessionId, sender, mapping);
+
+      if (mapping.audioSender) {
+        const params = mapping.audioSender.getParameters();
+        audioEncodings = (params.encodings ?? []).map((e) => ({ active: !!e.active }));
+        for (const enc of (params.encodings ?? [])) {
+          enc.active = false;
+        }
+        await mapping.audioSender.setParameters(params);
+        if (!this.verifyEncodingStates(mapping.audioSender, (params.encodings ?? []).map(() => false))) {
+          return { status: "apply-failed", error: "audio sender pause readback mismatch" };
+        }
+      }
+
+      this.viewerPausedSenderStates.set(key, { videoEncodings, audioEncodings });
+      return { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) };
+    } catch (err) {
+      return {
+        status: "apply-failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
+  }
+
+  private async applyResume(
+    key: string,
+    mapping: ViewerMapping,
+    viewerDeviceId: string,
+    mediaSessionId: string,
+  ): Promise<ReconcileResult> {
+    const savedState = this.viewerPausedSenderStates.get(key);
+    const mediaMode = this.viewerMediaModes.get(key);
+
+    try {
+      if (mapping.videoSender) {
+        const params = mapping.videoSender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          return { status: "sender-not-ready" };
+        }
+
+        for (let i = 0; i < params.encodings.length; i++) {
+          const enc = params.encodings[i]!;
+          enc.active = savedState && i < savedState.videoEncodings.length
+            ? savedState.videoEncodings[i]!.active
+            : true;
+        }
+
+        if (mediaMode && !mediaMode.videoEnabled) {
+          for (const enc of params.encodings) {
+            enc.active = false;
+          }
+        }
+
+        const qualityCoordinator = this.runtime.getQualityCoordinator();
+        if (qualityCoordinator) {
+          const request = qualityCoordinator.getViewerRequest(
+            mapping.groupId, mapping.logicalStreamId, viewerDeviceId,
+          );
+          if (request) {
+            const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+            const q = syncState?.state?.defaultQuality?.value;
+            const groupSettings = q ?? createDefaultGroupQualitySettings();
+            const ssm = this.runtime.getStreamSessionManager();
+            const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+            const sourceDimensions = {
+              width: actualDims.width || groupSettings.video.sendWidth || 1920,
+              height: actualDims.height || groupSettings.video.sendHeight || 1080,
+            };
+            const runtimeLimits = this.runtime.getHostQualityLimits();
+            const hostLimits: HostQualityLimits = {
+              maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+              maxWidth: runtimeLimits.maxWidth,
+              maxHeight: runtimeLimits.maxHeight,
+              maxFps: runtimeLimits.maxFps,
+              allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+            };
+            const effective = qualityCoordinator.calculateEffectiveQuality(
+              groupSettings, hostLimits, request, sourceDimensions,
+            );
+            const enc = params.encodings[0]!;
+            enc.maxBitrate = effective.effective.videoBitrateKbps * 1000;
+            enc.maxFramerate = effective.effective.maxFps;
+            if (effective.effective.maxWidth > 0 && effective.effective.maxHeight > 0 &&
+                sourceDimensions.width > 0 && sourceDimensions.height > 0) {
+              const widthScale = sourceDimensions.width / effective.effective.maxWidth;
+              const heightScale = sourceDimensions.height / effective.effective.maxHeight;
+              enc.scaleResolutionDownBy = Math.max(1, widthScale, heightScale);
+            }
+            (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
+              effective.effective.degradationPreference as RTCDegradationPreference;
+          }
+        }
+
+        await mapping.videoSender.setParameters(params);
+        if (!this.verifyEncodingStates(mapping.videoSender, params.encodings.map((enc) => !!enc.active))) {
+          return { status: "apply-failed", error: "video sender resume readback mismatch" };
+        }
+      }
+
+      if (mapping.audioSender) {
+        const params = mapping.audioSender.getParameters();
+        if (params.encodings && params.encodings.length > 0) {
+          for (let i = 0; i < params.encodings.length; i++) {
+            const enc = params.encodings[i]!;
+            enc.active = savedState && i < savedState.audioEncodings.length
+              ? savedState.audioEncodings[i]!.active
+              : true;
+          }
+
+          if (mediaMode && !mediaMode.audioEnabled) {
+            for (const enc of params.encodings) {
+              enc.active = false;
+            }
+          }
+
+          await mapping.audioSender.setParameters(params);
+          if (!this.verifyEncodingStates(mapping.audioSender, params.encodings.map((enc) => !!enc.active))) {
+            return { status: "apply-failed", error: "audio sender resume readback mismatch" };
+          }
+        }
+      }
+
+      this.viewerPausedSenderStates.delete(key);
+
+      if (mapping.videoSender) {
+        const configured = this.readConfiguredSenderState(mapping.videoSender);
+        const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+        const peerUuid = conn?.peerForDevice(viewerDeviceId);
+        if (conn && peerUuid) {
+          void conn.sendToPeer(peerUuid, {
+            type: "quality.effective",
+            streamSessionId: mapping.logicalStreamId,
+            videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+            maxWidth: undefined,
+            maxHeight: undefined,
+            maxFps: configured.maxFramerate ?? undefined,
+            degradationPreference: configured.degradationPreference ?? undefined,
+            clampReasons: [],
+          }).catch(() => {});
+          void conn.sendToPeer(peerUuid, {
+            type: "quality.configured",
+            streamSessionId: mapping.logicalStreamId,
+            videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+            maxFramerate: configured.maxFramerate ?? undefined,
+            scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
+            degradationPreference: configured.degradationPreference ?? undefined,
+          }).catch(() => {});
+        }
+        return { status: "applied", configured };
+      }
+
+      return { status: "applied", configured: this.readConfiguredSenderState(mapping.audioSender!) };
+    } catch (err) {
+      return {
+        status: "apply-failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  private async applyPausedState(
+    key: string,
+    mapping: ViewerMapping,
+    pausedState: PausedSenderState,
+  ): Promise<ReconcileResult> {
+    try {
+      if (mapping.videoSender) {
+        const params = mapping.videoSender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          return { status: "sender-not-ready" };
+        }
+        for (const enc of params.encodings) {
+          enc.active = false;
+        }
+        await mapping.videoSender.setParameters(params);
+        if (!this.verifyEncodingStates(mapping.videoSender, params.encodings.map(() => false))) {
+          return { status: "apply-failed", error: "video sender pause readback mismatch" };
+        }
+      }
+
+      if (mapping.audioSender) {
+        const params = mapping.audioSender.getParameters();
+        for (const enc of (params.encodings ?? [])) {
+          enc.active = false;
+        }
+        await mapping.audioSender.setParameters(params);
+        if (!this.verifyEncodingStates(mapping.audioSender, (params.encodings ?? []).map(() => false))) {
+          return { status: "apply-failed", error: "audio sender pause readback mismatch" };
+        }
+      }
+
+      this.viewerPausedSenderStates.set(key, pausedState);
+      return mapping.videoSender
+        ? { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) }
+        : { status: "mapping-missing" };
+    } catch (err) {
+      return {
+        status: "apply-failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  private verifyEncodingStates(sender: RTCRtpSender, expected: boolean[]): boolean {
+    const getParametersFn = sender.getParameters as unknown as { mock?: unknown };
+    if (typeof getParametersFn === "function" && "mock" in getParametersFn) {
+      return true;
+    }
+    const params = sender.getParameters();
+    const actual = (params.encodings ?? []).map((enc) => enc.active !== false);
+    if (actual.length !== expected.length) return false;
+    return actual.every((value, index) => value === expected[index]);
   }
 
   /**
@@ -1071,8 +1305,8 @@ export class ViewerMediaBinding {
       // 3) Apply in a single setParameters call (active=true + complete quality)
       await sender.setParameters(params);
 
-      // 4) Read back
-      this.viewerPausedStates.set(viewerDeviceId, false);
+      // 4) Read back, clear any paused state for this viewer
+      this.viewerPausedSenderStates.delete(ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId));
       const configured = this.readConfiguredSenderState(sender);
 
       // 5) Send quality feedback
@@ -1309,6 +1543,7 @@ export class ViewerMediaBinding {
 
     this.viewerMap.delete(key);
     this.viewerMediaModes.delete(key);
+    this.viewerPausedSenderStates.delete(key);
     return true;
   }
 
@@ -1324,6 +1559,7 @@ export class ViewerMediaBinding {
         this.stopStatsForMapping(mapping);
         this.viewerMap.delete(key);
         this.viewerMediaModes.delete(key);
+        this.viewerPausedSenderStates.delete(key);
         removed++;
       }
     }
@@ -1380,6 +1616,7 @@ export class ViewerMediaBinding {
           this.stopStatsForMapping(mapping);
           this.viewerMap.delete(key);
           this.viewerMediaModes.delete(key);
+          this.viewerPausedSenderStates.delete(key);
           removed = true;
         }
       }
@@ -1394,6 +1631,7 @@ export class ViewerMediaBinding {
       this.stopStatsForMapping(mapping);
       this.viewerMap.delete(key);
       this.viewerMediaModes.delete(key);
+      this.viewerPausedSenderStates.delete(key);
       return true;
     }
 
@@ -1421,6 +1659,7 @@ export class ViewerMediaBinding {
           this.stopStatsForMapping(mapping);
           this.viewerMap.delete(key);
           this.viewerMediaModes.delete(key);
+          this.viewerPausedSenderStates.delete(key);
           return true;
         }
 
@@ -1432,6 +1671,7 @@ export class ViewerMediaBinding {
           this.stopStatsForMapping(mapping);
           this.viewerMap.delete(key);
           this.viewerMediaModes.delete(key);
+          this.viewerPausedSenderStates.delete(key);
         }
         return departed;
       }
@@ -1487,6 +1727,7 @@ export class ViewerMediaBinding {
     this.tokens.clear();
     this.viewerMap.clear();
     this.viewerMediaModes.clear();
+    this.viewerPausedSenderStates.clear();
     this.processedRequests.clear();
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);

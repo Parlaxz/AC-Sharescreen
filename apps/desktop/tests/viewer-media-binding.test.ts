@@ -1521,4 +1521,684 @@ describe("ViewerMediaBinding (Stage 5)", () => {
     );
     expect(sendToPeer).not.toHaveBeenCalled();
   });
+
+  // ─── Pause / Resume (Task B) ──────────────────────────────────────
+  //
+  // Requirements:
+  //   1. Per-viewer host media pause/resume via composite identity
+  //   2. Pause disables ALL encodings for video AND audio senders
+  //   3. Prior active state persisted so resume restores only active
+  //   4. Respect viewer media mode on resume
+  //   5. Reapply stored video quality on resume
+  //   6. Verify configured readback
+  //   7. Reapply paused state after sender reconciliation
+
+  it("handleViewerPaused returns mapping-missing for unknown composite key", async () => {
+    const result = await binding.handleViewerPaused("unknown-viewer", "unknown-session", true);
+    expect(result).toEqual({ status: "mapping-missing" });
+  });
+
+  it("handleViewerPaused returns sender-not-ready when video sender has no encodings", async () => {
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: vi.fn(() => ({
+          encodings: [],
+          codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-1",
+        })),
+        setParameters: vi.fn(),
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect(result).toEqual({ status: "sender-not-ready" });
+  });
+
+  it("handleViewerPaused disables all video sender encodings on pause", async () => {
+    const setParameters = vi.fn();
+    const getParameters = vi.fn(() => ({
+      encodings: [
+        { active: true, maxBitrate: 5000000 },
+        { active: true, maxBitrate: 1000000 },
+      ],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-1",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters,
+        setParameters,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", true);
+
+    expect(result.status).toBe("applied");
+    expect(setParameters).toHaveBeenCalledTimes(1);
+    const appliedParams = setParameters.mock.calls[0][0];
+    // Both encodings must be inactive
+    for (const enc of appliedParams.encodings) {
+      expect(enc.active).toBe(false);
+    }
+    // Returned configured readback is present
+    expect((result as any).configured).toBeDefined();
+  });
+
+  it("handleViewerPaused disables all audio sender encodings on pause", async () => {
+    const videoSetParams = vi.fn();
+    const audioSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true, maxBitrate: 3000000 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+    const audioGetParams = vi.fn(() => ({
+      encodings: [
+        { active: true },
+        { active: true },
+      ],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-a",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: {
+        track: { kind: "audio" },
+        getParameters: audioGetParams,
+        setParameters: audioSetParams,
+      } as unknown as RTCRtpSender,
+    });
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", true);
+
+    expect(result.status).toBe("applied");
+    // Video sender was updated
+    expect(videoSetParams).toHaveBeenCalledTimes(1);
+    expect(videoSetParams.mock.calls[0][0].encodings[0].active).toBe(false);
+    // Audio sender was updated — both encodings disabled
+    expect(audioSetParams).toHaveBeenCalledTimes(1);
+    for (const enc of audioSetParams.mock.calls[0][0].encodings) {
+      expect(enc.active).toBe(false);
+    }
+  });
+
+  it("handleViewerPaused saves prior active state and resume restores only previously active encodings", async () => {
+    const videoSetParams = vi.fn();
+    const audioSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [
+        { active: true, maxBitrate: 5000000 },
+        { active: false, maxBitrate: 1000000 },
+      ],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+    const audioGetParams = vi.fn(() => ({
+      encodings: [
+        { active: true },
+        { active: false },
+      ],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-a",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: {
+        track: { kind: "audio" },
+        getParameters: audioGetParams,
+        setParameters: audioSetParams,
+      } as unknown as RTCRtpSender,
+    });
+
+    // Pause
+    await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect(videoSetParams.mock.calls[0][0].encodings[0].active).toBe(false);
+    expect(videoSetParams.mock.calls[0][0].encodings[1].active).toBe(false);
+    expect(audioSetParams.mock.calls[0][0].encodings[0].active).toBe(false);
+    expect(audioSetParams.mock.calls[0][0].encodings[1].active).toBe(false);
+
+    // Resume — restore prior active states
+    videoGetParams.mockReturnValue({
+      encodings: [
+        { active: false, maxBitrate: 5000000 },
+        { active: false, maxBitrate: 1000000 },
+      ],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    });
+    audioGetParams.mockReturnValue({
+      encodings: [
+        { active: false },
+        { active: false },
+      ],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-a",
+    });
+    videoSetParams.mockClear();
+    audioSetParams.mockClear();
+
+    await binding.handleViewerPaused("viewer-1", "ms-1", false);
+
+    // Encoding 0 was active before → should be active again
+    expect(videoSetParams).toHaveBeenCalled();
+    expect(videoSetParams.mock.calls[0][0].encodings[0].active).toBe(true);
+    // Encoding 1 was inactive before → should remain inactive
+    expect(videoSetParams.mock.calls[0][0].encodings[1].active).toBe(false);
+    // Audio encoding 0 was active → should be active again
+    expect(audioSetParams.mock.calls[0][0].encodings[0].active).toBe(true);
+    // Audio encoding 1 was inactive → should remain inactive
+    expect(audioSetParams.mock.calls[0][0].encodings[1].active).toBe(false);
+  });
+
+  it("handleViewerPaused respects viewer media mode on resume", async () => {
+    const videoSetParams = vi.fn();
+    const audioSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true, maxBitrate: 5000000 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+    const audioGetParams = vi.fn(() => ({
+      encodings: [{ active: true }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-a",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: {
+        track: { kind: "audio" },
+        getParameters: audioGetParams,
+        setParameters: audioSetParams,
+      } as unknown as RTCRtpSender,
+    });
+
+    // Store media mode: video disabled, audio enabled
+    (binding as any).viewerMediaModes.set("viewer-1::ms-1", {
+      audioEnabled: true,
+      videoEnabled: false,
+    });
+
+    // Pause
+    await binding.handleViewerPaused("viewer-1", "ms-1", true);
+
+    // Resume
+    videoGetParams.mockReturnValue({
+      encodings: [{ active: false, maxBitrate: 5000000 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    });
+    audioGetParams.mockReturnValue({
+      encodings: [{ active: false }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-a",
+    });
+    videoSetParams.mockClear();
+    audioSetParams.mockClear();
+
+    await binding.handleViewerPaused("viewer-1", "ms-1", false);
+
+    // Video encoding should stay inactive because media mode said videoEnabled=false
+    expect(videoSetParams).toHaveBeenCalled();
+    expect(videoSetParams.mock.calls[0][0].encodings[0].active).toBe(false);
+    // Audio should be re-enabled
+    expect(audioSetParams).toHaveBeenCalled();
+    expect(audioSetParams.mock.calls[0][0].encodings[0].active).toBe(true);
+  });
+
+  it("handleViewerPaused re-applies stored video quality on resume", async () => {
+    const videoSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true, maxBitrate: 5000000, maxFramerate: 30, scaleResolutionDownBy: 1 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+    const sendToPeer = vi.fn().mockResolvedValue(undefined);
+
+    const qualityCoordinator = {
+      getViewerRequest: vi.fn().mockReturnValue({
+        streamSessionId: "stream-1",
+        requestId: "req-1",
+        revision: 1,
+        videoBitrateKbps: 1200,
+        maxWidth: 1280,
+        maxHeight: 720,
+        maxFps: 24,
+        degradationPreference: "balanced",
+      }),
+      calculateEffectiveQuality: vi.fn().mockReturnValue({
+        effective: {
+          videoBitrateKbps: 1200,
+          maxWidth: 1280,
+          maxHeight: 720,
+          maxFps: 24,
+          degradationPreference: "balanced",
+        },
+        clampReasons: [],
+      }),
+      applyToExactViewer: vi.fn().mockResolvedValue({
+        maxBitrate: 1200000,
+        maxFramerate: 24,
+        scaleResolutionDownBy: 1,
+        degradationPreference: "balanced",
+        priority: "medium",
+      }),
+    };
+
+    const runtimeAny = runtime as any;
+    runtimeAny.getQualityCoordinator = () => qualityCoordinator;
+    runtimeAny.getConnectionManager = () => ({
+      getConnection: vi.fn().mockReturnValue({
+        peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+        sendToPeer,
+      }),
+    });
+    runtimeAny.getSyncService = () => ({ getSyncState: vi.fn().mockReturnValue(null) });
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    // Pause
+    await binding.handleViewerPaused("viewer-1", "ms-1", true);
+
+    // Resume
+    videoGetParams.mockReturnValue({
+      encodings: [{ active: false, maxBitrate: 5000000, maxFramerate: 30, scaleResolutionDownBy: 1 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    });
+    videoSetParams.mockClear();
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", false);
+
+    expect(result.status).toBe("applied");
+    const configured = (result as any).configured;
+    expect(configured.maxBitrate).toBeGreaterThan(0);
+    // Quality coordinator was consulted
+    expect(qualityCoordinator.getViewerRequest).toHaveBeenCalled();
+    expect(qualityCoordinator.calculateEffectiveQuality).toHaveBeenCalled();
+  });
+
+  it("handleViewerPaused returns configured readback on success", async () => {
+    const videoSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true, maxBitrate: 5000000, maxFramerate: 30 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect(result.status).toBe("applied");
+    const configured = (result as any).configured as import("../src/renderer/services/viewer-media-binding.js").SenderSettingsReadback;
+    expect(configured.maxBitrate).toBe(5000000);
+    expect(configured.maxFramerate).toBe(30);
+  });
+
+  it("handleViewerPaused returns apply-failed when setParameters throws on pause", async () => {
+    const failingSetParams = vi.fn().mockRejectedValue(new Error("setParameters failed"));
+    const getParams = vi.fn(() => ({
+      encodings: [{ active: true }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-1",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: getParams,
+        setParameters: failingSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect(result.status).toBe("apply-failed");
+    expect((result as any).error).toContain("setParameters failed");
+  });
+
+  it("handleViewerPaused returns apply-failed when setParameters throws on resume", async () => {
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+    const audioGetParams = vi.fn(() => ({
+      encodings: [{ active: true }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-a",
+    }));
+    const videoSetParams = vi.fn();
+    const audioSetParams = vi.fn();
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: {
+        track: { kind: "audio" },
+        getParameters: audioGetParams,
+        setParameters: audioSetParams,
+      } as unknown as RTCRtpSender,
+    });
+
+    // Pre-pause so we have saved state
+    const pauseResult = await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect(pauseResult.status).toBe("applied");
+
+    // Resume with failing video setParameters
+    videoGetParams.mockReturnValue({
+      encodings: [{ active: false }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    });
+    videoSetParams.mockClear();
+    videoSetParams.mockRejectedValue(new Error("video resume failed"));
+
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", false);
+    expect(result.status).toBe("apply-failed");
+    expect((result as any).error).toContain("video resume failed");
+  });
+
+  it("handleViewerPaused resumes correctly when paused sender state is missing (fallback)", async () => {
+    const videoSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: false, maxBitrate: 5000000 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    // Resume without having paused first — no saved state, should fall back
+    // to reactivating all encodings
+    const result = await binding.handleViewerPaused("viewer-1", "ms-1", false);
+    expect(result.status).toBe("applied");
+    expect(videoSetParams).toHaveBeenCalled();
+    // Fallback: set active=true for all encodings
+    expect(videoSetParams.mock.calls[0][0].encodings[0].active).toBe(true);
+  });
+
+  it("reapplies paused sender state after reconcileViewerByPeerUuid", async () => {
+    // This test verifies that after a reconnect (sender replacement),
+    // the paused state is reapplied to keep the viewer paused.
+    const videoSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true, maxBitrate: 5000000 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+
+    const pc = {
+      connectionState: "connected",
+      close: vi.fn(),
+      getSenders: vi.fn().mockReturnValue([
+        {
+          track: { kind: "video" },
+          getParameters: videoGetParams,
+          setParameters: videoSetParams,
+        },
+      ]),
+    } as unknown as RTCPeerConnection;
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc,
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    // Pause the viewer
+    await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect(videoSetParams).toHaveBeenCalled();
+    videoSetParams.mockClear();
+
+    // Re-resolution produces a "fresh" sender (encoding active=true)
+    const freshGetParams = vi.fn(() => ({
+      encodings: [{ active: true, maxBitrate: 5000000 }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+    const freshSetParams = vi.fn();
+    pc.getSenders = vi.fn().mockReturnValue([
+      {
+        track: { kind: "video" },
+        getParameters: freshGetParams,
+        setParameters: freshSetParams,
+      },
+    ]);
+
+    // Simulate reconnect — mapping resolved with default SDK (active=false)
+    const mockSDK = {
+      connections: new Map([
+        ["peer-uuid-1", { publisher: { pc }, viewer: null }],
+      ]),
+    };
+    const mockPublisher = { getSDK: vi.fn().mockReturnValue(mockSDK) };
+    const mockPubManager = { getPublisher: vi.fn().mockReturnValue(mockPublisher) };
+
+    const runtimeAny = runtime as any;
+    runtimeAny.resolveLocalPublication = vi.fn().mockReturnValue({
+      mediaSessionId: "ms-1",
+      logicalStreamId: "stream-1",
+      publisherManager: mockPubManager,
+      vdoConfig: { streamId: "vdo-stream-abc", password: "vdo-password-xyz" },
+    });
+
+    // reconcileViewerByPeerUuid should reapply the paused state
+    await binding.reconcileViewerByPeerUuid("peer-uuid-1");
+
+    // The fresh sender should have its encoding disabled again (paused state reapplied)
+    expect(freshSetParams).toHaveBeenCalled();
+    expect(freshSetParams.mock.calls[0][0].encodings[0].active).toBe(false);
+  });
+
+  it("reapplies paused sender state after retryResolveSender resolves senders", async () => {
+    vi.useFakeTimers();
+    try {
+      const mapping = {
+        viewerDeviceId: "viewer-1",
+        viewerSessionId: "session-1",
+        mediaPeerUuid: "peer-uuid-1",
+        groupId: "g-1",
+        logicalStreamId: "stream-1",
+        mediaSessionId: "ms-1",
+        pc: { connectionState: "connected", close: vi.fn() },
+        videoSender: null,
+        audioSender: null,
+      };
+
+      const pausedState = {
+        videoEncodings: [{ active: true }],
+        audioEncodings: [{ active: true }],
+      };
+
+      (binding as any).viewerMap.set("viewer-1::ms-1", mapping);
+      (binding as any).viewerPausedSenderStates.set("viewer-1::ms-1", pausedState);
+
+      vi.spyOn(binding as any, "resolveSendersForMapping").mockImplementation((target: any) => {
+        target.videoSender = { track: { kind: "video" }, getParameters: vi.fn(() => ({ encodings: [{ active: true }] })), setParameters: vi.fn() };
+        target.audioSender = { track: { kind: "audio" }, getParameters: vi.fn(() => ({ encodings: [{ active: true }] })), setParameters: vi.fn() };
+        return true;
+      });
+      vi.spyOn(binding as any, "startStatsForMapping").mockImplementation(() => {});
+      vi.spyOn(binding, "reconcileViewerQuality").mockResolvedValue({ status: "applied", configured: { maxBitrate: 0, maxFramerate: 0, scaleResolutionDownBy: 1, degradationPreference: "balanced", priority: "medium" } });
+      vi.spyOn(binding as any, "applyPausedState").mockResolvedValue({ status: "applied", configured: { maxBitrate: 0, maxFramerate: 0, scaleResolutionDownBy: 1, degradationPreference: "balanced", priority: "medium" } });
+
+      (binding as any).retryResolveSender("viewer-1", "ms-1", "peer-uuid-1");
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect((binding as any).applyPausedState).toHaveBeenCalledWith(
+        "viewer-1::ms-1",
+        mapping,
+        pausedState,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("viewerPausedSenderStates cleaned up alongside viewer mapping", async () => {
+    const videoSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    await binding.handleViewerPaused("viewer-1", "ms-1", true);
+
+    // Paused state should exist
+    expect((binding as any).viewerPausedSenderStates.has("viewer-1::ms-1")).toBe(true);
+
+    // Remove mapping
+    binding.removeViewerMapping("viewer-1", "ms-1");
+
+    // Paused state should be cleaned up
+    expect((binding as any).viewerPausedSenderStates.has("viewer-1::ms-1")).toBe(false);
+  });
+
+  it("destroy clears paused state for all viewers", async () => {
+    const videoSetParams = vi.fn();
+    const videoGetParams = vi.fn(() => ({
+      encodings: [{ active: true }],
+      codecs: [], headerExtensions: [], rtcp: {}, transactionId: "tx-v",
+    }));
+
+    (binding as any).viewerMap.set("viewer-1::ms-1", {
+      viewerDeviceId: "viewer-1",
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: {
+        track: { kind: "video" },
+        getParameters: videoGetParams,
+        setParameters: videoSetParams,
+      } as unknown as RTCRtpSender,
+      audioSender: null,
+    });
+
+    await binding.handleViewerPaused("viewer-1", "ms-1", true);
+    expect((binding as any).viewerPausedSenderStates.size).toBe(1);
+
+    binding.destroy();
+    expect((binding as any).viewerPausedSenderStates.size).toBe(0);
+  });
 });

@@ -79,7 +79,7 @@ function StreamInfoCardInner({
 
   return (
     <div
-      className="absolute top-3 left-3 z-30 bg-black/60 rounded-md p-2.5 font-mono tabular-nums leading-relaxed"
+      className="absolute top-3 right-3 z-30 bg-black/60 rounded-md p-2.5 font-mono tabular-nums leading-relaxed"
       style={{
         width: config.boxWidth,
         fontSize: config.fontSize,
