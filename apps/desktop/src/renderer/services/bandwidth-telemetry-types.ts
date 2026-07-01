@@ -137,6 +137,32 @@ export interface AudioRtpStreamDetails extends RtpStreamBaseEvidence {
   totalSamplesReceived: number | null;
 }
 
+/**
+ * Resolved codec information from an RTCStatsReport codec entry.
+ */
+export interface CodecEvidence {
+  /** The codec's report ID (same as codecId in RTP stream references). */
+  id: string;
+  /** MIME type (e.g. "video/VP9", "audio/opus"). */
+  mimeType: string;
+  /** Codec clock rate in Hz (e.g. 48000 for audio). */
+  clockRate: number | null;
+  /** Number of audio channels (null for video). */
+  channels: number | null;
+  /** SDP fmtp line parameters (e.g. "minptime=10;useinbandfec=1"). */
+  sdpFmtpLine: string | null;
+  /** Payload type number (e.g. 96). */
+  payloadType: number | null;
+}
+
+/**
+ * Verification state for a stream's evidence.
+ * - collecting: first sample seen, awaiting second to confirm
+ * - active-decoding: stream has confirmed recent decoded frame activity
+ * - stale: no decoded frame activity within the grace period (3-5s)
+ */
+export type StreamVerificationState = "collecting" | "active-decoding" | "stale";
+
 /** Union type for per-stream RTP evidence. */
 export type RtpStreamEvidence = VideoRtpStreamDetails | AudioRtpStreamDetails;
 

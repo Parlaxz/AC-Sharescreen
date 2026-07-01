@@ -5,7 +5,7 @@
  * ScreenLink NVIDIA overhaul.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, fireEvent } from "@testing-library/react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DiagnosticsPanel } from "@/components/workspace/viewer/DiagnosticsPanel";
 import {
@@ -18,6 +18,32 @@ import {
   subscribeToBenchmarkProgress,
   type BenchmarkProgress,
 } from "@/services/viewer-image-processing/nvidia-benchmark-service";
+
+// ─── Factory helpers ──────────────────────────────────────────────────────────
+
+/** Minimal snapshot that avoids the empty state. */
+function makeMinSnapshot() {
+  return {
+    historyId: "test",
+    role: "viewer" as const,
+    aggregate: {
+      rawSamples: [],
+      mediumBuckets: [],
+      longBuckets: [],
+      markers: [],
+      currentBitsPerSecond: 0,
+      averageBitsPerSecond: 0,
+      peakBitsPerSecond: 0,
+      totalBytes: 0,
+      durationMs: 0,
+      activeDurationMs: 0,
+      configuredBitsPerSecond: null,
+      effectiveBitsPerSecond: null,
+      state: "playing" as const,
+    },
+    connections: [],
+  };
+}
 
 // ─── Mock stores ──────────────────────────────────────────────────────────────
 
@@ -80,17 +106,21 @@ describe("DiagnosticsPanel — NVIDIA diagnostics section", () => {
     });
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={null} contentOnly>
+      <DiagnosticsPanel snapshot={makeMinSnapshot() as any} contentOnly>
         <span>trigger</span>
       </DiagnosticsPanel>,
     );
+
+    // Expand Advanced section to reveal NVIDIA content
+    const advancedTrigger = container.querySelector('[aria-expanded="false"]');
+    if (advancedTrigger) fireEvent.click(advancedTrigger);
 
     const html = container.innerHTML;
     expect(html).toContain("NVIDIA RTX Video");
     expect(html).toContain("Available");
     expect(html).toContain("NVIDIA GeForce RTX 4090");
     expect(html).toContain("546.17");
-    expect(html).toContain("Results folder");
+    expect(html).toContain("Open Benchmark Results Folder");
   });
 
   it("renders NVIDIA section showing unavailable reason when capability is probed but not available", () => {
@@ -106,10 +136,14 @@ describe("DiagnosticsPanel — NVIDIA diagnostics section", () => {
     });
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={null} contentOnly>
+      <DiagnosticsPanel snapshot={makeMinSnapshot() as any} contentOnly>
         <span>trigger</span>
       </DiagnosticsPanel>,
     );
+
+    // Expand Advanced section to reveal NVIDIA content
+    const advancedTrigger = container.querySelector('[aria-expanded="false"]');
+    if (advancedTrigger) fireEvent.click(advancedTrigger);
 
     const html = container.innerHTML;
     expect(html).toContain("NVIDIA RTX Video");
@@ -129,10 +163,14 @@ describe("DiagnosticsPanel — NVIDIA diagnostics section", () => {
     });
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={null} contentOnly>
+      <DiagnosticsPanel snapshot={makeMinSnapshot() as any} contentOnly>
         <span>trigger</span>
       </DiagnosticsPanel>,
     );
+
+    // Expand Advanced section to reveal NVIDIA content
+    const advancedTrigger = container.querySelector('[aria-expanded="false"]');
+    if (advancedTrigger) fireEvent.click(advancedTrigger);
 
     const html = container.innerHTML;
     expect(html).toContain("Modes");
@@ -154,16 +192,19 @@ describe("DiagnosticsPanel — NVIDIA diagnostics section", () => {
     });
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={null} contentOnly>
+      <DiagnosticsPanel snapshot={makeMinSnapshot() as any} contentOnly>
         <span>trigger</span>
       </DiagnosticsPanel>,
     );
 
-    // Should have Copy diagnostics button
-    expect(container.textContent).toContain("Copy diagnostics");
+    // Expand Advanced section to reveal NVIDIA content
+    const advancedTrigger = container.querySelector('[aria-expanded="false"]');
+    if (advancedTrigger) fireEvent.click(advancedTrigger);
 
+    // Should have Copy button
+    expect(container.textContent).toContain("Copy");
     // Should have Results folder button
-    expect(container.textContent).toContain("Results folder");
+    expect(container.textContent).toContain("Open Benchmark Results Folder");
   });
 });
 
@@ -324,7 +365,7 @@ describe("DiagnosticsPanel — BenchmarkResultsSummary", () => {
     nvidiaBenchmarkService.reset();
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={null} contentOnly>
+      <DiagnosticsPanel snapshot={makeMinSnapshot() as any} contentOnly>
         <span>trigger</span>
       </DiagnosticsPanel>,
     );
@@ -369,10 +410,14 @@ describe("DiagnosticsPanel — BenchmarkResultsSummary", () => {
     (nvidiaBenchmarkService as unknown as { _aggregate: typeof mockAggregate })._aggregate = mockAggregate;
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={null} contentOnly>
+      <DiagnosticsPanel snapshot={makeMinSnapshot() as any} contentOnly>
         <span>trigger</span>
       </DiagnosticsPanel>,
     );
+
+    // Expand Advanced section to reveal Benchmark content
+    const advancedTrigger = container.querySelector('[aria-expanded="false"]');
+    if (advancedTrigger) fireEvent.click(advancedTrigger);
 
     expect(container.textContent).toContain("Last Benchmark");
     expect(container.textContent).toContain("1/1 completed");

@@ -30,6 +30,8 @@ interface ViewerPanelShellProps {
   lastRequestedQuality?: ViewerRequestState | null;
   effectiveBitrateKbps?: number | null;
   configuredBitrateBps?: number | null;
+  /** The requested/preferred codec (from viewer configuration) */
+  requestedCodec?: string | null;
 
   // New diagnostics data (snapshot-based, no polling)
   /** Bandwidth snapshot from StreamMetricsService (or subscribe via viewerHistoryId) */
@@ -136,6 +138,7 @@ export function ViewerPanelShell({
   lastRequestedQuality,
   effectiveBitrateKbps,
   configuredBitrateBps,
+  requestedCodec,
   diagnosticsSnapshot: externalSnapshot,
   framePerformanceSamples = [],
   requestState,
@@ -168,7 +171,7 @@ export function ViewerPanelShell({
 
   const width =
     activePanel === "bandwidth" ? "w-[950px] max-w-[calc(100vw-32px)]" :
-    activePanel === "diagnostics" ? "w-[950px] max-w-[calc(100vw-32px)]" :
+    activePanel === "diagnostics" ? "w-[820px] max-w-[calc(100vw-32px)]" :
     "w-[750px] max-w-[calc(100vw-32px)]";
 
   const handleOpenChange = useMemo(
@@ -228,6 +231,7 @@ export function ViewerPanelShell({
               requestedQuality={lastRequestedQuality}
               effectiveBitrateKbps={effectiveBitrateKbps}
               configuredBitrateBps={configuredBitrateBps}
+              requestedCodec={requestedCodec}
             >
               <span />
             </DiagnosticsPanel>

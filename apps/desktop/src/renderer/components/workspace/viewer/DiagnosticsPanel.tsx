@@ -3,14 +3,14 @@
  *
  * Consumes an authoritative StreamMetricsService snapshot (no polling of
  * ViewerSession.getDiagnostics). Accepts frame performance samples as props
- * for the tabbed FramePerformanceGraph.
+ * for the FramePerformanceGraph.
  *
- * Layout (≈950px wide, scroll):
- *   1. 3-column grid: Detailed video | Detailed audio | At a glance
- *   2. Codec section (requested vs active, match, verification)
- *   3. FramePerformanceGraph (Frame rate / Frame time tabs)
- *   4. NVIDIA / Benchmark collapsible sections
- *   5. Copy diagnostics button
+ * Layout (820px wide):
+ *   1. Compact header with title + copy button
+ *   2. "At a glance" inline flex row (5 key metrics + bitrate summary)
+ *   3. FramePerformanceGraph (always visible)
+ *   4. Collapsible "Advanced diagnostics" with Detailed video/audio,
+ *      Connection/Codec, NVIDIA, and Benchmark sections
  */
 import { useState, useCallback, useEffect } from "react";
 import { useSyncExternalStore } from "react";
@@ -20,18 +20,10 @@ import {
   PopoverContent,
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
-import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from "@/components/ui/tooltip";
-import { Badge } from "@/components/ui/badge";
 import { Copy, Check, FolderOpen, ChevronDown, ChevronRight } from "lucide-react";
 import { formatBitrateBps } from "@/lib/utils";
-import {
-  TooltipProvider,
-} from "@/components/ui/tooltip";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { fmtBitRate, fmtCumulativeBytes } from "@/services/bandwidth-telemetry-types";
 import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
 import type { TelemetrySample } from "@/services/bandwidth-telemetry-types";
@@ -74,7 +66,7 @@ function fmtResolution(
   w: number | null | undefined,
   h: number | null | undefined,
 ): string {
-  if (w && h) return `${w}\u00d7${h}`;
+  if (w != null && h != null) return `${w}\u00d7${h}`;
   return NA;
 }
 
@@ -119,6 +111,13 @@ function getActiveCodecFromSnapshot(snapshot: BandwidthSnapshot): string | null 
 function getLatestSample(snapshot: BandwidthSnapshot): TelemetrySample | null {
   const samples = snapshot.aggregate.rawSamples;
   return samples.length > 0 ? samples[samples.length - 1] : null;
+}
+
+/** Get the latest raw sample from the first connection (has per-stream evidence that aggregate strips). */
+function getConnectionSample(snapshot: BandwidthSnapshot): TelemetrySample | null {
+  const conn = snapshot.connections?.[0];
+  const samples = conn?.rawSamples;
+  return (samples?.length ?? 0) > 0 ? samples![samples!.length - 1] : null;
 }
 
 /** Format a codec MIME string to a display name. */
@@ -208,15 +207,15 @@ function GlanceValue({
   sub?: React.ReactNode;
 }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-text-muted mb-0.5">
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-text-muted">
         {label}
       </div>
       <div className="font-mono tabular-nums text-sm font-semibold text-text-primary">
         {children}
       </div>
       {sub && (
-        <div className="text-[10px] text-text-muted mt-0.5">{sub}</div>
+        <div className="text-[10px] text-text-muted truncate">{sub}</div>
       )}
     </div>
   );
@@ -402,6 +401,7 @@ export function DiagnosticsPanel({
 }: DiagnosticsPanelProps) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // Listen for keyboard shortcut I to toggle, Escape to close
   useEffect(() => {
@@ -443,17 +443,20 @@ export function DiagnosticsPanel({
 
   const agg = snapshot?.aggregate ?? null;
   const latestSample = snapshot ? getLatestSample(snapshot) : null;
+  const connSample = snapshot ? getConnectionSample(snapshot) : null;
   const firstConn = snapshot?.connections?.[0] ?? null;
   const receivedStatus = firstConn?.receivedStatus ?? null;
 
+  // Use connection-level sample for rich metadata (aggregate strips width/height/codec/RTP evidence)
+  const richSample = connSample ?? latestSample;
+
   // Determine values
   const activeCodec = snapshot ? getActiveCodecFromSnapshot(snapshot) : null;
-  const resW = latestSample?.width ?? receivedStatus?.width ?? null;
-  const resH = latestSample?.height ?? receivedStatus?.height ?? null;
-  const decodedFps = latestSample?.framesPerSecond ?? receivedStatus?.framesPerSecond ?? null;
-  const videoBps = latestSample?.videoBitsPerSecond ?? receivedStatus?.videoBitsPerSecond ?? null;
-  const audioBps = latestSample?.audioBitsPerSecond ?? receivedStatus?.audioBitsPerSecond ?? null;
-  const totalBps = agg?.currentBitsPerSecond ?? (videoBps != null || audioBps != null ? (videoBps ?? 0) + (audioBps ?? 0) : null);
+  const resW = richSample?.width ?? receivedStatus?.width ?? null;
+  const resH = richSample?.height ?? receivedStatus?.height ?? null;
+  const decodedFps = richSample?.framesPerSecond ?? receivedStatus?.framesPerSecond ?? null;
+  const videoBps = richSample?.videoBitsPerSecond ?? receivedStatus?.videoBitsPerSecond ?? null;
+  const audioBps = richSample?.audioBitsPerSecond ?? receivedStatus?.audioBitsPerSecond ?? null;
 
   // Displayed FPS from frame samples (preferred), falling back to decoded FPS
   const latestFrameSample = frameSamples.length > 0 ? frameSamples[frameSamples.length - 1] : null;
@@ -466,12 +469,12 @@ export function DiagnosticsPanel({
   const confBitrateBps = configuredBitrateBps ?? agg?.configuredBitsPerSecond ?? null;
 
   // Packet loss / jitter / RTT
-  const packetLoss = latestSample?.packetLossPercent ?? receivedStatus?.packetLossPercent ?? null;
-  const jitterMs = latestSample?.jitterMs ?? receivedStatus?.jitterMs ?? null;
-  const rttMs = latestSample?.rttMs ?? receivedStatus?.rttMs ?? null;
-  const transportBps = latestSample?.transportBitsPerSecond ?? null;
-  const primaryVideoStream = latestSample?.videoRtpStreams?.[0] ?? null;
-  const primaryAudioStream = latestSample?.audioRtpStreams?.[0] ?? null;
+  const packetLoss = richSample?.packetLossPercent ?? receivedStatus?.packetLossPercent ?? null;
+  const jitterMs = richSample?.jitterMs ?? receivedStatus?.jitterMs ?? null;
+  const rttMs = richSample?.rttMs ?? receivedStatus?.rttMs ?? null;
+  const transportBps = richSample?.transportBitsPerSecond ?? null;
+  const primaryVideoStream = richSample?.videoRtpStreams?.[0] ?? null;
+  const primaryAudioStream = richSample?.audioRtpStreams?.[0] ?? null;
 
   // Dropped frames, freeze
   const droppedFrames = primaryVideoStream?.framesDropped ?? receivedStatus?.droppedFrames ?? null;
@@ -492,191 +495,149 @@ export function DiagnosticsPanel({
       ? reqCodecDisplay === activeCodecDisplay ? "yes" : "no"
       : "unknown";
 
+  // ── Empty state ────────────────────────────────────────────────────
+  if (!snapshot && frameSamples.length === 0) {
+    return (
+      <div className={contentOnly ? `w-[820px] max-w-[calc(100vw-32px)]` : ""}>
+        <div className="flex items-center justify-center h-32 text-sm text-text-muted">
+          No diagnostics data yet.
+        </div>
+      </div>
+    );
+  }
+
   const content = (
     <TooltipProvider>
       <div className="space-y-3 text-[11px]">
-        {/* ── 3-column grid: Video | Audio | At a glance ── */}
-      <div className="grid grid-cols-3 gap-4">
-        {/* Detailed Video */}
-        <DetailSection title="Detailed video">
-          <DetailRow label="Active codec" value={formatCodecDisplay(activeCodec)} />
-          <DetailRow label="Resolution" value={fmtResolution(resW, resH)} mono />
-          <DetailRow label="Bitrate" value={fmtBps(videoBps)} mono />
-          <DetailRow label="FPS (decoded)" value={fmtFps(decodedFps)} mono />
-          <DetailRow label="Packet loss" value={fmtPct(packetLoss)} />
-          <DetailRow label="Jitter" value={fmtMs(jitterMs)} />
-          <DetailRow label="Dropped / Freeze" value={`${droppedFrames ?? NA} / ${freezeCount ?? NA}`} />
-          <DetailRow label="Packets" value={receivedStatus?.packetsReceived != null ? `${receivedStatus.packetsReceived} recv` : NA} />
-        </DetailSection>
-
-        {/* Detailed Audio */}
-        <DetailSection title="Detailed audio">
-          <DetailRow label="Codec" value={formatCodecDisplay(primaryAudioStream?.codecMimeType ?? latestSample?.codec ?? NA)} />
-          <DetailRow label="Bitrate" value={fmtBps(audioBps)} mono />
-          <DetailRow label="Jitter" value={fmtMs(jitterMs)} />
-          <DetailRow label="Packets" value={
-            receivedStatus?.packetsReceived != null
-              ? `${receivedStatus.packetsReceived} recv`
-              : NA
-          } />
-        </DetailSection>
-
-        {/* At a Glance */}
-        <div>
-          <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-2">
-            At a glance
-          </p>
-          <div className="space-y-3">
-            {/* Resolution — prominent */}
-            <GlanceValue label="Resolution">
-              {fmtResolution(resW, resH)}
-            </GlanceValue>
-
-            {/* FPS — prefer displayed, fallback decoded, tooltip */}
-            <GlanceValue label="FPS">
-              {primaryFps != null ? `${primaryFps.toFixed(1)}` : NA}
-              {displayedFps != null && decodedFps != null && (
-                <span className="text-[10px] font-normal text-text-muted ml-1">
-                  (decoded: {decodedFps.toFixed(1)})
-                </span>
-              )}
-            </GlanceValue>
-
-            {/* Quality */}
-            <GlanceValue label="Quality">
-              {reqBitrateKbps != null || effBitrateBps != null ? (
-                <>
-                  {reqBitrateKbps != null
-                    ? `Request: ${formatBitrateBps(reqBitrateKbps * 1000)}`
-                    : "Request: \u2014"}
-                </>
-              ) : NA}
-            </GlanceValue>
-            {effBitrateBps != null && (
-              <div className="text-[10px] text-text-muted -mt-2">
-                Effective: {fmtBps(effBitrateBps)}
-              </div>
+        {/* ── Header ── */}
+        <div className="flex items-center justify-between pb-2 border-b border-border-subtle">
+          <h2 className="text-xs font-semibold text-text-primary uppercase tracking-wide">
+            ScreenLink Viewer Diagnostics
+          </h2>
+          <Button variant="ghost" size="sm" className="h-7 text-[10px] gap-1" onClick={handleCopy}>
+            {copied ? (
+              <><Check className="h-3 w-3" />Copied</>
+            ) : (
+              <><Copy className="h-3 w-3" />Copy</>
             )}
+          </Button>
+        </div>
 
-            {/* Bitrate — large total, subline video/audio */}
-            <GlanceValue
-              label="Bitrate"
-              sub={
-                videoBps != null || audioBps != null
-                  ? `Video ${fmtBps(videoBps)} \u00b7 Audio ${fmtBps(audioBps)}`
-                  : undefined
-              }
-            >
-              {totalBps != null ? fmtBps(totalBps) : NA}
-            </GlanceValue>
+        {/* ── At a glance ── */}
+        <div className="flex flex-wrap gap-x-6 gap-y-2 py-2">
+          <GlanceValue label="Resolution">
+            {fmtResolution(resW, resH)}
+          </GlanceValue>
+          <GlanceValue
+            label="FPS"
+            sub={displayedFps != null && decodedFps != null ? `decoded: ${decodedFps.toFixed(1)}` : undefined}
+          >
+            {primaryFps != null ? `${primaryFps.toFixed(1)}` : "Collecting\u2026"}
+          </GlanceValue>
+          <GlanceValue label="Quality">
+            {reqBitrateKbps != null
+              ? formatBitrateBps(reqBitrateKbps * 1000)
+              : effBitrateBps != null
+                ? fmtBps(effBitrateBps)
+                : "Collecting\u2026"}
+          </GlanceValue>
+          <GlanceValue label="Codec">
+            {activeCodecDisplay ? (
+              <span className={codecMatch === "yes" ? "text-emerald-500" : codecMatch === "no" ? "text-rose-500" : ""}>
+                {activeCodecDisplay}
+              </span>
+            ) : "Collecting\u2026"}
+          </GlanceValue>
+          <GlanceValue label="State">
+            <span className={`capitalize ${agg?.state === "playing" ? "text-emerald-500" : agg?.state === "paused" ? "text-amber-500" : "text-rose-500"}`}>
+              {agg?.state ?? "Collecting\u2026"}
+            </span>
+          </GlanceValue>
+          <div className="w-full text-[10px] text-text-muted">
+            Video {fmtBps(videoBps)} &middot; Audio {fmtBps(audioBps)} &middot; RTT {fmtMs(rttMs)} &middot; Loss {fmtPct(packetLoss)}
           </div>
         </div>
-      </div>
 
-      <Separator />
+        {/* ── Performance graphs ── */}
+        <FramePerformanceGraph samples={frameSamples} maxSamples={120} />
 
-      {/* ── Connection / Codec row ── */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* Connection info */}
-        <DetailSection title="Connection">
-          <DetailRow label="State" value={
-            <span className={`capitalize ${
-              agg?.state === "playing" ? "text-emerald-500" :
-              agg?.state === "paused" ? "text-amber-500" :
-              "text-rose-500"
-            }`}>
-              {agg?.state ?? NA}
-            </span>
-          } />
-          <DetailRow label="RTT" value={fmtMs(rttMs)} mono />
-          <DetailRow label="Transport (wire)" value={transportBps != null ? fmtBps(transportBps) : NA} mono />
-          <DetailRow label="Total bytes" value={agg ? fmtCumulativeBytes(agg.totalBytes) : NA} mono />
-          <DetailRow label="Sample age" value={fmtSampleAge(latestSample?.timestampMs ?? null)} />
-          <DetailRow label="Duration" value={
-            agg ? `${(agg.durationMs / 1000).toFixed(0)}s` : NA
-          } />
-        </DetailSection>
-
-        {/* Codec configuration vs observation */}
-        <DetailSection title="Codec">
-          <DetailRow label="Requested" value={reqCodecDisplay ?? NA} />
-          <DetailRow label="Active receive" value={activeCodecDisplay ?? NA} />
-          <DetailRow label="Match" value={
-            <span className={
-              codecMatch === "yes" ? "text-emerald-500" :
-              codecMatch === "no" ? "text-rose-500" :
-              "text-text-muted"
-            }>
-              {codecMatch === "yes" ? "Yes" :
-               codecMatch === "no" ? "No" :
-               "Unknown"}
-            </span>
-          } />
-        </DetailSection>
-      </div>
-
-      <Separator />
-
-      {/* ── Frame Performance Graph ── */}
-      <FramePerformanceGraph samples={frameSamples} maxSamples={120} />
-
-      <Separator />
-
-      {/* ── Benchmark & NVIDIA sections ── */}
-      <div className="grid grid-cols-2 gap-4">
-        <BenchmarkResultsSummary />
-        <NvidiaDiagnosticsSection />
-      </div>
-
-      <Separator />
-
-      {/* ── Action buttons ── */}
-      <div className="grid grid-cols-2 gap-2">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="outline" size="sm" className="w-full" onClick={handleCopy}>
-              {copied ? (
-                <><Check className="h-3.5 w-3.5 mr-1.5" />Copied</>
+        {/* ── Advanced diagnostics collapsible ── */}
+        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="w-full flex items-center justify-between h-7 text-[11px] text-text-secondary hover:text-text-primary">
+              <span>Advanced diagnostics</span>
+              {advancedOpen ? (
+                <ChevronDown className="h-3.5 w-3.5" />
               ) : (
-                <><Copy className="h-3.5 w-3.5 mr-1.5" />Copy diagnostics</>
+                <ChevronRight className="h-3.5 w-3.5" />
               )}
             </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Copy sanitized connection info to clipboard</TooltipContent>
-        </Tooltip>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="space-y-3 pt-2">
+            {/* ── 2-column grid: Detailed video | Detailed audio ── */}
+            <div className="grid grid-cols-2 gap-4">
+              <DetailSection title="Detailed video">
+                <DetailRow label="Active codec" value={formatCodecDisplay(activeCodec)} />
+                <DetailRow label="Packet loss" value={fmtPct(packetLoss)} />
+                <DetailRow label="Jitter" value={fmtMs(jitterMs)} />
+                <DetailRow label="Dropped / Freeze" value={`${droppedFrames ?? NA} / ${freezeCount ?? NA}`} />
+                <DetailRow label="Packets" value={receivedStatus?.packetsReceived != null ? `${receivedStatus.packetsReceived} recv` : NA} />
+                <DetailRow label="Decode time" value={fmtMs(latestFrameSample?.decodeTimeMs ?? null)} />
+              </DetailSection>
+              <DetailSection title="Detailed audio">
+                <DetailRow label="Codec" value={formatCodecDisplay(primaryAudioStream?.codecMimeType ?? latestSample?.codec ?? null)} />
+                <DetailRow label="Bitrate" value={fmtBps(audioBps)} mono />
+                <DetailRow label="Jitter" value={fmtMs(primaryAudioStream?.jitterMs ?? jitterMs)} />
+                <DetailRow label="Packets" value={receivedStatus?.packetsReceived != null ? `${receivedStatus.packetsReceived} recv` : NA} />
+                <DetailRow label="Jitter buffer" value={primaryAudioStream?.jitterBufferDelayMs != null ? fmtMs(primaryAudioStream.jitterBufferDelayMs) : NA} />
+                <DetailRow label="Concealment" value={primaryAudioStream?.concealmentPercent != null ? fmtPct(primaryAudioStream.concealmentPercent) : NA} />
+              </DetailSection>
+            </div>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full"
-              onClick={async () => {
-                try {
-                  const api = (window as unknown as { screenlink?: { nvidiaOpenBenchmarkFolder: () => Promise<boolean> } }).screenlink;
-                  await api?.nvidiaOpenBenchmarkFolder();
-                } catch { /* best-effort */ }
-              }}
-            >
-              <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
-              Results folder
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Open NVIDIA benchmark results folder</TooltipContent>
-        </Tooltip>
-      </div>
+            {/* ── 2-column grid: Connection | Codec ── */}
+            <div className="grid grid-cols-2 gap-4">
+              <DetailSection title="Connection">
+                <DetailRow label="State" value={
+                  <span className={`capitalize ${agg?.state === "playing" ? "text-emerald-500" : agg?.state === "paused" ? "text-amber-500" : "text-rose-500"}`}>
+                    {agg?.state ?? NA}
+                  </span>
+                } />
+                <DetailRow label="RTT" value={fmtMs(rttMs)} mono />
+                <DetailRow label="Transport (wire)" value={transportBps != null ? fmtBps(transportBps) : NA} mono />
+                <DetailRow label="Total bytes" value={agg ? fmtCumulativeBytes(agg.totalBytes) : NA} mono />
+                <DetailRow label="Sample age" value={fmtSampleAge(latestSample?.timestampMs ?? null)} />
+                <DetailRow label="Duration" value={agg ? `${(agg.durationMs / 1000).toFixed(0)}s` : NA} />
+              </DetailSection>
+              <DetailSection title="Codec">
+                <DetailRow label="Requested" value={reqCodecDisplay ?? NA} />
+                <DetailRow label="Active receive" value={activeCodecDisplay ?? NA} />
+                <DetailRow label="Match" value={
+                  <span className={codecMatch === "yes" ? "text-emerald-500" : codecMatch === "no" ? "text-rose-500" : "text-text-muted"}>
+                    {codecMatch === "yes" ? "Yes" : codecMatch === "no" ? "No" : "Unknown"}
+                  </span>
+                } />
+              </DetailSection>
+            </div>
+
+            {/* ── NVIDIA & Benchmark sections ── */}
+            <div className="grid grid-cols-2 gap-4">
+              <BenchmarkResultsSummary />
+              <NvidiaDiagnosticsSection />
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </TooltipProvider>
   );
 
   if (contentOnly) {
-    return <div className="w-[950px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto">{content}</div>;
+    return <div className="w-[820px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto">{content}</div>;
   }
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-[950px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto">
+      <PopoverContent side="top" align="center" className="w-[820px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto">
         {content}
       </PopoverContent>
     </Popover>

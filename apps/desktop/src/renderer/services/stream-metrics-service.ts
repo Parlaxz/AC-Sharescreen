@@ -75,6 +75,7 @@ interface CounterBaseline {
   };
   previousCumulativeBytes: number;
   previousMonotonicTimestamp: number;
+  previousFramesDecoded: number | null;
 }
 
 // ─── Audio cumulative metric baseline (jitter-buffer, concealment) ─────────
@@ -735,7 +736,14 @@ export class StreamMetricsService {
       }
       const videoObservations: RtpObs[] = [];
       const audioObservations: RtpObs[] = [];
-      const codecMap = new Map<string, string>(); // codecId → mimeType
+      interface CodecEntry {
+        mimeType: string;
+        clockRate: number | null;
+        channels: number | null;
+        sdpFmtpLine: string | null;
+        payloadType: number | null;
+      }
+      const codecMap = new Map<string, CodecEntry>();
       let transportCumulative: number | null = null;
       let rttMs: number | null = null;
       let connectionType: "direct" | "turn" | null = null;
@@ -748,7 +756,15 @@ export class StreamMetricsService {
         if (report.type === "remote-candidate") remoteCands.set(report.id, report as Record<string, unknown>);
         if (report.type === "codec") {
           const m = (report as Record<string, unknown>).mimeType as string;
-          if (m) codecMap.set(report.id, m);
+          if (m) {
+            codecMap.set(report.id, {
+              mimeType: m,
+              clockRate: (report as Record<string, unknown>).clockRate as number | null ?? null,
+              channels: (report as Record<string, unknown>).channels as number | null ?? null,
+              sdpFmtpLine: (report as Record<string, unknown>).sdpFmtpLine as string | null ?? null,
+              payloadType: (report as Record<string, unknown>).payloadType as number | null ?? null,
+            });
+          }
         }
       }
 
@@ -764,7 +780,7 @@ export class StreamMetricsService {
 
         if (!isRtp) continue;
 
-        const kind = (report.kind ?? "video") as string;
+        const kind = (report.kind ?? report.mediaType ?? "") as string;
         if (kind !== "video" && kind !== "audio") continue;
 
         const r = report as Record<string, unknown>;
@@ -869,6 +885,13 @@ export class StreamMetricsService {
       for (const obs of videoObservations) {
         const rkey = `${obs.reportId}:${obs.ssrc ?? 0}:${obs.mid ?? ""}`;
         const result = this.processCounterReport(conn.videoBaselines, rkey, obs.bytes, monoNow);
+        // Track framesDecoded delta in baseline for active stream selection
+        if (obs.framesDecoded !== null) {
+          const baseline = conn.videoBaselines.get(rkey);
+          if (baseline) {
+            baseline.previousFramesDecoded = obs.framesDecoded;
+          }
+        }
         videoResults.set(obs.reportId, result);
         totalVideoRate += result.bitsPerSecond;
         totalVideoDelta += result.deltaBytes;
@@ -881,7 +904,7 @@ export class StreamMetricsService {
       const videoRtpStreams: VideoRtpStreamDetails[] = [];
       for (const obs of videoObservations) {
         const result = videoResults.get(obs.reportId)!;
-        const codecMimeType = obs.codecId ? (codecMap.get(obs.codecId) ?? null) : null;
+        const codecMimeType = obs.codecId ? (codecMap.get(obs.codecId)?.mimeType ?? null) : null;
         const totalPkts = (obs.packetsReceived ?? 0) + (obs.packetsLost ?? 0);
         videoRtpStreams.push({
           kind: "video",
@@ -930,7 +953,7 @@ export class StreamMetricsService {
       const audioRtpStreams: AudioRtpStreamDetails[] = [];
       for (const obs of audioObservations) {
         const result = audioResults.get(obs.reportId)!;
-        const codecMimeType = obs.codecId ? (codecMap.get(obs.codecId) ?? null) : null;
+        const codecMimeType = obs.codecId ? (codecMap.get(obs.codecId)?.mimeType ?? null) : null;
         const totalPkts = (obs.packetsReceived ?? 0) + (obs.packetsLost ?? 0);
 
         // Jitter-buffer delay delta
@@ -1012,14 +1035,34 @@ export class StreamMetricsService {
       conn.transportBitsPerSecond = transportRate;
       conn.totalTransportBytes += transportDelta;
 
-      // Resolve codec from codecMap via active RTP codecId (authoritative).
-      // Per-stream evidence resolves each stream individually.
-      const primaryVideo = videoObservations[0];
+      // Active stream selection: prefer framesDecodedDelta as primary,
+      // byte-delta as tiebreaker, with a grace period for stale streams.
+      let primaryVideo: RtpObs | null = null;
+      let primaryVideoFramesDecoded: number | null = null;
+      let primaryVideoBytes: number | null = null;
       let resolvedCodec: string | null = null;
-      if (primaryVideo?.codecId) {
-        resolvedCodec = codecMap.get(primaryVideo.codecId) ?? null;
+
+      for (const obs of videoObservations) {
+        const baseline = conn.videoBaselines.get(`${obs.reportId}:${obs.ssrc ?? 0}:${obs.mid ?? ""}`);
+        const prevFramesDecoded = baseline?.previousFramesDecoded ?? null;
+        const framesDelta = prevFramesDecoded !== null && obs.framesDecoded !== null
+          ? obs.framesDecoded - prevFramesDecoded
+          : null;
+        const bytesDelta = baseline ? obs.bytes - baseline.previousCumulativeBytes : 0;
+
+        if (!primaryVideo ||
+            (framesDelta !== null && (primaryVideoFramesDecoded === null || framesDelta > primaryVideoFramesDecoded)) ||
+            (framesDelta === null && primaryVideoFramesDecoded === null && bytesDelta > (primaryVideoBytes ?? 0))) {
+          primaryVideo = obs;
+          primaryVideoFramesDecoded = framesDelta;
+          primaryVideoBytes = bytesDelta;
+        }
       }
-      // No iteration-order fallback — codecId → codecMap is authoritative
+
+      if (primaryVideo?.codecId) {
+        const codecEntry = codecMap.get(primaryVideo.codecId);
+        resolvedCodec = codecEntry?.mimeType ?? null;
+      }
 
       if (primaryVideo) {
         this.emitSampledMarkers(conn, primaryVideo.width, primaryVideo.height, primaryVideo.fps, resolvedCodec, connectionType,
@@ -1792,6 +1835,7 @@ function makeBaseline(): CounterBaseline {
     identity: { reportId: "", ssrc: null, trackIdentifier: null, mid: null },
     previousCumulativeBytes: 0,
     previousMonotonicTimestamp: 0,
+    previousFramesDecoded: null,
   };
 }
 

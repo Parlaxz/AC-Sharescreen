@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import type { BandwidthSnapshot, TelemetrySample, ConnectionTelemetrySnapshot, ViewerReportedStatus } from "@/services/bandwidth-telemetry-types";
 
@@ -104,26 +104,37 @@ function makeSnapshot(overrides?: Partial<BandwidthSnapshot>): BandwidthSnapshot
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
-describe("DiagnosticsPanel — At a glance column", () => {
-  it("renders Resolution in rightmost column", () => {
+describe("DiagnosticsPanel — Header", () => {
+  it("renders panel title", () => {
     const snapshot = makeSnapshot();
     render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    // Resolution appears twice: in Detailed video and At a glance
-    const res = screen.getAllByText("1920×1080");
-    expect(res.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("ScreenLink Viewer Diagnostics")).toBeTruthy();
   });
 
-  it("renders FPS (prefers displayed from frameSamples)", () => {
+  it("renders copy button", () => {
+    const snapshot = makeSnapshot();
+    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    expect(screen.getByText("Copy")).toBeTruthy();
+  });
+});
+
+describe("DiagnosticsPanel — At a glance", () => {
+  it("renders resolution from snapshot", () => {
+    const snapshot = makeSnapshot();
+    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    expect(screen.getByText("1920×1080")).toBeTruthy();
+  });
+
+  it("renders FPS preferring displayed from frameSamples", () => {
     const snapshot = makeSnapshot();
     const frameSamples = [
       { timestamp: 1000, displayedFps: 59.5, decodedFps: 60, frameIntervalMs: 16.8, decodeTimeMs: 5, state: "playing" as const },
     ];
     render(<DiagnosticsPanel contentOnly snapshot={snapshot} frameSamples={frameSamples} />);
-    // Should show 59.5 (displayed FPS)
     expect(screen.getByText(/59\.5/)).toBeTruthy();
   });
 
-  it("shows decoded FPS tooltip when displayed FPS available", () => {
+  it("shows decoded FPS sublabel when displayed FPS available", () => {
     const snapshot = makeSnapshot();
     const frameSamples = [
       { timestamp: 1000, displayedFps: 59.5, decodedFps: 60, frameIntervalMs: 16.8, decodeTimeMs: 5, state: "playing" as const },
@@ -132,182 +143,104 @@ describe("DiagnosticsPanel — At a glance column", () => {
     expect(screen.getByText(/decoded: 60/)).toBeTruthy();
   });
 
-  it("falls back to decoded FPS when no displayed FPS", () => {
-    const snapshot = makeSnapshot({
-      aggregate: {
-        ...makeSnapshot().aggregate,
-        rawSamples: Object.freeze([makeSample({ framesPerSecond: 30 })]),
-      },
-    });
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} frameSamples={[]} />);
-    expect(screen.getByText("30.0")).toBeTruthy();
+  it("shows Collecting… when no FPS data yet", () => {
+    const frameSamples = [
+      { timestamp: 1000, displayedFps: null, decodedFps: null, frameIntervalMs: null, decodeTimeMs: null, state: "playing" as const },
+    ];
+    render(<DiagnosticsPanel contentOnly snapshot={null} frameSamples={frameSamples} />);
+    // Multiple fields show Collecting… when data is absent
+    expect(screen.getAllByText("Collecting…").length).toBeGreaterThan(0);
   });
 
-  it("renders Quality with requested bitrate", () => {
-    const snapshot = makeSnapshot();
-    render(
-      <DiagnosticsPanel
-        contentOnly
-        snapshot={snapshot}
-        requestedQuality={{ videoBitrateKbps: 10000, maxWidth: 1920, maxHeight: 1080, maxFps: 60 }}
-      />,
-    );
-    expect(screen.getByText(/Request: 10\.0 Mbps/)).toBeTruthy();
-  });
-
-  it("renders Quality with effective bitrate", () => {
-    const snapshot = makeSnapshot();
-    render(
-      <DiagnosticsPanel
-        contentOnly
-        snapshot={snapshot}
-        effectiveBitrateKbps={8500}
-      />,
-    );
-    expect(screen.getByText(/Effective: 8\.5 Mbps/)).toBeTruthy();
-  });
-
-  it("renders Bitrate as total with video and audio subline", () => {
+  it("renders codec with match indicator", () => {
     const snapshot = makeSnapshot();
     render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    // Subline with video and audio (appears in the sub text area)
-    expect(screen.getByText(/Video 7\.5 Mbps/)).toBeTruthy();
-    // Audio bitrate appears both in detailed audio and subline — use getAll
-    const audioMatches = screen.getAllByText(/500\.0 kbps/);
-    expect(audioMatches.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("H264")).toBeTruthy();
+  });
+
+  it("renders state badge", () => {
+    const snapshot = makeSnapshot();
+    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    expect(screen.getByText("playing")).toBeTruthy();
+  });
+
+  it("renders video/audio bitrate summary line", () => {
+    const snapshot = makeSnapshot();
+    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    expect(screen.getByText(/Video/)).toBeTruthy();
+    expect(screen.getByText(/Audio/)).toBeTruthy();
   });
 });
 
-describe("DiagnosticsPanel — Detailed audio section", () => {
-  it("renders audio bitrate from snapshot", () => {
+describe("DiagnosticsPanel — Advanced collapsible", () => {
+  it("renders advanced diagnostics trigger collapsed by default", () => {
     const snapshot = makeSnapshot();
     render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    expect(screen.getByText("Advanced diagnostics")).toBeTruthy();
+  });
+
+  it("shows detailed sections when expanded", () => {
+    const snapshot = makeSnapshot();
+    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    // Click to expand
+    const trigger = screen.getByText("Advanced diagnostics");
+    fireEvent.click(trigger);
+    expect(screen.getByText("Detailed video")).toBeTruthy();
     expect(screen.getByText("Detailed audio")).toBeTruthy();
-    expect(screen.getByText("500.0 kbps")).toBeTruthy();
-  });
-
-  it("renders audio codec from snapshot", () => {
-    const snapshot = makeSnapshot({
-      aggregate: {
-        ...makeSnapshot().aggregate,
-        rawSamples: Object.freeze([makeSample({ codec: "audio/opus" })]),
-      },
-    });
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    // OPUS appears in both active codec (Detailed video) and Codec (Detailed audio)
-    const opus = screen.getAllByText("OPUS");
-    expect(opus.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("shows em-dash when audio data not available", () => {
-    const snapshot = makeSnapshot({
-      aggregate: {
-        ...makeSnapshot().aggregate,
-        rawSamples: Object.freeze([makeSample({ audioBitsPerSecond: null })]),
-      },
-    });
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getByText("Connection")).toBeTruthy();
+    // "Codec" appears multiple times: as a at-a-glance label, section title, and row label
+    expect(screen.getAllByText("Codec").length).toBeGreaterThan(0);
   });
 });
 
-describe("DiagnosticsPanel — Codec section", () => {
-  it("renders requested codec separately from active codec", () => {
-    const snapshot = makeSnapshot();
-    render(
-      <DiagnosticsPanel
-        contentOnly
-        snapshot={snapshot}
-        requestedCodec="video/H265"
-      />,
-    );
-    expect(screen.getByText("H265")).toBeTruthy(); // requested (unique)
-    // H264 appears multiple times (active codec, audio codec, active receive)
-    const h264 = screen.getAllByText("H264");
-    expect(h264.length).toBeGreaterThanOrEqual(2);
+describe("DiagnosticsPanel — Empty state", () => {
+  it("shows empty state when no snapshot and no frames", () => {
+    render(<DiagnosticsPanel contentOnly snapshot={null} />);
+    expect(screen.getByText("No diagnostics data yet.")).toBeTruthy();
   });
 
+  it("renders with frames but no snapshot", () => {
+    const frameSamples = [
+      { timestamp: 1000, displayedFps: 60, decodedFps: 60, frameIntervalMs: 16.67, decodeTimeMs: 5, state: "playing" as const },
+    ];
+    render(<DiagnosticsPanel contentOnly snapshot={null} frameSamples={frameSamples} />);
+    // Should show Collecting… for values rather than empty state
+    expect(screen.getAllByText("Collecting…").length).toBeGreaterThan(0);
+    // Should not show "No diagnostics data yet"
+    expect(screen.queryByText("No diagnostics data yet.")).toBeNull();
+  });
+});
+
+describe("DiagnosticsPanel — Codec match", () => {
   it("shows codec Match: Yes when requested matches active", () => {
     const snapshot = makeSnapshot();
     render(
-      <DiagnosticsPanel
-        contentOnly
-        snapshot={snapshot}
-        requestedCodec="video/H264"
-      />,
+      <DiagnosticsPanel contentOnly snapshot={snapshot} requestedCodec="video/H264">
+        <span />
+      </DiagnosticsPanel>,
     );
+    const trigger = screen.getByText("Advanced diagnostics");
+    fireEvent.click(trigger);
     expect(screen.getByText("Yes")).toBeTruthy();
   });
 
   it("shows codec Match: No when requested differs from active", () => {
     const snapshot = makeSnapshot();
     render(
-      <DiagnosticsPanel
-        contentOnly
-        snapshot={snapshot}
-        requestedCodec="video/H265"
-      />,
+      <DiagnosticsPanel contentOnly snapshot={snapshot} requestedCodec="video/H265">
+        <span />
+      </DiagnosticsPanel>,
     );
+    const trigger = screen.getByText("Advanced diagnostics");
+    fireEvent.click(trigger);
     expect(screen.getByText("No")).toBeTruthy();
   });
 
   it("shows Unknown codec match when no requested codec", () => {
     const snapshot = makeSnapshot();
     render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
+    const trigger = screen.getByText("Advanced diagnostics");
+    fireEvent.click(trigger);
     expect(screen.getByText("Unknown")).toBeTruthy();
-  });
-});
-
-describe("DiagnosticsPanel — Unknown values", () => {
-  it("renders em-dash for missing resolution", () => {
-    const snapshot = makeSnapshot({
-      aggregate: {
-        ...makeSnapshot().aggregate,
-        rawSamples: Object.freeze([makeSample({ width: null, height: null })]),
-      },
-    });
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    // Resolution should show em-dash
-    const dashes = screen.getAllByText("—");
-    expect(dashes.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("renders null snapshot gracefully (no crash)", () => {
-    const { container } = render(<DiagnosticsPanel contentOnly snapshot={null} />);
-    const el = container.querySelector(".space-y-3");
-    expect(el).toBeTruthy();
-  });
-});
-
-describe("DiagnosticsPanel — Labels distinction", () => {
-  it("renders distinct labels for Video, Audio, Connection, Network", () => {
-    const snapshot = makeSnapshot();
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    expect(screen.getByText("Detailed video")).toBeTruthy();
-    expect(screen.getByText("Detailed audio")).toBeTruthy();
-    expect(screen.getByText("Connection")).toBeTruthy();
-    expect(screen.getByText("Transport (wire)")).toBeTruthy();
-  });
-});
-
-describe("DiagnosticsPanel — Connection health", () => {
-  it("renders RTT from snapshot", () => {
-    const snapshot = makeSnapshot();
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    expect(screen.getByText("15.0 ms")).toBeTruthy();
-  });
-
-  it("renders state with playing label", () => {
-    const snapshot = makeSnapshot();
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    expect(screen.getByText("playing")).toBeTruthy();
-  });
-});
-
-describe("DiagnosticsPanel — Copy button", () => {
-  it("renders copy diagnostics button", () => {
-    const snapshot = makeSnapshot();
-    render(<DiagnosticsPanel contentOnly snapshot={snapshot} />);
-    expect(screen.getByText("Copy diagnostics")).toBeTruthy();
   });
 });

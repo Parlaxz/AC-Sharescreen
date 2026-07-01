@@ -130,31 +130,13 @@ describe("FramePerformanceGraph rendered", () => {
     ];
     render(<FramePerformanceGraph samples={samples} />);
     expect(screen.getByText("No frame rate data yet.")).toBeTruthy();
+    expect(screen.getByText("No frame time data yet.")).toBeTruthy();
   });
 
-  it("has accessible tablist with 2 tabs", () => {
-    const samples = [makeSample({ timestamp: 1000, displayedFps: 60 })];
+  it("renders both frame rate and frame time sections side-by-side", () => {
+    const samples = [makeSample({ timestamp: 1000, displayedFps: 60, frameIntervalMs: 16.67 })];
     render(<FramePerformanceGraph samples={samples} />);
-    const tablist = document.querySelector('[role="tablist"]');
-    expect(tablist).toBeTruthy();
-    const tabs = tablist!.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(2);
-    expect(tabs[0]!.textContent).toBe("Frame rate");
-    expect(tabs[1]!.textContent).toBe("Frame time");
-  });
-
-  it("frame-rate tab is active by default", () => {
-    const samples = [makeSample({ timestamp: 1000, displayedFps: 60 })];
-    render(<FramePerformanceGraph samples={samples} />);
-    const tabs = document.querySelectorAll('[role="tab"]');
-    expect(tabs[0]!.getAttribute("data-state")).toBe("active");
-    expect(tabs[1]!.getAttribute("data-state")).toBe("inactive");
-  });
-
-  it("frame-time tab has correct initial inactive state", () => {
-    const samples = [makeSample({ timestamp: 1000, frameIntervalMs: 16.67, decodeTimeMs: 5 })];
-    render(<FramePerformanceGraph samples={samples} />);
-    const tabs = document.querySelectorAll('[role="tab"]');
-    expect(tabs[1]!.getAttribute("data-state")).toBe("inactive");
+    expect(screen.getByText("Frame rate")).toBeTruthy();
+    expect(screen.getByText("Frame time")).toBeTruthy();
   });
 });

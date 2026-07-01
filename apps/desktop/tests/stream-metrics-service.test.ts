@@ -629,5 +629,59 @@ describe("StreamMetricsService", () => {
       // backward-compat alias remains 0
       expect(snapshot.connections[0].currentBitsPerSecond).toBe(0);
     });
+
+    it("falls back to report.mediaType when report.kind is missing", async () => {
+      const { historyId, stats } = setupConn();
+      // Purposely omit kind, only set mediaType
+      stats.clear();
+      stats.set("rtp-video", {
+        type: "inbound-rtp",
+        mediaType: "video",
+        bytesReceived: 200_000, ssrc: 1, mid: "0", codecId: "codec-vp9",
+        frameWidth: 640, frameHeight: 480, framesPerSecond: 30,
+      });
+      stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+      // Set a transport pair so tick doesn't fail
+      stats.set("cp", {
+        type: "candidate-pair", state: "succeeded", selected: true,
+        bytesReceived: 200_000, currentRoundTripTime: 0.01,
+        localCandidateId: "lc", remoteCandidateId: "rc",
+      });
+      stats.set("lc", { type: "local-candidate", candidateType: "host" });
+      stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+
+      await advanceTime(2000); // two ticks
+
+      const snapshot = svc.getSnapshot(historyId);
+      // Should have processed the video observation despite missing kind
+      expect(snapshot.aggregate.rawSamples.length).toBeGreaterThanOrEqual(1);
+      // Connection should have video bits per second (non-null)
+      expect(snapshot.connections[0].currentVideoBitsPerSecond).not.toBeNull();
+    });
+
+    it("skips observations with unknown kind and no mediaType", async () => {
+      const { historyId, stats } = setupConn();
+      stats.clear();
+      // Entry with kind="metadata" (not video/audio) and no mediaType
+      stats.set("rtp-metadata", {
+        type: "inbound-rtp",
+        kind: "metadata",
+        bytesReceived: 100_000, ssrc: 99, mid: "0", codecId: null,
+      });
+      stats.set("cp", {
+        type: "candidate-pair", state: "succeeded", selected: true,
+        bytesReceived: 100_000, currentRoundTripTime: 0.01,
+        localCandidateId: "lc", remoteCandidateId: "rc",
+      });
+      stats.set("lc", { type: "local-candidate", candidateType: "host" });
+      stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      // No video or audio observations should have been processed
+      expect(snapshot.connections[0].currentVideoBitsPerSecond).toBeNull();
+      expect(snapshot.connections[0].currentAudioBitsPerSecond).toBeNull();
+    });
   });
 });

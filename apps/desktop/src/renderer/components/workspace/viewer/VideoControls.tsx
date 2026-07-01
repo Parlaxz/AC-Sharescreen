@@ -128,6 +128,10 @@ interface VideoControlsProps {
   syncScreenLinkDeafen?: boolean;
   /** Called when the user clicks the Compare button */
   onCompareToggle?: () => void;
+  /** Whether the stream info card overlay is shown */
+  showStreamInfoCard?: boolean;
+  /** Toggle the stream info card overlay */
+  onToggleStreamInfoCard?: () => void;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -192,6 +196,8 @@ export function VideoControls({
   discordDeafenBinding = { modifiers: ["alt"], key: "D" },
   syncScreenLinkDeafen = true,
   onCompareToggle,
+  showStreamInfoCard = false,
+  onToggleStreamInfoCard,
 }: VideoControlsProps) {
   const handleVolumeSlider = useCallback(
     (value: number[]) => onVolumeChange(value[0]),
@@ -481,7 +487,28 @@ export function VideoControls({
               onOpenBandwidthModal={() => onActivePanelChange(activePanel === "bandwidth" ? null : "bandwidth")}
             />
           )}
-
+ 
+            {/* ── Stream info card toggle ── */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-7 w-7 hover:bg-white/10",
+                    showStreamInfoCard ? "text-white" : "text-white/50",
+                  )}
+                  onClick={onToggleStreamInfoCard}
+                  aria-label="Toggle stream info overlay"
+                >
+                  <span className="text-[11px] font-bold leading-none">HUD</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                Toggle stream info overlay
+              </TooltipContent>
+            </Tooltip>
+ 
           {/* ── Right group: Stream switcher | Connection dot | Settings | Fullscreen ── */}
           <div className="flex items-center gap-1">
             {/* Stream switcher */}

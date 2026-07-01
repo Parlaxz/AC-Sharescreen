@@ -43,6 +43,9 @@ import { ViewerPanelShell } from "./viewer/ViewerPanelShell.js";
 import type { ActivePanel } from "./viewer/ViewerPanelShell.js";
 import { ViewerSettingsPanel, type ViewerRequestState, type MediaMode } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
+import { saveSettings } from "@/services/settings-actions";
+import { StreamInfoCard } from "./viewer/StreamInfoCard.js";
+import { useStreamDiagnostics } from "@/hooks/use-stream-diagnostics";
 import {
   getViewerQualityDispatchError,
   resolveViewerQualityFeedbackStreamId,
@@ -350,6 +353,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // "Effective" = what the host replied (from quality.effective)
   const [effectiveBitrateKbps, setEffectiveBitrateKbps] = useState<number | null>(null);
   const [configuredBitrateBps, setConfiguredBitrateBps] = useState<number | null>(null);
+  /** The viewer's preferred codec from settings (e.g. "auto", "vp9", "h264") */
+  const [requestedCodec, setRequestedCodec] = useState<string | null>(null);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
@@ -410,6 +415,22 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [discordMuteBinding, setDiscordMuteBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "M" });
   const [discordDeafenBinding, setDiscordDeafenBinding] = useState<ShortcutBinding>({ modifiers: ["alt"], key: "D" });
   const [syncScreenLinkDeafen, setSyncScreenLinkDeafen] = useState(true);
+
+  // ── Stream info card overlay state ──
+  const [showStreamInfoCard, setShowStreamInfoCard] = useState(false);
+  const [streamInfoCardConfig, setStreamInfoCardConfig] = useState({
+    visible: false,
+    showResolution: true,
+    showFps: true,
+    showBitrate: true,
+    showDroppedFrames: true,
+    showNetworkUsage: true,
+    fontSize: 12,
+    textColor: "#ffffff",
+    boxOpacity: 60,
+    boxWidth: 200,
+  });
+
   const [maxVolumePercent, setMaxVolumePercent] = useState(200);
 
   useEffect(() => {
@@ -422,6 +443,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
       setSyncScreenLinkDeafen(settings.discordDeafenScreenLink ?? true);
       setMaxVolumePercent(settings.viewerMaxVolumePercent ?? 200);
+      if (settings.streamInfoCard) {
+        setShowStreamInfoCard(settings.streamInfoCard.visible ?? false);
+        setStreamInfoCardConfig(settings.streamInfoCard);
+      }
+      // Extract codec preference from global quality defaults
+      const codec = settings.globalQualityDefaults?.video?.codec;
+      if (codec) {
+        setRequestedCodec(codec);
+      }
     }).catch(() => {
       // keep defaults
     });
@@ -452,6 +482,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     });
   }, [isMuted]);
 
+  const handleToggleStreamInfoCard = useCallback(async () => {
+    const next = !showStreamInfoCard;
+    setShowStreamInfoCard(next);
+    try {
+      await saveSettings({ streamInfoCard: { ...streamInfoCardConfig, visible: next } });
+    } catch {
+      // best-effort
+    }
+  }, [showStreamInfoCard, streamInfoCardConfig]);
+
   // ── Bandwidth tracking ──
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
@@ -465,13 +505,18 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const frameFallbackIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const frameStateRef = useRef<ViewerSessionState>(sessionState);
   const frameBucketRef = useRef<number | null>(null);
+  const frameLastUpdateRef = useRef(0);
 
   if (!frameTimingRef.current) {
     frameTimingRef.current = new ViewerFrameTiming();
   }
 
   const appendFramePerformanceSample = useCallback((sample: FrameTimingSample) => {
-    const timestamp = Date.now();
+    const now = Date.now();
+    // Throttle visible FPS updates to ~2/sec so the display doesn't jitter
+    if (now - frameLastUpdateRef.current < 500) return;
+    frameLastUpdateRef.current = now;
+
     const state =
       frameStateRef.current === "paused"
         ? "paused"
@@ -479,7 +524,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         ? "reconnecting"
         : "playing";
     const point: FramePerformanceSample = {
-      timestamp,
+      timestamp: now,
       displayedFps: sample.displayedFps,
       decodedFps: sample.decodedFps,
       frameIntervalMs: sample.displayedFrameIntervalMs,
@@ -489,7 +534,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
     setFramePerformanceSamples((prev) => {
       const next = [...prev];
-      const bucket = Math.floor(timestamp / 1000) * 1000;
+      const bucket = Math.floor(now / 1000) * 1000;
 
       if (sample.segmentStart && next.length > 0) {
         next.push({
@@ -537,6 +582,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   useEffect(() => {
     frameStateRef.current = sessionState;
   }, [sessionState]);
+
+  // ViewerSession instance ref — stable across renders
+  const sessionRef = useRef<ViewerSession | null>(null);
+  const startAttemptRef = useRef(0);
+
+  // ── Stream diagnostics hook (polls every 2s) ──
+  const { snapshot: diagSnapshot, droppedFramesInLast5s } = useStreamDiagnostics(sessionRef.current, {
+    lastRequested: lastRequestedQuality,
+    effectiveKbps: effectiveBitrateKbps,
+    configuredBps: configuredBitrateBps,
+  });
 
   useEffect(() => {
     const frameTiming = frameTimingRef.current;
@@ -692,10 +748,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // Audio boost via Web Audio API GainNode (allows volume > 1.0)
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
-
-  // ViewerSession instance ref — stable across renders
-  const sessionRef = useRef<ViewerSession | null>(null);
-  const startAttemptRef = useRef(0);
 
   // Auto-hide controls — stay visible while any popover panel is open
   // Track panel open state as a synthetic "always show" signal
@@ -2485,6 +2537,18 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             </Button>
           </motion.div>
 
+          {/* ▸ Stream info card overlay */}
+          {showStreamInfoCard && (
+            <StreamInfoCard
+              snapshot={diagSnapshot}
+              droppedFramesInLast5s={droppedFramesInLast5s}
+              config={streamInfoCardConfig}
+              bandwidthBps={currentBandwidthBps}
+              totalBytes={totalBytesReceived}
+              activeDurationMs={activeDurationMs}
+            />
+          )}
+
           {/* ▸ Controls and panels — shown whenever not connecting */}
           {displayStatus !== "connecting" && (
             <ViewerPanelShell
@@ -2494,6 +2558,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               lastRequestedQuality={lastRequestedQuality}
               effectiveBitrateKbps={effectiveBitrateKbps}
               configuredBitrateBps={configuredBitrateBps}
+              requestedCodec={requestedCodec}
               diagnosticsSnapshot={diagnosticsSnapshot}
               framePerformanceSamples={framePerformanceSamples}
               requestState={viewerRequest}
@@ -2552,6 +2617,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 maxVolumePercent={maxVolumePercent}
                 activePanel={activePanel}
                 onActivePanelChange={setActivePanel}
+                showStreamInfoCard={showStreamInfoCard}
+                onToggleStreamInfoCard={handleToggleStreamInfoCard}
                 onCompareToggle={handleCompareToggleWithSettingsB}
               />
             </ViewerPanelShell>
@@ -2622,6 +2689,8 @@ function VideoControlsOverlay({
   activePanel,
   onActivePanelChange,
   onCompareToggle,
+  showStreamInfoCard,
+  onToggleStreamInfoCard,
 }: {
   isPaused: boolean;
   onTogglePlay: () => void;
@@ -2654,6 +2723,8 @@ function VideoControlsOverlay({
   activePanel: ActivePanel | null;
   onActivePanelChange: (panel: ActivePanel | null) => void;
   onCompareToggle?: () => void;
+  showStreamInfoCard?: boolean;
+  onToggleStreamInfoCard?: () => void;
 }) {
   return (
     <VideoControls
@@ -2687,6 +2758,8 @@ function VideoControlsOverlay({
       activePanel={activePanel}
       onActivePanelChange={onActivePanelChange}
       onCompareToggle={onCompareToggle}
+      showStreamInfoCard={showStreamInfoCard}
+      onToggleStreamInfoCard={onToggleStreamInfoCard}
     />
   );
 }

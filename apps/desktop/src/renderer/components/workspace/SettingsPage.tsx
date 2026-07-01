@@ -55,6 +55,16 @@ interface SettingsForm {
   discordDeafenScreenLink: boolean;
   viewerMaxVolumePercent: number;
   hourlyEstimateDurationMs: number;
+  streamInfoCardVisible: boolean;
+  streamInfoCardShowResolution: boolean;
+  streamInfoCardShowFps: boolean;
+  streamInfoCardShowBitrate: boolean;
+  streamInfoCardShowDroppedFrames: boolean;
+  streamInfoCardShowNetworkUsage: boolean;
+  streamInfoCardFontSize: number;
+  streamInfoCardTextColor: string;
+  streamInfoCardBoxOpacity: number;
+  streamInfoCardBoxWidth: number;
 }
 
 const DEFAULT_FORM: SettingsForm = {
@@ -76,6 +86,16 @@ const DEFAULT_FORM: SettingsForm = {
   discordDeafenScreenLink: true,
   viewerMaxVolumePercent: 200,
   hourlyEstimateDurationMs: 10_000,
+  streamInfoCardVisible: false,
+  streamInfoCardShowResolution: true,
+  streamInfoCardShowFps: true,
+  streamInfoCardShowBitrate: true,
+  streamInfoCardShowDroppedFrames: true,
+  streamInfoCardShowNetworkUsage: true,
+  streamInfoCardFontSize: 12,
+  streamInfoCardTextColor: "#ffffff",
+  streamInfoCardBoxOpacity: 60,
+  streamInfoCardBoxWidth: 200,
 };
 
 const DEFAULT_AUDIO_SETTINGS = {
@@ -141,6 +161,16 @@ function buildForm(
     discordDeafenScreenLink: settings.discordDeafenScreenLink ?? DEFAULT_FORM.discordDeafenScreenLink,
     viewerMaxVolumePercent: settings.viewerMaxVolumePercent ?? DEFAULT_FORM.viewerMaxVolumePercent,
     hourlyEstimateDurationMs: settings.hourlyEstimateDurationMs ?? DEFAULT_FORM.hourlyEstimateDurationMs,
+    streamInfoCardVisible: settings.streamInfoCard?.visible ?? DEFAULT_FORM.streamInfoCardVisible,
+    streamInfoCardShowResolution: settings.streamInfoCard?.showResolution ?? DEFAULT_FORM.streamInfoCardShowResolution,
+    streamInfoCardShowFps: settings.streamInfoCard?.showFps ?? DEFAULT_FORM.streamInfoCardShowFps,
+    streamInfoCardShowBitrate: settings.streamInfoCard?.showBitrate ?? DEFAULT_FORM.streamInfoCardShowBitrate,
+    streamInfoCardShowDroppedFrames: settings.streamInfoCard?.showDroppedFrames ?? DEFAULT_FORM.streamInfoCardShowDroppedFrames,
+    streamInfoCardShowNetworkUsage: settings.streamInfoCard?.showNetworkUsage ?? DEFAULT_FORM.streamInfoCardShowNetworkUsage,
+    streamInfoCardFontSize: settings.streamInfoCard?.fontSize ?? DEFAULT_FORM.streamInfoCardFontSize,
+    streamInfoCardTextColor: settings.streamInfoCard?.textColor ?? DEFAULT_FORM.streamInfoCardTextColor,
+    streamInfoCardBoxOpacity: settings.streamInfoCard?.boxOpacity ?? DEFAULT_FORM.streamInfoCardBoxOpacity,
+    streamInfoCardBoxWidth: settings.streamInfoCard?.boxWidth ?? DEFAULT_FORM.streamInfoCardBoxWidth,
   };
 }
 
@@ -163,7 +193,17 @@ function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
     a.discordDeafenShortcut === b.discordDeafenShortcut &&
     a.discordDeafenScreenLink === b.discordDeafenScreenLink &&
     a.viewerMaxVolumePercent === b.viewerMaxVolumePercent &&
-    a.hourlyEstimateDurationMs === b.hourlyEstimateDurationMs
+    a.hourlyEstimateDurationMs === b.hourlyEstimateDurationMs &&
+    a.streamInfoCardVisible === b.streamInfoCardVisible &&
+    a.streamInfoCardShowResolution === b.streamInfoCardShowResolution &&
+    a.streamInfoCardShowFps === b.streamInfoCardShowFps &&
+    a.streamInfoCardShowBitrate === b.streamInfoCardShowBitrate &&
+    a.streamInfoCardShowDroppedFrames === b.streamInfoCardShowDroppedFrames &&
+    a.streamInfoCardShowNetworkUsage === b.streamInfoCardShowNetworkUsage &&
+    a.streamInfoCardFontSize === b.streamInfoCardFontSize &&
+    a.streamInfoCardTextColor === b.streamInfoCardTextColor &&
+    a.streamInfoCardBoxOpacity === b.streamInfoCardBoxOpacity &&
+    a.streamInfoCardBoxWidth === b.streamInfoCardBoxWidth
   );
 }
 
@@ -336,6 +376,18 @@ export function SettingsPage() {
         discordDeafenScreenLink: form.discordDeafenScreenLink,
         viewerMaxVolumePercent: form.viewerMaxVolumePercent,
         hourlyEstimateDurationMs: form.hourlyEstimateDurationMs,
+        streamInfoCard: {
+          visible: form.streamInfoCardVisible,
+          showResolution: form.streamInfoCardShowResolution,
+          showFps: form.streamInfoCardShowFps,
+          showBitrate: form.streamInfoCardShowBitrate,
+          showDroppedFrames: form.streamInfoCardShowDroppedFrames,
+          showNetworkUsage: form.streamInfoCardShowNetworkUsage,
+          fontSize: form.streamInfoCardFontSize,
+          textColor: form.streamInfoCardTextColor,
+          boxOpacity: form.streamInfoCardBoxOpacity,
+          boxWidth: form.streamInfoCardBoxWidth,
+        },
       };
 
       await saveSettings(mergedSettingsPartial);
@@ -678,6 +730,116 @@ export function SettingsPage() {
             checked={form.discordDeafenScreenLink}
             onCheckedChange={(value) => updateField("discordDeafenScreenLink", value)}
           />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Stream Info Overlay</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-text-muted">
+            Configure the on-screen data overlay shown in the top-left corner while viewing a stream.
+          </p>
+          <Separator />
+          <SwitchRow
+            id="sic-visible"
+            label="Show overlay by default"
+            checked={form.streamInfoCardVisible}
+            onCheckedChange={(value) => updateField("streamInfoCardVisible", value)}
+          />
+          <Separator />
+          <div className="space-y-2">
+            <Label className="text-sm text-text-primary">Visible metrics</Label>
+            <SwitchRow
+              id="sic-resolution"
+              label="Resolution"
+              checked={form.streamInfoCardShowResolution}
+              onCheckedChange={(value) => updateField("streamInfoCardShowResolution", value)}
+            />
+            <SwitchRow
+              id="sic-fps"
+              label="FPS"
+              checked={form.streamInfoCardShowFps}
+              onCheckedChange={(value) => updateField("streamInfoCardShowFps", value)}
+            />
+            <SwitchRow
+              id="sic-bitrate"
+              label="Bitrate"
+              checked={form.streamInfoCardShowBitrate}
+              onCheckedChange={(value) => updateField("streamInfoCardShowBitrate", value)}
+            />
+            <SwitchRow
+              id="sic-dropped"
+              label="Dropped frames"
+              checked={form.streamInfoCardShowDroppedFrames}
+              onCheckedChange={(value) => updateField("streamInfoCardShowDroppedFrames", value)}
+            />
+            <SwitchRow
+              id="sic-network"
+              label="Network usage"
+              checked={form.streamInfoCardShowNetworkUsage}
+              onCheckedChange={(value) => updateField("streamInfoCardShowNetworkUsage", value)}
+            />
+          </div>
+          <Separator />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="sic-font-size">Font size (px)</Label>
+              <Input
+                id="sic-font-size"
+                type="number"
+                min={8}
+                max={32}
+                value={form.streamInfoCardFontSize}
+                onChange={(e) => updateField("streamInfoCardFontSize", parseInt(e.target.value || "12", 10) || 12)}
+                disabled={saving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sic-box-width">Box width (px)</Label>
+              <Input
+                id="sic-box-width"
+                type="number"
+                min={100}
+                max={600}
+                value={form.streamInfoCardBoxWidth}
+                onChange={(e) => updateField("streamInfoCardBoxWidth", parseInt(e.target.value || "200", 10) || 200)}
+                disabled={saving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sic-box-opacity">Background opacity (0-100)</Label>
+              <Input
+                id="sic-box-opacity"
+                type="number"
+                min={0}
+                max={100}
+                value={form.streamInfoCardBoxOpacity}
+                onChange={(e) => updateField("streamInfoCardBoxOpacity", parseInt(e.target.value || "60", 10) || 60)}
+                disabled={saving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="sic-text-color">Text color</Label>
+              <div className="flex gap-2 items-center">
+                <Input
+                  id="sic-text-color"
+                  type="text"
+                  value={form.streamInfoCardTextColor}
+                  onChange={(e) => updateField("streamInfoCardTextColor", e.target.value)}
+                  placeholder="#ffffff"
+                  disabled={saving}
+                  className="flex-1"
+                />
+                <input
+                  type="color"
+                  value={form.streamInfoCardTextColor}
+                  onChange={(e) => updateField("streamInfoCardTextColor", e.target.value)}
+                  className="w-9 h-9 rounded-md border border-white/10 cursor-pointer bg-transparent"
+                />
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
       <StreamHistorySection />

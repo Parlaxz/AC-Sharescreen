@@ -1,9 +1,8 @@
 /**
- * FramePerformanceGraph — Tabbed Recharts graph for viewer frame timing.
+ * FramePerformanceGraph — Side-by-side Recharts graphs for viewer frame timing.
  *
- * Tabs:
- *   Frame rate  — primary displayed FPS, secondary decoded FPS
- *   Frame time  — primary frame interval ms, secondary decode time ms
+ * Displays frame rate (displayed FPS / decoded FPS) and frame time
+ * (frame interval / decode time) simultaneously in a two-column grid.
  *
  * Accepts frame performance samples as props (no internal polling).
  * Null values during pauses/reconnects produce graph gaps.
@@ -18,7 +17,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 // ─── Sample type ────────────────────────────────────────────────────────────
 
@@ -173,7 +171,7 @@ function FrameTimeTooltip({
 
 function EmptyGraph({ label }: { label: string }) {
   return (
-    <div className="h-32 flex items-center justify-center text-sm text-text-muted">
+    <div className="h-28 flex items-center justify-center text-sm text-text-muted">
       {label}
     </div>
   );
@@ -198,18 +196,16 @@ export function FramePerformanceGraph({
   const hasTimeData = frameTimeData.some((d) => d.frameIntervalMs != null || d.decodeTimeMs != null);
 
   return (
-    <Tabs defaultValue="frame-rate">
-      <TabsList className="mb-1">
-        <TabsTrigger value="frame-rate">Frame rate</TabsTrigger>
-        <TabsTrigger value="frame-time">Frame time</TabsTrigger>
-      </TabsList>
-
-      {/* ── Frame rate tab ── */}
-      <TabsContent value="frame-rate">
+    <div className="grid grid-cols-2 gap-4">
+      {/* ── Frame rate ── */}
+      <div className="min-w-0">
+        <h4 className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1">
+          Frame rate
+        </h4>
         {!hasRateData ? (
           <EmptyGraph label="No frame rate data yet." />
         ) : (
-          <div className="h-32">
+          <div className="h-28">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart
                 data={frameRateData}
@@ -224,23 +220,22 @@ export function FramePerformanceGraph({
                   type="number"
                   domain={["dataMin", "dataMax"]}
                   tickFormatter={formatTimeAxis}
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 10 }}
                   stroke="var(--color-text-muted)"
                 />
                 <YAxis
                   tickFormatter={formatFpsTick}
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 10 }}
                   stroke="var(--color-text-muted)"
+                  width={28}
                   label={{
                     value: "FPS",
                     angle: -90,
                     position: "insideLeft",
-                    style: { fontSize: 11, fill: "var(--color-text-muted)" },
+                    style: { fontSize: 10, fill: "var(--color-text-muted)" },
                   }}
                 />
                 <RechartsTooltip content={<FrameRateTooltip />} />
-
-                {/* Primary: displayed FPS */}
                 <Area
                   type="monotone"
                   dataKey="displayedFps"
@@ -253,8 +248,6 @@ export function FramePerformanceGraph({
                   strokeWidth={2}
                   connectNulls={false}
                 />
-
-                {/* Secondary: decoded FPS */}
                 <Area
                   type="monotone"
                   dataKey="decodedFps"
@@ -272,14 +265,17 @@ export function FramePerformanceGraph({
             </ResponsiveContainer>
           </div>
         )}
-      </TabsContent>
+      </div>
 
-      {/* ── Frame time tab ── */}
-      <TabsContent value="frame-time">
+      {/* ── Frame time ── */}
+      <div className="min-w-0">
+        <h4 className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1">
+          Frame time
+        </h4>
         {!hasTimeData ? (
           <EmptyGraph label="No frame time data yet." />
         ) : (
-          <div className="h-32">
+          <div className="h-28">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart
                 data={frameTimeData}
@@ -294,23 +290,22 @@ export function FramePerformanceGraph({
                   type="number"
                   domain={["dataMin", "dataMax"]}
                   tickFormatter={formatTimeAxis}
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 10 }}
                   stroke="var(--color-text-muted)"
                 />
                 <YAxis
                   tickFormatter={formatMsTick}
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 10 }}
                   stroke="var(--color-text-muted)"
+                  width={28}
                   label={{
                     value: "ms",
                     angle: -90,
                     position: "insideLeft",
-                    style: { fontSize: 11, fill: "var(--color-text-muted)" },
+                    style: { fontSize: 10, fill: "var(--color-text-muted)" },
                   }}
                 />
                 <RechartsTooltip content={<FrameTimeTooltip />} />
-
-                {/* Primary: frame interval */}
                 <Area
                   type="monotone"
                   dataKey="frameIntervalMs"
@@ -323,8 +318,6 @@ export function FramePerformanceGraph({
                   strokeWidth={2}
                   connectNulls={false}
                 />
-
-                {/* Secondary: decode time */}
                 <Area
                   type="monotone"
                   dataKey="decodeTimeMs"
@@ -342,7 +335,7 @@ export function FramePerformanceGraph({
             </ResponsiveContainer>
           </div>
         )}
-      </TabsContent>
-    </Tabs>
+      </div>
+    </div>
   );
 }
