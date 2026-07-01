@@ -27,4 +27,16 @@ describe("viewer workspace lifecycle wiring", () => {
     expect(viewerWorkspaceSrc).toContain("ensureAppRuntimeInitialized");
     expect(viewerWorkspaceSrc).toMatch(/if \(sessionRef\.current\) \{[\s\S]*retry\(\);[\s\S]*\} else \{[\s\S]*startViewerSession\(/);
   });
+
+  it("binds the video element through a callback ref instead of a sessionState effect", () => {
+    expect(viewerWorkspaceSrc).toContain("const videoRefCallback = useCallback");
+    expect(viewerWorkspaceSrc).toContain("sessionRef.current.bindVideoElement(el)");
+    expect(viewerWorkspaceSrc).not.toMatch(/useEffect\(\(\) => \{[\s\S]*bindVideoElement\(videoRef\.current\)[\s\S]*sessionState/);
+  });
+
+  it("serializes destroy promises across remounts", () => {
+    expect(viewerWorkspaceSrc).toContain("let _globalDestroyPromise: Promise<void> | null = null");
+    expect(viewerWorkspaceSrc).toContain("if (_globalDestroyPromise)");
+    expect(viewerWorkspaceSrc).toContain("_globalDestroyPromise = destroyPromise");
+  });
 });

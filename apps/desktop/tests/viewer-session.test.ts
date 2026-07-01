@@ -717,9 +717,10 @@ describe("ViewerSession — destroy lifecycle", () => {
   });
 
   it("destroy clears video.srcObject and pauses the video element", async () => {
+    const mockStream = { id: "stream-1" } as unknown as MediaStream;
     const mockVideo = {
       pause: vi.fn(),
-      srcObject: "fake-stream",
+      srcObject: mockStream,
       autoplay: false,
       playsInline: false,
       muted: false,
@@ -728,12 +729,12 @@ describe("ViewerSession — destroy lifecycle", () => {
     } as unknown as HTMLVideoElement;
 
     session.bindVideoElement(mockVideo);
-    // Simulate having a received stream
-    Object.defineProperty(session, "_receivedStream", { value: "some-stream", writable: true });
+    // Simulate having a received stream that matches the element's srcObject
+    Object.defineProperty(session, "_receivedStream", { value: mockStream, writable: true });
 
     await session.destroy();
 
-    // video.pause and srcObject cleared
+    // video.pause and srcObject cleared (the session owns the element's stream)
     expect(mockVideo.pause).toHaveBeenCalled();
     expect((mockVideo as any).srcObject).toBeNull();
   });
@@ -1399,5 +1400,307 @@ describe("ViewerSession — instance-local generations", () => {
     const payload = joinRequests[0][1] as Record<string, unknown>;
     expect(payload.mediaSessionId).toBe("ms-1");
     expect(payload.logicalStreamId).toBe("ls-1");
+  });
+});
+
+// ─── Stream attachment (grey-screen fix) ────────────────────────────────
+
+describe("ViewerSession — stream attachment (grey-screen fix)", () => {
+  let session: ViewerSession;
+  let runtime: ReturnType<typeof makeMockRuntime>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtime = makeMockRuntime();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    session = new ViewerSession();
+  });
+
+  afterEach(() => {
+    session.destroy().catch(() => {});
+    vi.restoreAllMocks();
+  });
+
+  function mockJoinOk() {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: true,
+      mediaJoinMetadata: "test-token",
+      mediaSessionId: "ms-1",
+      streamId: "stream-1",
+      password: "vdo-password",
+    });
+    mockViewerClientMethods.createAndConnect.mockResolvedValue(undefined);
+    mockViewerClientMethods.view.mockResolvedValue(undefined);
+    mockViewerClientMethods.getSDK.mockReturnValue({
+      connections: new Map([["pub-uuid-1", { viewer: null, publisher: null }]]),
+    });
+    mockViewerClientMethods.sendMediaBind.mockResolvedValue(undefined);
+  }
+
+  it("audio-only track does not attach stream to video element", async () => {
+    mockJoinOk();
+    const mockVideo = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+      videoElement: mockVideo,
+    });
+
+    // Capture the trackAdded handler
+    const trackAddedHandler = mockViewerClientMethods.on.mock.calls.find(
+      ([event]: [string]) => event === "trackAdded",
+    )?.[1] as ((event: { detail: unknown }) => void) | undefined;
+    expect(trackAddedHandler).toBeDefined();
+
+    // Fire an audio-only track event — should NOT attach to video element
+    const audioTrack = { kind: "audio", id: "at-1", enabled: true, readyState: "live" };
+    trackAddedHandler!({ detail: { track: audioTrack, uuid: "peer-1" } });
+
+    // After audio-only track: state should NOT be "watching", srcObject should NOT be set
+    expect(session.state).not.toBe("watching");
+    expect((mockVideo as any).srcObject).toBeNull();
+    expect(mockVideo.play).not.toHaveBeenCalled();
+  });
+
+  it("video track attaches stream to video element and transitions to watching", async () => {
+    mockJoinOk();
+    const mockVideo = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    await session.start({
+      groupId: "g-1", hostDeviceId: "host-1",
+      logicalStreamId: "ls-1", mediaSessionId: "ms-1", hostName: "Host",
+      videoElement: mockVideo,
+    });
+
+    const trackAddedHandler = mockViewerClientMethods.on.mock.calls.find(
+      ([event]: [string]) => event === "trackAdded",
+    )?.[1] as ((event: { detail: unknown }) => void) | undefined;
+    expect(trackAddedHandler).toBeDefined();
+
+    // Create a fake MediaStream-like object to test attachment
+    const mockAddTrack = vi.fn();
+    const mockStream = {
+      addTrack: mockAddTrack,
+      getTracks: vi.fn().mockReturnValue([]),
+    };
+
+    // Fire a video track event — should attach and transition to watching
+    const videoTrack = { kind: "video", id: "vt-1", enabled: true, readyState: "live", addEventListener: vi.fn() };
+    trackAddedHandler!({ detail: { track: videoTrack, streams: [mockStream], uuid: "peer-1" } });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(session.state).toBe("watching");
+    expect((mockVideo as any).srcObject).toBe(mockStream);
+    expect(mockVideo.play).toHaveBeenCalled();
+  });
+
+  it("attachStreamToElement is idempotent — repeated calls with same stream are no-ops", async () => {
+    const videoEl = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      paused: true,
+      readyState: 0,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    // Bind the element first
+    session.bindVideoElement(videoEl);
+
+    // Create a fake stream
+    const mockAddTrack = vi.fn();
+    const stream = {
+      addTrack: mockAddTrack,
+      getTracks: vi.fn().mockReturnValue([]),
+    } as unknown as MediaStream;
+
+    // First attach: should set srcObject and call play
+    (session as any).attachStreamToElement(videoEl, stream);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect((videoEl as any).srcObject).toBe(stream);
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+
+    (videoEl as any).paused = false;
+    (videoEl as any).readyState = 3;
+
+    // Second attach with same stream: should NOT re-set srcObject or call play again
+    (session as any).attachStreamToElement(videoEl, stream);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("bindVideoElement reattaches the same stream to a replacement video element", async () => {
+    const stream = {
+      addTrack: vi.fn(),
+      getTracks: vi.fn().mockReturnValue([]),
+    } as unknown as MediaStream;
+
+    const firstVideo = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      paused: true,
+      readyState: 0,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    const secondVideo = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      paused: true,
+      readyState: 0,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    Object.defineProperty(session, "_receivedStream", { value: stream, writable: true });
+
+    session.bindVideoElement(firstVideo);
+    await new Promise((resolve) => setImmediate(resolve));
+    session.bindVideoElement(secondVideo);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect((firstVideo as any).srcObject).toBe(stream);
+    expect((secondVideo as any).srcObject).toBe(stream);
+    expect(firstVideo.play).toHaveBeenCalledTimes(1);
+    expect(secondVideo.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("attachStreamToElement retries play() once on AbortError", async () => {
+    const addEventListener = vi.fn((event: string, handler: () => void) => {
+      if (event === "canplay") {
+        handler();
+      }
+    });
+    const videoEl = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      paused: true,
+      readyState: 0,
+      addEventListener,
+      removeEventListener: vi.fn(),
+      // First call throws AbortError, second succeeds
+      play: vi.fn()
+        .mockRejectedValueOnce(Object.assign(new Error("play() aborted"), { name: "AbortError" }))
+        .mockResolvedValueOnce(undefined),
+    } as unknown as HTMLVideoElement;
+
+    const stream = {
+      addTrack: vi.fn(),
+      getTracks: vi.fn().mockReturnValue([]),
+    } as unknown as MediaStream;
+
+    (session as any).attachStreamToElement(videoEl, stream);
+
+    // Allow promises to settle
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Should have called play() twice (first failed AbortError, second retry succeeded)
+    expect(videoEl.play).toHaveBeenCalledTimes(2);
+  });
+
+  it("attachStreamToElement does not retry non-AbortError play failures", async () => {
+    const videoEl = {
+      pause: vi.fn(),
+      srcObject: null,
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      paused: true,
+      readyState: 0,
+      play: vi.fn().mockRejectedValue(new Error("NotAllowedError: autoplay blocked")),
+    } as unknown as HTMLVideoElement;
+
+    const stream = {
+      addTrack: vi.fn(),
+      getTracks: vi.fn().mockReturnValue([]),
+    } as unknown as MediaStream;
+
+    (session as any).attachStreamToElement(videoEl, stream);
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Should have called play() only once (no retry for non-AbortError)
+    expect(videoEl.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("beginTeardown only clears video element if session owns its stream", async () => {
+    const videoEl = {
+      pause: vi.fn(),
+      srcObject: "stream-other-session",  // Some other session's stream is attached
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    session.bindVideoElement(videoEl);
+    Object.defineProperty(session, "_receivedStream", { value: "stream-this-session", writable: true });
+
+    await session.destroy();
+
+    // The element's srcObject (from another session) should NOT be cleared
+    expect((videoEl as any).srcObject).toBe("stream-other-session");
+    expect(videoEl.pause).not.toHaveBeenCalled();
+  });
+
+  it("beginTeardown clears video element when session owns its stream", async () => {
+    const stream = {
+      addTrack: vi.fn(),
+      getTracks: vi.fn().mockReturnValue([]),
+    } as unknown as MediaStream;
+
+    const videoEl = {
+      pause: vi.fn(),
+      srcObject: stream,  // This session's stream is attached
+      autoplay: false,
+      playsInline: false,
+      muted: false,
+      volume: 1,
+      play: vi.fn().mockResolvedValue(undefined),
+    } as unknown as HTMLVideoElement;
+
+    session.bindVideoElement(videoEl);
+    Object.defineProperty(session, "_receivedStream", { value: stream, writable: true });
+
+    await session.destroy();
+
+    // The element's srcObject should be cleared
+    expect((videoEl as any).srcObject).toBeNull();
+    expect(videoEl.pause).toHaveBeenCalled();
   });
 });

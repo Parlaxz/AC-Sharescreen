@@ -70,6 +70,12 @@ import {
 import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
 import { getNvidiaCapabilitySnapshot } from "@/services/nvidia-capability-store";
 
+// ─── Module-level teardown serialization ────────────────────────────────
+// Survives component remounts so a previous session's destroy() can be
+// awaited before a new session starts, even when the component unmounts
+// and remounts (e.g. React strict mode or navigation).
+let _globalDestroyPromise: Promise<void> | null = null;
+
 type NativeBenchmarkStatusShape = {
   benchmarkActive: boolean;
   benchmarkTargetFrames: number;
@@ -514,6 +520,19 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // Video element ref — shared with ViewerSession
   const videoRef = useRef<HTMLVideoElement>(null);
+  /**
+   * Stable callback ref that binds the video element to the session only
+   * when the actual DOM element changes. Unlike the old effect-based bind
+   * (which ran on every sessionState change), this avoids redundant
+   * bindVideoElement calls that can interfere with stream attachment.
+   */
+  const videoRefCallback = useCallback((el: HTMLVideoElement | null) => {
+    videoRef.current = el;
+    // Only bind when there is both an element and an active session
+    if (el && sessionRef.current) {
+      sessionRef.current.bindVideoElement(el);
+    }
+  }, []);
 
   // Audio boost via Web Audio API GainNode (allows volume > 1.0)
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -600,22 +619,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
     }
 
-    // 3) Clear the video element srcObject defensively (the
-    //    session's copy was already cleared, but React's ref
-    //    might still hold a reference).
-    if (videoRef.current) {
-      try {
-        videoRef.current.pause();
-        videoRef.current.srcObject = null;
-      } catch { /* ignore */ }
-    }
-
-    // 4) Clear watching target and store viewing state
+    // 3) Clear watching target and store viewing state
     useStore.getState().setWatchingTarget(null);
     setIsViewing(false);
     setViewStatus("");
 
-    // 5) Exit fullscreen if active
+    // 4) Exit fullscreen if active
     if (isFullscreen) {
       const api = (window as unknown as { screenlink?: { toggleFullscreen: () => Promise<boolean> } }).screenlink;
       if (api) {
@@ -625,7 +634,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       }
     }
 
-    // 6) Navigate back to group overview with refresh
+    // 5) Navigate back to group overview with refresh
     navigateToGroupOverview();
   }, [setIsViewing, setViewStatus, isFullscreen]);
 
@@ -681,6 +690,19 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
    */
   const startViewerSession = useCallback(async (shouldAbort: () => boolean = () => false): Promise<void> => {
     await ensureAppRuntimeInitialized();
+
+    // Await any cross-instance destroy promise from a previous mount
+    // (React strict mode or component remount). This ensures the old
+    // session's async teardown completes before the new one starts.
+    if (_globalDestroyPromise) {
+      const p = _globalDestroyPromise;
+      _globalDestroyPromise = null;
+      try {
+        await p;
+      } catch {
+        // Best-effort — a fresh session can still proceed.
+      }
+    }
 
     if (lastDestroyRef.current) {
       const pendingDestroy = lastDestroyRef.current;
@@ -1673,11 +1695,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     return () => {
       cancelled = true;
       // Cleanup on unmount: store the destroy promise so a subsequent
-      // mount can await it before creating a new ViewerSession.
+      // mount (including remounts via React strict mode) can await it
+      // before creating a new ViewerSession. Both instance-level and
+      // module-level stores ensure cross-mount serialization.
       const s = sessionRef.current;
       if (s) {
         sessionRef.current = null;
-        lastDestroyRef.current = s.destroy().catch(() => {});
+        const destroyPromise = s.destroy().catch(() => {});
+        lastDestroyRef.current = destroyPromise;
+        _globalDestroyPromise = destroyPromise;
       }
     };
   }, [isViewing, startViewerSession]);
@@ -1772,13 +1798,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     };
   }, [isViewing, selectedGroupId, setViewStatus, watchingTarget?.logicalStreamId, watchingTarget?.mediaSessionId]);
 
-  // Bind video element to session whenever ref is available
-  useEffect(() => {
-    if (sessionRef.current && videoRef.current) {
-      sessionRef.current.bindVideoElement(videoRef.current);
-    }
-  }, [videoRef.current, sessionState]);
-
   // ── Derive display status from session state ─────────────────────
   // Use the store's viewStatus as source of truth, falling back to sessionState
   const displayStatus = viewStatus || sessionStateToViewStatus(sessionState);
@@ -1842,7 +1861,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           {/* Preserve video layout — show the video element behind */}
           <div className="relative flex-1 flex items-center justify-center bg-canvas">
             <video
-              ref={videoRef}
+              ref={videoRefCallback}
               className="h-full object-contain"
               playsInline
             />
@@ -1915,7 +1934,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         >
           <div className="relative flex-1 flex items-center justify-center bg-canvas">
             <video
-              ref={videoRef}
+              ref={videoRefCallback}
               className="h-full object-contain"
               playsInline
             />
@@ -2087,7 +2106,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           {/* Keeps the WebRTC MediaStream pipeline alive. In compare mode
               it is visually hidden behind the CompareViewerSurface layers. */}
           <video
-            ref={videoRef}
+            ref={videoRefCallback}
             data-video-native
             className={cn(
               "h-full object-contain absolute inset-0",

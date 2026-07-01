@@ -216,6 +216,13 @@ export class ViewerSession {
   /** Remote-track-ended debounce timer — instance state for proper cleanup. */
   private _remoteTrackEndedTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Tracks the last play() promise so that attachStreamToElement never
+   * starts a new play() while a previous one is still settling — avoiding
+   * AbortError from overlapping calls.
+   */
+  private _playPromise: Promise<void> | null = null;
+
   // Self-viewing support — when the host is the local device,
   // we pipe the capture stream directly instead of VDO relay.
   private selfViewEndedHandler: (() => void) | null = null;
@@ -228,6 +235,10 @@ export class ViewerSession {
   private _selfViewRetryCount = 0;
   /** Handle for cancelling a scheduled self-view retry. */
   private _selfViewRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private static readonly HAVE_CURRENT_DATA = typeof HTMLMediaElement === "undefined"
+    ? 2
+    : HTMLMediaElement.HAVE_CURRENT_DATA;
 
   // Session identity (set by start)
   private groupId = "";
@@ -601,20 +612,88 @@ export class ViewerSession {
 
   /**
    * Attach a MediaStream to a video element with autoplay and playsInline.
-   * Calls play() and surfaces autoplay failures.
-   * Applies current muted/volume state.
+   * Idempotent: skips redundant srcObject assignments for the same stream.
+   * Resilient: serializes play() calls and retries once on AbortError after
+   * the same stream becomes playable.
+   *
+   * Applies current mute/volume state via the caller (video controls refs).
    */
   private attachStreamToElement(el: HTMLVideoElement, stream: MediaStream): void {
-    el.srcObject = stream;
+    const alreadyAttached = el.srcObject === stream;
+
     el.autoplay = true;
     el.playsInline = true;
+
+    if (!alreadyAttached) {
+      el.srcObject = stream;
+    }
 
     // Preserve current mute/volume state — do NOT force el.muted = false.
     // The caller manages mute via volume/muted refs (e.g. media controls).
 
-    el.play().catch((reason) => {
-      // Surface real autoplay failures rather than swallowing them
-      console.warn('[ViewerSession] video.play() failed (autoplay may be blocked):', reason);
+    const readyState = typeof el.readyState === "number" ? el.readyState : 0;
+    const paused = typeof el.paused === "boolean" ? el.paused : true;
+    if (alreadyAttached && !paused && readyState >= ViewerSession.HAVE_CURRENT_DATA) {
+      return;
+    }
+
+    const attemptPlay = async (): Promise<void> => {
+      if (el.srcObject !== stream) return;
+
+      try {
+        await el.play();
+      } catch (reason) {
+        const err = reason as DOMException;
+        if (err?.name === "AbortError" && el.srcObject === stream) {
+          await this.waitForCanPlay(el, stream);
+          if (el.srcObject === stream) {
+            await el.play();
+          }
+          return;
+        }
+
+        console.warn("[ViewerSession] video.play() failed (autoplay may be blocked):", reason);
+      }
+    };
+
+    const queuedPlay = (this._playPromise ?? Promise.resolve())
+      .catch(() => {})
+      .then(attemptPlay)
+      .catch((reason) => {
+        console.warn("[ViewerSession] video.play() retry also failed:", reason);
+      });
+
+    this._playPromise = queuedPlay;
+    queuedPlay.finally(() => {
+      if (this._playPromise === queuedPlay) {
+        this._playPromise = null;
+      }
+    });
+  }
+
+  private waitForCanPlay(el: HTMLVideoElement, stream: MediaStream): Promise<void> {
+    const readyState = typeof el.readyState === "number" ? el.readyState : 0;
+    if (el.srcObject !== stream || readyState >= ViewerSession.HAVE_CURRENT_DATA) {
+      return Promise.resolve();
+    }
+
+    if (typeof el.addEventListener !== "function" || typeof el.removeEventListener !== "function") {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        cleanup();
+        resolve();
+      };
+
+      const cleanup = (): void => {
+        el.removeEventListener("canplay", finish);
+        el.removeEventListener("loadedmetadata", finish);
+      };
+
+      el.addEventListener("canplay", finish, { once: true });
+      el.addEventListener("loadedmetadata", finish, { once: true });
     });
   }
 
@@ -835,17 +914,23 @@ export class ViewerSession {
         //    would blank the shared <video> DOM element. Because
         //    destroy() now awaits this method, the new Watch session
         //    cannot start until this completes.
+        //    IMPORTANT: only clear the element if this session still
+        //    owns its stream — a newer session may have attached a
+        //    different stream to the same element.
         if (this.videoElement) {
-          try {
-            this.videoElement.pause();
-            this.videoElement.srcObject = null;
-          } catch { /* ignore */ }
+          if (this.videoElement.srcObject === this._receivedStream) {
+            try {
+              this.videoElement.pause();
+              this.videoElement.srcObject = null;
+            } catch { /* ignore */ }
+          }
           if (options.final) {
             this.videoElement = null;
           }
         }
 
         this._receivedStream = null;
+        this._playPromise = null;
         this._trackIdsInStream.clear();
 
 		// 6) Clear pause state so any in-flight pause/resume observers
@@ -1210,15 +1295,17 @@ export class ViewerSession {
           }
         }
 
-        // Attach to video element if bound
-        if (this.videoElement && this._receivedStream) {
-          this.attachStreamToElement(this.videoElement, this._receivedStream);
-        }
-
         this.onStreamReceived?.(this._receivedStream);
 
-        // Only transition to watching when a live video track is received
+        // Only transition to watching when a live video track is received.
+        // Also attach the stream to the video element only when a video
+        // track arrives — audio-only tracks should not trigger attachment
+        // (the grey-screen fix).
         if (isVideo) {
+          if (this.videoElement && this._receivedStream) {
+            this.attachStreamToElement(this.videoElement, this._receivedStream);
+          }
+
           this.cancelReadinessTimer();
           this.setState("watching");
           this.startStatusInterval();
@@ -1341,6 +1428,7 @@ export class ViewerSession {
         }
 
         this._receivedStream = null;
+        this._playPromise = null;
         this._trackIdsInStream.clear();
         this.leaveAnnounced = false;
         this._viewerSessionId = generateViewerSessionId();
