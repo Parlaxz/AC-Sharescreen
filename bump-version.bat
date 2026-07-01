@@ -13,26 +13,22 @@ if "%CURRENT_VERSION%"=="" (
 
 echo Current version: %CURRENT_VERSION%
 echo.
+
+for /f "tokens=*" %%a in ('node -p "const v='%CURRENT_VERSION%'.split('.').map(Number); v[2]++; v.join('.')"') do set "PATCH_VER=%%a"
+for /f "tokens=*" %%a in ('node -p "const v='%CURRENT_VERSION%'.split('.').map(Number); v[1]++; v[2]=0; v.join('.')"') do set "MINOR_VER=%%a"
+for /f "tokens=*" %%a in ('node -p "const v='%CURRENT_VERSION%'.split('.').map(Number); v[0]++; v[1]=0; v[2]=0; v.join('.')"') do set "MAJOR_VER=%%a"
+
 echo Select bump type:
-echo   [1] Patch  (e.g. %CURRENT_VERSION% -^> patch bump)
-echo   [2] Minor  (e.g. %CURRENT_VERSION% -^> minor bump)
-echo   [3] Major  (e.g. %CURRENT_VERSION% -^> major bump)
+echo   [1] Patch  %CURRENT_VERSION% -^> %PATCH_VER%
+echo   [2] Minor  %CURRENT_VERSION% -^> %MINOR_VER%
+echo   [3] Major  %CURRENT_VERSION% -^> %MAJOR_VER%
 echo   [4] Custom
 echo.
 set /p CHOICE="Enter choice (1-4): "
 
-if "%CHOICE%"=="1" (
-    for /f "tokens=*" %%a in ('node -p "const v='%CURRENT_VERSION%'.split('.').map(Number); v[2]++; v.join('.')"') do set "NEW_VERSION=%%a"
-    goto update
-)
-if "%CHOICE%"=="2" (
-    for /f "tokens=*" %%a in ('node -p "const v='%CURRENT_VERSION%'.split('.').map(Number); v[1]++; v[2]=0; v.join('.')"') do set "NEW_VERSION=%%a"
-    goto update
-)
-if "%CHOICE%"=="3" (
-    for /f "tokens=*" %%a in ('node -p "const v='%CURRENT_VERSION%'.split('.').map(Number); v[0]++; v[1]=0; v[2]=0; v.join('.')"') do set "NEW_VERSION=%%a"
-    goto update
-)
+if "%CHOICE%"=="1" set "NEW_VERSION=%PATCH_VER%"& goto update
+if "%CHOICE%"=="2" set "NEW_VERSION=%MINOR_VER%"& goto update
+if "%CHOICE%"=="3" set "NEW_VERSION=%MAJOR_VER%"& goto update
 if "%CHOICE%"=="4" (
     set /p NEW_VERSION="Enter new version (current: %CURRENT_VERSION%): "
     if "!NEW_VERSION!"=="" (

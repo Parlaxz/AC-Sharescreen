@@ -70,11 +70,18 @@ import {
 import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
 import { getNvidiaCapabilitySnapshot } from "@/services/nvidia-capability-store";
 
-// ─── Module-level teardown serialization ────────────────────────────────
-// Survives component remounts so a previous session's destroy() can be
-// awaited before a new session starts, even when the component unmounts
-// and remounts (e.g. React strict mode or navigation).
-let _globalDestroyPromise: Promise<void> | null = null;
+// ─── Module-level viewer lifecycle serialization ────────────────────────
+// Survives component remounts so create/start/destroy operations for the
+// viewer session cannot overlap across remounts or quick retries.
+let viewerLifecycle: Promise<void> = Promise.resolve();
+
+function queueViewerLifecycle(
+  operation: () => Promise<void>,
+): Promise<void> {
+  const run = viewerLifecycle.then(operation, operation);
+  viewerLifecycle = run.catch(() => {});
+  return run;
+}
 
 type NativeBenchmarkStatusShape = {
   benchmarkActive: boolean;
@@ -293,7 +300,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ─── Store ───────────────────────────────────────────────────────
   const isViewing = useStore((s) => s.isViewing);
-  const viewStatus = useStore((s) => s.viewStatus);
   const setIsViewing = useStore((s) => s.setIsViewing);
   const setViewStatus = useStore((s) => s.setViewStatus);
   const toggleFocusMode = useStore((s) => s.toggleFocusMode);
@@ -337,6 +343,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<ViewerSessionState>("idle");
+  const [viewerError, setViewerError] = useState<string | null>(null);
   const [qualityRequestPending, setQualityRequestPending] = useState(false);
   const [qualityFeedback, setQualityFeedback] = useState<string | null>(null);
   const [lastQualityAccepted, setLastQualityAccepted] = useState<boolean | undefined>(undefined);
@@ -539,6 +546,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ViewerSession instance ref — stable across renders
   const sessionRef = useRef<ViewerSession | null>(null);
+  const startAttemptRef = useRef(0);
 
   // Auto-hide controls — stay visible while any popover panel is open
   // Track panel open state as a synthetic "always show" signal
@@ -586,11 +594,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     //    Capturing sessionRef.current before the null-assignment
     //    ensures we hold a reference to the exact session we mean
     //    to destroy, even if the ref is cleared concurrently.
+    startAttemptRef.current++;
     const session = sessionRef.current;
-    sessionRef.current = null;
+    if (sessionRef.current === session) {
+      sessionRef.current = null;
+    }
 
     if (session) {
-      await session.destroy();
+      await queueViewerLifecycle(() => session.destroy());
     }
 
     // 2) Clear visual stale state that destroy() does not own
@@ -606,6 +617,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     setStreamPauseState("playing");
     setStreamPausePoster(null);
     setSessionState("idle");
+    setViewerError(null);
     setCurrentStreamId(null);
     setCurrentBandwidthBps(0);
     setTotalBytesReceived(0);
@@ -687,106 +699,117 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
    * retries).  Extracted from the useEffect so it can be called both from
    * the isViewing effect and from the retry handler.
    */
-  const startViewerSession = useCallback(async (shouldAbort: () => boolean = () => false): Promise<void> => {
+  const startViewerSession = useCallback(async (
+    claimOwnedSession: (session: ViewerSession) => void,
+    shouldAbort: () => boolean = () => false,
+  ): Promise<void> => {
+    const attempt = ++startAttemptRef.current;
+
     // Reset enhancement active state for the new session so the raw video
     // is not hidden before the new enhanced path produces its first frame.
     setEnhancementActive(false);
+    setStreamPauseState("playing");
+    setStreamPausePoster(null);
+    setViewerError(null);
+    setSessionState("connecting");
+    setViewStatus("connecting");
 
     await ensureAppRuntimeInitialized();
 
-    // Await any cross-instance destroy promise from a previous mount
-    // (React strict mode or component remount). This ensures the old
-    // session's async teardown completes before the new one starts.
-    if (_globalDestroyPromise) {
-      const p = _globalDestroyPromise;
-      _globalDestroyPromise = null;
-      try {
-        await p;
-      } catch {
-        // Best-effort — a fresh session can still proceed.
+    await queueViewerLifecycle(async () => {
+      if (shouldAbort() || attempt !== startAttemptRef.current || sessionRef.current || !useStore.getState().isViewing) {
+        return;
       }
-    }
 
-    if (lastDestroyRef.current) {
-      const pendingDestroy = lastDestroyRef.current;
-      lastDestroyRef.current = null;
-      try {
-        await pendingDestroy;
-      } catch {
-        // Best-effort — a fresh session can still proceed.
+      const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
+
+      const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
+      const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
+      const targetLogicalStreamId = cStream?.logicalStreamId;
+
+      if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
+        if (attempt !== startAttemptRef.current || shouldAbort()) return;
+        setViewerError("missing stream target");
+        setSessionState("error");
+        setViewStatus("error");
+        return;
       }
-    }
 
-    if (shouldAbort() || sessionRef.current || !useStore.getState().isViewing) {
-      return;
-    }
+      const session = new ViewerSession();
 
-    const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
+      if (shouldAbort() || attempt !== startAttemptRef.current || !useStore.getState().isViewing) {
+        await session.destroy().catch(() => {});
+        return;
+      }
 
-    const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
-    const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
-    const targetLogicalStreamId = cStream?.logicalStreamId;
+      claimOwnedSession(session);
+      sessionRef.current = session;
 
-    if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
-      setViewStatus("error: missing stream target");
-      return;
-    }
+      session.onStateChange = (state: ViewerSessionState) => {
+        if (sessionRef.current !== session) return;
+        setSessionState(state);
+        if (state !== "error") {
+          setViewerError(null);
+        }
+        const status = sessionStateToViewStatus(state);
+        setViewStatus(status);
+      };
 
-    const session = new ViewerSession();
-    sessionRef.current = session;
-
-    session.onStateChange = (state: ViewerSessionState) => {
-      setSessionState(state);
-      const status = sessionStateToViewStatus(state);
-      setViewStatus(status);
-    };
-
-    session.onPauseStateChange = (pauseState: ViewerPauseState) => {
-      setStreamPauseState(pauseState);
-    };
-    session.onPosterFrameChange = (poster: string | null) => {
-      if (enhancementSettingsRef.current?.enabled && !enhancementFallbackRef.current) {
-        const canvas = document.querySelector('[data-enhanced-canvas]') as HTMLCanvasElement | null;
-        if (canvas && canvas.width > 0 && canvas.height > 0) {
-          try {
-            const enhancedPoster = canvas.toDataURL("image/jpeg", 0.85);
-            setStreamPausePoster(enhancedPoster);
-            return;
-          } catch {
-            // Fall through to use video element poster
+      session.onPauseStateChange = (pauseState: ViewerPauseState) => {
+        if (sessionRef.current !== session) return;
+        setStreamPauseState(pauseState);
+      };
+      session.onPosterFrameChange = (poster: string | null) => {
+        if (sessionRef.current !== session) return;
+        if (enhancementSettingsRef.current?.enabled && !enhancementFallbackRef.current) {
+          const canvas = document.querySelector('[data-enhanced-canvas]') as HTMLCanvasElement | null;
+          if (canvas && canvas.width > 0 && canvas.height > 0) {
+            try {
+              const enhancedPoster = canvas.toDataURL("image/jpeg", 0.85);
+              setStreamPausePoster(enhancedPoster);
+              return;
+            } catch {
+              // Fall through to use video element poster
+            }
           }
         }
-      }
-      setStreamPausePoster(poster);
-    };
+        setStreamPausePoster(poster);
+      };
 
-    session.onError = (error: string) => {
-      setViewStatus(`error: ${error}`);
-    };
+      session.onError = (error: string) => {
+        if (sessionRef.current !== session) return;
+        setViewerError(error);
+      };
 
-    await session.start({
-      groupId: gId,
-      hostDeviceId: targetHostDeviceId,
-      logicalStreamId: targetLogicalStreamId,
-      mediaSessionId: targetSessionId,
-      hostName: sName,
-      videoElement: videoRef.current,
-    }).catch((err: unknown) => {
-      setViewStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+      await session.start({
+        groupId: gId,
+        hostDeviceId: targetHostDeviceId,
+        logicalStreamId: targetLogicalStreamId,
+        mediaSessionId: targetSessionId,
+        hostName: sName,
+        videoElement: videoRef.current,
+      }).catch((err: unknown) => {
+        if (sessionRef.current !== session) return;
+        setViewerError(err instanceof Error ? err.message : String(err));
+        setSessionState("error");
+        setViewStatus("error");
+      });
     });
-  }, [ensureAppRuntimeInitialized, setViewStatus, setSessionState, setStreamPauseState, setStreamPausePoster]);
+  }, [ensureAppRuntimeInitialized, setViewStatus]);
 
   const handleRetry = useCallback(async () => {
     if (viewerHistoryIdRef.current) {
       StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "reconnecting");
     }
+    setViewerError(null);
+    setSessionState("connecting");
     setViewStatus("connecting");
 
     if (sessionRef.current) {
       await ensureAppRuntimeInitialized();
       void sessionRef.current.retry();
     } else {
-      await startViewerSession();
+      await startViewerSession(() => {});
     }
   }, [setViewStatus, ensureAppRuntimeInitialized, startViewerSession]);
 
@@ -1682,31 +1705,27 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const targetRef = useRef({ selectedGroupId, watchedInfo, currentStream, sharerName });
   targetRef.current = { selectedGroupId, watchedInfo, currentStream, sharerName };
 
-  /**
-   * Holds the promise from the previous session's destroy() so the next
-   * effect run can await it before creating a new ViewerSession. This
-   * prevents the old session's async teardown from blanking the shared
-   * <video> element's srcObject after the new stream has been attached.
-   */
-  const lastDestroyRef = useRef<Promise<void> | null>(null);
-
   useEffect(() => {
     if (!isViewing || sessionRef.current) return;
     let cancelled = false;
-    void startViewerSession(() => cancelled);
+    let ownedSession: ViewerSession | null = null;
+
+    void startViewerSession((session) => {
+      ownedSession = session;
+    }, () => cancelled);
 
     return () => {
       cancelled = true;
-      // Cleanup on unmount: store the destroy promise so a subsequent
-      // mount (including remounts via React strict mode) can await it
-      // before creating a new ViewerSession. Both instance-level and
-      // module-level stores ensure cross-mount serialization.
-      const s = sessionRef.current;
-      if (s) {
+      startAttemptRef.current++;
+      const session = ownedSession;
+      ownedSession = null;
+
+      if (sessionRef.current === session) {
         sessionRef.current = null;
-        const destroyPromise = s.destroy().catch(() => {});
-        lastDestroyRef.current = destroyPromise;
-        _globalDestroyPromise = destroyPromise;
+      }
+
+      if (session) {
+        void queueViewerLifecycle(() => session.destroy());
       }
     };
   }, [isViewing, startViewerSession]);
@@ -1744,9 +1763,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           (s) => s.logicalStreamId === exactLogicalStreamId && s.mediaSessionId === exactMediaSessionId
         );
         if (!stillExists) {
+          const session = sessionRef.current;
           // Our stream is gone — destroy session and show ended
-          lastDestroyRef.current = sessionRef.current.destroy().catch(() => {});
-          sessionRef.current = null;
+          startAttemptRef.current++;
+          if (sessionRef.current === session) {
+            sessionRef.current = null;
+          }
+          if (session) {
+            void queueViewerLifecycle(() => session.destroy());
+          }
+          setSessionState("ended");
+          setViewerError(null);
           setViewStatus("ended");
           setActivePanel(null);
 
@@ -1772,10 +1799,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       const prevWatched = prevState.watchedStreamsBySessionId;
       const currWatched = state.watchedStreamsBySessionId;
       if (exactMediaSessionId && prevWatched[exactMediaSessionId] && !currWatched[exactMediaSessionId]) {
-        if (sessionRef.current) {
-          lastDestroyRef.current = sessionRef.current.destroy().catch(() => {});
+        const session = sessionRef.current;
+        startAttemptRef.current++;
+        if (sessionRef.current === session) {
           sessionRef.current = null;
         }
+        if (session) {
+          void queueViewerLifecycle(() => session.destroy());
+        }
+        setSessionState("ended");
+        setViewerError(null);
         setViewStatus("ended");
         setActivePanel(null);
 
@@ -1802,8 +1835,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }, [isViewing, selectedGroupId, setViewStatus, watchingTarget?.logicalStreamId, watchingTarget?.mediaSessionId]);
 
   // ── Derive display status from session state ─────────────────────
-  // Use the store's viewStatus as source of truth, falling back to sessionState
-  const displayStatus = viewStatus || sessionStateToViewStatus(sessionState);
+  const displayStatus = sessionStateToViewStatus(sessionState);
 
   // ── Render by view status (Section 15) ───────────────────────────
 
@@ -1857,9 +1889,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }
 
   // Fatal error state — Destructive Alert + retry
-  // Some error states carry a detail message prefixed with "error:"
-  // (e.g. "error: missing stream target") that the exact match misses.
-  const isFatalError = displayStatus === "error" || (typeof displayStatus === "string" && displayStatus.startsWith("error:"));
+  const isFatalError = displayStatus === "error";
   if (isFatalError) {
     return (
       <ViewerShell className={className} onExit={handleExit}>
@@ -1879,9 +1909,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 A fatal error occurred while trying to connect to or play
                 {sharerName}'s stream. Please try again or check your
                 connection.
-                {viewStatus.startsWith("error:") && (
+                {viewerError && (
                   <span className="block mt-2 text-xs opacity-70">
-                    {viewStatus.slice(6)}
+                    {viewerError}
                   </span>
                 )}
               </AlertDescription>

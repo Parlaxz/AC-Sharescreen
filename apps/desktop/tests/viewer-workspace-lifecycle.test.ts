@@ -34,10 +34,33 @@ describe("viewer workspace lifecycle wiring", () => {
     expect(viewerWorkspaceSrc).not.toMatch(/useEffect\(\(\) => \{[\s\S]*bindVideoElement\(videoRef\.current\)[\s\S]*sessionState/);
   });
 
-  it("serializes destroy promises across remounts", () => {
-    expect(viewerWorkspaceSrc).toContain("let _globalDestroyPromise: Promise<void> | null = null");
-    expect(viewerWorkspaceSrc).toContain("if (_globalDestroyPromise)");
-    expect(viewerWorkspaceSrc).toContain("_globalDestroyPromise = destroyPromise");
+  it("serializes viewer lifecycle through a module-level queue instead of clearing a destroy promise early", () => {
+    expect(viewerWorkspaceSrc).toContain("let viewerLifecycle: Promise<void> = Promise.resolve()");
+    expect(viewerWorkspaceSrc).toContain("function queueViewerLifecycle(");
+    expect(viewerWorkspaceSrc).toContain("viewerLifecycle.then(operation, operation)");
+    expect(viewerWorkspaceSrc).not.toContain("_globalDestroyPromise = null");
+  });
+
+  it("tracks an effect-owned session so stale cleanup cannot destroy a newer session", () => {
+    expect(viewerWorkspaceSrc).toContain("let ownedSession: ViewerSession | null = null");
+    expect(viewerWorkspaceSrc).toContain("const session = ownedSession");
+    expect(viewerWorkspaceSrc).toContain("ownedSession = null");
+    expect(viewerWorkspaceSrc).not.toContain("const s = sessionRef.current");
+  });
+
+  it("guards session callbacks and async start failures by active session identity", () => {
+    expect(viewerWorkspaceSrc).toMatch(/session\.onStateChange = \(state: ViewerSessionState\) => \{[\s\S]*if \(sessionRef\.current !== session\) return;/);
+    expect(viewerWorkspaceSrc).toMatch(/session\.onPauseStateChange = \(pauseState: ViewerPauseState\) => \{[\s\S]*if \(sessionRef\.current !== session\) return;/);
+    expect(viewerWorkspaceSrc).toMatch(/session\.onPosterFrameChange = \(poster: string \| null\) => \{[\s\S]*if \(sessionRef\.current !== session\) return;/);
+    expect(viewerWorkspaceSrc).toMatch(/session\.onError = \(error: string\) => \{[\s\S]*if \(sessionRef\.current !== session\) return;/);
+    expect(viewerWorkspaceSrc).toMatch(/\.catch\(\(err: unknown\) => \{[\s\S]*if \(sessionRef\.current !== session\) return;/);
+  });
+
+  it("renders active viewing status from local session state and keeps error detail in dedicated local state", () => {
+    expect(viewerWorkspaceSrc).toContain("const [viewerError, setViewerError] = useState<string | null>(null)");
+    expect(viewerWorkspaceSrc).toContain("const displayStatus = sessionStateToViewStatus(sessionState)");
+    expect(viewerWorkspaceSrc).not.toContain("const displayStatus = viewStatus || sessionStateToViewStatus(sessionState)");
+    expect(viewerWorkspaceSrc).toContain("viewerError && (");
   });
 
   it("renders a single persistent native <video> element across connecting/reconnecting/degraded/watching", () => {

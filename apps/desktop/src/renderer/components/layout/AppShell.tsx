@@ -152,6 +152,7 @@ export function AppShell({ children, className }: AppShellProps) {
           {isViewing && (
             <div
               className={cn(
+                "h-full",
                 currentPage !== "viewer" && "absolute inset-0 pointer-events-none opacity-0",
               )}
               aria-hidden={currentPage !== "viewer"}
