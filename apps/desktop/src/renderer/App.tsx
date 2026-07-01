@@ -20,6 +20,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "./components/layout/AppShell.js";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts.js";
 import { usePreloadEvents } from "./hooks/use-preload-events.js";
+import { useTrayStateSync } from "./hooks/use-tray-state-sync.js";
 import { initializeAppRuntime } from "./services/initialize-app-runtime.js";
 import { initGroupShortcutListener } from "./services/group-shortcut-service.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
@@ -56,6 +57,9 @@ export function App() {
 
   // Subscribe to main-process tray events
   usePreloadEvents();
+
+  // Sync renderer state (sharing/viewing/viewer count) to tray icon
+  useTrayStateSync();
 
   // Initialize group shortcut listener (Quick Share / Quick Join via global shortcuts)
   useEffect(() => {

@@ -119,6 +119,27 @@ export interface PersistedSettings {
   lastNvidiaProcessingMode: string;
   /** Last selected NVIDIA quality level for quick recall */
   lastNvidiaQuality: string;
+
+  /** Duration window (ms) for the bandwidth graph's hourly usage estimate. Default 10_000 (10s). */
+  hourlyEstimateDurationMs: number;
+
+  /** Stream info card overlay configuration for the viewer */
+  streamInfoCard: StreamInfoCardConfig;
+}
+
+export interface StreamInfoCardConfig {
+  visible: boolean;
+  showResolution: boolean;
+  showFps: boolean;
+  showBitrate: boolean;
+  showDroppedFrames: boolean;
+  showNetworkUsage: boolean;
+  fontSize: number;
+  textColor: string;
+  /** Opacity percentage 0-100 */
+  boxOpacity: number;
+  /** Width in pixels */
+  boxWidth: number;
 }
 
 export type ShortcutBinding = {
@@ -134,6 +155,19 @@ const DEFAULT_HOST_LIMITS: PersistedSettings["hostQualityLimits"] = {
   maxHeight: 1080,
   maxFps: 60,
   allowViewerQualityRequests: true,
+};
+
+const DEFAULT_STREAM_INFO_CARD: StreamInfoCardConfig = {
+  visible: false,
+  showResolution: true,
+  showFps: true,
+  showBitrate: true,
+  showDroppedFrames: true,
+  showNetworkUsage: true,
+  fontSize: 12,
+  textColor: "#ffffff",
+  boxOpacity: 60,
+  boxWidth: 200,
 };
 
 const DEFAULT_GLOBAL_DEFAULTS: PersistedSettings["globalQualityDefaults"] = {
@@ -206,6 +240,8 @@ function getDefaults(): PersistedSettings {
     viewerImageEnhancementSettings: null,
     lastNvidiaProcessingMode: "vsr",
     lastNvidiaQuality: "high",
+    hourlyEstimateDurationMs: 10_000,
+    streamInfoCard: { ...DEFAULT_STREAM_INFO_CARD },
   };
 }
 
@@ -400,6 +436,14 @@ export class SettingsStore {
     }
     if (s.lastNvidiaQuality === undefined) {
       s.lastNvidiaQuality = "high";
+    }
+    // Add hourlyEstimateDurationMs if absent
+    if (s.hourlyEstimateDurationMs === undefined) {
+      s.hourlyEstimateDurationMs = 10_000;
+    }
+    // Add streamInfoCard if absent
+    if (s.streamInfoCard === undefined) {
+      s.streamInfoCard = { ...DEFAULT_STREAM_INFO_CARD };
     }
     // Normalise "Win" → "Super" in any stored Quick Share accelerator
     // (catches values saved before the IPC-level normalisation was added).

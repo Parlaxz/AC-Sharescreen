@@ -55,6 +55,104 @@ export interface PeerTelemetryObservation {
   state: TelemetryState;
 }
 
+// ─── RTP Stream Evidence ──────────────────────────────────────────
+
+/**
+ * Base fields shared by both video and audio RTP stream evidence.
+ * All rate fields are bitsPerSecond. Timestamps are monotonic ms.
+ */
+export interface RtpStreamBaseEvidence {
+  /** The RTCStatsReport id for this inbound-rtp (or outbound-rtp) record. */
+  id: string;
+  /** Synchronisation source identifier. */
+  ssrc: number | null;
+  /** Media stream identifier. */
+  mid: string | null;
+  /** The codecId from the RTP record, used to look up the matching codec. */
+  codecId: string | null;
+  /** Resolved codec MIME type (e.g. "video/VP9" or "audio/opus"). */
+  codecMimeType: string | null;
+  /** Cumulative bytes received (or sent for outbound). */
+  bytesReceived: number;
+  /** Byte delta since the previous sample. */
+  bytesDelta: number;
+  /** Instantaneous bit rate computed from the byte delta and elapsed wall time. */
+  bitsPerSecond: number;
+  /** Cumulative packets received. */
+  packetsReceived: number | null;
+  /** Cumulative packets lost. */
+  packetsLost: number | null;
+  /** Packet loss percentage for this interval, null when insufficient data. */
+  packetLossPercent: number | null;
+  /** Jitter in milliseconds (converted from the stats seconds value exactly once). */
+  jitterMs: number | null;
+}
+
+/** Video-specific RTP stream evidence. */
+export interface VideoRtpStreamDetails extends RtpStreamBaseEvidence {
+  kind: "video";
+  /** Frame width in pixels. */
+  frameWidth: number | null;
+  /** Frame height in pixels. */
+  frameHeight: number | null;
+  /** Framerate as reported by the decoder. */
+  framesPerSecond: number | null;
+  /** Cumulative frames decoded. */
+  framesDecoded: number | null;
+  /** Cumulative frames dropped. */
+  framesDropped: number | null;
+  /** Cumulative key frames decoded (inter-frame). */
+  keyFramesDecoded: number | null;
+  /** Cumulative freeze count. */
+  freezeCount: number | null;
+  /** Decoder implementation name (e.g. "FFmpeg", "VideoToolbox"). */
+  decoderImplementation: string | null;
+}
+
+/** Audio-specific RTP stream evidence. */
+export interface AudioRtpStreamDetails extends RtpStreamBaseEvidence {
+  kind: "audio";
+  /** Audio level (0-1, only valid on the last 3 seconds). */
+  audioLevel: number | null;
+  /** Cumulative audio energy. */
+  totalAudioEnergy: number | null;
+  /** Cumulative audio sample duration in seconds. */
+  totalSamplesDuration: number | null;
+  /** Codec clock rate (e.g. 48000). */
+  clockRate: number | null;
+  /** Number of audio channels. */
+  channels: number | null;
+  /** Average jitter-buffer delay in milliseconds.
+   *  = delta(jitterBufferDelay) / delta(jitterBufferEmittedCount) * 1000 */
+  jitterBufferDelayMs: number | null;
+  /** Cumulative count of emitted packets from the jitter buffer. */
+  jitterBufferEmittedCount: number | null;
+  /** Cumulative count of concealed samples. */
+  concealedSamples: number | null;
+  /** Cumulative count of concealment events. */
+  concealedEvents: number | null;
+  /** Concealment percentage = delta(concealedSamples) / delta(totalSamplesReceived) * 100. */
+  concealmentPercent: number | null;
+  /** Cumulative total samples received by the audio decoder. */
+  totalSamplesReceived: number | null;
+}
+
+/** Union type for per-stream RTP evidence. */
+export type RtpStreamEvidence = VideoRtpStreamDetails | AudioRtpStreamDetails;
+
+// ─── Media breakdown ──────────────────────────────────────────────
+
+export interface MediaBreakdown {
+  videoBitsPerSecond: number | null;
+  audioBitsPerSecond: number | null;
+  mediaBitsPerSecond: number | null;
+  transportBitsPerSecond: number | null;
+  cumulativeVideoBytes: number;
+  cumulativeAudioBytes: number;
+  cumulativeMediaBytes: number;
+  cumulativeTransportBytes: number | null;
+}
+
 // ─── Telemetry sample (raw, 1s) ────────────────────────────────────────────
 
 export interface TelemetrySample {
@@ -80,6 +178,10 @@ export interface TelemetrySample {
   state: TelemetryState;
   /** Easy Compare variant label, if this connection belongs to a compare variant. */
   variantId?: "A" | "B";
+  /** Per-stream video RTP evidence for this sample interval. */
+  videoRtpStreams: readonly VideoRtpStreamDetails[];
+  /** Per-stream audio RTP evidence for this sample interval. */
+  audioRtpStreams: readonly AudioRtpStreamDetails[];
 }
 
 // ─── Aggregated bucket ──────────────────────────────────────────────────────
@@ -150,6 +252,12 @@ export interface TelemetrySeriesSnapshot {
   configuredBitsPerSecond: number | null;
   effectiveBitsPerSecond: number | null;
   state: TelemetryState;
+  /** Current aggregate video bits per second (null when unavailable). */
+  currentVideoBitsPerSecond: number | null;
+  /** Current aggregate audio bits per second (null when unavailable). */
+  currentAudioBitsPerSecond: number | null;
+  /** Current aggregate transport bits per second (null when unavailable/not measured). */
+  currentTransportBitsPerSecond: number | null;
 }
 
 // ─── Viewer reported status ─────────────────────────────────────────────────

@@ -22,9 +22,10 @@ import { useStore } from "@/stores/main-store";
  * | S              | Toggle viewer settings panel    |
  * | C              | Toggle compare mode             |
  * | V              | Vertical wipe (in compare mode) |
- * | 1              | Show variant A only (compare)   |
- * | 2              | Show variant B only (compare)   |
- * | 0              | Exit compare mode               |
+ * | Alt+1          | Show variant A only (compare)   |
+ * | Alt+2          | Show variant B only (compare)   |
+ * | Alt+0          | Exit compare mode               |
+ * | 1…9            | Apply pinned viewer preset      |
  * | Esc            | Leave fullscreen → close overlays |
  *
  * All shortcuts are ignored while the user is typing in an input, textarea,
@@ -91,7 +92,10 @@ export function useKeyboardShortcuts() {
     }
 
     // Alt+1…9 — Select group by position (Section 14)
+    // Skip on viewer page — Alt+1/Alt+2 are used for compare mode
     if (alt && event.key >= "1" && event.key <= "9") {
+      const page = useStore.getState().currentPage;
+      if (page === "viewer") return; // handled by viewer-specific shortcuts below
       event.preventDefault();
       const index = parseInt(event.key, 10) - 1;
       const groupOrder = useStore.getState().groupOrder;
@@ -159,24 +163,32 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // 1 — Side A only (compare mode)
-      if (event.key === "1" && !ctrl && !alt && !event.shiftKey) {
+      // Alt+1 — Side A only (compare mode)
+      if (event.key === "1" && alt && !ctrl && !event.shiftKey) {
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("screenlink:compare-mode", { detail: "side-a" }));
         return;
       }
 
-      // 2 — Side B only (compare mode)
-      if (event.key === "2" && !ctrl && !alt && !event.shiftKey) {
+      // Alt+2 — Side B only (compare mode)
+      if (event.key === "2" && alt && !ctrl && !event.shiftKey) {
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("screenlink:compare-mode", { detail: "side-b" }));
         return;
       }
 
-      // 0 — Center compare divider
-      if (event.key === "0" && !ctrl && !alt && !event.shiftKey) {
+      // Alt+0 — Center compare divider
+      if (event.key === "0" && alt && !ctrl && !event.shiftKey) {
         event.preventDefault();
         window.dispatchEvent(new CustomEvent("screenlink:compare-center"));
+        return;
+      }
+
+      // 1…9 — Apply pinned viewer preset by slot number
+      if (event.key >= "1" && event.key <= "9" && !ctrl && !alt && !event.shiftKey) {
+        event.preventDefault();
+        const slot = parseInt(event.key, 10);
+        window.dispatchEvent(new CustomEvent("screenlink:viewer-apply-preset", { detail: { slot } }));
         return;
       }
 

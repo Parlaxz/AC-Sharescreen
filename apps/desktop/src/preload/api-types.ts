@@ -52,8 +52,8 @@ export interface ScreenLinkAPI {
   // Quality presets
   listQualityPresets: () => Promise<unknown[]>;
   getQualityPreset: (id: string) => Promise<unknown | null>;
-  createQualityPreset: (input: { name: string; settings: unknown }) => Promise<unknown>;
-  updateQualityPreset: (id: string, input: { name?: string; settings?: unknown }) => Promise<unknown | null>;
+  createQualityPreset: (input: { name: string; settings: unknown; showInViewerPanel?: boolean; viewerPanelSlot?: number | null }) => Promise<unknown>;
+  updateQualityPreset: (id: string, input: { name?: string; settings?: unknown; showInViewerPanel?: boolean; viewerPanelSlot?: number | null }) => Promise<unknown | null>;
   duplicateQualityPreset: (id: string, newName: string) => Promise<unknown | null>;
   deleteQualityPreset: (id: string) => Promise<boolean>;
   exportQualityPreset: (id: string) => Promise<string | null>;
@@ -62,6 +62,7 @@ export interface ScreenLinkAPI {
   // Tray
   traySetSharing: (sharing: boolean) => void;
   traySetViewing: (viewing: boolean) => void;
+  traySetViewerCount: (count: number) => void;
 
   // Fullscreen (native Electron)
   toggleFullscreen: () => Promise<boolean>;
@@ -431,6 +432,21 @@ export interface CaptureSourceDTO {
   appIconDataUrl: string | null;
 }
 
+export interface StreamInfoCardConfig {
+  visible: boolean;
+  showResolution: boolean;
+  showFps: boolean;
+  showBitrate: boolean;
+  showDroppedFrames: boolean;
+  showNetworkUsage: boolean;
+  fontSize: number;
+  textColor: string;
+  /** Opacity percentage 0-100 */
+  boxOpacity: number;
+  /** Width in pixels */
+  boxWidth: number;
+}
+
 export interface PersistedSettings {
   version: number;
   deviceIdentity: { deviceId: string; displayName: string; createdAt: number };
@@ -526,6 +542,12 @@ export interface PersistedSettings {
   lastNvidiaProcessingMode: string;
   /** Last selected NVIDIA quality level for quick recall */
   lastNvidiaQuality: string;
+
+  /** Duration window (ms) for the bandwidth graph's hourly usage estimate. Default 10_000 (10s). */
+  hourlyEstimateDurationMs: number;
+
+  /** Stream info card overlay configuration for the viewer */
+  streamInfoCard: StreamInfoCardConfig;
 }
 
 /** Protocol response envelope for helper IPC calls */

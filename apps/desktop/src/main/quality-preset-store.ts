@@ -136,14 +136,14 @@ export class QualityPresetStore {
     return this.presets.get(id) ?? null;
   }
 
-  create(input: { name: string; settings: QualityPreset["settings"]; now?: number; idFactory?: () => string }): QualityPreset {
+  create(input: { name: string; settings: QualityPreset["settings"]; now?: number; idFactory?: () => string; showInViewerPanel?: boolean; viewerPanelSlot?: number | null }): QualityPreset {
     const preset = createQualityPreset(input);
     this.presets.set(preset.id, preset);
     this.persist();
     return preset;
   }
 
-  update(id: string, input: { name?: string; settings?: QualityPreset["settings"]; now?: number }): QualityPreset | null {
+  update(id: string, input: { name?: string; settings?: QualityPreset["settings"]; now?: number; showInViewerPanel?: boolean; viewerPanelSlot?: number | null }): QualityPreset | null {
     const existing = this.presets.get(id);
     if (!existing) return null;
     const updated = updateQualityPreset(existing, input);

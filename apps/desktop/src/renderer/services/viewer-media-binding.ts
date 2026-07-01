@@ -79,6 +79,35 @@ export type ReconcileResult =
   | { status: "apply-failed"; error: string };
 
 /**
+ * Viewer presence state for join/leave audio cue lifecycle.
+ */
+export interface ViewerPresence {
+  viewerDeviceId: string;
+  viewerSessionId: string;
+  mediaSessionId: string;
+  logicalStreamId: string;
+  displayName?: string;
+  /** Current lifecycle state */
+  state: "accepted" | "media-bound" | "ready" | "departed";
+  /** Wall time when the viewer transitioned to ready */
+  readyAt?: number;
+  /** Wall time when the viewer departed or disconnect started */
+  departedAt?: number;
+  /** Whether a join cue has been played for this viewer */
+  joinCuePlayed: boolean;
+  /** Whether a leave cue has been played for this viewer */
+  leaveCuePlayed: boolean;
+  /** Timer handle for disconnect grace period */
+  graceTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** Callback signature for join/leave cues */
+export type ViewerCueCallback = (
+  name: "user-join" | "user-leave",
+  presence: ViewerPresence,
+) => void;
+
+/**
  * Composite-key separator for viewer mappings.
  * Used to construct keys of the form `${viewerDeviceId}::${mediaSessionId}`.
  */
@@ -322,6 +351,13 @@ export class ViewerMediaBinding {
     };
 
     this.tokens.set(token, bindingToken);
+    this.upsertPresence({
+      viewerDeviceId,
+      viewerSessionId,
+      mediaSessionId: effectiveMediaSessionId,
+      logicalStreamId,
+      state: "accepted",
+    });
 
     // Track for idempotency
     if (envelope.messageId) {
@@ -554,6 +590,14 @@ export class ViewerMediaBinding {
       audioSender,
     });
 
+    this.upsertPresence({
+      viewerDeviceId: input.viewerDeviceId,
+      viewerSessionId: input.viewerSessionId ?? bindingToken.viewerSessionId,
+      mediaSessionId: input.mediaSessionId,
+      logicalStreamId: input.logicalStreamId,
+      state: "media-bound",
+    });
+
     // Start per-viewer stats polling when binding is established
     if (pc) {
       const statsService = this.runtime.getMediaStatsService();
@@ -630,6 +674,16 @@ export class ViewerMediaBinding {
         this.startStatsForMapping(mapping);
         // Sender found — reconcile any stored quality request
         void this.reconcileViewerQuality(viewerDeviceId, mediaSessionId);
+        // Also re-apply any stored media mode preference
+        const mediaMode = this.viewerMediaModes.get(key);
+        if (mediaMode) {
+          void this.handleViewerMediaRequest(
+            viewerDeviceId,
+            mediaSessionId,
+            mediaMode.audioEnabled,
+            mediaMode.videoEnabled,
+          );
+        }
       }
     }, ViewerMediaBinding.SENDER_RETRY_INTERVAL_MS);
   }
@@ -825,8 +879,22 @@ export class ViewerMediaBinding {
     let reconciled = false;
     for (const [, mapping] of this.viewerMap) {
       if (mapping.mediaPeerUuid === mediaPeerUuid) {
+        this.recoverViewerPresence(mapping.viewerDeviceId, mapping.mediaSessionId, mapping.viewerSessionId, "media-bound");
         const result = await this.reconcileViewerQuality(mapping.viewerDeviceId, mapping.mediaSessionId);
         if (result.status === "applied") reconciled = true;
+
+        // Re-apply stored media mode preference so disabled senders stay disabled
+        // after a host restart or peer reconnect.
+        const modeKey = ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId);
+        const mediaMode = this.viewerMediaModes.get(modeKey);
+        if (mediaMode) {
+          void this.handleViewerMediaRequest(
+            mapping.viewerDeviceId,
+            mapping.mediaSessionId,
+            mediaMode.audioEnabled,
+            mediaMode.videoEnabled,
+          );
+        }
       }
     }
     return reconciled;
@@ -859,6 +927,15 @@ export class ViewerMediaBinding {
    * Used to detect state transitions for sender enable/disable.
    */
   private viewerPausedStates = new Map<string, boolean>();
+
+  /**
+   * Per-viewer media mode preference (which senders should be enabled).
+   * Keyed by composite key (viewerDeviceId::mediaSessionId) for compare-mode
+   * safety. Used by applyResumeWithQuality to respect the viewer's media
+   * mode choice during resume (avoiding re-enabling senders the viewer
+   * explicitly disabled). Cleaned up alongside the viewer mapping.
+   */
+  private viewerMediaModes = new Map<string, { audioEnabled: boolean; videoEnabled: boolean }>();
 
   /**
    * Handle a viewer pause state transition. Called when the host receives
@@ -930,6 +1007,15 @@ export class ViewerMediaBinding {
 
       // 1) Reactivate the encoding
       enc.active = true;
+
+      // 1b) Check stored media mode preference — if the viewer requested
+      //     audio-only, override the re-activation so we don't waste bandwidth
+      //     re-enabling a sender the viewer explicitly disabled.
+      const mediaModeKey = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+      const storedMediaMode = this.viewerMediaModes.get(mediaModeKey);
+      if (storedMediaMode && !storedMediaMode.videoEnabled) {
+        enc.active = false;
+      }
 
       // 2) Apply stored quality settings
       const qualityCoordinator = this.runtime.getQualityCoordinator();
@@ -1020,6 +1106,79 @@ export class ViewerMediaBinding {
         status: "apply-failed",
         error: err instanceof Error ? err.message : String(err),
       };
+    }
+  }
+
+  // ─── Viewer media request (audio/video enable) ──────────────────
+
+  /**
+   * Handle a viewer.media.request from a viewer. Toggles audio and/or video
+   * sender encoding independently to save bandwidth (host stops encoding
+   * unwanted senders).
+   *
+   * Both audio and video senders are handled independently, each wrapped
+   * in try/catch. If a sender is not found (null), the operation is silently
+   * skipped — the sender may arrive later and the default binding path will
+   * start with active=true (which is fine).
+   *
+   * When re-enabling video, calls applyResumeWithQuality() to reactivate
+   * encoding AND restore quality settings in one setParameters call.
+   */
+  async handleViewerMediaRequest(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    audioEnabled: boolean,
+    videoEnabled: boolean,
+  ): Promise<void> {
+    if (this.destroyed) return;
+
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    const mapping = this.viewerMap.get(key);
+    if (!mapping) return;
+
+    // Store the mode preference so pause/resume respects it
+    this.viewerMediaModes.set(key, { audioEnabled, videoEnabled });
+
+    // ── Audio sender ──────────────────────────────────────────────
+    if (mapping.audioSender) {
+      try {
+        const params = mapping.audioSender.getParameters();
+        if (params.encodings && params.encodings.length > 0) {
+          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+          const enc = params.encodings[0]!;
+          enc.active = audioEnabled;
+          await mapping.audioSender.setParameters(params);
+        }
+      } catch (err) {
+        console.warn(
+          '[ViewerMediaBinding] Failed to update audio sender for viewer',
+          { viewerDeviceId, mediaSessionId, audioEnabled, error: err },
+        );
+      }
+    }
+
+    // ── Video sender ──────────────────────────────────────────────
+    if (mapping.videoSender) {
+      if (!videoEnabled) {
+        // Disable: same as pause but without quality restore
+        try {
+          const params = mapping.videoSender.getParameters();
+          if (params.encodings && params.encodings.length > 0) {
+            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+            const enc = params.encodings[0]!;
+            enc.active = false;
+            await mapping.videoSender.setParameters(params);
+          }
+        } catch (err) {
+          console.warn(
+            '[ViewerMediaBinding] Failed to disable video sender for viewer',
+            { viewerDeviceId, mediaSessionId, error: err },
+          );
+        }
+      } else {
+        // Re-enable with quality: use applyResumeWithQuality (same path as resume)
+        await this.applyResumeWithQuality(viewerDeviceId, mediaSessionId, mapping.videoSender, mapping);
+      }
     }
   }
 
@@ -1149,6 +1308,7 @@ export class ViewerMediaBinding {
     this.stopStatsForMapping(mapping);
 
     this.viewerMap.delete(key);
+    this.viewerMediaModes.delete(key);
     return true;
   }
 
@@ -1163,6 +1323,7 @@ export class ViewerMediaBinding {
       if (sessionSet.has(mapping.mediaSessionId)) {
         this.stopStatsForMapping(mapping);
         this.viewerMap.delete(key);
+        this.viewerMediaModes.delete(key);
         removed++;
       }
     }
@@ -1218,6 +1379,7 @@ export class ViewerMediaBinding {
         if (mapping.viewerSessionId === viewerSessionId) {
           this.stopStatsForMapping(mapping);
           this.viewerMap.delete(key);
+          this.viewerMediaModes.delete(key);
           removed = true;
         }
       }
@@ -1231,6 +1393,7 @@ export class ViewerMediaBinding {
       const [key, mapping] = entries[0];
       this.stopStatsForMapping(mapping);
       this.viewerMap.delete(key);
+      this.viewerMediaModes.delete(key);
       return true;
     }
 
@@ -1250,12 +1413,27 @@ export class ViewerMediaBinding {
    * no `stream.leave` ever arrives) still cleans up ScreenLink-owned
    * state. The PC close itself is left to the SDK.
    */
-  removeViewerByPeerUuid(mediaPeerUuid: string): boolean {
+  removeViewerByPeerUuid(mediaPeerUuid: string, immediate?: boolean): boolean {
     for (const [key, mapping] of this.viewerMap) {
       if (mapping.mediaPeerUuid === mediaPeerUuid) {
-        this.stopStatsForMapping(mapping);
-        this.viewerMap.delete(key);
-        return true;
+        const presence = this.getViewerPresence(mapping.viewerDeviceId, mapping.mediaSessionId);
+        if (!presence) {
+          this.stopStatsForMapping(mapping);
+          this.viewerMap.delete(key);
+          this.viewerMediaModes.delete(key);
+          return true;
+        }
+
+        const departed = this.markViewerDeparted(mapping.viewerDeviceId, mapping.mediaSessionId, {
+          viewerSessionId: mapping.viewerSessionId,
+          immediate,
+        });
+        if (immediate) {
+          this.stopStatsForMapping(mapping);
+          this.viewerMap.delete(key);
+          this.viewerMediaModes.delete(key);
+        }
+        return departed;
       }
     }
     return false;
@@ -1305,8 +1483,10 @@ export class ViewerMediaBinding {
    */
   destroy(): void {
     this.destroyed = true;
+    this.destroyPresences();
     this.tokens.clear();
     this.viewerMap.clear();
+    this.viewerMediaModes.clear();
     this.processedRequests.clear();
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
@@ -1394,5 +1574,307 @@ export class ViewerMediaBinding {
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
+  }
+
+  // ─── Viewer presence lifecycle (join/leave audio cues) ─────────────
+  //
+  // Tracks viewer presence by composite key with explicit states:
+  //   accepted → media-bound → ready → departed
+  //
+  // Join cue fires once: not-ready → ready
+  // Leave cue fires once: ready → departed  (only if previously became ready)
+  //
+  // A grace period (VIEWER_DISCONNECT_GRACE_MS) allows recovery from
+  // transient disconnections without firing a leave cue.
+
+  /** Grace period (ms) for transient disconnects before firing leave cue */
+  private static readonly VIEWER_DISCONNECT_GRACE_MS = 30_000;
+
+  /** Presence map keyed by composite key (viewerDeviceId::mediaSessionId) */
+  private presenceMap = new Map<string, ViewerPresence>();
+
+  /** Callback fired when a join or leave cue should be played */
+  onViewerCue: ViewerCueCallback | null = null;
+
+  /**
+   * Handle a `stream.viewer.ready` message from a viewer.
+   * Transitions the viewer's presence from accepted/media-bound to ready.
+   *
+   * Rules:
+   * - Join cue fired ONLY on the first ready transition (not-ready → ready).
+   * - Duplicate ready messages (same composite key, already ready) are ignored.
+   * - The viewer must have a valid binding mapping.
+   *
+   * Returns true if this was the first ready transition (join cue triggered).
+   */
+  handleViewerReady(
+    viewerDeviceId: string,
+    viewerSessionId: string,
+    mediaSessionId: string,
+    logicalStreamId: string,
+    presentation: "native-video" | "webgl" | "nvidia" | "fallback",
+  ): boolean {
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    let presence = this.presenceMap.get(key);
+
+    if (!presence) {
+      // Create new presence if one doesn't exist
+      presence = {
+        viewerDeviceId,
+        viewerSessionId,
+        mediaSessionId,
+        logicalStreamId,
+        state: "accepted",
+        joinCuePlayed: false,
+        leaveCuePlayed: false,
+      };
+      this.presenceMap.set(key, presence);
+    }
+
+    // Stale session guard: reject if viewerSessionId doesn't match
+    if (presence.viewerSessionId !== viewerSessionId) return false;
+
+    // Already ready — duplicate message, ignore
+    if (presence.state === "ready") return false;
+    if (presence.state === "departed") return false;
+
+    // Cancel any pending grace timer (viewer reconnected before timeout)
+    if (presence.graceTimer) {
+      clearTimeout(presence.graceTimer);
+      presence.graceTimer = undefined;
+    }
+
+    // Transition to ready
+    presence.state = "ready";
+    presence.readyAt = Date.now();
+
+    // Fire join cue if this is the first ready transition
+    if (!presence.joinCuePlayed) {
+      presence.joinCuePlayed = true;
+      this.onViewerCue?.("user-join", presence);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Mark a viewer as departed. May be called from stream.leave,
+   * VDO peerDisconnected, or host-side cleanup.
+   *
+   * If the viewer was in "ready" state:
+   *   - If graceful (explicit leave): fires leave cue immediately.
+   *   - If abrupt (disconnect): starts a grace timer. If the viewer
+   *     reconnects before the timer fires, the departure is cancelled.
+   *     If the timer fires, the leave cue plays.
+   *
+   * During destroy/shutdown, pass `immediate=true` to suppress the
+   * leave cue entirely (no sounds during cleanup).
+   */
+  markViewerDeparted(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    options?: { immediate?: boolean; viewerSessionId?: string; explicit?: boolean },
+  ): boolean {
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    const presence = this.presenceMap.get(key);
+    if (!presence) return false;
+
+    // Stale session guard
+    if (options?.viewerSessionId && presence.viewerSessionId !== options.viewerSessionId) return false;
+
+    // Already departed — no-op
+    if (presence.state === "departed") return false;
+
+    // Never became ready — no leave cue, just clean up
+    if (presence.state !== "ready") {
+      presence.state = "departed";
+      presence.departedAt = Date.now();
+      presence.leaveCuePlayed = true; // Don't play leave for never-ready
+      this.presenceMap.delete(key);
+      const mapping = this.viewerMap.get(key);
+      if (mapping) {
+        this.stopStatsForMapping(mapping);
+        this.viewerMap.delete(key);
+      }
+      return true;
+    }
+
+    // Cancel any existing grace timer
+    if (presence.graceTimer) {
+      clearTimeout(presence.graceTimer);
+      presence.graceTimer = undefined;
+    }
+
+    if (options?.explicit) {
+      presence.state = "departed";
+      presence.departedAt = Date.now();
+      if (!presence.leaveCuePlayed && presence.joinCuePlayed) {
+        presence.leaveCuePlayed = true;
+        this.onViewerCue?.("user-leave", presence);
+      }
+      this.presenceMap.delete(key);
+      const mapping = this.viewerMap.get(key);
+      if (mapping) {
+        this.stopStatsForMapping(mapping);
+        this.viewerMap.delete(key);
+      }
+      return true;
+    }
+
+    if (options?.immediate) {
+      // Shutdown/cleanup: no leave cue
+      presence.state = "departed";
+      presence.departedAt = Date.now();
+      presence.leaveCuePlayed = true;
+      this.presenceMap.delete(key);
+      const mapping = this.viewerMap.get(key);
+      if (mapping) {
+        this.stopStatsForMapping(mapping);
+        this.viewerMap.delete(key);
+      }
+      return true;
+    }
+
+    // Grace period for transient disconnects
+    // Start grace timer
+    presence.state = "departed"; // Optimistically mark departed
+    presence.departedAt = Date.now();
+
+    presence.graceTimer = setTimeout(() => {
+      const current = this.presenceMap.get(key);
+      if (!current || current.graceTimer === undefined) return;
+
+      // If viewer never came back, play leave cue
+      if (!current.leaveCuePlayed && current.joinCuePlayed) {
+        current.leaveCuePlayed = true;
+        this.onViewerCue?.("user-leave", current);
+      }
+      const mapping = this.viewerMap.get(key);
+      if (mapping) {
+        this.stopStatsForMapping(mapping);
+        this.viewerMap.delete(key);
+      }
+      this.presenceMap.delete(key);
+    }, ViewerMediaBinding.VIEWER_DISCONNECT_GRACE_MS);
+
+    return true;
+  }
+
+  /**
+   * Remove viewer mapping with presence lifecycle integration.
+   * Overrides the legacy removeViewer for presence tracking.
+   * Call this instead of removeViewer when presence cues are active.
+   */
+  removeViewerWithPresence(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    viewerSessionId?: string,
+    immediate?: boolean,
+  ): boolean {
+    return this.markViewerDeparted(viewerDeviceId, mediaSessionId, {
+      viewerSessionId,
+      immediate,
+      explicit: !immediate,
+    });
+  }
+
+  /**
+   * Cancel a pending departure (viewer reconnected within grace period).
+   * Returns the presence if it was recovered, null if no recovery needed.
+   */
+  recoverViewerPresence(
+    viewerDeviceId: string,
+    mediaSessionId: string,
+    viewerSessionId: string,
+    nextState: "media-bound" | "ready" = "media-bound",
+  ): ViewerPresence | null {
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    const presence = this.presenceMap.get(key);
+    if (!presence) return null;
+
+    // Stale session guard
+    if (presence.viewerSessionId !== viewerSessionId) return null;
+
+    // If the viewer is already departed and leave cue wasn't played yet,
+    // cancel the grace timer and mark as recovered
+    if (presence.state === "departed" && !presence.leaveCuePlayed) {
+      if (presence.graceTimer) {
+        clearTimeout(presence.graceTimer);
+        presence.graceTimer = undefined;
+      }
+      presence.state = nextState;
+      presence.departedAt = undefined;
+      return presence;
+    }
+
+    return null;
+  }
+
+  /**
+   * Get all active presence entries (not departed).
+   */
+  getActivePresences(): ViewerPresence[] {
+    return Array.from(this.presenceMap.values())
+      .filter((p) => p.state !== "departed");
+  }
+
+  /**
+   * Get the presence for a specific viewer, or null if not found.
+   */
+  getViewerPresence(viewerDeviceId: string, mediaSessionId: string): ViewerPresence | null {
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    return this.presenceMap.get(key) ?? null;
+  }
+
+  /**
+   * Clean up all presence entries (during destroy, no leave cues).
+   */
+  private destroyPresences(): void {
+    for (const [key, presence] of this.presenceMap) {
+      if (presence.graceTimer) {
+        clearTimeout(presence.graceTimer);
+      }
+    }
+    this.presenceMap.clear();
+  }
+
+  private upsertPresence(input: {
+    viewerDeviceId: string;
+    viewerSessionId: string;
+    mediaSessionId: string;
+    logicalStreamId: string;
+    state: "accepted" | "media-bound";
+  }): ViewerPresence {
+    const key = ViewerMediaBinding.compositeKey(input.viewerDeviceId, input.mediaSessionId);
+    const existing = this.presenceMap.get(key);
+
+    if (existing && existing.viewerSessionId === input.viewerSessionId) {
+      if (existing.graceTimer) {
+        clearTimeout(existing.graceTimer);
+        existing.graceTimer = undefined;
+      }
+      if (existing.state !== "ready") {
+        existing.state = input.state;
+      }
+      existing.departedAt = undefined;
+      return existing;
+    }
+
+    if (existing?.graceTimer) {
+      clearTimeout(existing.graceTimer);
+    }
+
+    const presence: ViewerPresence = {
+      viewerDeviceId: input.viewerDeviceId,
+      viewerSessionId: input.viewerSessionId,
+      mediaSessionId: input.mediaSessionId,
+      logicalStreamId: input.logicalStreamId,
+      state: input.state,
+      joinCuePlayed: false,
+      leaveCuePlayed: false,
+    };
+    this.presenceMap.set(key, presence);
+    return presence;
   }
 }

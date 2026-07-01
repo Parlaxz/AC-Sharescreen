@@ -430,14 +430,14 @@ export function registerIpcHandlers(
     ipcMain.handle("get-quality-preset", (_event, id: string) => presetStore.get(id));
     ipcMain.handle(
       "create-quality-preset",
-      (_event, input: { name: string; settings: import("@screenlink/shared").QualityPreset["settings"] }) => {
-        return presetStore.create({ name: input.name, settings: input.settings });
+      (_event, input: { name: string; settings: import("@screenlink/shared").QualityPreset["settings"]; showInViewerPanel?: boolean; viewerPanelSlot?: number | null }) => {
+        return presetStore.create({ name: input.name, settings: input.settings, showInViewerPanel: input.showInViewerPanel, viewerPanelSlot: input.viewerPanelSlot });
       },
     );
     ipcMain.handle(
       "update-quality-preset",
-      (_event, id: string, input: { name?: string; settings?: import("@screenlink/shared").QualityPreset["settings"] }) => {
-        return presetStore.update(id, { name: input.name, settings: input.settings });
+      (_event, id: string, input: { name?: string; settings?: import("@screenlink/shared").QualityPreset["settings"]; showInViewerPanel?: boolean; viewerPanelSlot?: number | null }) => {
+        return presetStore.update(id, { name: input.name, settings: input.settings, showInViewerPanel: input.showInViewerPanel, viewerPanelSlot: input.viewerPanelSlot });
       },
     );
     ipcMain.handle("duplicate-quality-preset", (_event, id: string, newName: string) =>
@@ -976,6 +976,10 @@ export function registerIpcHandlers(
     trayManager.setViewing(viewing);
     if (viewing) trayManager.setState("viewing");
     else trayManager.setState("idle");
+  });
+
+  ipcMain.on("tray-set-viewer-count", (_event, count: number) => {
+    trayManager.setViewerCount(count);
   });
 
 

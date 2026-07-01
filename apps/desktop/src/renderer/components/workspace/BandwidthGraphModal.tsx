@@ -1,4 +1,4 @@
-import { Fragment, useSyncExternalStore, useMemo, useState, useCallback } from "react";
+import { Fragment, useSyncExternalStore, useMemo, useState, useCallback, useEffect } from "react";
 import {
   Area,
   AreaChart,
@@ -31,6 +31,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label as UILabel } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type {
   TelemetrySample,
@@ -49,6 +51,7 @@ import {
   estimateHourlyBytes,
 } from "@/services/bandwidth-telemetry-types";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
+import { loadSettings } from "@/services/settings-actions";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -58,6 +61,15 @@ const TIME_RANGES = [
   { label: "30 min", value: 1_800_000 },
   { label: "Session", value: Infinity },
 ] as const;
+
+type SeriesKey = "total" | "video" | "audio" | "network";
+
+const SERIES_CONFIG: Record<SeriesKey, { label: string; color: string; defaultOn: boolean }> = {
+  total:   { label: "Total media",  color: "var(--color-accent)",     defaultOn: true },
+  video:   { label: "Video",        color: "var(--color-chart-1, #3b82f6)", defaultOn: true },
+  audio:   { label: "Audio",        color: "var(--color-chart-2, #22c55e)", defaultOn: false },
+  network: { label: "Network/wire", color: "var(--color-chart-3, #f59e0b)", defaultOn: false },
+};
 
 const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
   historyId: "",
@@ -75,6 +87,9 @@ const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
     activeDurationMs: 0,
     configuredBitsPerSecond: null,
     effectiveBitsPerSecond: null,
+    currentVideoBitsPerSecond: null,
+    currentAudioBitsPerSecond: null,
+    currentTransportBitsPerSecond: null,
     state: "paused" as TelemetryState,
   }),
   connections: Object.freeze([]),
@@ -100,6 +115,7 @@ interface ChartDataPoint {
   target?: number;
   video?: number | null;
   audio?: number | null;
+  transport?: number | null;
 }
 
 interface HealthDataPoint {
@@ -149,6 +165,122 @@ function compute30sAverage(series: { mediumBuckets: readonly AggregatedBucket[] 
   return totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
 }
 
+// ─── Per-kind cumulative estimation from raw samples ───────────────────────
+
+interface KindTotals {
+  videoBytes: number;
+  audioBytes: number;
+  transportBytes: number;
+  videoRateSum: number;
+  audioRateSum: number;
+  transportRateSum: number;
+  sampleCount: number;
+}
+
+function computeKindTotals(samples: readonly TelemetrySample[]): KindTotals {
+  let videoBytes = 0;
+  let audioBytes = 0;
+  let transportBytes = 0;
+  let videoRateSum = 0;
+  let audioRateSum = 0;
+  let transportRateSum = 0;
+  let sampleCount = 0;
+
+  for (const s of samples) {
+    const deltaBytes = Math.round((s.mediaBitsPerSecond * s.intervalMs) / 8000);
+    if (s.videoBitsPerSecond != null && s.audioBitsPerSecond != null && deltaBytes > 0) {
+      const totalRate = s.videoBitsPerSecond + s.audioBitsPerSecond;
+      if (totalRate > 0) {
+        const videoFrac = s.videoBitsPerSecond / totalRate;
+        const audioFrac = s.audioBitsPerSecond / totalRate;
+        videoBytes += Math.round(deltaBytes * videoFrac);
+        audioBytes += Math.round(deltaBytes * audioFrac);
+      }
+    }
+    if (s.transportBitsPerSecond != null) {
+      const transportDeltaBytes = Math.round((s.transportBitsPerSecond * s.intervalMs) / 8000);
+      transportBytes += transportDeltaBytes;
+    }
+    videoRateSum += s.videoBitsPerSecond ?? 0;
+    audioRateSum += s.audioBitsPerSecond ?? 0;
+    transportRateSum += s.transportBitsPerSecond ?? 0;
+    sampleCount++;
+  }
+
+  return { videoBytes, audioBytes, transportBytes, videoRateSum, audioRateSum, transportRateSum, sampleCount };
+}
+
+// ─── Short duration formatter for label ──────────────────────────────────────
+
+function fmtShortDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  const minutes = Math.round(ms / 60_000);
+  return `${minutes}m`;
+}
+
+// ─── Windowed hourly estimate ───────────────────────────────────────────────
+
+function computeWindowedEstimate(
+  samples: readonly TelemetrySample[],
+  windowMs: number,
+  fallbackTotalBytes: number,
+  fallbackActiveDurationMs: number,
+): { bytesPerHour: number; actualDurationMs: number } {
+  if (samples.length < 2) {
+    return {
+      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
+      actualDurationMs: fallbackActiveDurationMs,
+    };
+  }
+
+  const now = Date.now();
+  const cutoff = now - windowMs;
+
+  // Find first sample within the window
+  let startIdx = 0;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i].timestampMs >= cutoff) {
+      startIdx = i;
+      break;
+    }
+  }
+
+  // Not enough samples in window — fall back to session span
+  if (startIdx >= samples.length - 1) {
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const byteDelta = last.cumulativeMediaBytes - first.cumulativeMediaBytes;
+    const timeDelta = last.timestampMs - first.timestampMs;
+    if (byteDelta > 0 && timeDelta > 0) {
+      return {
+        bytesPerHour: estimateHourlyBytes(byteDelta, timeDelta),
+        actualDurationMs: timeDelta,
+      };
+    }
+    return {
+      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
+      actualDurationMs: fallbackActiveDurationMs,
+    };
+  }
+
+  const first = samples[startIdx];
+  const last = samples[samples.length - 1];
+  const byteDelta = last.cumulativeMediaBytes - first.cumulativeMediaBytes;
+  const timeDelta = last.timestampMs - first.timestampMs;
+
+  if (byteDelta <= 0 || timeDelta <= 0) {
+    return {
+      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
+      actualDurationMs: fallbackActiveDurationMs,
+    };
+  }
+
+  return {
+    bytesPerHour: estimateHourlyBytes(byteDelta, timeDelta),
+    actualDurationMs: timeDelta,
+  };
+}
+
 // ─── Chart data preparation ─────────────────────────────────────────────────
 
 function getChartData(
@@ -170,7 +302,6 @@ function getChartData(
   if (rangeMs <= 300_000 && rawSamples.length > 0) {
     const now = Date.now();
     const cutoff = now - rangeMs;
-    const baseTime = rawSamples[0].timestampMs;
     const data: ChartDataPoint[] = [];
 
     for (let i = 0; i < rawSamples.length; i++) {
@@ -181,8 +312,9 @@ function getChartData(
         smoothed: s.mediaBitsPerSecond,
         raw: showRaw ? s.mediaBitsPerSecond : undefined,
         target: s.configuredVideoBitsPerSecond ?? undefined,
-        video: null,
-        audio: null,
+        video: s.videoBitsPerSecond ?? null,
+        audio: s.audioBitsPerSecond ?? null,
+        transport: s.transportBitsPerSecond ?? null,
       });
     }
 
@@ -206,7 +338,6 @@ function getChartData(
   const subset = buckets.slice(-maxBuckets);
   if (subset.length === 0) return [];
 
-  const baseTime = subset[0].startTimestampMs;
   return subset.map((b) => ({
     time: b.startTimestampMs,
     smoothed: b.weightedAverageBitsPerSecond,
@@ -343,7 +474,7 @@ function ThroughputTooltip({
       <div className="space-y-0.5">
         {d.smoothed !== undefined && (
           <div className="flex justify-between gap-4">
-            <span className="text-text-secondary">Smoothed</span>
+            <span className="text-text-secondary">Total media</span>
             <span className="font-mono tabular-nums text-text-primary">
               {fmtBitRate(d.smoothed)}
             </span>
@@ -378,6 +509,14 @@ function ThroughputTooltip({
             <span className="text-text-secondary">Audio</span>
             <span className="font-mono tabular-nums text-text-primary">
               {fmtBitRate(d.audio)}
+            </span>
+          </div>
+        )}
+        {d.transport != null && (
+          <div className="flex justify-between gap-4">
+            <span className="text-text-secondary">Network/Wire</span>
+            <span className="font-mono tabular-nums text-text-primary">
+              {fmtBitRate(d.transport)}
             </span>
           </div>
         )}
@@ -463,15 +602,39 @@ function SummaryItem({
 }) {
   return (
     <div className="min-w-0">
-      <div className="text-[11px] uppercase tracking-wider text-text-muted mb-0.5 truncate">
+      <div className="text-[10px] uppercase tracking-wider text-text-muted mb-0.5 truncate">
         {label}
       </div>
       {children ?? (
-        <div className="font-mono tabular-nums text-sm truncate">
+        <div className="font-mono tabular-nums text-xs truncate">
           {value ?? "\u2014"}
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Series Toggle Component ────────────────────────────────────────────────
+
+function SeriesToggle({
+  seriesKey,
+  enabled,
+  onToggle,
+}: {
+  seriesKey: SeriesKey;
+  enabled: boolean;
+  onToggle: () => void;
+}) {
+  const cfg = SERIES_CONFIG[seriesKey];
+  return (
+    <label className="flex items-center gap-1.5 cursor-pointer text-xs select-none">
+      <Checkbox checked={enabled} onCheckedChange={onToggle} />
+      <span
+        className="inline-block w-2 h-2 rounded-full"
+        style={{ backgroundColor: cfg.color }}
+      />
+      <span className="text-text-secondary">{cfg.label}</span>
+    </label>
   );
 }
 
@@ -503,6 +666,32 @@ export function BandwidthGraphModal({
   const [timeRange, setTimeRange] = useState<number>(300_000); // default 5 min
   const [showRaw, setShowRaw] = useState(false);
   const [selectedViewer, setSelectedViewer] = useState<string>("__all__");
+  const [enabledSeries, setEnabledSeries] = useState<Set<SeriesKey>>(() => new Set(["total", "video"]));
+  const [hourlyEstimateDurationMs, setHourlyEstimateDurationMs] = useState(10_000);
+
+  // Load user-configured hourly estimate window from settings
+  useEffect(() => {
+    let cancelled = false;
+    loadSettings()
+      .then((s) => {
+        if (!cancelled) {
+          setHourlyEstimateDurationMs(s.hourlyEstimateDurationMs ?? 10_000);
+        }
+      })
+      .catch(() => {
+        // keep default
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleSeries = useCallback((key: SeriesKey) => {
+    setEnabledSeries(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // Resolve which series to use based on selected viewer
   const selectedSeries = useMemo((): typeof snapshot.aggregate => {
@@ -530,12 +719,34 @@ export function BandwidthGraphModal({
     } as typeof snapshot.aggregate;
   }, [selectedViewer, snapshot]);
 
+  // Latest raw sample for current split values
+  const latestSample = useMemo(() => {
+    const samples = selectedSeries.rawSamples;
+    return samples.length > 0 ? samples[samples.length - 1] : null;
+  }, [selectedSeries.rawSamples]);
+
+  // Compute per-kind totals from raw samples
+  const kindTotals = useMemo(
+    () => computeKindTotals(selectedSeries.rawSamples),
+    [selectedSeries.rawSamples],
+  );
+
+  // Current bitrates from latest sample
+  const currentVideoBps = latestSample?.videoBitsPerSecond ?? 0;
+  const currentAudioBps = latestSample?.audioBitsPerSecond ?? 0;
+  const currentTransportBps = latestSample?.transportBitsPerSecond ?? 0;
+
   // Compute summary values
   const avg30s = useMemo(() => compute30sAverage(selectedSeries), [selectedSeries]);
   const hourlyEstimate = useMemo(
     () =>
-      estimateHourlyBytes(selectedSeries.totalBytes, selectedSeries.activeDurationMs),
-    [selectedSeries.totalBytes, selectedSeries.activeDurationMs],
+      computeWindowedEstimate(
+        selectedSeries.rawSamples,
+        hourlyEstimateDurationMs,
+        selectedSeries.totalBytes,
+        selectedSeries.activeDurationMs,
+      ),
+    [selectedSeries.rawSamples, hourlyEstimateDurationMs, selectedSeries.totalBytes, selectedSeries.activeDurationMs],
   );
 
   // Chart data
@@ -589,9 +800,26 @@ export function BandwidthGraphModal({
     [snapshot.connections],
   );
 
+  // Determine if we have split data for chart rendering
+  const hasVideoData = chartData.some(d => d.video != null);
+  const hasAudioData = chartData.some(d => d.audio != null);
+  const hasTransportData = chartData.some(d => d.transport != null);
+  const hasSplitData = hasVideoData || hasAudioData || hasTransportData;
+  const canShowVideo = hasVideoData && kindTotals.sampleCount > 0;
+  const canShowAudio = hasAudioData && kindTotals.sampleCount > 0;
+  const canShowTransport = hasTransportData && kindTotals.sampleCount > 0;
+
+  // Colors for chart series
+  const seriesColors = {
+    total: "var(--color-accent)",
+    video: "var(--color-chart-1, #3b82f6)",
+    audio: "var(--color-chart-2, #22c55e)",
+    network: "var(--color-chart-3, #f59e0b)",
+  };
+
   const content = (
     <Fragment>
-      <div className="text-lg font-semibold mb-4 text-text-primary flex items-center gap-2">
+      <div className="text-base font-semibold mb-2 text-text-primary flex items-center gap-2">
         Bandwidth
         {hasCompareVariant && (
           <Badge variant="outline" className="text-[10px] px-1.5 py-0">
@@ -600,9 +828,9 @@ export function BandwidthGraphModal({
         )}
       </div>
 
-      <ScrollArea className="max-h-[calc(85vh-8rem)] pr-2">
+      <ScrollArea className="max-h-[calc(85vh-6rem)] pr-2">
         {/* ── Summary Row ── */}
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-4 text-sm">
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 mb-2 text-xs">
           <SummaryItem
             label="Current"
             value={fmtBitRate(selectedSeries.currentBitsPerSecond)}
@@ -617,10 +845,10 @@ export function BandwidthGraphModal({
             value={fmtCumulativeBytes(selectedSeries.totalBytes)}
           />
           <SummaryItem
-            label="Est/hr"
+            label={`Est/hr (last ${fmtShortDuration(hourlyEstimateDurationMs)})`}
             value={
-              hourlyEstimate > 0
-                ? fmtHourlyUsage(hourlyEstimate)
+              hourlyEstimate.bytesPerHour > 0
+                ? fmtHourlyUsage(hourlyEstimate.bytesPerHour)
                 : "\u2014"
             }
           />
@@ -646,8 +874,42 @@ export function BandwidthGraphModal({
           </SummaryItem>
         </div>
 
+        {/* ── Split Summary Row (video/audio/network) ── */}
+        {hasSplitData && (
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 mb-2 text-xs">
+            <SummaryItem
+              label="Video curr."
+              value={fmtBitRate(currentVideoBps)}
+            />
+            <SummaryItem
+              label="Audio curr."
+              value={fmtBitRate(currentAudioBps)}
+            />
+            {currentTransportBps > 0 && (
+              <SummaryItem
+                label="Wire curr."
+                value={fmtBitRate(currentTransportBps)}
+              />
+            )}
+            <SummaryItem
+              label="Video total"
+              value={fmtCumulativeBytes(kindTotals.videoBytes)}
+            />
+            <SummaryItem
+              label="Audio total"
+              value={fmtCumulativeBytes(kindTotals.audioBytes)}
+            />
+            {kindTotals.transportBytes > 0 && (
+              <SummaryItem
+                label="Wire total"
+                value={fmtCumulativeBytes(kindTotals.transportBytes)}
+              />
+            )}
+          </div>
+        )}
+
         {/* ── Time Range Selector ── */}
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center justify-between mb-1">
           <div className="flex gap-0.5">
             {TIME_RANGES.map((r) => (
               <Button
@@ -685,7 +947,7 @@ export function BandwidthGraphModal({
 
         {/* ── Per-Viewer Selector (Host Mode) ── */}
         {role === "host" && viewerOptions.length > 1 && (
-          <div className="mb-3">
+          <div className="mb-1.5">
             <Select
               value={selectedViewer}
               onValueChange={setSelectedViewer}
@@ -710,12 +972,12 @@ export function BandwidthGraphModal({
 
         {/* ── Empty State ── */}
         {!hasData ? (
-          <div className="h-64 flex items-center justify-center text-sm text-text-muted">
-            No bandwidth data available yet.
-          </div>
+            <div className="h-24 flex items-center justify-center text-sm text-text-muted">
+              No bandwidth data available yet.
+            </div>
         ) : (
           <Tabs defaultValue="throughput">
-            <TabsList className="mb-2">
+            <TabsList className="mb-1">
               <TabsTrigger value="throughput">Throughput</TabsTrigger>
               <TabsTrigger value="health">
                 Connection Health
@@ -725,160 +987,228 @@ export function BandwidthGraphModal({
             {/* ── Throughput Tab ── */}
             <TabsContent value="throughput">
               {chartData.length === 0 ? (
-                <div className="h-48 flex items-center justify-center text-sm text-text-muted">
+                <div className="h-24 flex items-center justify-center text-sm text-text-muted">
                   No bandwidth data available yet.
                 </div>
               ) : (
-                <div className="h-72">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart
-                      data={chartData}
-                      margin={{
-                        top: 16,
-                        right: 16,
-                        left: 8,
-                        bottom: 8,
-                      }}
-                    >
-                      <CartesianGrid
-                        strokeDasharray="3 3"
-                        stroke="var(--color-border)"
-                      />
-                      <XAxis
-                        dataKey="time"
-                        type="number"
-                        domain={["dataMin", "dataMax"]}
-                        tickFormatter={formatTimeAxis}
-                        tick={{ fontSize: 11 }}
-                        stroke="var(--color-text-muted)"
-                      />
-                      <YAxis
-                        tickFormatter={formatBitRateAxis}
-                        tick={{ fontSize: 11 }}
-                        stroke="var(--color-text-muted)"
-                        label={{
-                          value: "bps",
-                          angle: -90,
-                          position: "insideLeft",
-                          style: {
-                            fontSize: 11,
-                            fill: "var(--color-text-muted)",
-                          },
-                        }}
-                      />
-                      <RechartsTooltip
-                        content={<ThroughputTooltip />}
-                      />
-
-                      {/* Smoothed (EWMA) line */}
-                      <Area
-                        type="monotone"
-                        dataKey="smoothed"
-                        name="Smoothed"
-                        stroke="var(--color-accent)"
-                        fill="var(--color-accent)"
-                        fillOpacity={0.08}
-                        isAnimationActive={false}
-                        dot={false}
-                        strokeWidth={2}
-                      />
-
-                      {/* Raw samples area (optional toggle) */}
-                      {showRaw && (
-                        <Area
-                          type="monotone"
-                          dataKey="raw"
-                          name="Raw"
-                          stroke="var(--color-text-muted)"
-                          fill="var(--color-text-muted)"
-                          fillOpacity={0.04}
-                          isAnimationActive={false}
-                          dot={false}
-                          strokeWidth={1}
+                <>
+                  {/* Series toggles */}
+                  <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                    {([ "total", "video", "audio", "network" ] as SeriesKey[]).map((key) => {
+                      const dataAvailable = key === "total" || (key === "video" && canShowVideo) || (key === "audio" && canShowAudio) || (key === "network" && canShowTransport);
+                      if (!dataAvailable) return null;
+                      return (
+                        <SeriesToggle
+                          key={key}
+                          seriesKey={key}
+                          enabled={enabledSeries.has(key)}
+                          onToggle={() => toggleSeries(key)}
                         />
-                      )}
+                      );
+                    })}
+                  </div>
 
-                      {/* Target reference line */}
-                      {selectedSeries.configuredBitsPerSecond != null &&
-                        selectedSeries.configuredBitsPerSecond > 0 && (
-                          <ReferenceLine
-                            y={selectedSeries.configuredBitsPerSecond}
-                            stroke="var(--color-warning)"
-                            strokeDasharray="6 3"
-                            label={
-                              <Label
-                                value={`Target: ${fmtBitRate(selectedSeries.configuredBitsPerSecond)}`}
-                                position="right"
-                                style={{
-                                  fontSize: 10,
-                                  fill: "var(--color-warning)",
-                                }}
-                              />
-                            }
+                  <div className="h-40">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart
+                        data={chartData}
+                        margin={{
+                          top: 4,
+                          right: 4,
+                          left: 0,
+                          bottom: 0,
+                        }}
+                      >
+                        <CartesianGrid
+                          strokeDasharray="3 3"
+                          stroke="var(--color-border)"
+                        />
+                        <XAxis
+                          dataKey="time"
+                          type="number"
+                          domain={["dataMin", "dataMax"]}
+                          tickFormatter={formatTimeAxis}
+                          tick={{ fontSize: 11 }}
+                          stroke="var(--color-text-muted)"
+                        />
+                        <YAxis
+                          tickFormatter={formatBitRateAxis}
+                          tick={{ fontSize: 11 }}
+                          stroke="var(--color-text-muted)"
+                          label={{
+                            value: "bps",
+                            angle: -90,
+                            position: "insideLeft",
+                            style: {
+                              fontSize: 11,
+                              fill: "var(--color-text-muted)",
+                            },
+                          }}
+                        />
+                        <RechartsTooltip
+                          content={<ThroughputTooltip />}
+                        />
+
+                        {/* Total media (EWMA smoothed) line */}
+                        {enabledSeries.has("total") && (
+                          <Area
+                            type="monotone"
+                            dataKey="smoothed"
+                            name="Total media"
+                            stroke={seriesColors.total}
+                            fill={seriesColors.total}
+                            fillOpacity={0.08}
+                            isAnimationActive={false}
+                            dot={false}
+                            strokeWidth={2}
                           />
                         )}
 
-                      {/* Marker reference lines */}
-                      {visibleMarkers.map((cluster) => {
-                        const first = cluster[0];
-                        const markerTime = first.timestampMs;
-                        const label =
-                          cluster.length === 1
-                            ? first.label
-                            : `${first.label} +${cluster.length - 1}`;
-                        const color = getMarkerColor(first.type);
-                        const clusterTooltip =
-                          cluster.length > 1
-                            ? cluster.map((m) => `\u2022 ${m.label}`).join("\n")
-                            : first.detail
-                              ? `\u2022 ${first.label}\n${first.detail}`
-                              : undefined;
-
-                        return (
-                          <ReferenceLine
-                            key={first.id}
-                            x={markerTime}
-                            stroke={color}
-                            strokeDasharray="4 4"
-                            label={
-                              <Label
-                                value={label}
-                                position="top"
-                                style={{
-                                  fontSize: 10,
-                                  fill: color,
-                                }}
-                              />
-                            }
-                            {...(clusterTooltip ? {
-                              ifOverflow: "extendDomain",
-                              // tooltip shown via title-like label for now
-                            } : {})}
+                        {/* Raw samples area (optional toggle) */}
+                        {showRaw && enabledSeries.has("total") && (
+                          <Area
+                            type="monotone"
+                            dataKey="raw"
+                            name="Raw"
+                            stroke="var(--color-text-muted)"
+                            fill="var(--color-text-muted)"
+                            fillOpacity={0.04}
+                            isAnimationActive={false}
+                            dot={false}
+                            strokeWidth={1}
                           />
-                        );
-                      })}
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
+                        )}
+
+                        {/* Video series */}
+                        {enabledSeries.has("video") && hasVideoData && (
+                          <Area
+                            type="monotone"
+                            dataKey="video"
+                            name="Video"
+                            stroke={seriesColors.video}
+                            fill={seriesColors.video}
+                            fillOpacity={0.06}
+                            isAnimationActive={false}
+                            dot={false}
+                            strokeWidth={1.5}
+                            connectNulls={false}
+                          />
+                        )}
+
+                        {/* Audio series */}
+                        {enabledSeries.has("audio") && hasAudioData && (
+                          <Area
+                            type="monotone"
+                            dataKey="audio"
+                            name="Audio"
+                            stroke={seriesColors.audio}
+                            fill={seriesColors.audio}
+                            fillOpacity={0.06}
+                            isAnimationActive={false}
+                            dot={false}
+                            strokeWidth={1.5}
+                            connectNulls={false}
+                          />
+                        )}
+
+                        {/* Network/Wire series */}
+                        {enabledSeries.has("network") && hasTransportData && (
+                          <Area
+                            type="monotone"
+                            dataKey="transport"
+                            name="Network/Wire"
+                            stroke={seriesColors.network}
+                            fill={seriesColors.network}
+                            fillOpacity={0.06}
+                            isAnimationActive={false}
+                            dot={false}
+                            strokeWidth={1.5}
+                            connectNulls={false}
+                          />
+                        )}
+
+                        {/* Target reference line */}
+                        {selectedSeries.configuredBitsPerSecond != null &&
+                          selectedSeries.configuredBitsPerSecond > 0 && (
+                            <ReferenceLine
+                              y={selectedSeries.configuredBitsPerSecond}
+                              stroke="var(--color-warning)"
+                              strokeDasharray="6 3"
+                              label={
+                                <Label
+                                  value={`Target: ${fmtBitRate(selectedSeries.configuredBitsPerSecond)}`}
+                                  position="right"
+                                  style={{
+                                    fontSize: 10,
+                                    fill: "var(--color-warning)",
+                                  }}
+                                />
+                              }
+                            />
+                          )}
+
+                        {/* Marker reference lines */}
+                        {visibleMarkers.map((cluster) => {
+                          const first = cluster[0];
+                          const markerTime = first.timestampMs;
+                          const label =
+                            cluster.length === 1
+                              ? first.label
+                              : `${first.label} +${cluster.length - 1}`;
+                          const color = getMarkerColor(first.type);
+                          const clusterTooltip =
+                            cluster.length > 1
+                              ? cluster.map((m) => `\u2022 ${m.label}`).join("\n")
+                              : first.detail
+                                ? `\u2022 ${first.label}\n${first.detail}`
+                                : undefined;
+
+                          return (
+                            <ReferenceLine
+                              key={first.id}
+                              x={markerTime}
+                              stroke={color}
+                              strokeDasharray="4 4"
+                              label={
+                                <Label
+                                  value={label}
+                                  position="top"
+                                  style={{
+                                    fontSize: 10,
+                                    fill: color,
+                                  }}
+                                />
+                              }
+                              {...(clusterTooltip ? {
+                                ifOverflow: "extendDomain",
+                                // tooltip shown via title-like label for now
+                              } : {})}
+                            />
+                          );
+                        })}
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </>
               )}
             </TabsContent>
 
             {/* ── Connection Health Tab ── */}
             <TabsContent value="health">
               {healthData.length === 0 ? (
-                <div className="h-48 flex items-center justify-center text-sm text-text-muted">
+                <div className="h-24 flex items-center justify-center text-sm text-text-muted">
                   No connection health data available.
                 </div>
               ) : (
-                <div className="h-72">
+                <div className="h-40">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart
                       data={healthData}
                       margin={{
-                        top: 16,
-                        right: 16,
-                        left: 8,
-                        bottom: 8,
+                        top: 4,
+                        right: 4,
+                        left: 0,
+                        bottom: 0,
                       }}
                     >
                       <CartesianGrid
@@ -967,7 +1297,7 @@ export function BandwidthGraphModal({
               )}
 
               {/* Connection status badge */}
-              <div className="flex items-center gap-2 mt-3">
+              <div className="flex items-center gap-2 mt-1.5">
                 <span className="text-xs text-text-muted">Status:</span>
                 <Badge
                   variant={
@@ -996,14 +1326,18 @@ export function BandwidthGraphModal({
   if (!contentOnly) {
     return (
       <TooltipProvider>
-        <div className="w-[950px] p-4">{content}</div>
+        <div className="w-[950px] p-3">{content}</div>
       </TooltipProvider>
     );
   }
 
   return (
     <TooltipProvider>
-      <div className="w-[950px] p-4">{content}</div>
+      <div className="w-[950px] p-3">{content}</div>
     </TooltipProvider>
   );
 }
+
+// ─── Test exports ──────────────────────────────────────────────────────────
+export { computeKindTotals };
+export type { KindTotals, SeriesKey, ChartDataPoint };

@@ -133,6 +133,8 @@ export function QualityPresetsPage() {
     degradationPreference: "maintain-resolution",
   });
   const [formSaving, setFormSaving] = useState(false);
+  const [showInViewer, setShowInViewer] = useState(false);
+  const [viewerSlot, setViewerSlot] = useState<number | null>(null);
 
   // ── Delete dialog ───────────────────────────────────────────────
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -151,6 +153,7 @@ export function QualityPresetsPage() {
     try {
       const items = (await fetchQualityPresets()) as PresetRecord[];
       setPresets(items);
+      setQualityPresets(items);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load presets",
@@ -177,6 +180,8 @@ export function QualityPresetsPage() {
       contentHint: "motion",
       degradationPreference: "maintain-resolution",
     });
+    setShowInViewer(false);
+    setViewerSlot(null);
     setFormSaving(false);
   }, []);
 
@@ -209,6 +214,10 @@ export function QualityPresetsPage() {
           (video.degradationPreference as string) ?? "maintain-resolution",
       });
       setEditingId(preset.id);
+      const sv = preset.showInViewerPanel as boolean | undefined;
+      const vs = preset.viewerPanelSlot as number | null | undefined;
+      setShowInViewer(sv ?? false);
+      setViewerSlot(vs ?? null);
       setEditorOpen(true);
     },
     [],
@@ -258,21 +267,37 @@ export function QualityPresetsPage() {
     };
 
     try {
+      // Validate viewer panel slot uniqueness
+      if (showInViewer && viewerSlot != null) {
+        const conflict = presets.find(
+          (p) => p.id !== editingId && (p as any).showInViewerPanel === true && (p as any).viewerPanelSlot === viewerSlot,
+        );
+        if (conflict) {
+          toast.error(`Slot ${viewerSlot} is already assigned to "${conflict.name}"`);
+          setFormSaving(false);
+          return;
+        }
+      }
+
       if (editingId) {
         await updateQualityPreset(editingId, {
           name: formName.trim(),
           settings,
+          showInViewerPanel: showInViewer || undefined,
+          viewerPanelSlot: showInViewer ? viewerSlot : null,
         });
         toast.success("Preset updated");
       } else {
         await createQualityPreset({
           name: formName.trim(),
           settings,
+          showInViewerPanel: showInViewer || undefined,
+          viewerPanelSlot: showInViewer ? viewerSlot : null,
         });
         toast.success("Preset created");
       }
       setEditorOpen(false);
-      await loadPresets(); // refresh list
+      await loadPresets(); // refresh list — also syncs store via setQualityPresets
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : "Failed to save preset";
@@ -285,7 +310,11 @@ export function QualityPresetsPage() {
     formName,
     formQuality,
     formSaving,
+    showInViewer,
+    viewerSlot,
+    presets,
     loadPresets,
+    setQualityPresets,
   ]);
 
   // ── Delete ──────────────────────────────────────────────────────
@@ -296,7 +325,7 @@ export function QualityPresetsPage() {
         await deleteQualityPreset(id);
         toast.success("Preset deleted");
         setDeleteId(null);
-        await loadPresets();
+        await loadPresets(); // also syncs store via setQualityPresets
       } catch (err) {
         const msg =
           err instanceof Error ? err.message : "Failed to delete preset";
@@ -356,7 +385,7 @@ export function QualityPresetsPage() {
       toast.success("Preset imported");
       setImportDialogOpen(false);
       setImportString("");
-      await loadPresets();
+      await loadPresets(); // also syncs store
     } catch (err) {
       setImportError(
         err instanceof Error ? err.message : "Failed to import",
@@ -443,7 +472,14 @@ export function QualityPresetsPage() {
                 >
                   <Card className="h-full flex flex-col">
                     <CardHeader>
-                      <CardTitle className="text-sm">{preset.name}</CardTitle>
+                      <div className="flex items-center gap-2">
+                        <CardTitle className="text-sm">{preset.name}</CardTitle>
+                        {(preset as any).showInViewerPanel && (preset as any).viewerPanelSlot != null && (
+                          <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
+                            {(preset as any).viewerPanelSlot}
+                          </Badge>
+                        )}
+                      </div>
                     </CardHeader>
                     <CardContent className="flex-1">
                       <div className="space-y-1 text-xs text-text-secondary">
@@ -555,6 +591,46 @@ export function QualityPresetsPage() {
               onChange={setFormQuality}
               disabled={formSaving}
             />
+
+            {/* Viewer Panel Pin */}
+            <div className="space-y-3 pt-2 border-t border-border-subtle">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="show-in-viewer">Show in viewer panel</Label>
+                <input
+                  id="show-in-viewer"
+                  type="checkbox"
+                  checked={showInViewer}
+                  onChange={(e) => {
+                    setShowInViewer(e.target.checked);
+                    if (!e.target.checked) setViewerSlot(null);
+                  }}
+                  disabled={formSaving}
+                  className="toggle"
+                />
+              </div>
+              {showInViewer && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="viewer-slot">Keyboard shortcut</Label>
+                  <select
+                    id="viewer-slot"
+                    value={viewerSlot ?? ""}
+                    onChange={(e) => setViewerSlot(e.target.value ? parseInt(e.target.value, 10) : null)}
+                    disabled={formSaving}
+                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
+                  >
+                    <option value="">Select slot…</option>
+                    {Array.from({ length: 9 }, (_, i) => i + 1).map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-text-muted">
+                    Press this number key on the viewer page to instantly apply this preset.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
 
           <SheetFooter className="mt-6">

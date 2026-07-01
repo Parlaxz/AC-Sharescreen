@@ -11,6 +11,10 @@ export interface QualityPreset {
   settings: GroupQualitySettings;
   createdAt: number;
   updatedAt: number;
+  /** When true, this preset appears in the viewer settings panel for quick access */
+  showInViewerPanel?: boolean;
+  /** Unique slot number (1-9) for keyboard-triggered switching on the viewer page */
+  viewerPanelSlot?: number | null;
 }
 
 // ─── Schemas ───────────────────────────────────────────────────────────────
@@ -22,6 +26,8 @@ export const QualityPresetSchema: z.ZodType<QualityPreset> = z.object({
   settings: GroupQualitySettingsSchema,
   createdAt: z.number().int().positive(),
   updatedAt: z.number().int().positive(),
+  showInViewerPanel: z.boolean().optional(),
+  viewerPanelSlot: z.number().int().min(1).max(9).nullable().optional(),
 });
 
 export type QualityPresetParsed = z.infer<typeof QualityPresetSchema>;
@@ -40,6 +46,8 @@ export function createQualityPreset(input: {
   settings: GroupQualitySettings;
   now?: number;
   idFactory?: () => string;
+  showInViewerPanel?: boolean;
+  viewerPanelSlot?: number | null;
 }): QualityPreset {
   const now = input.now ?? Date.now();
   const id = input.idFactory ? input.idFactory() : crypto.randomUUID();
@@ -50,6 +58,8 @@ export function createQualityPreset(input: {
     settings: input.settings,
     createdAt: now,
     updatedAt: now,
+    ...(input.showInViewerPanel !== undefined ? { showInViewerPanel: input.showInViewerPanel } : {}),
+    ...(input.viewerPanelSlot !== undefined ? { viewerPanelSlot: input.viewerPanelSlot } : {}),
   };
 }
 
@@ -58,13 +68,15 @@ export function createQualityPreset(input: {
  */
 export function updateQualityPreset(
   preset: QualityPreset,
-  patch: { name?: string; settings?: GroupQualitySettings; now?: number },
+  patch: { name?: string; settings?: GroupQualitySettings; now?: number; showInViewerPanel?: boolean; viewerPanelSlot?: number | null },
 ): QualityPreset {
   const now = patch.now ?? Date.now();
   return {
     ...preset,
     ...(patch.name !== undefined ? { name: patch.name } : {}),
     ...(patch.settings !== undefined ? { settings: patch.settings } : {}),
+    ...(patch.showInViewerPanel !== undefined ? { showInViewerPanel: patch.showInViewerPanel } : {}),
+    ...(patch.viewerPanelSlot !== undefined ? { viewerPanelSlot: patch.viewerPanelSlot } : {}),
     updatedAt: now,
   };
 }

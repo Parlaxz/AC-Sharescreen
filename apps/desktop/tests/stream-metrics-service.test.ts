@@ -16,7 +16,7 @@ function makeMockPC(videoBytes: number, ssrc: number): RTCPeerConnection {
     frameHeight: 1080,
     framesPerSecond: 60,
   });
-  stats.set("codec-vp9", { type: "codec", mimeType: "video/VP9" });
+  stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
   stats.set("cp", {
     type: "candidate-pair",
     state: "succeeded",
@@ -290,6 +290,344 @@ describe("StreamMetricsService", () => {
       snapshot = svc.getSnapshot(historyId);
       expect(snapshot.aggregate.currentBitsPerSecond).toBeGreaterThanOrEqual(0);
       expect(snapshot.connections.length).toBe(1);
+    });
+  });
+
+  // ─── Extended telemetry: RTP evidence, bandwidth breakdown ────────────
+
+  describe("extended telemetry - RTP evidence", () => {
+    // ── Helpers ────────────────────────────────────────────────────────
+
+    function setVideo(
+      stats: Map<string, Record<string, unknown>>,
+      bytes: number, ssrc: number, extra?: Record<string, unknown>,
+    ): void {
+      stats.set("rtp-video", {
+        type: "inbound-rtp", kind: "video",
+        bytesReceived: bytes, ssrc, mid: "0", codecId: "codec-vp9",
+        frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+        packetsReceived: 1000, packetsLost: 0, jitter: 0.005,
+        ...extra,
+      });
+      stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+    }
+
+    function setAudio(
+      stats: Map<string, Record<string, unknown>>,
+      id: string, bytes: number, ssrc: number, extra?: Record<string, unknown>,
+    ): void {
+      stats.set(id, {
+        type: "inbound-rtp", kind: "audio",
+        bytesReceived: bytes, ssrc, mid: "0", codecId: "codec-opus",
+        packetsReceived: 200, packetsLost: 0, jitter: 0.003,
+        ...extra,
+      });
+      stats.set("codec-opus", { type: "codec", id: "codec-opus", mimeType: "audio/opus" });
+    }
+
+    function setTransport(
+      stats: Map<string, Record<string, unknown>>, bytes: number,
+    ): void {
+      stats.set("cp", {
+        type: "candidate-pair", state: "succeeded", selected: true,
+        bytesReceived: bytes, currentRoundTripTime: 0.01,
+        localCandidateId: "lc", remoteCandidateId: "rc",
+      });
+      stats.set("lc", { type: "local-candidate", candidateType: "host" });
+      stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+    }
+
+    function setupConn(): {
+      historyId: string;
+      pc: RTCPeerConnection;
+      stats: Map<string, Record<string, unknown>>;
+    } {
+      const historyId = svc.startViewerSession("ms-ext", "ls-ext", "g1", "G1");
+      const pc = createMockPC();
+      const stats = (pc as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      svc.registerConnection({
+        historyId, connectionId: "ext-conn", viewerDeviceId: null,
+        displayName: null, peerConnection: pc, direction: "inbound",
+      });
+      return { historyId, pc, stats };
+    }
+
+    // ── Tests ─────────────────────────────────────────────────────────
+
+    it("first sample baseline creates no spike", async () => {
+      const { historyId, stats } = setupConn();
+      setVideo(stats, 1_000_000, 1);
+      setAudio(stats, "rtp-audio", 20_000, 101);
+      setTransport(stats, 1_020_000);
+
+      await advanceTime(1000); // tick 1 — baselines, rate 0
+      let snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.aggregate.rawSamples.length).toBe(1);
+      expect(snapshot.aggregate.rawSamples[0].mediaBitsPerSecond).toBe(0);
+      // Per-connection sample exists and shows 0
+      expect(snapshot.connections[0].rawSamples[0].mediaBitsPerSecond).toBe(0);
+      expect(snapshot.connections[0].rawSamples[0].videoBitsPerSecond).toBe(0);
+      expect(snapshot.connections[0].rawSamples[0].audioBitsPerSecond).toBe(0);
+
+      await advanceTime(1000); // tick 2 — same bytes, delta zero
+      snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.aggregate.rawSamples.length).toBe(2);
+      expect(snapshot.aggregate.rawSamples[1].mediaBitsPerSecond).toBe(0);
+    });
+
+    it("video and audio bandwidth computed correctly", async () => {
+      const { historyId, stats } = setupConn();
+
+      // Tick 1: baseline with zero bytes
+      setVideo(stats, 0, 1);
+      setAudio(stats, "rtp-audio", 0, 101);
+      setTransport(stats, 0);
+      await advanceTime(1000);
+
+      // Tick 2: accumulated bytes over ~1s
+      setVideo(stats, 1_000_000, 1);
+      setAudio(stats, "rtp-audio", 20_000, 101);
+      setTransport(stats, 1_020_000);
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      const sample = snapshot.aggregate.rawSamples[1];
+      // Video: 1_000_000 × 8 ÷ ~1s ≈ 8_000_000 bps
+      expect(sample.videoBitsPerSecond).toBeGreaterThanOrEqual(7_900_000);
+      expect(sample.videoBitsPerSecond).toBeLessThanOrEqual(8_100_000);
+      // Audio: 20_000 × 8 ÷ ~1s ≈ 160_000 bps
+      expect(sample.audioBitsPerSecond).toBeGreaterThanOrEqual(150_000);
+      expect(sample.audioBitsPerSecond).toBeLessThanOrEqual(170_000);
+      // Total media = video + audio
+      expect(sample.mediaBitsPerSecond)
+        .toBe((sample.videoBitsPerSecond ?? 0) + (sample.audioBitsPerSecond ?? 0));
+      expect(snapshot.aggregate.currentBitsPerSecond).toBe(sample.mediaBitsPerSecond);
+      // Cumulative media = video + audio bytes
+      expect(sample.cumulativeMediaBytes).toBe(1_020_000);
+      expect(snapshot.aggregate.totalBytes).toBe(1_020_000);
+    });
+
+    it("multiple active audio streams summed correctly", async () => {
+      const { historyId, stats } = setupConn();
+
+      // Tick 1: baseline
+      setVideo(stats, 0, 1);
+      setAudio(stats, "rtp-audio-1", 0, 101);
+      stats.set("rtp-audio-2", {
+        type: "inbound-rtp", kind: "audio",
+        bytesReceived: 0, ssrc: 102, mid: "0", codecId: "codec-opus",
+        packetsReceived: 100, packetsLost: 0, jitter: 0.002,
+      });
+      setTransport(stats, 0);
+      await advanceTime(1000);
+
+      // Tick 2: both audio streams have bytes
+      setAudio(stats, "rtp-audio-1", 10_000, 101);
+      stats.set("rtp-audio-2", {
+        type: "inbound-rtp", kind: "audio",
+        bytesReceived: 5_000, ssrc: 102, mid: "0", codecId: "codec-opus",
+        packetsReceived: 100, packetsLost: 0, jitter: 0.002,
+      });
+      setVideo(stats, 1_000_000, 1);
+      setTransport(stats, 1_015_000);
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      const sample = snapshot.aggregate.rawSamples[1];
+      // Two audio streams: (10_000 + 5_000) = 15_000 bytes × 8 / ~1s ≈ 120_000 bps
+      expect(sample.audioBitsPerSecond).toBeGreaterThanOrEqual(110_000);
+      expect(sample.audioBitsPerSecond).toBeLessThanOrEqual(130_000);
+    });
+
+    it("candidate-pair transport not added to media totals", async () => {
+      const { historyId, stats } = setupConn();
+
+      setVideo(stats, 0, 1);
+      setAudio(stats, "rtp-audio", 0, 101);
+      setTransport(stats, 0);
+      await advanceTime(1000);
+
+      // Tick 2: transport bytes far exceed media bytes
+      setVideo(stats, 1_000_000, 1);
+      setAudio(stats, "rtp-audio", 20_000, 101);
+      setTransport(stats, 5_000_000);
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      const sample = snapshot.aggregate.rawSamples[1];
+      // Cumulative media bytes = video + audio only
+      expect(sample.cumulativeMediaBytes).toBe(1_020_000);
+      expect(snapshot.aggregate.totalBytes).toBe(1_020_000);
+      // mediaBitsPerSecond reflects media only
+      expect(sample.mediaBitsPerSecond)
+        .toBe((sample.videoBitsPerSecond ?? 0) + (sample.audioBitsPerSecond ?? 0));
+      // transportBitsPerSecond is separate (not added to media)
+      expect(sample.transportBitsPerSecond).toBeGreaterThan(0);
+    });
+
+    it("SSRC change does not spike rate", async () => {
+      const { historyId, stats } = setupConn();
+
+      // Tick 1: SSRC=1
+      setVideo(stats, 500_000, 1);
+      setAudio(stats, "rtp-audio", 10_000, 101);
+      setTransport(stats, 510_000);
+      await advanceTime(1000);
+
+      // Tick 2: SSRC changes to 2 — new baseline, rate 0
+      stats.clear();
+      setVideo(stats, 600_000, 2);
+      setAudio(stats, "rtp-audio", 15_000, 201);
+      setTransport(stats, 615_000);
+      await advanceTime(1000);
+      let snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.aggregate.rawSamples.length).toBe(2);
+      expect(snapshot.aggregate.rawSamples[1].mediaBitsPerSecond).toBe(0);
+
+      // Tick 3: bytes increase from new baseline — normal rate
+      setVideo(stats, 700_000, 2);
+      setAudio(stats, "rtp-audio", 25_000, 201);
+      setTransport(stats, 725_000);
+      await advanceTime(1000);
+      snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.aggregate.rawSamples.length).toBe(3);
+      expect(snapshot.aggregate.rawSamples[2].mediaBitsPerSecond).toBeGreaterThan(0);
+    });
+
+    it("missing audio clears stale audio measurements", async () => {
+      const { historyId, stats } = setupConn();
+
+      // Tick 1: with audio
+      setVideo(stats, 1_000_000, 1);
+      setAudio(stats, "rtp-audio", 20_000, 101);
+      setTransport(stats, 1_020_000);
+      await advanceTime(1000);
+
+      // Tick 2: audio stream removed from stats
+      stats.delete("rtp-audio");
+      stats.delete("codec-opus");
+      setVideo(stats, 2_000_000, 1);
+      setTransport(stats, 2_000_000);
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.connections[0].currentAudioBitsPerSecond).toBeNull();
+      expect(snapshot.connections[0].currentVideoBitsPerSecond).not.toBeNull();
+      expect(snapshot.connections[0].currentBitsPerSecond).toBeGreaterThan(0);
+    });
+
+    it("codec resolved via codecId from active RTP stream", async () => {
+      const { historyId, stats } = setupConn();
+
+      // Manual setup: avoid setVideo helper to prevent codecMap ordering confusion
+      stats.clear();
+      stats.set("rtp-video", {
+        type: "inbound-rtp", kind: "video",
+        bytesReceived: 1_000_000, ssrc: 1, mid: "0", codecId: "codec-h264",
+        frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+        packetsReceived: 1000, packetsLost: 0, jitter: 0.005,
+      });
+      stats.set("rtp-audio", {
+        type: "inbound-rtp", kind: "audio",
+        bytesReceived: 20_000, ssrc: 101, mid: "0", codecId: "codec-opus",
+        packetsReceived: 200, packetsLost: 0, jitter: 0.003,
+      });
+      // Add codecs in wrong order: VP9 first, H264 second, AV1 third
+      // The RTP stream's codecId points to "codec-h264" — should resolve to H264
+      stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+      stats.set("codec-h264", { type: "codec", id: "codec-h264", mimeType: "video/H264" });
+      stats.set("codec-av1", { type: "codec", id: "codec-av1", mimeType: "video/AV1" });
+      stats.set("codec-opus", { type: "codec", id: "codec-opus", mimeType: "audio/opus" });
+      setTransport(stats, 1_020_000);
+
+      await advanceTime(2000); // two ticks: baseline + measurement
+
+      const snapshot = svc.getSnapshot(historyId);
+      // Per-stream evidence (per-connection sample) has codec resolved via codecId
+      const connSample = snapshot.connections[0].rawSamples[1];
+      expect(connSample.videoRtpStreams.length).toBe(1);
+      expect(connSample.videoRtpStreams[0].codecId).toBe("codec-h264");
+      expect(connSample.videoRtpStreams[0].codecMimeType).toBe("video/H264");
+    });
+
+    it("jitter seconds converted to ms exactly once", async () => {
+      const { historyId, stats } = setupConn();
+
+      setVideo(stats, 1_000_000, 1, { jitter: 0.005 });
+      setAudio(stats, "rtp-audio", 20_000, 101, { jitter: 0.003 });
+      setTransport(stats, 1_020_000);
+
+      await advanceTime(2000);
+
+      // Per-stream evidence is per-connection, not carried in aggregate samples
+      const snapshot = svc.getSnapshot(historyId);
+      const connSample = snapshot.connections[0].rawSamples[1];
+      expect(connSample.videoRtpStreams.length).toBe(1);
+      // 0.005 seconds × 1000 = 5 ms
+      expect(connSample.videoRtpStreams[0].jitterMs).toBe(5);
+      expect(connSample.audioRtpStreams.length).toBe(1);
+      // 0.003 seconds × 1000 = 3 ms
+      expect(connSample.audioRtpStreams[0].jitterMs).toBe(3);
+    });
+
+    it("jitter-buffer delay and concealment delta calculations correct", async () => {
+      const { historyId, stats } = setupConn();
+
+      // Tick 1: initial audio stats
+      setVideo(stats, 1_000_000, 1);
+      setAudio(stats, "rtp-audio", 20_000, 101, {
+        jitterBufferDelay: 0.5,
+        jitterBufferEmittedCount: 100,
+        concealedSamples: 10,
+        concealedEvents: 2,
+        totalSamplesReceived: 10000,
+      });
+      setTransport(stats, 1_020_000);
+      await advanceTime(1000);
+
+      // Tick 2: delta values
+      setAudio(stats, "rtp-audio", 40_000, 101, {
+        jitterBufferDelay: 1.5,
+        jitterBufferEmittedCount: 300,
+        concealedSamples: 30,
+        concealedEvents: 5,
+        totalSamplesReceived: 30000,
+      });
+      setVideo(stats, 2_000_000, 1);
+      setTransport(stats, 2_040_000);
+      await advanceTime(1000);
+
+      // Per-stream evidence lives in per-connection samples
+      const snapshot = svc.getSnapshot(historyId);
+      const connSample = snapshot.connections[0].rawSamples[1];
+      const audioEvidence = connSample.audioRtpStreams[0];
+
+      // delay = (1.5-0.5) / (300-100) × 1000 = 1.0/200 × 1000 = 5.0 ms
+      expect(audioEvidence.jitterBufferDelayMs).toBeCloseTo(5.0, 0);
+      expect(audioEvidence.jitterBufferEmittedCount).toBe(200);
+
+      // concealment% = (30-10)/(30000-10000) × 100 = 20/20000 × 100 = 0.1%
+      expect(audioEvidence.concealmentPercent).toBeCloseTo(0.1, 0);
+      expect(audioEvidence.concealedSamples).toBe(20);
+      expect(audioEvidence.concealedEvents).toBe(3);
+      expect(audioEvidence.totalSamplesReceived).toBe(20000);
+    });
+
+    it("rates null before first tick", async () => {
+      const historyId = svc.startViewerSession("ms-pre", "ls-pre", "g1", "G1");
+      const pc = createMockPC();
+      svc.registerConnection({
+        historyId, connectionId: "pre-tick", viewerDeviceId: null,
+        displayName: null, peerConnection: pc, direction: "inbound",
+      });
+
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.connections.length).toBe(1);
+      expect(snapshot.connections[0].currentVideoBitsPerSecond).toBeNull();
+      expect(snapshot.connections[0].currentAudioBitsPerSecond).toBeNull();
+      expect(snapshot.connections[0].currentTransportBitsPerSecond).toBeNull();
+      // backward-compat alias remains 0
+      expect(snapshot.connections[0].currentBitsPerSecond).toBe(0);
     });
   });
 });

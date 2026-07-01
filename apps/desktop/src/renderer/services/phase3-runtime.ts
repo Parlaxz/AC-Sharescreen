@@ -8,6 +8,7 @@ import { RestartCoordinator } from "./restart-coordinator.js";
 import { QualityCoordinator } from "./quality-coordinator.js";
 import { MediaStatsPoller } from "./media-stats-service.js";
 import { showNotification } from "./notifications.js";
+import { uiSoundService } from "./ui-sound-service.js";
 import type { GroupSharedState, GroupMemberRecord, HybridTimestamp, HostQualityLimits } from "@screenlink/shared";
 import { createDefaultHostQualityLimits } from "@screenlink/shared";
 import type { PublisherManager } from "./publisher-manager.js";
@@ -274,6 +275,10 @@ export class Phase3Runtime {
 
     // Create RestartCoordinator (Stage 14)
     this.restartCoordinator = new RestartCoordinator(this);
+
+    // Preload UI sound cues (join/leave) so they are ready when the host
+    // needs to play them. Idempotent — safe to call multiple times.
+    void uiSoundService.preload();
 
     this.initialized = true;
   }

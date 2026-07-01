@@ -30,6 +30,7 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "stream.bind.ack",
   "stream.leave",
   "viewer.paused",
+  "viewer.media.request",
   "viewer.status",
   "media.bind",
   "quality.viewer.request",
@@ -37,6 +38,7 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "quality.effective",
   "quality.configured",
   "quality.observed",
+  "stream.viewer.ready",
   "ping",
   "pong",
 ] as const;
@@ -549,6 +551,16 @@ export const ViewerPausedPayloadSchema = z.object({
   paused: z.boolean(),
 }).strict();
 
+// ─── Viewer media request payload schema ──────────────────────────────────────
+
+export const ViewerMediaRequestPayloadSchema = z.object({
+  logicalStreamId: z.string(),
+  viewerDeviceId: z.string(),
+  viewerSessionId: z.string().optional(),
+  audioEnabled: z.boolean(),
+  videoEnabled: z.boolean(),
+}).strict();
+
 // ─── Viewer status payload schema ────────────────────────────────────────────
 
 export const ViewerStatusPayloadSchema = z.object({
@@ -618,6 +630,28 @@ export const QualityObservedPayloadSchema = z.object({
   videoBitrateKbps: z.number().optional(),
 });
 
+// ─── Stream viewer ready ─────────────────────────────────────────────────
+
+export const VIEWER_READY_PRESENTATIONS = [
+  "native-video",
+  "webgl",
+  "nvidia",
+  "fallback",
+] as const;
+
+export type ViewerReadyPresentation = (typeof VIEWER_READY_PRESENTATIONS)[number];
+
+export const StreamViewerReadyPayloadSchema = z.object({
+  groupId: z.string(),
+  logicalStreamId: z.string(),
+  mediaSessionId: z.string(),
+  viewerSessionId: z.string(),
+  viewerNodeId: z.string(),
+  viewerDeviceId: z.string(),
+  readyAt: z.number(),
+  presentation: z.enum(VIEWER_READY_PRESENTATIONS),
+}).strict();
+
 // ─── Ping / Pong ───────────────────────────────────────────────────────────
 
 export const PingPayloadSchema = z.object({
@@ -660,12 +694,14 @@ export type GroupControlPayloadMap = {
   "stream.leave": z.infer<typeof StreamLeavePayloadSchema>;
   "media.bind": z.infer<typeof MediaBindPayloadSchema>;
   "viewer.paused": z.infer<typeof ViewerPausedPayloadSchema>;
+  "viewer.media.request": z.infer<typeof ViewerMediaRequestPayloadSchema>;
   "viewer.status": z.infer<typeof ViewerStatusPayloadSchema>;
   "quality.viewer.request": z.infer<typeof QualityViewerRequestPayloadSchema>;
   "quality.viewer.clear": z.infer<typeof QualityViewerClearPayloadSchema>;
   "quality.effective": z.infer<typeof QualityEffectivePayloadSchema>;
   "quality.configured": z.infer<typeof QualityConfiguredPayloadSchema>;
   "quality.observed": z.infer<typeof QualityObservedPayloadSchema>;
+  "stream.viewer.ready": z.infer<typeof StreamViewerReadyPayloadSchema>;
   "ping": z.infer<typeof PingPayloadSchema>;
   "pong": z.infer<typeof PongPayloadSchema>;
 };
@@ -695,12 +731,14 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "stream.leave": StreamLeavePayloadSchema,
   "media.bind": MediaBindPayloadSchema,
   "viewer.paused": ViewerPausedPayloadSchema,
+  "viewer.media.request": ViewerMediaRequestPayloadSchema,
   "viewer.status": ViewerStatusPayloadSchema,
   "quality.viewer.request": QualityViewerRequestPayloadSchema,
   "quality.viewer.clear": QualityViewerClearPayloadSchema,
   "quality.effective": QualityEffectivePayloadSchema,
   "quality.configured": QualityConfiguredPayloadSchema,
   "quality.observed": QualityObservedPayloadSchema,
+  "stream.viewer.ready": StreamViewerReadyPayloadSchema,
   "ping": PingPayloadSchema,
   "pong": PongPayloadSchema,
 };

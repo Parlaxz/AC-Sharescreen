@@ -150,6 +150,7 @@ const noopUnsub = () => () => {};
   // Tray
   traySetSharing: () => {},
   traySetViewing: () => {},
+  traySetViewerCount: () => {},
 
   // Fullscreen
   toggleFullscreen: () => Promise.resolve(false),

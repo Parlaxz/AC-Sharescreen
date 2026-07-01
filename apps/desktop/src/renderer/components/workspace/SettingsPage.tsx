@@ -54,6 +54,7 @@ interface SettingsForm {
   discordDeafenShortcut: string;
   discordDeafenScreenLink: boolean;
   viewerMaxVolumePercent: number;
+  hourlyEstimateDurationMs: number;
 }
 
 const DEFAULT_FORM: SettingsForm = {
@@ -74,6 +75,7 @@ const DEFAULT_FORM: SettingsForm = {
   discordDeafenShortcut: "Alt+D",
   discordDeafenScreenLink: true,
   viewerMaxVolumePercent: 200,
+  hourlyEstimateDurationMs: 10_000,
 };
 
 const DEFAULT_AUDIO_SETTINGS = {
@@ -138,6 +140,7 @@ function buildForm(
     discordDeafenShortcut: formatShortcutBinding(settings.discordDeafenShortcut) || DEFAULT_FORM.discordDeafenShortcut,
     discordDeafenScreenLink: settings.discordDeafenScreenLink ?? DEFAULT_FORM.discordDeafenScreenLink,
     viewerMaxVolumePercent: settings.viewerMaxVolumePercent ?? DEFAULT_FORM.viewerMaxVolumePercent,
+    hourlyEstimateDurationMs: settings.hourlyEstimateDurationMs ?? DEFAULT_FORM.hourlyEstimateDurationMs,
   };
 }
 
@@ -159,7 +162,8 @@ function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
     a.discordMuteShortcut === b.discordMuteShortcut &&
     a.discordDeafenShortcut === b.discordDeafenShortcut &&
     a.discordDeafenScreenLink === b.discordDeafenScreenLink &&
-    a.viewerMaxVolumePercent === b.viewerMaxVolumePercent
+    a.viewerMaxVolumePercent === b.viewerMaxVolumePercent &&
+    a.hourlyEstimateDurationMs === b.hourlyEstimateDurationMs
   );
 }
 
@@ -331,6 +335,7 @@ export function SettingsPage() {
         discordDeafenShortcut: parseShortcutString(form.discordDeafenShortcut),
         discordDeafenScreenLink: form.discordDeafenScreenLink,
         viewerMaxVolumePercent: form.viewerMaxVolumePercent,
+        hourlyEstimateDurationMs: form.hourlyEstimateDurationMs,
       };
 
       await saveSettings(mergedSettingsPartial);
@@ -556,6 +561,31 @@ export function SettingsPage() {
             onChange={(e) => updateField("viewerMaxVolumePercent", parseInt(e.target.value || "0", 10) || 0)}
             disabled={saving}
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Hourly usage estimate window</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1.5">
+          <Label htmlFor="hourly-estimate-window">
+            Time window used to compute the bandwidth graph's hourly usage estimate
+          </Label>
+          <Select
+            value={String(form.hourlyEstimateDurationMs)}
+            onValueChange={(value) => updateField("hourlyEstimateDurationMs", Number(value))}
+          >
+            <SelectTrigger id="hourly-estimate-window">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="10000">Last 10 seconds</SelectItem>
+              <SelectItem value="30000">Last 30 seconds</SelectItem>
+              <SelectItem value="60000">Last 1 minute</SelectItem>
+              <SelectItem value="300000">Last 5 minutes</SelectItem>
+            </SelectContent>
+          </Select>
         </CardContent>
       </Card>
 

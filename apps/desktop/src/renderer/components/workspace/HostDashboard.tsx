@@ -1,5 +1,5 @@
 ﻿import { useCallback, useMemo, useState, useEffect } from "react";
-import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, ArrowRight } from "lucide-react";
+import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, ArrowRight, UserX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -36,6 +36,8 @@ import { Separator } from "@/components/ui/separator";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
 import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
 import { formatBitrateKbps } from "@/lib/utils";
+import { toast } from "sonner";
+import { shouldAutoKickViewer, shouldShowViewerAfterKick } from "@/lib/viewer-kick-policy";
 
 function formatLiveDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
@@ -70,7 +72,7 @@ function getConnectionClass(label: string): string {
   return "bg-text-muted";
 }
 
-function ViewerRowItem({ row, onBitrateClick }: { row: ViewerRow; onBitrateClick?: () => void }) {
+function ViewerRowItem({ row, onBitrateClick, onKick }: { row: ViewerRow; onBitrateClick?: () => void; onKick?: (viewerDeviceId: string) => void | Promise<void> }) {
   const statusDot = (() => {
     switch (row.state) {
       case "playing": return "bg-green-500";
@@ -97,7 +99,21 @@ function ViewerRowItem({ row, onBitrateClick }: { row: ViewerRow; onBitrateClick
       <div className="flex items-center gap-2 text-xs">
         <span className={`h-2 w-2 rounded-full ${statusDot} shrink-0`} />
         <span className="text-text-primary font-medium truncate">{row.displayName}</span>
-        <span className="text-text-muted ml-auto shrink-0">{statusLabel}</span>
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          <span className="text-text-muted">{statusLabel}</span>
+          {onKick ? (
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              className="h-6 px-2 text-[10px]"
+              onClick={() => void onKick(row.viewerDeviceId)}
+            >
+              <UserX className="h-3 w-3" />
+              Kick out
+            </Button>
+          ) : null}
+        </div>
       </div>
 
       {row.state === "paused" && (
@@ -196,6 +212,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const [selectedSwitchSource, setSelectedSwitchSource] = useState<CaptureSourceDTO | null>(null);
   const [switchSourceError, setSwitchSourceError] = useState<string | null>(null);
   const [bandwidthModalOpen, setBandwidthModalOpen] = useState(false);
+  const [dismissedViewerTimestamps, setDismissedViewerTimestamps] = useState<Record<string, number>>({});
   const runtime = getRuntime();
   const sdk = runtime
     ?.getStreamSessionManager()
@@ -236,6 +253,11 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     selectedGroupId ?? "",
     logicalStreamId,
     mediaSessionId,
+  );
+
+  const visibleViewerRows = useMemo(
+    () => viewerRows.filter((row) => shouldShowViewerAfterKick(row.lastStatusAt, dismissedViewerTimestamps[row.viewerDeviceId])),
+    [dismissedViewerTimestamps, viewerRows],
   );
 
   const group = selectedGroupId ? groupsById[selectedGroupId] : null;
@@ -352,6 +374,64 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     s.navigate("viewer");
   }, []);
 
+  const kickViewer = useCallback(async (viewerDeviceId: string, reason: "manual" | "stale") => {
+    const currentRuntime = getRuntime();
+    const viewerBinding = currentRuntime?.getViewerMediaBinding();
+    if (!viewerBinding) {
+      if (reason === "manual") {
+        toast.error("Failed to kick viewer");
+      }
+      return;
+    }
+
+    const kickedAt = Date.now();
+    setDismissedViewerTimestamps((current) => ({
+      ...current,
+      [viewerDeviceId]: kickedAt,
+    }));
+
+    // 1) Send stream.stopped to the viewer so they see the stream as gone
+    const conn = selectedGroupId
+      ? currentRuntime?.getConnectionManager().getConnection(selectedGroupId)
+      : null;
+    const peerUuid = conn?.peerForDevice(viewerDeviceId);
+    if (conn && peerUuid && selectedGroupId && logicalStreamId) {
+      await conn.sendToPeer(peerUuid, {
+        type: "stream.stopped",
+        groupId: selectedGroupId,
+        hostDeviceId: currentRuntime?.deviceId ?? "local",
+        logicalStreamId,
+      }).catch(() => {});
+    }
+
+    // 2) Force-close the viewer's RTCPeerConnection to cut media immediately
+    //    removeViewer() deliberately does NOT close the PC (it's owned by
+    //    the VDO SDK).  For a kick we close it anyway — the viewer's
+    //    track-ended handler will detect the drop and tear down their
+    //    ViewerSession after a 2s debounce.
+    for (const v of viewerBinding.getAllViewers()) {
+      if (v.viewerDeviceId === viewerDeviceId && v.pc) {
+        try { v.pc.close(); } catch { /* best effort */ }
+      }
+    }
+
+    // 3) Remove the viewer binding (mapping + stats polling)
+    viewerBinding.removeViewer(viewerDeviceId);
+
+    if (reason === "manual") {
+      toast.success("Viewer kicked out");
+    }
+  }, [logicalStreamId, selectedGroupId]);
+
+  useEffect(() => {
+    const now = Date.now();
+    for (const row of visibleViewerRows) {
+      if (shouldAutoKickViewer(row, now)) {
+        void kickViewer(row.viewerDeviceId, "stale");
+      }
+    }
+  }, [kickViewer, visibleViewerRows]);
+
   if (loading || !isSharing) {
     return null;
   }
@@ -376,7 +456,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             </span>
             <span className="flex items-center gap-1">
               <Eye className="h-3 w-3" />
-              {viewerRows.length} {viewerRows.length === 1 ? "viewer" : "viewers"}
+              {visibleViewerRows.length} {visibleViewerRows.length === 1 ? "viewer" : "viewers"}
             </span>
           </div>
         </div>
@@ -479,19 +559,19 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       <Card>
         <CardHeader>
           <CardTitle className="text-sm font-medium text-text-primary">
-            Viewers ({viewerRows.length})
+            Viewers ({visibleViewerRows.length})
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-0">
-          {viewerRows.length === 0 ? (
+          {visibleViewerRows.length === 0 ? (
             <p className="text-[11px] text-text-muted py-1">
               No viewers connected yet
             </p>
           ) : (
-            viewerRows.map((row, i) => (
+            visibleViewerRows.map((row, i) => (
               <div key={row.viewerDeviceId}>
                 {i > 0 && <Separator className="my-1.5" />}
-                <ViewerRowItem row={row} onBitrateClick={() => setBandwidthModalOpen(true)} />
+                <ViewerRowItem row={row} onBitrateClick={() => setBandwidthModalOpen(true)} onKick={(id) => kickViewer(id, "manual")} />
               </div>
             ))
           )}

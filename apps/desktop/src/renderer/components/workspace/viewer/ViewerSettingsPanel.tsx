@@ -445,23 +445,15 @@ export interface ViewerRequestState {
   degradationPreference?: string;
 }
 
-export const VIEWER_REQUEST_PRESETS: Array<{
-  label: string;
-  value: ViewerRequestState;
-}> = [
-  {
-    label: "Low (360p)",
-    value: { videoBitrateKbps: 300, maxWidth: 640, maxHeight: 360, maxFps: 15 },
-  },
-  {
-    label: "Medium (720p)",
-    value: { videoBitrateKbps: 1500, maxWidth: 1280, maxHeight: 720, maxFps: 24 },
-  },
-  {
-    label: "High (1080p)",
-    value: { videoBitrateKbps: 3000, maxWidth: 1920, maxHeight: 1080, maxFps: 30 },
-  },
-];
+
+
+export type MediaMode = "av" | "audio" | "video";
+
+export const MEDIA_MODE_LABELS: Record<MediaMode, string> = {
+  av: "Audio+Video",
+  audio: "Audio only",
+  video: "Video only",
+};
 
 export const RESOLUTION_CHOICES: Array<{ label: string; w: number; h: number }> = [
   { label: "1080p", w: 1920, h: 1080 },
@@ -532,6 +524,8 @@ interface ViewerSettingsPanelProps {
    * appearance and "Comparison Configuration B" header.
    */
   variant?: "A" | "B";
+  mediaMode?: MediaMode;
+  onMediaModeChange?: (mode: MediaMode) => void;
 }
 
 //  Helpers 
@@ -628,6 +622,8 @@ interface StorePreset {
   id: string;
   name: string;
   settings: Record<string, unknown>;
+  showInViewerPanel?: boolean;
+  viewerPanelSlot?: number | null;
 }
 
 //  ViewerSettingsPanel 
@@ -659,6 +655,8 @@ export function ViewerSettingsPanel({
   onCancelBenchmark = () => {},
   onApplyBenchmarkRecommendation = () => {},
   variant,
+  mediaMode = "av",
+  onMediaModeChange,
 }: ViewerSettingsPanelProps) {
   const [open, setOpen] = useState(false);
   const [effectiveMaxBitrate, setEffectiveMaxBitrate] = useState(maxSliderBitrateKbps);
@@ -673,6 +671,12 @@ export function ViewerSettingsPanel({
       return video && typeof video.videoBitrateKbps === "number";
     });
   }, [rawPresets]);
+
+  const pinnedPresets = useMemo(() => {
+    return qualityPresets
+      .filter((p) => p.showInViewerPanel === true && p.viewerPanelSlot != null)
+      .sort((a, b) => (a.viewerPanelSlot ?? 99) - (b.viewerPanelSlot ?? 99));
+  }, [qualityPresets]);
 
   // Load persisted viewerBitrateSliderMaxKbps setting on mount
   useEffect(() => {
@@ -689,7 +693,7 @@ export function ViewerSettingsPanel({
 
   // Local editing state (only applies when user hits Send / Clear)
   const [localQuality, setLocalQuality] = useState<ViewerRequestState>(
-    requestState ?? VIEWER_REQUEST_PRESETS[1].value,
+    requestState ?? { videoBitrateKbps: 1500, maxWidth: 1280, maxHeight: 720, maxFps: 24 },
   );
 
   // FPS / bitrate text input state
@@ -816,11 +820,36 @@ export function ViewerSettingsPanel({
       {/*  General tab (existing quality controls)  */}
       <TabsContent value="general" className="mt-0">
         <div className="grid grid-cols-2 gap-3">
-          {qualityPresets.length > 0 && (
+          {/* Media Mode */}
+          {onMediaModeChange && (
+            <div className="col-span-2">
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Media Mode</p>
+              <div className="flex rounded-standard border border-border-subtle overflow-hidden">
+                {(["av", "audio", "video"] as const).map((mode) => {
+                  const isActive = mediaMode === mode;
+                  return (
+                    <button
+                      key={mode}
+                      className={cn(
+                        "flex-1 px-3 py-1.5 text-[11px] transition-colors border-r last:border-r-0 border-border-subtle",
+                        isActive
+                          ? "bg-accent/10 text-text-primary font-medium"
+                          : "bg-surface-2 text-text-muted hover:text-text-secondary hover:bg-surface-1",
+                      )}
+                      onClick={() => onMediaModeChange(mode)}
+                    >
+                      {MEDIA_MODE_LABELS[mode]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {pinnedPresets.length > 0 && (
             <div className="col-span-2 sm:col-span-1">
-              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Presets</p>
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Viewer Presets</p>
               <div className="flex flex-wrap gap-1">
-                {qualityPresets.map((preset) => {
+                {pinnedPresets.map((preset) => {
                   const video = preset.settings.video as Record<string, unknown>;
                   const pw = video.sendWidth as number;
                   const ph = video.sendHeight as number;
@@ -834,7 +863,7 @@ export function ViewerSettingsPanel({
                     <button
                       key={preset.id}
                       className={cn(
-                        "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
+                        "px-2 py-0.5 rounded-standard text-[10px] transition-colors border flex items-center gap-1",
                         isMatch
                           ? "bg-accent/10 border-accent/30 text-text-primary"
                           : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
@@ -847,6 +876,11 @@ export function ViewerSettingsPanel({
                       })}
                       disabled={requestPending}
                     >
+                      {preset.viewerPanelSlot != null && (
+                        <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-[2px] bg-accent/20 text-[8px] font-mono leading-none">
+                          {preset.viewerPanelSlot}
+                        </span>
+                      )}
                       {preset.name}
                     </button>
                   );
@@ -855,32 +889,7 @@ export function ViewerSettingsPanel({
             </div>
           )}
 
-          <div className={cn(qualityPresets.length > 0 ? "col-span-2 sm:col-span-1" : "col-span-2")}>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Quick</p>
-            <div className="flex flex-wrap gap-1">
-              {VIEWER_REQUEST_PRESETS.map((preset) => {
-                const isMatch = requestState !== null &&
-                  requestState.videoBitrateKbps === preset.value.videoBitrateKbps &&
-                  requestState.maxWidth === preset.value.maxWidth &&
-                  requestState.maxFps === preset.value.maxFps;
-                return (
-                  <button
-                    key={preset.label}
-                    className={cn(
-                      "px-2 py-0.5 rounded-standard text-[10px] transition-colors border",
-                      isMatch
-                        ? "bg-accent/10 border-accent/30 text-text-primary"
-                        : "bg-surface-2 border-border-subtle text-text-muted hover:text-text-secondary",
-                    )}
-                    onClick={() => applyPreset(preset.value)}
-                    disabled={requestPending}
-                  >
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+
 
           <div className="col-span-2">
             <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">Resolution</p>

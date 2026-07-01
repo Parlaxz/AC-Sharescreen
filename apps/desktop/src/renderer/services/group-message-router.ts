@@ -1,13 +1,18 @@
 import type { GroupControlEnvelope, GroupControlMessageType, HostQualityLimits } from "@screenlink/shared";
-import { parseGroupMessagePayload, createDefaultGroupQualitySettings } from "@screenlink/shared";
+import {
+  parseGroupMessagePayload,
+  createDefaultGroupQualitySettings,
+} from "@screenlink/shared";
+import { StreamViewerReadyPayloadSchema } from "../../../../../packages/shared/src/group-control-messages.js";
 import type { GroupSyncService } from "./group-sync-service.js";
 import type { ActiveStreamRegistry } from "./active-stream-registry.js";
-import type { ViewerMediaBinding } from "./viewer-media-binding.js";
+import type { ViewerMediaBinding, ViewerPresence } from "./viewer-media-binding.js";
 import type { ReconcileResult, ViewerMapping } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
 import type { QualityCoordinator, EffectiveQuality } from "./quality-coordinator.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import { showNotification } from "./notifications.js";
+import { uiSoundService } from "./ui-sound-service.js";
 
 /**
  * C1: GroupMessageRouter (Stages 4–5)
@@ -81,7 +86,14 @@ export class GroupMessageRouter {
     private streamRegistry: ActiveStreamRegistry,
     private connManager: GroupConnectionManager,
     private viewerBinding?: ViewerMediaBinding,
-  ) {}
+  ) {
+    // Wire viewer presence cue callbacks to the UI sound service
+    if (this.viewerBinding) {
+      this.viewerBinding.onViewerCue = (name, presence) => {
+        void uiSoundService.play(name);
+      };
+    }
+  }
 
   /**
    * Set the runtime reference for accessing viewer binding and stats service.
@@ -262,7 +274,10 @@ export class GroupMessageRouter {
         const mediaSessionId = leaveData.data.mediaSessionId;
         if (viewerDeviceId) {
           if (mediaSessionId) {
-            this.viewerBinding.removeViewerMapping(viewerDeviceId, mediaSessionId, viewerSessionId);
+            // Use presence-aware removal so explicit leave can fire the leave cue immediately.
+            this.viewerBinding.removeViewerWithPresence(
+              viewerDeviceId, mediaSessionId, viewerSessionId,
+            );
           } else {
             this.viewerBinding.removeViewer(viewerDeviceId, viewerSessionId);
           }
@@ -343,6 +358,48 @@ export class GroupMessageRouter {
             );
           }
         }
+      }
+      return;
+    }
+
+    // viewer.media.request → host-side media mode control (audio/video enable)
+    if (type === "viewer.media.request") {
+      if (this.viewerBinding) {
+        const parsed = parseGroupMessagePayload("viewer.media.request", envelope.payload);
+        if (parsed.ok) {
+          const data = parsed.data;
+          const mapping = this.findViewerMappingForLogicalStream(
+            this.viewerBinding,
+            data.viewerDeviceId,
+            data.logicalStreamId,
+          );
+          if (mapping) {
+            void this.viewerBinding.handleViewerMediaRequest(
+              data.viewerDeviceId,
+              mapping.mediaSessionId,
+              data.audioEnabled,
+              data.videoEnabled,
+            );
+          }
+        }
+      }
+      return;
+    }
+
+    // stream.viewer.ready → host-side viewer presence + audio cue
+    if ((type as string) === "stream.viewer.ready") {
+      const parsed = StreamViewerReadyPayloadSchema.safeParse(envelope.payload);
+      if (!parsed.success) return;
+      const data = parsed.data;
+
+      if (this.viewerBinding) {
+        this.viewerBinding.handleViewerReady(
+          data.viewerDeviceId,
+          data.viewerSessionId,
+          data.mediaSessionId,
+          data.logicalStreamId,
+          data.presentation,
+        );
       }
       return;
     }

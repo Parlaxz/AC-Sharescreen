@@ -1,15 +1,19 @@
-import { Fragment, useMemo } from "react";
+import { Fragment, useMemo, useCallback } from "react";
+import { useSyncExternalStore } from "react";
 import {
   Popover,
   PopoverAnchor,
   PopoverContent,
 } from "@/components/ui/popover";
-import { ViewerSettingsPanel, type ViewerRequestState } from "./ViewerSettingsPanel.js";
+import { ViewerSettingsPanel, type ViewerRequestState, type MediaMode } from "./ViewerSettingsPanel.js";
 import { DiagnosticsPanel } from "./DiagnosticsPanel.js";
 import { BandwidthGraphModal } from "../BandwidthGraphModal.js";
 import type { ViewerSession } from "@/services/viewer-session.js";
 import type { ViewerImageEnhancementSettings, FsrFinalScaler, ScalingAlgorithm } from "@/services/viewer-image-processing/viewer-image-settings";
 import type { BenchmarkProgress } from "@/services/viewer-image-processing/nvidia-benchmark-service";
+import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
+import type { FramePerformanceSample } from "./FramePerformanceGraph.js";
+import { StreamMetricsService } from "@/services/stream-metrics-service";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -21,10 +25,17 @@ interface ViewerPanelShellProps {
   children: React.ReactNode;
 
   // DiagnosticsPanel props
+  /** @deprecated Use diagnosticsSnapshot instead — kept for backward compat */
   session: ViewerSession | null;
   lastRequestedQuality?: ViewerRequestState | null;
   effectiveBitrateKbps?: number | null;
   configuredBitrateBps?: number | null;
+
+  // New diagnostics data (snapshot-based, no polling)
+  /** Bandwidth snapshot from StreamMetricsService (or subscribe via viewerHistoryId) */
+  diagnosticsSnapshot?: BandwidthSnapshot | null;
+  /** Frame timing samples for performance graph */
+  framePerformanceSamples?: FramePerformanceSample[];
 
   // ViewerSettingsPanel props
   requestState: ViewerRequestState | null;
@@ -60,6 +71,10 @@ interface ViewerPanelShellProps {
   mediaSessionId: string | null;
   viewerHistoryId?: string | null;
 
+  // ── Media mode props ────────────────────────────────────────────────
+  mediaMode?: MediaMode;
+  onMediaModeChange?: (mode: MediaMode) => void;
+
   // ── Benchmark props ─────────────────────────────────────────────────
   benchmarkRunning?: boolean;
   benchmarkProgress?: BenchmarkProgress | null;
@@ -68,16 +83,61 @@ interface ViewerPanelShellProps {
   onApplyBenchmarkRecommendation?: () => void;
 }
 
+// ─── Snapshot subscription hook ─────────────────────────────────────────────
+
+const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
+  historyId: "",
+  role: "viewer" as const,
+  aggregate: Object.freeze({
+    rawSamples: Object.freeze([]),
+    mediumBuckets: Object.freeze([]),
+    longBuckets: Object.freeze([]),
+    markers: Object.freeze([]),
+    currentBitsPerSecond: 0,
+    averageBitsPerSecond: 0,
+    peakBitsPerSecond: 0,
+    totalBytes: 0,
+    durationMs: 0,
+    activeDurationMs: 0,
+    configuredBitsPerSecond: null,
+    effectiveBitsPerSecond: null,
+    currentVideoBitsPerSecond: null,
+    currentAudioBitsPerSecond: null,
+    currentTransportBitsPerSecond: null,
+    state: "paused" as const,
+  }),
+  connections: Object.freeze([]),
+});
+
+function useBandwidthSnapshot(historyId: string | null): BandwidthSnapshot | null {
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      if (!historyId) return () => {};
+      return StreamMetricsService.getInstance().subscribe(historyId, onStoreChange);
+    },
+    [historyId],
+  );
+
+  const getSnapshot = useCallback(() => {
+    if (!historyId) return null;
+    return StreamMetricsService.getInstance().getSnapshot(historyId);
+  }, [historyId]);
+
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
 // ─── ViewerPanelShell ───────────────────────────────────────────────────────
 
 export function ViewerPanelShell({
   activePanel,
   onActivePanelChange,
   children,
-  session,
+  session: _session, // kept for backward compat, unused
   lastRequestedQuality,
   effectiveBitrateKbps,
   configuredBitrateBps,
+  diagnosticsSnapshot: externalSnapshot,
+  framePerformanceSamples = [],
   requestState,
   onRequestChange,
   requestPending = false,
@@ -96,9 +156,20 @@ export function ViewerPanelShell({
   onRunBenchmark = () => {},
   onCancelBenchmark = () => {},
   onApplyBenchmarkRecommendation = () => {},
+  mediaMode,
+  onMediaModeChange,
 }: ViewerPanelShellProps) {
+  // Subscribe internally if no external snapshot provided
+  const internalSnapshot = useBandwidthSnapshot(
+    externalSnapshot === undefined ? viewerHistoryId : null,
+  );
+  const diagnosticsSnapshot: BandwidthSnapshot | null =
+    externalSnapshot !== undefined ? externalSnapshot : internalSnapshot;
+
   const width =
-    activePanel === "bandwidth" ? "w-[950px] max-w-[calc(100vw-32px)]" : "w-[750px] max-w-[calc(100vw-32px)]";
+    activePanel === "bandwidth" ? "w-[950px] max-w-[calc(100vw-32px)]" :
+    activePanel === "diagnostics" ? "w-[950px] max-w-[calc(100vw-32px)]" :
+    "w-[750px] max-w-[calc(100vw-32px)]";
 
   const handleOpenChange = useMemo(
     () => (open: boolean) => {
@@ -143,6 +214,8 @@ export function ViewerPanelShell({
               onRunBenchmark={onRunBenchmark}
               onCancelBenchmark={onCancelBenchmark}
               onApplyBenchmarkRecommendation={onApplyBenchmarkRecommendation}
+              mediaMode={mediaMode}
+              onMediaModeChange={onMediaModeChange}
             >
               <span />
             </ViewerSettingsPanel>
@@ -150,8 +223,9 @@ export function ViewerPanelShell({
           {activePanel === "diagnostics" && (
             <DiagnosticsPanel
               contentOnly
-              session={session}
-              lastRequestedQuality={lastRequestedQuality}
+              snapshot={diagnosticsSnapshot}
+              frameSamples={framePerformanceSamples}
+              requestedQuality={lastRequestedQuality}
               effectiveBitrateKbps={effectiveBitrateKbps}
               configuredBitrateBps={configuredBitrateBps}
             >

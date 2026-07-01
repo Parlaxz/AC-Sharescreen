@@ -64,6 +64,6 @@ describe("AppShell layout", () => {
     // Workspace renders one scrolling element; the inner <main>
     // already has overflow-auto so the ResizablePanel should not
     // also be a scroll owner.
-    expect(shellSrc).toMatch(/<ResizablePanel[\s\S]{0,200}className="flex-1 min-w-0 min-h-0 bg-canvas overflow-hidden"/);
+    expect(shellSrc).toMatch(/<ResizablePanel[\s\S]{0,200}className="flex-1 min-w-0 min-h-0 bg-canvas overflow-hidden(?: relative)?"/);
   });
 });

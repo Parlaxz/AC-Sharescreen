@@ -35,10 +35,13 @@ import { cn } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 import type { StreamAnnouncement } from "@/stores/main-store";
 import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
+import type { FramePerformanceSample } from "./viewer/FramePerformanceGraph.js";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
+import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
+import { ViewerFrameTiming, type FrameTimingSample } from "@/services/viewer-frame-timing";
 import { ViewerPanelShell } from "./viewer/ViewerPanelShell.js";
 import type { ActivePanel } from "./viewer/ViewerPanelShell.js";
-import { ViewerSettingsPanel, type ViewerRequestState } from "./viewer/ViewerSettingsPanel.js";
+import { ViewerSettingsPanel, type ViewerRequestState, type MediaMode } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
 import {
   getViewerQualityDispatchError,
@@ -46,6 +49,7 @@ import {
 } from "./viewer/viewer-quality-helpers.js";
 import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
+import { uiSoundService } from "@/services/ui-sound-service.js";
 import { initializeAppRuntime } from "@/services/initialize-app-runtime.js";
 import type { ScreenLinkAPI } from "../../../preload/api-types.js";
 import { navigateToGroupOverview } from "@/services/group-navigation";
@@ -326,6 +330,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       return localStorage.getItem("screenlink:viewer-muted") === "true";
     } catch { return false; }
   });
+  const [mediaMode, setMediaMode] = useState<MediaMode>(() => {
+    try {
+      const stored = localStorage.getItem("screenlink:viewer-media-mode");
+      if (stored === "audio" || stored === "video") return stored;
+    } catch { /* ignore */ }
+    return "av";
+  });
   // Viewer quality request state (null = no request = host defaults)
   const [viewerRequest, setViewerRequest] = useState<ViewerRequestState | null>(() => {
     try {
@@ -445,8 +456,141 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [currentBandwidthBps, setCurrentBandwidthBps] = useState(0);
   const [totalBytesReceived, setTotalBytesReceived] = useState(0);
   const [activeDurationMs, setActiveDurationMs] = useState(0);
+  const [diagnosticsSnapshot, setDiagnosticsSnapshot] = useState<BandwidthSnapshot | null>(null);
+  const [framePerformanceSamples, setFramePerformanceSamples] = useState<FramePerformanceSample[]>([]);
   const unregisterMetricsRef = useRef<(() => void) | null>(null);
   const metricsSubscriptionRef = useRef<(() => void) | null>(null);
+  const frameTimingRef = useRef<ViewerFrameTiming | null>(null);
+  const frameTimingUnsubscribeRef = useRef<(() => void) | null>(null);
+  const frameFallbackIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const frameStateRef = useRef<ViewerSessionState>(sessionState);
+  const frameBucketRef = useRef<number | null>(null);
+
+  if (!frameTimingRef.current) {
+    frameTimingRef.current = new ViewerFrameTiming();
+  }
+
+  const appendFramePerformanceSample = useCallback((sample: FrameTimingSample) => {
+    const timestamp = Date.now();
+    const state =
+      frameStateRef.current === "paused"
+        ? "paused"
+        : frameStateRef.current === "reconnecting"
+        ? "reconnecting"
+        : "playing";
+    const point: FramePerformanceSample = {
+      timestamp,
+      displayedFps: sample.displayedFps,
+      decodedFps: sample.decodedFps,
+      frameIntervalMs: sample.displayedFrameIntervalMs,
+      decodeTimeMs: sample.decodeTimeMs,
+      state,
+    };
+
+    setFramePerformanceSamples((prev) => {
+      const next = [...prev];
+      const bucket = Math.floor(timestamp / 1000) * 1000;
+
+      if (sample.segmentStart && next.length > 0) {
+        next.push({
+          timestamp: Math.max(timestamp - 1, 0),
+          displayedFps: null,
+          decodedFps: null,
+          frameIntervalMs: null,
+          decodeTimeMs: null,
+          state: "paused",
+        });
+        frameBucketRef.current = null;
+      }
+
+      if (frameBucketRef.current === bucket && next.length > 0) {
+        next[next.length - 1] = point;
+      } else {
+        next.push(point);
+        frameBucketRef.current = bucket;
+      }
+
+      return next.slice(-121);
+    });
+  }, []);
+
+  const resetFramePerformance = useCallback((gapState?: "paused" | "reconnecting") => {
+    frameTimingRef.current?.reset();
+    frameBucketRef.current = null;
+    setFramePerformanceSamples((prev) => {
+      if (!gapState) return [];
+      if (prev.length === 0) return prev;
+      return [
+        ...prev,
+        {
+          timestamp: Date.now(),
+          displayedFps: null,
+          decodedFps: null,
+          frameIntervalMs: null,
+          decodeTimeMs: null,
+          state: gapState,
+        },
+      ].slice(-121);
+    });
+  }, []);
+
+  useEffect(() => {
+    frameStateRef.current = sessionState;
+  }, [sessionState]);
+
+  useEffect(() => {
+    const frameTiming = frameTimingRef.current;
+    if (!frameTiming) return;
+
+    frameTimingUnsubscribeRef.current?.();
+    frameTimingUnsubscribeRef.current = frameTiming.onSample(appendFramePerformanceSample);
+
+    return () => {
+      frameTimingUnsubscribeRef.current?.();
+      frameTimingUnsubscribeRef.current = null;
+    };
+  }, [appendFramePerformanceSample]);
+
+  useEffect(() => {
+    if (!videoRef.current || !viewerHistoryIdRef.current || sessionState === "ended" || sessionState === "error") {
+      if (frameFallbackIntervalRef.current) {
+        clearInterval(frameFallbackIntervalRef.current);
+        frameFallbackIntervalRef.current = null;
+      }
+      if (sessionState === "ended" || sessionState === "error") {
+        frameTimingRef.current?.detach();
+        resetFramePerformance();
+      }
+      return;
+    }
+
+    if (frameFallbackIntervalRef.current) {
+      clearInterval(frameFallbackIntervalRef.current);
+    }
+
+    frameFallbackIntervalRef.current = setInterval(() => {
+      frameTimingRef.current?.pollDecodedFallback();
+    }, 1000);
+
+    return () => {
+      if (frameFallbackIntervalRef.current) {
+        clearInterval(frameFallbackIntervalRef.current);
+        frameFallbackIntervalRef.current = null;
+      }
+    };
+  }, [sessionState, viewerHistoryId, resetFramePerformance]);
+
+  useEffect(() => {
+    if (sessionState === "paused") {
+      resetFramePerformance("paused");
+    } else if (sessionState === "reconnecting") {
+      resetFramePerformance("reconnecting");
+    }
+  }, [resetFramePerformance, sessionState]);
+
+  useEffect(() => {
+    resetFramePerformance();
+  }, [resetFramePerformance, viewerHistoryId, watchingTarget?.mediaSessionId]);
 
   // Poll WebRTC stats for bandwidth
   useEffect(() => {
@@ -455,6 +599,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setCurrentBandwidthBps(0);
       setTotalBytesReceived(0);
       setActiveDurationMs(0);
+      setDiagnosticsSnapshot(null);
       // Unregister metrics connection
       if (unregisterMetricsRef.current) { unregisterMetricsRef.current(); unregisterMetricsRef.current = null; }
       if (metricsSubscriptionRef.current) { metricsSubscriptionRef.current(); metricsSubscriptionRef.current = null; }
@@ -509,13 +654,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           setCurrentBandwidthBps(snapshot.aggregate.currentBitsPerSecond);
           setTotalBytesReceived(snapshot.aggregate.totalBytes);
           setActiveDurationMs(snapshot.aggregate.activeDurationMs);
+          setDiagnosticsSnapshot(snapshot);
         });
         metricsSubscriptionRef.current = unsub;
 
         // Initial read
         const snapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
+        setCurrentBandwidthBps(snapshot.aggregate.currentBitsPerSecond);
         setTotalBytesReceived(snapshot.aggregate.totalBytes);
         setActiveDurationMs(snapshot.aggregate.activeDurationMs);
+        setDiagnosticsSnapshot(snapshot);
       }
     }
 
@@ -538,6 +686,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     // Always bind/unbind (including null) so the session stays in sync
     // with the actual video element lifecycle.
     sessionRef.current?.bindVideoElement(el);
+    frameTimingRef.current?.attach(el);
   }, []);
 
   // Audio boost via Web Audio API GainNode (allows volume > 1.0)
@@ -629,6 +778,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       setViewerHistoryId(null);
       StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
     }
+    setDiagnosticsSnapshot(null);
+    resetFramePerformance();
 
     // 3) Clear watching target and store viewing state
     useStore.getState().setWatchingTarget(null);
@@ -705,6 +856,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   ): Promise<void> => {
     const attempt = ++startAttemptRef.current;
 
+    // Reset viewer readiness for the new watch attempt
+    viewerReadyRef.current = false;
+    effectivePresentationRef.current = "native-video";
+
     // Reset enhancement active state for the new session so the raw video
     // is not hidden before the new enhanced path produces its first frame.
     setEnhancementActive(false);
@@ -725,7 +880,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
       const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
       const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
-      const targetLogicalStreamId = cStream?.logicalStreamId;
+      const targetLogicalStreamId = cStream?.logicalStreamId ?? wInfo?.logicalStreamId;
 
       if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
         if (attempt !== startAttemptRef.current || shouldAbort()) return;
@@ -882,9 +1037,93 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     setEnhancementFallback(false);
   }, []);
 
-  const handleEnhancementFirstFrame = useCallback(() => {
-    setEnhancementActive(true);
+  // ── Viewer readiness controller (join/leave audio cues) ───────────
+  //
+  // Sends stream.viewer.ready exactly once per watch attempt, after the
+  // first visible frame is presented. The session.sendViewerReady() method
+  // has its own one-shot and stale-generation guards.
+  //
+  // Enhanced path: fires from handleEnhancementReadyFirstFrame when the
+  //   GPU pipeline produces its first frame.
+  // Native path: fires from requestVideoFrameCallback on the <video>
+  //   element when watching and enhancement is not active.
+  // Compare mode: each EnhancedVideoSurface fires onFirstFrame, but the
+  //   session's _viewerReadySent guard prevents double-ack.
+
+  /** Track the effective presentation type from the enhancement backend */
+  const effectivePresentationRef = useRef<"native-video" | "webgl" | "nvidia" | "fallback">("native-video");
+
+  /** One-shot ready-send guard (complements session-level guard) */
+  const viewerReadyRef = useRef(false);
+
+  const trySendViewerReady = useCallback((): void => {
+    if (viewerReadyRef.current) return;
+    const session = sessionRef.current;
+    if (!session) return;
+    const sent = session.sendViewerReady(effectivePresentationRef.current);
+    if (sent) {
+      viewerReadyRef.current = true;
+    }
   }, []);
+
+  /** Fired by EnhancedVideoSurface on first GPU-rendered frame */
+  const handleEnhancementReadyFirstFrame = useCallback(() => {
+    setEnhancementActive(true);
+    trySendViewerReady();
+  }, [trySendViewerReady]);
+
+  /** Tracks effective backend for correct presentation type */
+  const handleEnhancementEffectiveBackend = useCallback((effective: string, _fallbackReason?: string) => {
+    if (effective === "nvidia-vsr") {
+      effectivePresentationRef.current = "nvidia";
+    } else if (effective === "webgl2") {
+      effectivePresentationRef.current = "webgl";
+    } else {
+      effectivePresentationRef.current = "fallback";
+    }
+  }, []);
+
+  /** Arms native video readiness detection when watching + enhancement not active.
+   *  Uses requestVideoFrameCallback for precise first-frame detection. */
+  useEffect(() => {
+    if (sessionState !== "watching") return;
+    if (viewerReadyRef.current) return;
+
+    // If enhancement is active and will produce a frame, skip native path
+    if (enhancementSettings.enabled && !enhancementFallback) return;
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (typeof video.requestVideoFrameCallback !== "function") {
+      // Fallback: use playing + non-zero dimensions
+      const onPlaying = () => {
+        if (!video || viewerReadyRef.current || sessionState !== "watching") return;
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          effectivePresentationRef.current = "native-video";
+          trySendViewerReady();
+        }
+      };
+      video.addEventListener("playing", onPlaying, { once: true });
+      return () => video.removeEventListener("playing", onPlaying);
+    }
+
+    let cancelled = false;
+    const onFrame: VideoFrameRequestCallback = (_now, metadata) => {
+      if (cancelled || viewerReadyRef.current) return;
+      // First visible frame: non-zero dimensions + valid metadata
+      if (video.videoWidth > 0 && video.videoHeight > 0 &&
+          metadata.width > 0 && metadata.height > 0) {
+        effectivePresentationRef.current = "native-video";
+        trySendViewerReady();
+      } else {
+        // No valid frame yet — re-arm
+        video.requestVideoFrameCallback(onFrame);
+      }
+    };
+    video.requestVideoFrameCallback(onFrame);
+    return () => { cancelled = true; };
+  }, [sessionState, enhancementSettings.enabled, enhancementFallback, trySendViewerReady]);
 
   const handleEnhancementStatsUpdate = useCallback((stats: ProcessorStats) => {
     setEnhancementStats(stats);
@@ -1189,6 +1428,11 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     };
   }, []);
 
+  // Preload UI sound cues on mount (fire-and-forget — failures are tolerated)
+  useEffect(() => {
+    void uiSoundService.preload();
+  }, []);
+
   // ── Audio boost pipeline (Web Audio API GainNode) ────────────────
   // HTMLMediaElement.volume is spec-capped at [0, 1]. For boost >100% we use a
   // GainNode. The pipeline is created ON DEMAND from user-gesture handlers so
@@ -1310,6 +1554,17 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, []);
 
+  const handleMediaModeChange = useCallback((mode: MediaMode) => {
+    setMediaMode(mode);
+    // Send to host if session is active
+    const session = sessionRef.current;
+    if (session) {
+      const audioEnabled = mode !== "video";
+      const videoEnabled = mode !== "audio";
+      session.setMediaMode(audioEnabled, videoEnabled);
+    }
+  }, []);
+
   // Listen for viewer keyboard shortcut events
   useEffect(() => {
     const handleTogglePause = () => {
@@ -1339,6 +1594,23 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     const handleToggleSettings = () => {
       setActivePanel((prev) => (prev === "settings" ? null : "settings"));
     };
+    const handleApplyPreset = (e: Event) => {
+      const { slot } = (e as CustomEvent).detail as { slot: number };
+      const raw = useStore.getState().qualityPresets as Array<Record<string, unknown>>;
+      const pinned = raw.filter(
+        (p) => (p as any).showInViewerPanel === true && (p as any).viewerPanelSlot === slot,
+      );
+      if (pinned.length === 0) return;
+      const video = ((pinned[0] as any).settings?.video as Record<string, unknown>) ?? {};
+      const vb = video.videoBitrateKbps;
+      if (typeof vb !== "number") return;
+      qualityRequestHandlerRef.current({
+        videoBitrateKbps: vb,
+        maxWidth: (video.sendWidth ?? video.captureWidth ?? 1280) as number,
+        maxHeight: (video.sendHeight ?? video.captureHeight ?? 720) as number,
+        maxFps: (video.sendFps ?? video.captureFps ?? 30) as number,
+      });
+    };
     const handleToggleInfo = () => {
       setActivePanel((prev) => (prev === "diagnostics" ? null : "diagnostics"));
     };
@@ -1349,6 +1621,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       });
     };
 
+    window.addEventListener("screenlink:viewer-apply-preset", handleApplyPreset);
     window.addEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
     window.addEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
     window.addEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
@@ -1360,6 +1633,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     window.addEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
     window.addEventListener("keydown", handleKeyDown);
     return () => {
+      window.removeEventListener("screenlink:viewer-apply-preset", handleApplyPreset);
       window.removeEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
       window.removeEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
       window.removeEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
@@ -1418,16 +1692,24 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     try { localStorage.setItem("screenlink:viewer-muted", String(isMuted)); } catch {}
   }, [isMuted]);
 
-  // Persist viewer request preferences to localStorage (reuse on later streams)
+  // Persist media mode to localStorage
   useEffect(() => {
-    try {
-      if (viewerRequest) {
-        localStorage.setItem("screenlink:viewer-request", JSON.stringify(viewerRequest));
-      } else {
-        localStorage.removeItem("screenlink:viewer-request");
-      }
-    } catch { /* ignore */ }
-  }, [viewerRequest]);
+    try { localStorage.setItem("screenlink:viewer-media-mode", mediaMode); } catch {}
+  }, [mediaMode]);
+
+  // When muted, force video-only (disable audio). Restore user's choice when unmuted.
+  useEffect(() => {
+    const session = sessionRef.current;
+    if (!session || sessionState !== "watching") return;
+
+    if (isMuted) {
+      session.setMediaMode(false, true);  // video only
+    } else {
+      const audioEnabled = mediaMode !== "video";
+      const videoEnabled = mediaMode !== "audio";
+      session.setMediaMode(audioEnabled, videoEnabled);
+    }
+  }, [isMuted, mediaMode, sessionState]);
 
   // ── Reset enhancement fallback/active state when re-enabled ──────────
   useEffect(() => {
@@ -1474,6 +1756,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       hostDeviceId: watchingTarget.hostDeviceId,
       hostName: watchingTarget.hostName,
       startedAt: watchingTarget.startedAt,
+      logicalStreamId: watchingTarget.logicalStreamId,
     };
   }, [watchingTarget]);
 
@@ -1491,6 +1774,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ── Send real quality request when user sets quality ──────────
   const handleQualityRequestChange = useCallback(async (newRequest: ViewerRequestState | null) => {
+    // Ensure the runtime is initialized before attempting to send a quality
+    // request.  This mirrors what startViewerSession does and prevents
+    // "Phase3Runtime is null" false-rejections when the user tweaks quality
+    // settings before or during the session's connection handshake.
+    await ensureAppRuntimeInitialized();
+
     const runtime = getRuntime();
     let target = watchingTarget;
 
@@ -1605,7 +1894,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     } finally {
       setQualityRequestPending(false);
     }
-  }, [viewerRequest, watchingTarget]);
+  }, [viewerRequest, watchingTarget, ensureAppRuntimeInitialized]);
+
+  const qualityRequestHandlerRef = useRef(handleQualityRequestChange);
+  qualityRequestHandlerRef.current = handleQualityRequestChange;
 
   // ── Auto-send stored quality request when session starts watching ──
   // When the user joins a new stream, the stored viewerRequest from a
@@ -2071,6 +2363,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 onStatsUpdateB={handleEnhancementStatsUpdateB}
                 processorApiRefA={processorApiRef}
                 processorApiRefB={processorApiRefB}
+                onFirstFrame={handleEnhancementReadyFirstFrame}
+                onBackendChange={handleEnhancementEffectiveBackend}
               />
             </div>
           ) : (
@@ -2083,7 +2377,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 onProcessorStateChange={handleEnhancementProcessorStateChange}
                 onProcessingError={handleEnhancementProcessingError}
                 onContextRestored={handleEnhancementContextRestored}
-                onFirstFrame={handleEnhancementFirstFrame}
+                onFirstFrame={handleEnhancementReadyFirstFrame}
+                onBackendChange={handleEnhancementEffectiveBackend}
                 onStatsUpdate={handleEnhancementStatsUpdate}
                 processorApiRef={processorApiRef}
                 onContextMenu={(e) => { e.preventDefault(); handleToggleFullscreen(); }}
@@ -2158,6 +2453,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                   contentOnly
                   variant="B"
                   benchmarkRunning={false}
+                  mediaMode={mediaMode}
+                  onMediaModeChange={handleMediaModeChange}
                 >
                   <span />
                 </ViewerSettingsPanel>
@@ -2197,6 +2494,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               lastRequestedQuality={lastRequestedQuality}
               effectiveBitrateKbps={effectiveBitrateKbps}
               configuredBitrateBps={configuredBitrateBps}
+              diagnosticsSnapshot={diagnosticsSnapshot}
+              framePerformanceSamples={framePerformanceSamples}
               requestState={viewerRequest}
               onRequestChange={handleQualityRequestChange}
               requestPending={qualityRequestPending}
@@ -2213,6 +2512,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               onRunBenchmark={handleRunBenchmark}
               onCancelBenchmark={handleCancelBenchmark}
               onApplyBenchmarkRecommendation={handleApplyBenchmarkRecommendation}
+              mediaMode={mediaMode}
+              onMediaModeChange={handleMediaModeChange}
             >
               <VideoControlsOverlay
                 isPaused={isPaused}
@@ -2244,6 +2545,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 currentBandwidthBps={currentBandwidthBps}
                 totalBytesReceived={totalBytesReceived}
                 activeDurationMs={activeDurationMs}
+                viewerHistoryId={viewerHistoryId}
                 discordMuteBinding={discordMuteBinding}
                 discordDeafenBinding={discordDeafenBinding}
                 syncScreenLinkDeafen={syncScreenLinkDeafen}
@@ -2312,6 +2614,7 @@ function VideoControlsOverlay({
   currentBandwidthBps,
   totalBytesReceived,
   activeDurationMs,
+  viewerHistoryId,
   discordMuteBinding,
   discordDeafenBinding,
   syncScreenLinkDeafen,
@@ -2343,6 +2646,7 @@ function VideoControlsOverlay({
   currentBandwidthBps?: number;
   totalBytesReceived?: number;
   activeDurationMs?: number;
+  viewerHistoryId?: string | null;
   discordMuteBinding?: ShortcutBinding;
   discordDeafenBinding?: ShortcutBinding;
   syncScreenLinkDeafen?: boolean;
@@ -2375,6 +2679,7 @@ function VideoControlsOverlay({
       currentBandwidthBps={currentBandwidthBps}
       totalBytesReceived={totalBytesReceived}
       activeDurationMs={activeDurationMs}
+      viewerHistoryId={viewerHistoryId}
       discordMuteBinding={discordMuteBinding}
       discordDeafenBinding={discordDeafenBinding}
       syncScreenLinkDeafen={syncScreenLinkDeafen}

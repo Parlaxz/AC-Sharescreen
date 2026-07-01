@@ -214,7 +214,7 @@ export function applyCodecPreferencesToTransceiverBeforeOffer(
     requested: requestedCodec,
     preferred: normalizeCodecName(preferred),
     negotiated: targetCodecs[0]?.mimeType ?? null,
-    observed: targetCodecs[0]?.mimeType ?? null,
+    observed: null, // not observed from stats — set by viewer-side evidence
     fallbackReason,
   };
 }

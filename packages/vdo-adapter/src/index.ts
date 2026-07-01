@@ -17,7 +17,12 @@ export type {
   QualityResult,
 } from "./sender-parameters.js";
 
-export type { StatsSnapshot } from "./media-stats.js";
+export type {
+  StatsSnapshot,
+  CodecVerificationState,
+  InboundRtpCodecEvidence,
+  PreviousSample,
+} from "./media-stats.js";
 
 export {
   EXPECTED_SDK_VERSION,
@@ -57,4 +62,8 @@ export {
 } from "./codec-capabilities.js";
 export type { CodecPreferenceRecord } from "./codec-capabilities.js";
 
-export { pollStats } from "./media-stats.js";
+export {
+  pollStats,
+  resolveActiveCodecFromStats,
+  collectCodecEvidence,
+} from "./media-stats.js";

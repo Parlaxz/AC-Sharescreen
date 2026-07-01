@@ -50,8 +50,20 @@ const config = {
       to: "vendor",
     },
     {
-      from: "assets/tray-icon.png",
-      to: "tray-icon.png",
+      from: "assets/tray-icon-blue.png",
+      to: "tray-icon-blue.png",
+    },
+    {
+      from: "assets/tray-icon-green.png",
+      to: "tray-icon-green.png",
+    },
+    {
+      from: "assets/tray-icon-orange.png",
+      to: "tray-icon-orange.png",
+    },
+    {
+      from: "assets/tray-icon-red.png",
+      to: "tray-icon-red.png",
     },
     {
       from: "../../native/audio-helper/build/Release/screenlink-audio-helper.exe",

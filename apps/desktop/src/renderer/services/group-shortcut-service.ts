@@ -1,5 +1,5 @@
 import { useStore } from "@/stores/main-store";
-import { startShare, type ShareSource } from "./share-coordinator";
+import { startShare, stopShare, type ShareSource } from "./share-coordinator";
 import { presetSettingsToOverride, type PresetSettingsLike } from "./share-quality";
 import { showNotification } from "./notifications";
 import type { GroupShortcutConfigDTO, CaptureSourceDTO } from "../../preload/api-types.js";
@@ -134,9 +134,10 @@ export async function executeQuickShare(groupId: string): Promise<void> {
       return;
     }
 
-    // 2. Check if already sharing in this group
+    // 2. Toggle off if already sharing in this group
     if (store.isSharing && store.sharingGroupId === groupId) {
-      return; // Already sharing — no-op
+      await stopShare();
+      return;
     }
 
     const api = getApi();
@@ -260,9 +261,12 @@ export async function executeQuickJoin(groupId: string): Promise<void> {
       );
     }
 
-    // Check if already viewing this stream
+    // Check if already viewing this stream — toggle off
     if (alreadyWatching(selected)) {
-      return; // No-op
+      store.setIsViewing(false);
+      store.setWatchingTarget(null);
+      store.setViewStatus("");
+      return;
     }
 
     // 5. Check if the stream still exists (refresh once)
@@ -279,7 +283,10 @@ export async function executeQuickJoin(groupId: string): Promise<void> {
       retried = true;
 
       if (alreadyWatching(selected)) {
-        return; // No-op
+        store.setIsViewing(false);
+        store.setWatchingTarget(null);
+        store.setViewStatus("");
+        return;
       }
     } else if (!stillExists) {
       showNotification({

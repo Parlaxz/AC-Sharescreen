@@ -2,60 +2,7 @@ import { ViewerClient } from "@screenlink/vdo-adapter";
 import { getRuntime } from "./phase3-runtime.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import { extractTrackEvent } from "./sdk-event-normalizer.js";
-
-// ─── Diagnostics Types ─────────────────────────────────────────────────────
-
-/**
- * Snapshot of viewer diagnostics for the UI to display.
- * Populated from real RTCPeerConnection stats, ICE candidate pairs,
- * and inbound-rtp reports.
- */
-export interface ViewerDiagnosticsSnapshot {
-  connectionState: string;
-  selectedCandidatePair: {
-    local: string | null;
-    remote: string | null;
-    state: string | null;
-    nominated: boolean | null;
-  };
-  inboundVideo: {
-    bitrateBps: number;
-    /** Total bytes received on the inbound video RTP stream (cumulative). */
-    bytesReceived: number;
-    packetsReceived: number;
-    packetsLost: number;
-    jitter: number;
-    codecId: string | null;
-    /** frameWidth from inbound-rtp stats (track resolution) */
-    frameWidth: number | null;
-    /** frameHeight from inbound-rtp stats */
-    frameHeight: number | null;
-    /** framesPerSecond from inbound-rtp stats */
-    framesPerSecond: number | null;
-    /** framesDropped from inbound-rtp stats */
-    framesDropped: number | null;
-    /** freezeCount from inbound-rtp stats */
-    freezeCount: number | null;
-    /** SSRC of the primary video inbound RTP stream */
-    ssrc: number | null;
-  };
-  inboundAudio: {
-    bitrateBps: number;
-    /** Total bytes received on the inbound audio RTP stream (cumulative). */
-    bytesReceived: number;
-    packetsReceived: number;
-    packetsLost: number;
-    jitter: number;
-    codecId: string | null;
-  };
-  /** currentRoundTripTime from candidate-pair stats (ms) */
-  rttMs: number | null;
-  /** Real candidate type from ICE candidate stats */
-  localCandidateType: string | null;
-  /** Real candidate type from ICE candidate stats */
-  remoteCandidateType: string | null;
-  timestamp: number;
-}
+import { StreamMetricsService } from "./stream-metrics-service.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -204,7 +151,7 @@ export class ViewerSession {
 
   /** 2-second interval for sending viewer.status reports to the host */
   private _statusInterval: ReturnType<typeof setInterval> | null = null;
-  /** Prevents concurrent getDiagnostics() calls when a prior tick is still in flight */
+  /** Guards the status interval so only one tick runs at a time */
   private _statusReportInFlight = false;
 
   /** Track IDs already in the received stream (deduplication). */
@@ -265,20 +212,22 @@ export class ViewerSession {
    */
   private _viewerSessionId: string | null = null;
 
-  /**
-   * Saved bind parameters for re-sending media.bind after resume.
-   * The host requires media.bind authorisation on the new data channel
-   * before it will deliver video/audio. Without re-sending bind after
-   * view() re-establishes the RTC connection, the host sees a connected
-   * viewer but does not forward media tracks.
-   */
-  private _bindToken: string | null = null;
+	/**
+	 * Saved bind parameters for re-sending media.bind after resume.
+	 * The host requires media.bind authorisation on the new data channel
+	 * before it will deliver video/audio. Without re-sending bind after
+	 * view() re-establishes the RTC connection, the host sees a connected
+	 * viewer but does not forward media tracks.
+	 */
+	private _bindToken: string | null = null;
   private _bindMediaSessionId: string | null = null;
 
   // ── Pause state machine ─────────────────────────────────────────────
   private _pauseState: ViewerPauseState = "playing";
   /** Captured poster frame (data: URL) shown while paused. */
   private _pausePoster: string | null = null;
+  /** Current media mode preference. Sent to host to save bandwidth. */
+  private _mediaMode: { audioEnabled: boolean; videoEnabled: boolean } = { audioEnabled: true, videoEnabled: true };
 	/**
 	 * Instance-local pause generation counter. Bumped to cancel in-flight
 	 * pause/resume that raced a newer call on this instance. Static would
@@ -365,6 +314,10 @@ export class ViewerSession {
       // 1) Capture the current video frame before disabling the sender
       this.capturePosterFrame();
 
+      // 1b) Pause the bound video element locally so it holds the last frame.
+      //     Do NOT clear srcObject — the stream stays attached for quick resume.
+      this.videoElement?.pause();
+
       // 2) Mark state only — viewerClient.pauseMedia() no longer calls
       //    stopViewing(). The WebRTC connection, sender, and data channel
       //    all stay alive. The host will disable the sender encoding.
@@ -436,6 +389,11 @@ export class ViewerSession {
       //     connection is the same one. The host's re-enabled sender
       //     will resume sending video packets on the existing RTP stream.
       this.clearPosterFrame();
+
+      // 3b) Resume the video element playback. The stream is still attached
+      //     (srcObject was never cleared), so this is a simple play() call.
+      void this.videoElement?.play().catch(() => {});
+
       this.setPauseState("playing");
     } catch (err) {
       // Resume failed — stay paused so the user can retry
@@ -561,8 +519,7 @@ export class ViewerSession {
     this.mediaSessionId = options.mediaSessionId;
     this.hostName = options.hostName;
     this.leaveAnnounced = false;
-    // Fresh session ID per Watch attempt — the host uses this to tell
-    // leaves from prior attempts apart from the active one.
+    this._viewerReadySent = false;
     this._viewerSessionId = generateViewerSessionId();
 
     if (options.videoElement) {
@@ -707,6 +664,39 @@ export class ViewerSession {
   }
 
   /**
+   * Tell the host which media types to enable. When audioEnabled=false the
+   * host stops sending audio; when videoEnabled=false the host stops sending
+   * video. This saves bandwidth by disabling the RTCRtpSender encoding.
+   *
+   * Safe to call when not watching (no-op).
+   */
+  setMediaMode(audioEnabled: boolean, videoEnabled: boolean): void {
+    if (this._destructed) return;
+    if (!this.isCurrent()) return;
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
+
+    this._mediaMode = { audioEnabled, videoEnabled };
+
+    const runtime = getRuntime();
+    if (!runtime || runtime.isDestroyed()) return;
+
+    const conn = runtime.getConnectionManager().getConnection(this.groupId);
+    if (!conn) return;
+
+    const peerUuid = conn.peerForDevice(this.hostDeviceId);
+    if (!peerUuid) return;
+
+    void conn.sendToPeer(peerUuid, {
+      type: "viewer.media.request",
+      logicalStreamId: this.logicalStreamId,
+      viewerDeviceId: runtime.deviceId ?? "viewer",
+      ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
+      audioEnabled,
+      videoEnabled,
+    }).catch(() => {});
+  }
+
+  /**
    * Retry the full join flow. Resets state and runs start() again
    * with the same session parameters. The teardown runs asynchronously;
    * the new attempt awaits it before creating a new ViewerClient.
@@ -722,6 +712,7 @@ export class ViewerSession {
     this._receivedStream = null;
     this._trackIdsInStream.clear();
     this.leaveAnnounced = false;
+    this._viewerReadySent = false;
     this._viewerSessionId = generateViewerSessionId();
 
     // Actively request a group sync before refreshing local state.
@@ -844,6 +835,7 @@ export class ViewerSession {
       await (this._teardownPromise ?? Promise.resolve());
       return;
     }
+    this.setState("ended");
     this._destructed = true;
     this.clearPosterFrame();
     await this.beginTeardown({ final: true });
@@ -949,6 +941,7 @@ export class ViewerSession {
         this.clearPosterFrame();
         this._bindToken = null;
         this._bindMediaSessionId = null;
+        this._mediaMode = { audioEnabled: true, videoEnabled: true };
 
         if (options.final) {
           this._state = "ended";
@@ -974,10 +967,8 @@ export class ViewerSession {
   // ── Diagnostics access ───────────────────────────────────────────
 
   /**
-   * Expose the underlying ViewerClient for the UI/store task to access
-   * the real VDO connection. Returns null if no client is active.
+   * Get the raw RTCPeerConnection for metrics registration. Returns null if no active media connection.
    */
-  /** Get the raw RTCPeerConnection for metrics registration. Returns null if no active media connection. */
   getPeerConnection(): RTCPeerConnection | null {
     if (!this.viewerClient || this._destructed) return null;
     const sdk = this.viewerClient.getSDK();
@@ -988,149 +979,12 @@ export class ViewerSession {
     return group.viewer?.pc ?? group.publisher?.pc ?? null;
   }
 
+  /**
+   * Expose the underlying ViewerClient for low-level SDK access.
+   * Returns null if no client is active or session is destroyed.
+   */
   getViewerClient(): ViewerClient | null {
     return this.viewerClient;
-  }
-
-  /**
-   * Gather real diagnostics from the ViewerClient's RTCPeerConnection.
-   * Uses actual WebRTC stats (candidate-pair, inbound-rtp) rather than
-   * fake/placeholder data. Returns null if no active viewer connection
-   * exists.
-   */
-  async getDiagnostics(): Promise<ViewerDiagnosticsSnapshot | null> {
-    if (!this.viewerClient || this._destructed) return null;
-    const sdk = this.viewerClient.getSDK();
-    if (!sdk) return null;
-
-    const entries = Array.from(sdk.connections.entries());
-    if (entries.length === 0) return null;
-
-    const [, group] = entries[0];
-    const pc = group.viewer?.pc ?? group.publisher?.pc;
-    if (!pc) return null;
-
-    const timestamp = Date.now();
-    let connectionState = pc.connectionState;
-
-    const snapshot: ViewerDiagnosticsSnapshot = {
-      connectionState,
-      selectedCandidatePair: {
-        local: null,
-        remote: null,
-        state: null,
-        nominated: null,
-      },
-      inboundVideo: {
-        bitrateBps: 0,
-        bytesReceived: 0,
-        packetsReceived: 0,
-        packetsLost: 0,
-        jitter: 0,
-        codecId: null,
-        frameWidth: null,
-        frameHeight: null,
-        framesPerSecond: null,
-        framesDropped: null,
-        freezeCount: null,
-        ssrc: null,
-      },
-      inboundAudio: {
-        bitrateBps: 0,
-        bytesReceived: 0,
-        packetsReceived: 0,
-        packetsLost: 0,
-        jitter: 0,
-        codecId: null,
-      },
-      rttMs: null,
-      localCandidateType: null,
-      remoteCandidateType: null,
-      timestamp,
-    };
-
-    try {
-      const stats = await pc.getStats();
-      let aggregatedVideoBytes = 0;
-      let aggregatedAudioBytes = 0;
-
-      const localCandidates = new Map<string, any>();
-      const remoteCandidates = new Map<string, any>();
-
-      for (const report of stats.values()) {
-        // Collect local and remote ICE candidates for type resolution
-        if (report.type === "local-candidate") {
-          localCandidates.set(report.id, report);
-        }
-        if (report.type === "remote-candidate") {
-          remoteCandidates.set(report.id, report);
-        }
-
-        if (report.type === "candidate-pair" && (report as any).selected) {
-          snapshot.selectedCandidatePair.state = (report as any).state ?? null;
-          snapshot.selectedCandidatePair.nominated = (report as any).nominated ?? null;
-          // Read currentRoundTripTime
-          const rtt = (report as any).currentRoundTripTime;
-          if (rtt !== undefined && rtt !== null) {
-            snapshot.rttMs = rtt * 1000; // convert seconds to ms
-          }
-          // Resolve local/remote candidate descriptions and types
-          if ((report as any).localCandidateId) {
-            const local = localCandidates.get((report as any).localCandidateId);
-            if (local) {
-              snapshot.selectedCandidatePair.local =
-                `${(local as any).address ?? "?"}:${(local as any).port ?? "?"}`;
-              snapshot.localCandidateType = (local as any).candidateType ?? null;
-            }
-          }
-          if ((report as any).remoteCandidateId) {
-            const remote = remoteCandidates.get((report as any).remoteCandidateId);
-            if (remote) {
-              snapshot.selectedCandidatePair.remote =
-                `${(remote as any).address ?? "?"}:${(remote as any).port ?? "?"}`;
-              snapshot.remoteCandidateType = (remote as any).candidateType ?? null;
-            }
-          }
-        }
-
-        if (report.type === "inbound-rtp") {
-          const kind = (report as any).kind;
-          const bytes = (report as any).bytesReceived ?? 0;
-          const packets = (report as any).packetsReceived ?? 0;
-          const lost = (report as any).packetsLost ?? 0;
-          const jitter = (report as any).jitter ?? 0;
-          const codecId = (report as any).codecId ?? null;
-
-          if (kind === "video") {
-            aggregatedVideoBytes += bytes;
-            snapshot.inboundVideo.ssrc = (report as any).ssrc ?? null;
-            snapshot.inboundVideo.packetsReceived = packets;
-            snapshot.inboundVideo.packetsLost = lost;
-            snapshot.inboundVideo.jitter = jitter;
-            snapshot.inboundVideo.codecId = codecId;
-            // Real video frame dimensions and stats
-            snapshot.inboundVideo.frameWidth = (report as any).frameWidth ?? null;
-            snapshot.inboundVideo.frameHeight = (report as any).frameHeight ?? null;
-            snapshot.inboundVideo.framesPerSecond = (report as any).framesPerSecond ?? null;
-            snapshot.inboundVideo.framesDropped = (report as any).framesDropped ?? null;
-            snapshot.inboundVideo.freezeCount = (report as any).freezeCount ?? null;
-          } else if (kind === "audio") {
-            aggregatedAudioBytes += bytes;
-            snapshot.inboundAudio.packetsReceived = packets;
-            snapshot.inboundAudio.packetsLost = lost;
-            snapshot.inboundAudio.jitter = jitter;
-            snapshot.inboundAudio.codecId = codecId;
-          }
-        }
-      }
-
-      snapshot.inboundVideo.bytesReceived = aggregatedVideoBytes;
-      snapshot.inboundAudio.bytesReceived = aggregatedAudioBytes;
-    } catch {
-      // Stats collection is best-effort; return partial snapshot
-    }
-
-    return snapshot;
   }
 
   // ── Join flow ───────────────────────────────────────────────────────
@@ -1595,6 +1449,59 @@ export class ViewerSession {
     };
   }
 
+  /** Guards one-shot viewer.ready send per watch attempt */
+  private _viewerReadySent = false;
+
+  /**
+   * Send a `stream.viewer.ready` acknowledgement to the host exactly once
+   * per watch attempt. The caller (readiness controller) is responsible for
+   * calling this only after the first visible frame is presented.
+   *
+   * Guards:
+   * - Stale session: checks the current generation so abandoned flows are ignored.
+   * - One-shot: `_viewerReadySent` prevents duplicate sends.
+   * - Identity: the payload carries the current watch-attempt identifiers
+   *   (logicalStreamId, mediaSessionId, viewerSessionId) so the host can
+   *   correlate and ignore messages from stale attempts.
+   *
+   * Returns true if the message was sent, false if it was suppressed.
+   */
+  sendViewerReady(presentation: "native-video" | "webgl" | "nvidia" | "fallback"): boolean {
+    if (!this.isCurrent()) return false;
+    if (this._viewerReadySent) return false;
+    if (!this.groupId || !this.hostDeviceId || !this._viewerSessionId) return false;
+
+    this._viewerReadySent = true;
+
+    const runtime = getRuntime();
+    if (!runtime || runtime.isDestroyed()) return false;
+
+    const conn = runtime.getConnectionManager().getConnection(this.groupId);
+    if (!conn) return false;
+
+    const peerUuid = conn.peerForDevice(this.hostDeviceId);
+    if (!peerUuid) return false;
+
+    void conn.sendToPeer(peerUuid, {
+      type: "stream.viewer.ready",
+      groupId: this.groupId,
+      logicalStreamId: this.logicalStreamId,
+      mediaSessionId: this.mediaSessionId,
+      viewerSessionId: this._viewerSessionId,
+      viewerNodeId: runtime.deviceId ?? "viewer",
+      viewerDeviceId: runtime.deviceId ?? "viewer",
+      readyAt: Date.now(),
+      presentation,
+    }).catch(() => {});
+
+    return true;
+  }
+
+  /** Reset the viewer ready flag (called on retry/restart) */
+  private resetViewerReady(): void {
+    this._viewerReadySent = false;
+  }
+
   // ── Internal helpers ────────────────────────────────────────────────
 
   private setState(state: ViewerSessionState): void {
@@ -1643,18 +1550,30 @@ export class ViewerSession {
     let receivedHeight: number | null = null;
     let displayedFps: number | null = null;
 
-    if (state !== "paused" && this.viewerClient) {
+    // Read from authoritative telemetry snapshot instead of a second getStats() pipeline.
+    // StreamMetricsService polls getStats() every 1 second with proper baseline tracking,
+    // bitrate computation, and codec resolution.  This avoids the bugs of the removed
+    // getDiagnostics() method (bitrate always zero, raw codecId, multi-stream overwrite,
+    // audio bytes always zero).
+    if (state !== "paused") {
       try {
-        const diag = await this.getDiagnostics();
-        if (diag) {
-          receivedBitrateKbps = diag.inboundVideo.bitrateBps > 0
-            ? Math.round(diag.inboundVideo.bitrateBps / 1000)
-            : null;
-          receivedWidth = diag.inboundVideo.frameWidth;
-          receivedHeight = diag.inboundVideo.frameHeight;
-          displayedFps = diag.inboundVideo.framesPerSecond;
+        const svc = StreamMetricsService.getInstance();
+        const historyId = svc.findHistoryIdByMediaSessionId(this.mediaSessionId);
+        if (historyId) {
+          const snapshot = svc.getSnapshot(historyId);
+          const connSnap = snapshot.connections[0];
+          if (connSnap) {
+            const latest = connSnap.rawSamples[connSnap.rawSamples.length - 1];
+            if (latest) {
+              const totalBps = (latest.videoBitsPerSecond ?? 0) + (latest.audioBitsPerSecond ?? 0);
+              receivedBitrateKbps = totalBps > 0 ? Math.round(totalBps / 1000) : null;
+              receivedWidth = latest.width;
+              receivedHeight = latest.height;
+              displayedFps = latest.framesPerSecond;
+            }
+          }
         }
-      } catch { /* best effort */ }
+      } catch { /* best effort — status still sends with null metrics */ }
     }
 
     void conn.sendToPeer(peerUuid, {

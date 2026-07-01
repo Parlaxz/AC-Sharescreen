@@ -22,6 +22,8 @@ import type {
   PeerTelemetryObservation,
   PersistenceRecordV2,
   ViewerRateEntry,
+  VideoRtpStreamDetails,
+  AudioRtpStreamDetails,
 } from "./bandwidth-telemetry-types.js";
 
 // ─── Legacy history record (pre-migration) ─────────────────────────────────
@@ -75,6 +77,16 @@ interface CounterBaseline {
   previousMonotonicTimestamp: number;
 }
 
+// ─── Audio cumulative metric baseline (jitter-buffer, concealment) ─────────
+
+interface AudioCumulativeBaseline {
+  jitterBufferDelay: number;
+  jitterBufferEmittedCount: number;
+  concealedSamples: number;
+  concealedEvents: number;
+  totalSamplesReceived: number;
+}
+
 // ─── Connection state ──────────────────────────────────────────────────────
 
 interface ConnectionState {
@@ -98,10 +110,17 @@ interface ConnectionState {
   totalAudioBytes: number;
   totalTransportBytes: number;
 
-  // Current rate
-  videoBitsPerSecond: number;
-  audioBitsPerSecond: number;
-  transportBitsPerSecond: number;
+  // Current rate (null = unavailable, 0 = measured zero)
+  videoBitsPerSecond: number | null;
+  audioBitsPerSecond: number | null;
+  transportBitsPerSecond: number | null;
+
+  // Per-stream RTP evidence from the last poll
+  videoRtpStreams: VideoRtpStreamDetails[];
+  audioRtpStreams: AudioRtpStreamDetails[];
+
+  // Audio cumulative counter baselines for jitter-buffer / concealment deltas
+  audioCumulativeBaselines: Map<string, AudioCumulativeBaseline>;
 
   // Peaks
   peakBitsPerSecond: number;
@@ -326,9 +345,12 @@ export class StreamMetricsService {
       totalVideoBytes: 0,
       totalAudioBytes: 0,
       totalTransportBytes: 0,
-      videoBitsPerSecond: 0,
-      audioBitsPerSecond: 0,
-      transportBitsPerSecond: 0,
+      videoBitsPerSecond: null,
+      audioBitsPerSecond: null,
+      transportBitsPerSecond: null,
+      videoRtpStreams: [],
+      audioRtpStreams: [],
+      audioCumulativeBaselines: new Map(),
       peakBitsPerSecond: 0,
       state: "playing",
       pausedAtMonotonic: null,
@@ -560,7 +582,7 @@ export class StreamMetricsService {
     return Array.from(state.connections.values()).map((c) => ({
       viewerDeviceId: c.viewerDeviceId ?? c.connectionId,
       displayName: c.displayName ?? c.connectionId,
-      bitsPerSecond: c.videoBitsPerSecond + c.audioBitsPerSecond,
+      bitsPerSecond: (c.videoBitsPerSecond ?? 0) + (c.audioBitsPerSecond ?? 0),
       totalBytes: c.totalVideoBytes + c.totalAudioBytes,
       rttMs: c.receivedStatus?.rttMs ?? null,
       packetLossPercent: c.receivedStatus?.packetLossPercent ?? null,
@@ -692,8 +714,24 @@ export class StreamMetricsService {
         width: number | null;
         height: number | null;
         fps: number | null;
+        packetsReceived: number | null;
         packetsLost: number | null;
         jitter: number | null;
+        framesDecoded: number | null;
+        framesDropped: number | null;
+        keyFramesDecoded: number | null;
+        freezeCount: number | null;
+        decoderImplementation: string | null;
+        jitterBufferDelay: number | null;
+        jitterBufferEmittedCount: number | null;
+        concealedSamples: number | null;
+        concealedEvents: number | null;
+        totalSamplesReceived: number | null;
+        audioLevel: number | null;
+        totalAudioEnergy: number | null;
+        totalSamplesDuration: number | null;
+        clockRate: number | null;
+        channels: number | null;
       }
       const videoObservations: RtpObs[] = [];
       const audioObservations: RtpObs[] = [];
@@ -744,12 +782,24 @@ export class StreamMetricsService {
           width: kind === "video" ? ((r.frameWidth ?? null) as number | null) : null,
           height: kind === "video" ? ((r.frameHeight ?? null) as number | null) : null,
           fps: kind === "video" ? ((r.framesPerSecond ?? null) as number | null) : null,
-          packetsLost: kind === "video" && conn.direction === "inbound"
-            ? ((r.packetsLost ?? null) as number | null)
-            : null,
-          jitter: kind === "video" && conn.direction === "inbound"
-            ? ((r.jitter ?? null) as number | null)
-            : null,
+          packetsReceived: (r.packetsReceived ?? null) as number | null,
+          packetsLost: (r.packetsLost ?? null) as number | null,
+          jitter: (r.jitter ?? null) as number | null,
+          framesDecoded: kind === "video" ? ((r.framesDecoded ?? null) as number | null) : null,
+          framesDropped: kind === "video" ? ((r.framesDropped ?? null) as number | null) : null,
+          keyFramesDecoded: kind === "video" ? ((r.keyFramesDecoded ?? null) as number | null) : null,
+          freezeCount: kind === "video" ? ((r.freezeCount ?? null) as number | null) : null,
+          decoderImplementation: kind === "video" ? ((r.decoderImplementation ?? null) as string | null) : null,
+          jitterBufferDelay: kind === "audio" ? ((r.jitterBufferDelay ?? null) as number | null) : null,
+          jitterBufferEmittedCount: kind === "audio" ? ((r.jitterBufferEmittedCount ?? null) as number | null) : null,
+          concealedSamples: kind === "audio" ? ((r.concealedSamples ?? null) as number | null) : null,
+          concealedEvents: kind === "audio" ? ((r.concealedEvents ?? null) as number | null) : null,
+          totalSamplesReceived: kind === "audio" ? ((r.totalSamplesReceived ?? null) as number | null) : null,
+          audioLevel: kind === "audio" ? ((r.audioLevel ?? null) as number | null) : null,
+          totalAudioEnergy: kind === "audio" ? ((r.totalAudioEnergy ?? null) as number | null) : null,
+          totalSamplesDuration: kind === "audio" ? ((r.totalSamplesDuration ?? null) as number | null) : null,
+          clockRate: kind === "audio" ? ((r.clockRate ?? null) as number | null) : null,
+          channels: kind === "audio" ? ((r.channels ?? null) as number | null) : null,
         };
 
         if (kind === "video") videoObservations.push(obs);
@@ -811,33 +861,145 @@ export class StreamMetricsService {
         }
       }
 
-      // Process per-report baselines (audit items 6-7)
+      // ── Video processing with per-stream evidence ─────────────────────
       let totalVideoRate = 0;
       let totalVideoDelta = 0;
       let videoIntervalMs = 0;
+      const videoResults = new Map<string, { bitsPerSecond: number; deltaBytes: number; intervalMs: number }>();
       for (const obs of videoObservations) {
         const rkey = `${obs.reportId}:${obs.ssrc ?? 0}:${obs.mid ?? ""}`;
         const result = this.processCounterReport(conn.videoBaselines, rkey, obs.bytes, monoNow);
+        videoResults.set(obs.reportId, result);
         totalVideoRate += result.bitsPerSecond;
         totalVideoDelta += result.deltaBytes;
         videoIntervalMs = Math.max(videoIntervalMs, result.intervalMs);
       }
-      conn.videoBitsPerSecond = totalVideoRate;
+      conn.videoBitsPerSecond = videoObservations.length > 0 ? totalVideoRate : null;
       conn.totalVideoBytes += totalVideoDelta;
 
+      // Build per-stream video evidence
+      const videoRtpStreams: VideoRtpStreamDetails[] = [];
+      for (const obs of videoObservations) {
+        const result = videoResults.get(obs.reportId)!;
+        const codecMimeType = obs.codecId ? (codecMap.get(obs.codecId) ?? null) : null;
+        const totalPkts = (obs.packetsReceived ?? 0) + (obs.packetsLost ?? 0);
+        videoRtpStreams.push({
+          kind: "video",
+          id: obs.reportId,
+          ssrc: obs.ssrc,
+          mid: obs.mid,
+          codecId: obs.codecId,
+          codecMimeType,
+          bytesReceived: obs.bytes,
+          bytesDelta: result.deltaBytes,
+          bitsPerSecond: result.bitsPerSecond,
+          packetsReceived: obs.packetsReceived,
+          packetsLost: obs.packetsLost,
+          packetLossPercent: totalPkts > 0 && obs.packetsLost !== null
+            ? Math.round((obs.packetsLost / totalPkts) * 100) : null,
+          jitterMs: obs.jitter !== null ? obs.jitter * 1000 : null,
+          frameWidth: obs.width,
+          frameHeight: obs.height,
+          framesPerSecond: obs.fps,
+          framesDecoded: obs.framesDecoded,
+          framesDropped: obs.framesDropped,
+          keyFramesDecoded: obs.keyFramesDecoded,
+          freezeCount: obs.freezeCount,
+          decoderImplementation: obs.decoderImplementation,
+        });
+      }
+      conn.videoRtpStreams = videoRtpStreams;
+
+      // ── Audio processing with per-stream evidence ─────────────────────
       let totalAudioRate = 0;
       let totalAudioDelta = 0;
       let audioIntervalMs = 0;
+      const audioResults = new Map<string, { bitsPerSecond: number; deltaBytes: number; intervalMs: number }>();
       for (const obs of audioObservations) {
         const rkey = `${obs.reportId}:${obs.ssrc ?? 0}:${obs.mid ?? ""}`;
         const result = this.processCounterReport(conn.audioBaselines, rkey, obs.bytes, monoNow);
+        audioResults.set(obs.reportId, result);
         totalAudioRate += result.bitsPerSecond;
         totalAudioDelta += result.deltaBytes;
         audioIntervalMs = Math.max(audioIntervalMs, result.intervalMs);
       }
-      conn.audioBitsPerSecond = totalAudioRate;
+      conn.audioBitsPerSecond = audioObservations.length > 0 ? totalAudioRate : null;
       conn.totalAudioBytes += totalAudioDelta;
 
+      // Build per-stream audio evidence with jitter-buffer / concealment
+      const audioRtpStreams: AudioRtpStreamDetails[] = [];
+      for (const obs of audioObservations) {
+        const result = audioResults.get(obs.reportId)!;
+        const codecMimeType = obs.codecId ? (codecMap.get(obs.codecId) ?? null) : null;
+        const totalPkts = (obs.packetsReceived ?? 0) + (obs.packetsLost ?? 0);
+
+        // Jitter-buffer delay delta
+        let jitterBufferDelayMs: number | null = null;
+        let jitterBufferEmittedDelta: number | null = null;
+        let concealedSamplesDelta: number | null = null;
+        let concealedEventsDelta: number | null = null;
+        let totalSamplesDelta: number | null = null;
+
+        if (obs.jitterBufferDelay !== null && obs.jitterBufferEmittedCount !== null) {
+          const prev = conn.audioCumulativeBaselines.get(obs.reportId) ??
+            { jitterBufferDelay: 0, jitterBufferEmittedCount: 0, concealedSamples: 0, concealedEvents: 0, totalSamplesReceived: 0 };
+          const delayDelta = obs.jitterBufferDelay - prev.jitterBufferDelay;
+          const countDelta = obs.jitterBufferEmittedCount - prev.jitterBufferEmittedCount;
+          if (countDelta > 0) {
+            jitterBufferDelayMs = (delayDelta / countDelta) * 1000;
+            jitterBufferEmittedDelta = countDelta;
+          }
+          if (obs.concealedSamples !== null && obs.totalSamplesReceived !== null) {
+            concealedSamplesDelta = obs.concealedSamples - prev.concealedSamples;
+            totalSamplesDelta = obs.totalSamplesReceived - prev.totalSamplesReceived;
+            if (obs.concealedEvents !== null) {
+              concealedEventsDelta = obs.concealedEvents - prev.concealedEvents;
+            }
+          }
+          // Update baseline
+          conn.audioCumulativeBaselines.set(obs.reportId, {
+            jitterBufferDelay: obs.jitterBufferDelay,
+            jitterBufferEmittedCount: obs.jitterBufferEmittedCount,
+            concealedSamples: obs.concealedSamples ?? 0,
+            concealedEvents: obs.concealedEvents ?? 0,
+            totalSamplesReceived: obs.totalSamplesReceived ?? 0,
+          });
+        }
+
+        const concealmentPercent = totalSamplesDelta !== null && totalSamplesDelta > 0 && concealedSamplesDelta !== null
+          ? Math.round((concealedSamplesDelta / totalSamplesDelta) * 100) : null;
+
+        audioRtpStreams.push({
+          kind: "audio",
+          id: obs.reportId,
+          ssrc: obs.ssrc,
+          mid: obs.mid,
+          codecId: obs.codecId,
+          codecMimeType,
+          bytesReceived: obs.bytes,
+          bytesDelta: result.deltaBytes,
+          bitsPerSecond: result.bitsPerSecond,
+          packetsReceived: obs.packetsReceived,
+          packetsLost: obs.packetsLost,
+          packetLossPercent: totalPkts > 0 && obs.packetsLost !== null
+            ? Math.round((obs.packetsLost / totalPkts) * 100) : null,
+          jitterMs: obs.jitter !== null ? obs.jitter * 1000 : null,
+          audioLevel: obs.audioLevel,
+          totalAudioEnergy: obs.totalAudioEnergy,
+          totalSamplesDuration: obs.totalSamplesDuration,
+          clockRate: obs.clockRate,
+          channels: obs.channels,
+          jitterBufferDelayMs,
+          jitterBufferEmittedCount: jitterBufferEmittedDelta,
+          concealedSamples: concealedSamplesDelta,
+          concealedEvents: concealedEventsDelta,
+          concealmentPercent,
+          totalSamplesReceived: totalSamplesDelta,
+        });
+      }
+      conn.audioRtpStreams = audioRtpStreams;
+
+      // ── Transport ────────────────────────────────────────────────────
       let transportRate: number | null = null;
       let transportDelta = 0;
       if (transportCumulative !== null) {
@@ -847,15 +1009,17 @@ export class StreamMetricsService {
         transportRate = tpResult.bitsPerSecond;
         transportDelta = tpResult.deltaBytes;
       }
-      conn.transportBitsPerSecond = transportRate ?? 0;
+      conn.transportBitsPerSecond = transportRate;
       conn.totalTransportBytes += transportDelta;
 
-      // Resolve codec from codecMap (audit item 8)
+      // Resolve codec from codecMap via active RTP codecId (authoritative).
+      // Per-stream evidence resolves each stream individually.
       const primaryVideo = videoObservations[0];
       let resolvedCodec: string | null = null;
       if (primaryVideo?.codecId) {
         resolvedCodec = codecMap.get(primaryVideo.codecId) ?? null;
       }
+      // No iteration-order fallback — codecId → codecMap is authoritative
 
       if (primaryVideo) {
         this.emitSampledMarkers(conn, primaryVideo.width, primaryVideo.height, primaryVideo.fps, resolvedCodec, connectionType,
@@ -901,6 +1065,8 @@ export class StreamMetricsService {
         connectionType,
         state: conn.state,
         variantId: conn.variantId,
+        videoRtpStreams: Object.freeze([...videoRtpStreams]),
+        audioRtpStreams: Object.freeze([...audioRtpStreams]),
       };
 
       conn.rawSamples.push(sample);
@@ -1009,7 +1175,7 @@ export class StreamMetricsService {
     // ── Combined quality-change marker (Deliverable 1) ─────────────────
 
     // Use effective bitrate if available, otherwise current computed rate
-    const bitrateBps = effectiveBps ?? configuredBps ?? conn.videoBitsPerSecond;
+    const bitrateBps = effectiveBps ?? configuredBps ?? conn.videoBitsPerSecond ?? 0;
     const candidate: { width: number | null; height: number | null; fps: number | null; bitrateBps: number | null } = {
       width,
       height,
@@ -1195,7 +1361,7 @@ export class StreamMetricsService {
 
     for (const conn of state.connections.values()) {
       totalBytes += conn.totalVideoBytes + conn.totalAudioBytes;
-      const connRate = conn.videoBitsPerSecond + conn.audioBitsPerSecond;
+      const connRate = (conn.videoBitsPerSecond ?? 0) + (conn.audioBitsPerSecond ?? 0);
       aggRate += connRate;
       if (conn.peakBitsPerSecond > peakBitsPerSecond) peakBitsPerSecond = conn.peakBitsPerSecond;
     }
@@ -1252,7 +1418,7 @@ export class StreamMetricsService {
         mediumBuckets: Object.freeze([...conn.mediumBuckets]),
         longBuckets: Object.freeze([...conn.longBuckets]),
         markers: Object.freeze([...conn.markers]),
-        currentBitsPerSecond: conn.videoBitsPerSecond + conn.audioBitsPerSecond,
+        currentBitsPerSecond: (conn.videoBitsPerSecond ?? 0) + (conn.audioBitsPerSecond ?? 0),
         averageBitsPerSecond: connActiveMs > 0
           ? Math.round(totalObservedBits / (connActiveMs / 1000))
           : 0,
@@ -1263,6 +1429,9 @@ export class StreamMetricsService {
         configuredBitsPerSecond: conn.configuredVideoBitsPerSecond,
         effectiveBitsPerSecond: conn.effectiveVideoBitsPerSecond,
         state: conn.state,
+        currentVideoBitsPerSecond: conn.videoBitsPerSecond,
+        currentAudioBitsPerSecond: conn.audioBitsPerSecond,
+        currentTransportBitsPerSecond: conn.transportBitsPerSecond,
       };
       allConnections.push(Object.freeze(connSnapshot));
     }
@@ -1288,6 +1457,9 @@ export class StreamMetricsService {
       configuredBitsPerSecond: state.configuredBitsPerSecond,
       effectiveBitsPerSecond: state.effectiveBitsPerSecond,
       state: state.state,
+      currentVideoBitsPerSecond: latestSample?.videoBitsPerSecond ?? null,
+      currentAudioBitsPerSecond: latestSample?.audioBitsPerSecond ?? null,
+      currentTransportBitsPerSecond: latestSample?.transportBitsPerSecond ?? null,
     };
 
     return Object.freeze({
@@ -1348,11 +1520,14 @@ export class StreamMetricsService {
       let minRtt = Infinity;
       let maxJitter = 0;
       let state: TelemetryState = "playing";
+      let hasVideo = false;
+      let hasAudio = false;
+      let hasTransport = false;
       for (const s of samples) {
         totalRate += s.mediaBitsPerSecond;
-        totalVideo += s.videoBitsPerSecond ?? 0;
-        totalAudio += s.audioBitsPerSecond ?? 0;
-        transportRate += s.transportBitsPerSecond ?? 0;
+        if (s.videoBitsPerSecond !== null) { totalVideo += s.videoBitsPerSecond; hasVideo = true; }
+        if (s.audioBitsPerSecond !== null) { totalAudio += s.audioBitsPerSecond; hasAudio = true; }
+        if (s.transportBitsPerSecond !== null) { transportRate += s.transportBitsPerSecond; hasTransport = true; }
         bytes += (s.mediaBitsPerSecond * s.intervalMs) / 8000;
         if ((s.packetLossPercent ?? 0) > maxPacketLoss) maxPacketLoss = s.packetLossPercent ?? 0;
         if ((s.rttMs ?? Infinity) < minRtt) minRtt = s.rttMs ?? Infinity;
@@ -1365,9 +1540,9 @@ export class StreamMetricsService {
         monotonicTimestampMs: ts, // aggregate uses epoch
         intervalMs: 1000,
         mediaBitsPerSecond: totalRate,
-        videoBitsPerSecond: totalVideo || null,
-        audioBitsPerSecond: totalAudio || null,
-        transportBitsPerSecond: transportRate || null,
+        videoBitsPerSecond: hasVideo ? totalVideo : null,
+        audioBitsPerSecond: hasAudio ? totalAudio : null,
+        transportBitsPerSecond: hasTransport ? transportRate : null,
         cumulativeMediaBytes: bytes,
         cumulativeTransportBytes: null,
         configuredVideoBitsPerSecond: null,
@@ -1381,6 +1556,8 @@ export class StreamMetricsService {
         codec: null,
         connectionType: null,
         state,
+        videoRtpStreams: Object.freeze([]),
+        audioRtpStreams: Object.freeze([]),
       });
     }
     result.sort((a, b) => a.timestampMs - b.timestampMs);
@@ -1636,6 +1813,9 @@ function emptySnapshot(historyId: string): BandwidthSnapshot {
       configuredBitsPerSecond: null,
       effectiveBitsPerSecond: null,
       state: "paused" as TelemetryState,
+      currentVideoBitsPerSecond: null,
+      currentAudioBitsPerSecond: null,
+      currentTransportBitsPerSecond: null,
     }),
     connections: Object.freeze([]),
   });

@@ -118,6 +118,8 @@ export {
   MediaBindPayloadSchema,
   ViewerPausedPayloadSchema,
   ViewerStatusPayloadSchema,
+  StreamViewerReadyPayloadSchema,
+  VIEWER_READY_PRESENTATIONS,
   QualityViewerRequestPayloadSchema,
   QualityViewerClearPayloadSchema,
   QualityEffectivePayloadSchema,

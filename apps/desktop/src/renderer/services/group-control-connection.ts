@@ -340,7 +340,11 @@ export class GroupControlConnection {
       console.warn("[group-control] sendToPeer: no usable data-channel route to", peerUuid);
       return false;
     }
-    const input = makeInput(payload.type as string, this.opts.nodeId, this.opts.groupId, payload, this.clock);
+    // Strip `type` from the payload — it is used for the envelope's top-level
+    // type field and must NOT be in the payload object, or `.strict()` Zod
+    // schemas on the receiving end will reject it.
+    const { type: _msgType, ...strippedPayload } = payload;
+    const input = makeInput(payload.type as string, this.opts.nodeId, this.opts.groupId, strippedPayload, this.clock);
     const envelope = await buildEnvelope(input, this.opts.groupSecret);
     const sent = this.sdk.sendData(envelope as unknown as Record<string, unknown>, {
       uuid: peerUuid,
@@ -364,7 +368,11 @@ export class GroupControlConnection {
       console.warn("[group-control] broadcast: no SDK (not connected)");
       return { attempted: 0, sent: 0, failed: 0 };
     }
-    const input = makeInput(payload.type as string, this.opts.nodeId, this.opts.groupId, payload, this.clock);
+    // Strip `type` from the payload — it is used for the envelope's top-level
+    // type field and must NOT be in the payload object, or `.strict()` Zod
+    // schemas on the receiving end will reject it.
+    const { type: _msgType, ...strippedPayload } = payload;
+    const input = makeInput(payload.type as string, this.opts.nodeId, this.opts.groupId, strippedPayload, this.clock);
     const envelope = await buildEnvelope(input, this.opts.groupSecret);
     const peers = this.connectedPeers;
     if (peers.length === 0) {

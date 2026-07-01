@@ -1742,3 +1742,63 @@ describe("ViewerSession — stream attachment (grey-screen fix)", () => {
     expect(videoEl.pause).toHaveBeenCalled();
   });
 });
+
+// ─── Pause/resume video element (regression) ────────────────────────────
+
+describe("ViewerSession — pause/resume video element", () => {
+  let session: ViewerSession;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    session = new ViewerSession();
+  });
+
+  afterEach(() => {
+    session.destroy();
+    vi.restoreAllMocks();
+  });
+
+  it("pause() pauses the bound video element and resume() resumes it without detaching srcObject", async () => {
+    // Mock video element with zero dimensions so capturePosterFrame avoids DOM canvas
+    const videoEl = {
+      pause: vi.fn(),
+      play: vi.fn().mockResolvedValue(undefined),
+      srcObject: { id: "stream-1" },
+      videoWidth: 0,
+      videoHeight: 0,
+    } as unknown as HTMLVideoElement;
+
+    // Mimic a started session with a viewerClient that supports pause/resume
+    Object.defineProperty(session, "_state", { value: "watching", writable: true });
+    (session as any).viewerClient = {
+      pauseMedia: vi.fn().mockResolvedValue(undefined),
+      resumeMedia: vi.fn().mockResolvedValue(undefined),
+    };
+
+    session.bindVideoElement(videoEl);
+
+    // ── Pause ────────────────────────────────────────────────────────
+    await session.pause();
+
+    // viewerClient.pauseMedia was called
+    expect((session as any).viewerClient.pauseMedia).toHaveBeenCalled();
+    // The video element itself was paused
+    expect(videoEl.pause).toHaveBeenCalled();
+    // srcObject is NOT detached during pause (unlike destroy which clears it)
+    expect(videoEl.srcObject).not.toBeNull();
+    // Session pause state is "paused"
+    expect(session.pauseState).toBe("paused");
+
+    // ── Resume ───────────────────────────────────────────────────────
+    await session.resume();
+
+    // viewerClient.resumeMedia was called
+    expect((session as any).viewerClient.resumeMedia).toHaveBeenCalled();
+    // The video element was played
+    expect(videoEl.play).toHaveBeenCalled();
+    // srcObject is STILL not detached after resume
+    expect(videoEl.srcObject).not.toBeNull();
+    // Session pause state is back to "playing"
+    expect(session.pauseState).toBe("playing");
+  });
+});

@@ -63,6 +63,7 @@ const api: ScreenLinkAPI = {
 
   traySetSharing: (sharing) => ipcRenderer.send("tray-set-sharing", sharing),
   traySetViewing: (viewing) => ipcRenderer.send("tray-set-viewing", viewing),
+  traySetViewerCount: (count) => ipcRenderer.send("tray-set-viewer-count", count),
 
   getAppInfo: () => ipcRenderer.invoke("get-app-info"),
 

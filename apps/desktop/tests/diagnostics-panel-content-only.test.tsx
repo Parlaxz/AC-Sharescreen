@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, cleanup, waitFor } from "@testing-library/react";
+import { render, cleanup } from "@testing-library/react";
 import { TooltipProvider } from "../src/renderer/components/ui/tooltip.js";
 import { DiagnosticsPanel } from "../src/renderer/components/workspace/viewer/DiagnosticsPanel.js";
 
@@ -14,45 +14,76 @@ describe("DiagnosticsPanel contentOnly", () => {
     vi.restoreAllMocks();
   });
 
-  it("polls diagnostics immediately in contentOnly mode", async () => {
-    const getDiagnostics = vi.fn().mockResolvedValue({
-      connectionState: "connected",
-      inboundVideo: {
-        codecId: "VP9",
-        packetsReceived: 100,
-        packetsLost: 0,
-        framesPerSecond: 30,
-        frameWidth: 1280,
-        frameHeight: 720,
-        bitrateBps: 2_000_000,
-        jitter: 2,
-        framesDropped: 1,
-        freezeCount: 0,
+  it("renders snapshot-based diagnostics in contentOnly mode", async () => {
+    const mockSnapshot = {
+      historyId: "test-history-1",
+      role: "viewer" as const,
+      aggregate: {
+        rawSamples: [
+          {
+            timestampMs: Date.now(),
+            monotonicTimestampMs: performance.now(),
+            intervalMs: 1000,
+            mediaBitsPerSecond: 2_064_000,
+            videoBitsPerSecond: 2_000_000,
+            audioBitsPerSecond: 64_000,
+            transportBitsPerSecond: 2_100_000,
+            cumulativeMediaBytes: 250_000,
+            cumulativeTransportBytes: 260_000,
+            configuredVideoBitsPerSecond: null,
+            effectiveVideoBitsPerSecond: null,
+            width: 1280,
+            height: 720,
+            framesPerSecond: 30,
+            packetLossPercent: 0,
+            rttMs: 10,
+            jitterMs: 2,
+            codec: "video/VP9",
+            connectionType: "direct" as const,
+            state: "playing" as const,
+          },
+        ],
+        mediumBuckets: [],
+        longBuckets: [],
+        markers: [],
+        currentBitsPerSecond: 2_064_000,
+        averageBitsPerSecond: 2_000_000,
+        peakBitsPerSecond: 2_064_000,
+        totalBytes: 250_000,
+        durationMs: 5000,
+        activeDurationMs: 5000,
+        configuredBitsPerSecond: null,
+        effectiveBitsPerSecond: null,
+        state: "playing" as const,
       },
-      inboundAudio: {
-        codecId: "opus",
-        packetsReceived: 50,
-        packetsLost: 0,
-        bitrateBps: 64_000,
-        jitter: 1,
-      },
-      selectedCandidatePair: { local: "1.1.1.1", remote: "2.2.2.2", state: "succeeded", nominated: true },
-      localCandidateType: "host",
-      remoteCandidateType: "srflx",
-      rttMs: 10,
-      timestamp: Date.now(),
-    });
+      connections: [],
+    };
 
     const { container } = renderWithProviders(
-      <DiagnosticsPanel session={{ getDiagnostics } as any} contentOnly>
+      <DiagnosticsPanel snapshot={mockSnapshot as any} contentOnly>
         <span />
       </DiagnosticsPanel>,
     );
 
-    await waitFor(() => {
-      expect(getDiagnostics).toHaveBeenCalled();
-      expect(container.textContent).toContain("connected");
-      expect(container.textContent).toContain("VP9");
-    });
+    // Verify snapshot data is rendered — aggregate state "playing" shows
+    expect(container.textContent).toContain("playing");
+    // Codec "video/VP9" → formatCodecDisplay strips prefix → "VP9"
+    expect(container.textContent).toContain("VP9");
+    // Resolution from sample
+    expect(container.textContent).toContain("1280");
+    expect(container.textContent).toContain("720");
+    // FPS
+    expect(container.textContent).toContain("30");
+  });
+
+  it("renders empty state when no snapshot provided", async () => {
+    const { container } = renderWithProviders(
+      <DiagnosticsPanel snapshot={null} contentOnly>
+        <span />
+      </DiagnosticsPanel>,
+    );
+
+    // Should render without crashing, show default values
+    expect(container.textContent).toBeTruthy();
   });
 });

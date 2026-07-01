@@ -77,6 +77,11 @@ export interface CompareViewerSurfaceProps {
   // Benchmark integration (passed through to EnhancedVideoSurface)
   processorApiRefA?: React.MutableRefObject<ProcessorAPI | null>;
   processorApiRefB?: React.MutableRefObject<ProcessorAPI | null>;
+
+  /** Called when the first GPU-rendered frame is produced (either variant) */
+  onFirstFrame?: () => void;
+  /** Called when the effective backend changes (either variant) */
+  onBackendChange?: (effective: string, fallbackReason?: string) => void;
 }
 
 // ─── Auto-hide timeout hook ────────────────────────────────────────────────
@@ -237,6 +242,8 @@ export function CompareViewerSurface({
   onProcessorStateChangeB,
   processorApiRefA,
   processorApiRefB,
+  onFirstFrame,
+  onBackendChange,
 }: CompareViewerSurfaceProps): ReactElement {
   // ── Layout mode ─────────────────────────────────────────────────
   const [displayMode, setDisplayMode] = useState<CompareDisplayMode>("vertical-wipe");
@@ -420,6 +427,8 @@ export function CompareViewerSurface({
               onStatsUpdate={onStatsUpdateA}
               onProcessorStateChange={onProcessorStateChangeA}
               processorApiRef={processorApiRefA}
+              onFirstFrame={onFirstFrame}
+              onBackendChange={onBackendChange}
             />
 
             {/* Label overlay — top-left */}
@@ -446,6 +455,8 @@ export function CompareViewerSurface({
               onStatsUpdate={onStatsUpdateB}
               onProcessorStateChange={onProcessorStateChangeB}
               processorApiRef={processorApiRefB}
+              onFirstFrame={onFirstFrame}
+              onBackendChange={onBackendChange}
             />
 
             {/* Label overlay — top-left */}

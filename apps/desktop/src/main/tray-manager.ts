@@ -7,18 +7,29 @@ const __dirname = path.dirname(__filename);
 
 export type TrayState = "idle" | "sharing" | "viewing" | "sharing-and-viewing" | "degraded" | "error";
 
+const STATE_ICON_MAP: Record<TrayState, string> = {
+  idle: "tray-icon-blue.png",
+  viewing: "tray-icon-green.png",
+  sharing: "tray-icon-orange.png",
+  "sharing-and-viewing": "tray-icon-red.png",
+  degraded: "tray-icon-orange.png",
+  error: "tray-icon-red.png",
+};
+
 /**
- * Resolve the tray icon path based on whether the app is packaged.
+ * Resolve the tray icon path based on the current state and whether the app
+ * is packaged.
  *
  * In development (unpackaged), the icon lives relative to `__dirname`
  * inside the source tree. In packaged builds, it is copied to
  * `process.resourcesPath` via electron-builder `extraResources`.
  */
-export function getTrayIconPath(isPackaged: boolean): string {
+export function getTrayIconPath(state: TrayState, isPackaged: boolean): string {
+  const filename = STATE_ICON_MAP[state];
   if (isPackaged) {
-    return path.join(process.resourcesPath, "tray-icon.png");
+    return path.join(process.resourcesPath, filename);
   }
-  return path.join(__dirname, "../../assets/tray-icon.png");
+  return path.join(__dirname, `../../assets/${filename}`);
 }
 
 export interface TrayMenuActions {
@@ -48,7 +59,7 @@ export class TrayManager {
   }
 
   create(): void {
-    const iconPath = getTrayIconPath(app.isPackaged);
+    const iconPath = getTrayIconPath(this.state, app.isPackaged);
     let icon: Electron.NativeImage;
     try {
       icon = nativeImage.createFromPath(iconPath);
@@ -69,36 +80,63 @@ export class TrayManager {
     });
 
     this.updateMenu();
+    this.updateIcon();
   }
 
   setState(state: TrayState): void {
     this.state = state;
     this.updateMenu();
+    this.updateIcon();
   }
 
   setSharing(sharing: boolean): void {
     this.isSharing = sharing;
     this.updateMenu();
+    this.updateIcon();
   }
 
   setViewing(viewing: boolean): void {
     this.isViewing = viewing;
     this.updateMenu();
+    this.updateIcon();
   }
 
   setViewerCount(count: number): void {
     this._viewerCount = count;
     this.updateMenu();
+    this.updateIcon();
   }
 
   setRemoteStreamCount(count: number): void {
     this._remoteStreamCount = count;
     this.updateMenu();
+    this.updateIcon();
   }
 
   destroy(): void {
     this.tray?.destroy();
     this.tray = null;
+  }
+
+  private updateIcon(): void {
+    if (!this.tray) return;
+
+    let effectiveState: TrayState;
+    if (this.isSharing && this._viewerCount > 0) {
+      effectiveState = "sharing-and-viewing";
+    } else if (this.isSharing) {
+      effectiveState = "sharing";
+    } else if (this.isViewing) {
+      effectiveState = "viewing";
+    } else {
+      effectiveState = "idle";
+    }
+
+    const iconPath = getTrayIconPath(effectiveState, app.isPackaged);
+    const icon = nativeImage.createFromPath(iconPath);
+    if (!icon.isEmpty()) {
+      this.tray.setImage(icon);
+    }
   }
 
   private updateMenu(): void {

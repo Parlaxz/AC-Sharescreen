@@ -69,6 +69,8 @@ export async function fetchQualityPresets(): Promise<
 export async function createQualityPreset(input: {
   name: string;
   settings: unknown;
+  showInViewerPanel?: boolean;
+  viewerPanelSlot?: number | null;
 }): Promise<{ id: string; name: string; settings: unknown }> {
   const api = getApi();
   if (!api) throw new Error("screenlink API not available");
@@ -87,7 +89,7 @@ export async function createQualityPreset(input: {
  */
 export async function updateQualityPreset(
   id: string,
-  input: { name?: string; settings?: unknown },
+  input: { name?: string; settings?: unknown; showInViewerPanel?: boolean; viewerPanelSlot?: number | null },
 ): Promise<{ id: string; name: string; settings: unknown } | null> {
   const api = getApi();
   if (!api) throw new Error("screenlink API not available");
