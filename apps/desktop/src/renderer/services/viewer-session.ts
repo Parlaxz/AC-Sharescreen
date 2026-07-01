@@ -231,6 +231,8 @@ export class ViewerSession {
   private static readonly SELF_VIEW_MAX_RETRIES = 3;
   /** Delay (ms) between self-view retry attempts. */
   private static readonly SELF_VIEW_RETRY_DELAY_MS = 2_000;
+  /** Max wait for media readiness before retrying play() anyway. */
+  private static readonly PLAY_RETRY_READY_TIMEOUT_MS = 3_000;
   /** Current self-view retry count. Resets on successful start(). */
   private _selfViewRetryCount = 0;
   /** Handle for cancelling a scheduled self-view retry. */
@@ -682,16 +684,23 @@ export class ViewerSession {
     }
 
     return new Promise((resolve) => {
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+
       const finish = (): void => {
         cleanup();
         resolve();
       };
 
       const cleanup = (): void => {
+        if (timeout !== null) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
         el.removeEventListener("canplay", finish);
         el.removeEventListener("loadedmetadata", finish);
       };
 
+      timeout = setTimeout(finish, ViewerSession.PLAY_RETRY_READY_TIMEOUT_MS);
       el.addEventListener("canplay", finish, { once: true });
       el.addEventListener("loadedmetadata", finish, { once: true });
     });

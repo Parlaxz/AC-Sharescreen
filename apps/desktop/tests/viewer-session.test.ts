@@ -1631,6 +1631,44 @@ describe("ViewerSession — stream attachment (grey-screen fix)", () => {
     expect(videoEl.play).toHaveBeenCalledTimes(2);
   });
 
+  it("attachStreamToElement does not hang forever waiting for canplay after AbortError", async () => {
+    vi.useFakeTimers();
+    try {
+      const videoEl = {
+        pause: vi.fn(),
+        srcObject: null,
+        autoplay: false,
+        playsInline: false,
+        muted: false,
+        volume: 1,
+        paused: true,
+        readyState: 0,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        play: vi.fn()
+          .mockRejectedValueOnce(Object.assign(new Error("play() aborted"), { name: "AbortError" }))
+          .mockResolvedValueOnce(undefined),
+      } as unknown as HTMLVideoElement;
+
+      const stream = {
+        addTrack: vi.fn(),
+        getTracks: vi.fn().mockReturnValue([]),
+      } as unknown as MediaStream;
+
+      (session as any).attachStreamToElement(videoEl, stream);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(videoEl.play).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(videoEl.play).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("attachStreamToElement does not retry non-AbortError play failures", async () => {
     const videoEl = {
       pause: vi.fn(),

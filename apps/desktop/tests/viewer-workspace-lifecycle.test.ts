@@ -30,7 +30,7 @@ describe("viewer workspace lifecycle wiring", () => {
 
   it("binds the video element through a callback ref instead of a sessionState effect", () => {
     expect(viewerWorkspaceSrc).toContain("const videoRefCallback = useCallback");
-    expect(viewerWorkspaceSrc).toContain("sessionRef.current.bindVideoElement(el)");
+    expect(viewerWorkspaceSrc).toContain("bindVideoElement(el)");
     expect(viewerWorkspaceSrc).not.toMatch(/useEffect\(\(\) => \{[\s\S]*bindVideoElement\(videoRef\.current\)[\s\S]*sessionState/);
   });
 
@@ -38,5 +38,51 @@ describe("viewer workspace lifecycle wiring", () => {
     expect(viewerWorkspaceSrc).toContain("let _globalDestroyPromise: Promise<void> | null = null");
     expect(viewerWorkspaceSrc).toContain("if (_globalDestroyPromise)");
     expect(viewerWorkspaceSrc).toContain("_globalDestroyPromise = destroyPromise");
+  });
+
+  it("renders a single persistent native <video> element across connecting/reconnecting/degraded/watching", () => {
+    // After unification, only one <video> element should exist in the
+    // template (ended and error states are separate early-return branches).
+    const videoTags = viewerWorkspaceSrc.match(/<video\s/g) ?? [];
+    expect(videoTags).toHaveLength(1);
+  });
+
+  it("videoRefCallback passes null to bindVideoElement on unmount", () => {
+    // The callback ref must always call bindVideoElement(el),
+    // including when el is null (unmount/unbind).
+    expect(viewerWorkspaceSrc).toMatch(
+      /sessionRef\.current\?\.bindVideoElement\(el\)/,
+    );
+  });
+
+  it("does not hide raw video before enhancement produces a frame", () => {
+    // The visibility condition must include enhancementActive as a gate,
+    // not rely solely on enhancementSettings.enabled.
+    expect(viewerWorkspaceSrc).toMatch(
+      /enhancementActive.*enhancementSettings\.enabled/,
+    );
+  });
+
+  it("status UI for connecting/reconnecting/degraded are conditional overlays not separate branches", () => {
+    // Connecting state must NOT be an early return that omits the video element.
+    expect(viewerWorkspaceSrc).not.toMatch(
+      /if \(displayStatus === "connecting"\) \{[\s\S]{0,200}return \(/,
+    );
+    // Reconnecting state must NOT be an early return with its own <video>.
+    expect(viewerWorkspaceSrc).not.toMatch(
+      /if \(displayStatus === "reconnecting"\) \{[\s\S]{0,200}return \(/,
+    );
+    // Connecting overlay must exist as conditional JSX.
+    expect(viewerWorkspaceSrc).toMatch(
+      /\{displayStatus === "connecting" && \(/,
+    );
+    // Reconnecting overlay must exist as conditional JSX.
+    expect(viewerWorkspaceSrc).toMatch(
+      /\{displayStatus === "reconnecting" && \(/,
+    );
+  });
+
+  it("resets enhancementActive at start of a new viewer session", () => {
+    expect(viewerWorkspaceSrc).toContain("setEnhancementActive(false)");
   });
 });

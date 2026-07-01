@@ -528,10 +528,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
    */
   const videoRefCallback = useCallback((el: HTMLVideoElement | null) => {
     videoRef.current = el;
-    // Only bind when there is both an element and an active session
-    if (el && sessionRef.current) {
-      sessionRef.current.bindVideoElement(el);
-    }
+    // Always bind/unbind (including null) so the session stays in sync
+    // with the actual video element lifecycle.
+    sessionRef.current?.bindVideoElement(el);
   }, []);
 
   // Audio boost via Web Audio API GainNode (allows volume > 1.0)
@@ -689,6 +688,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
    * the isViewing effect and from the retry handler.
    */
   const startViewerSession = useCallback(async (shouldAbort: () => boolean = () => false): Promise<void> => {
+    // Reset enhancement active state for the new session so the raw video
+    // is not hidden before the new enhanced path produces its first frame.
+    setEnhancementActive(false);
+
     await ensureAppRuntimeInitialized();
 
     // Await any cross-instance destroy promise from a previous mount
@@ -1804,193 +1807,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ── Render by view status (Section 15) ───────────────────────────
 
-  // Connecting state — Skeleton + status text
-  if (displayStatus === "connecting") {
-    return (
-      <ViewerShell className={className} onExit={handleExit}>
-        <motion.div
-          key="connecting"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={reduced ? fadeInstant : fadeSpring}
-          className="flex flex-col items-center justify-center h-full gap-5"
-          role="status"
-          aria-label="Connecting to stream"
-        >
-          {/* 16:9 skeleton stage */}
-          <div className="relative w-full max-w-3xl aspect-video rounded-standard overflow-hidden bg-surface-2">
-            <Skeleton className="absolute inset-0 rounded-none" />
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="flex flex-col items-center gap-3">
-                <div className="relative">
-                  <Skeleton className="h-16 w-16 rounded-full" />
-                  <span className="absolute inset-0 flex items-center justify-center">
-                    <Monitor className="h-7 w-7 text-text-muted" />
-                  </span>
-                </div>
-                <div className="text-center">
-                  <p className="text-sm text-text-secondary font-medium">
-                    Connecting to {sharerName}'s stream
-                  </p>
-                  <p className="text-xs text-text-muted mt-1">
-                    Establishing secure relay connection...
-                  </p>
-                </div>
-                <Progress value={35} className="w-48 h-1" />
-              </div>
-            </div>
-          </div>
-        </motion.div>
-      </ViewerShell>
-    );
-  }
-
-  // Reconnecting state — Amber Alert with inline Progress
-  if (displayStatus === "reconnecting") {
-    return (
-      <ViewerShell className={className} onExit={handleExit}>
-        <motion.div
-          key="reconnecting"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={reduced ? fadeInstant : fadeSpring}
-          className="flex flex-col h-full"
-        >
-          {/* Preserve video layout — show the video element behind */}
-          <div className="relative flex-1 flex items-center justify-center bg-canvas">
-            <video
-              ref={videoRefCallback}
-              className="h-full object-contain"
-              playsInline
-            />
-
-            {/* Reconnection overlay — inline, non-disruptive */}
-            <div className="absolute top-4 left-4 right-4 z-20">
-              <Alert variant="warning" className="backdrop-blur-sm bg-surface-2/90">
-                <div className="flex items-start gap-3">
-                  <WifiOff className="h-4 w-4 mt-0.5 text-warning" />
-                  <div className="flex-1">
-                    <AlertTitle>Reconnecting</AlertTitle>
-                    <AlertDescription>
-                      Attempting to restore the connection to {sharerName}'s stream.
-                    </AlertDescription>
-                    <Progress value={60} className="mt-3 h-1.5" />
-                  </div>
-                </div>
-              </Alert>
-            </div>
-          </div>
-
-          {/* Controls persist during reconnection */}
-          <VideoControlsOverlay
-            isPaused={isPaused}
-            onTogglePlay={() => setIsPaused((p) => !p)}
-            isStreamPaused={streamPauseState === "paused"}
-            isStreamPauseTransitioning={streamPauseTransitioning}
-            onToggleStreamPause={handleToggleStreamPause}
-            volume={volume}
-            isMuted={isMuted}
-            onVolumeChange={handleVolumeChange}
-            onToggleMute={handleToggleMute}
-            currentStreamId={currentStreamId ?? ""}
-            onStreamSwitch={handleStreamSwitch}
-            connectionState="reconnecting"
-            isFullscreen={isFullscreen}
-            onToggleFullscreen={handleToggleFullscreen}
-            onExit={handleExit}
-            controlsVisible={controlsVisible}
-            showControls={showControls}
-            isLive
-            isScreenLinkDeafened={isScreenLinkDeafened}
-            onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
-            currentBandwidthBps={currentBandwidthBps}
-            totalBytesReceived={totalBytesReceived}
-            activeDurationMs={activeDurationMs}
-            discordMuteBinding={discordMuteBinding}
-            discordDeafenBinding={discordDeafenBinding}
-            syncScreenLinkDeafen={syncScreenLinkDeafen}
-            maxVolumePercent={maxVolumePercent}
-            activePanel={activePanel}
-            onActivePanelChange={setActivePanel}
-          />
-        </motion.div>
-      </ViewerShell>
-    );
-  }
-
-  // Degraded state — Amber Alert
-  if (displayStatus === "degraded") {
-    return (
-      <ViewerShell className={className} onExit={handleExit}>
-        <motion.div
-          key="degraded"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={reduced ? fadeInstant : fadeSpring}
-          className="flex flex-col h-full"
-        >
-          <div className="relative flex-1 flex items-center justify-center bg-canvas">
-            <video
-              ref={videoRefCallback}
-              className="h-full object-contain"
-              playsInline
-            />
-
-            {/* Degraded overlay — amber, compact */}
-            <div className="absolute top-4 left-4 right-4 z-20">
-              <Alert variant="warning" className="backdrop-blur-sm bg-surface-2/90">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="h-4 w-4 mt-0.5 text-warning" />
-                  <div className="flex-1">
-                    <AlertTitle>Connection degraded</AlertTitle>
-                    <AlertDescription>
-                      The stream quality may be reduced. The host's connection is
-                      experiencing issues.
-                    </AlertDescription>
-                  </div>
-                </div>
-              </Alert>
-            </div>
-          </div>
-
-          <VideoControlsOverlay
-            isPaused={isPaused}
-            onTogglePlay={() => setIsPaused((p) => !p)}
-            isStreamPaused={streamPauseState === "paused"}
-            isStreamPauseTransitioning={streamPauseTransitioning}
-            onToggleStreamPause={handleToggleStreamPause}
-            volume={volume}
-            isMuted={isMuted}
-            onVolumeChange={handleVolumeChange}
-            onToggleMute={handleToggleMute}
-            currentStreamId={currentStreamId ?? ""}
-            onStreamSwitch={handleStreamSwitch}
-            connectionState="degraded"
-            isFullscreen={isFullscreen}
-            onToggleFullscreen={handleToggleFullscreen}
-            onExit={handleExit}
-            controlsVisible={controlsVisible}
-            showControls={showControls}
-            isLive
-            isScreenLinkDeafened={isScreenLinkDeafened}
-            onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
-            currentBandwidthBps={currentBandwidthBps}
-            totalBytesReceived={totalBytesReceived}
-            activeDurationMs={activeDurationMs}
-            discordMuteBinding={discordMuteBinding}
-            discordDeafenBinding={discordDeafenBinding}
-            syncScreenLinkDeafen={syncScreenLinkDeafen}
-            maxVolumePercent={maxVolumePercent}
-            activePanel={activePanel}
-            onActivePanelChange={setActivePanel}
-          />
-        </motion.div>
-      </ViewerShell>
-    );
-  }
+  // Terminal states that don't need a video element
 
   // Stream ended state — Animated exit with auto-navigate
   if (displayStatus === "ended") {
@@ -2085,26 +1902,28 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     );
   }
 
-  // ── Watching / default state: Video stage with controls ────────
+  // ── Unified viewer stage: connecting / reconnecting / degraded / watching ──
+  // One persistent <video> element stays mounted across all these states.
+  // Status UI is rendered as conditional overlays on top of the video stage.
 
   return (
     <ViewerShell className={className} onExit={handleExit}>
       <motion.div
-        key="watching"
+        key="viewer-stage"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         transition={reduced ? fadeInstant : fadeSpring}
         className="flex flex-col h-full"
-        onMouseMove={showControls}
-        onMouseEnter={showControls}
-        onMouseLeave={hideControls}
+        {...(displayStatus === "watching" ? {
+          onMouseMove: showControls,
+          onMouseEnter: showControls,
+          onMouseLeave: hideControls,
+        } : {})}
       >
         {/* ── Video stage ──────────────────────────────────────────── */}
         <div className="relative flex-1 flex items-center justify-center bg-black">
-          {/* ── Raw source video — ALWAYS mounted ── */}
-          {/* Keeps the WebRTC MediaStream pipeline alive. In compare mode
-              it is visually hidden behind the CompareViewerSurface layers. */}
+          {/* ── Raw source video — persistent across all states ── */}
           <video
             ref={videoRefCallback}
             data-video-native
@@ -2114,6 +1933,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               isCompareActive && "invisible",
               // Non-compare mode visibility rules:
               !isCompareActive && streamPauseState === "paused" && "opacity-30",
+              // Only hide raw video when enhanced output is actually active/ready
               !isCompareActive && enhancementActive && !enhancementFallback && enhancementSettings.enabled && streamPauseState === "playing" && "invisible",
             )}
             playsInline
@@ -2125,6 +1945,89 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             }}
           />
 
+          {/* ▸ Connecting overlay — skeleton + status text */}
+          {displayStatus === "connecting" && (
+            <motion.div
+              key="connecting-overlay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={reduced ? fadeInstant : fadeSpring}
+              className="absolute inset-0 z-10 flex items-center justify-center bg-surface-2/80"
+              role="status"
+              aria-label="Connecting to stream"
+            >
+              <div className="flex flex-col items-center gap-3">
+                <div className="relative">
+                  <Skeleton className="h-16 w-16 rounded-full" />
+                  <span className="absolute inset-0 flex items-center justify-center">
+                    <Monitor className="h-7 w-7 text-text-muted" />
+                  </span>
+                </div>
+                <div className="text-center">
+                  <p className="text-sm text-text-secondary font-medium">
+                    Connecting to {sharerName}'s stream
+                  </p>
+                  <p className="text-xs text-text-muted mt-1">
+                    Establishing secure relay connection...
+                  </p>
+                </div>
+                <Progress value={35} className="w-48 h-1" />
+              </div>
+            </motion.div>
+          )}
+
+          {/* ▸ Reconnecting overlay — amber alert + progress */}
+          {displayStatus === "reconnecting" && (
+            <motion.div
+              key="reconnecting-overlay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={reduced ? fadeInstant : fadeSpring}
+              className="absolute top-4 left-4 right-4 z-20"
+            >
+              <Alert variant="warning" className="backdrop-blur-sm bg-surface-2/90">
+                <div className="flex items-start gap-3">
+                  <WifiOff className="h-4 w-4 mt-0.5 text-warning" />
+                  <div className="flex-1">
+                    <AlertTitle>Reconnecting</AlertTitle>
+                    <AlertDescription>
+                      Attempting to restore the connection to {sharerName}'s stream.
+                    </AlertDescription>
+                    <Progress value={60} className="mt-3 h-1.5" />
+                  </div>
+                </div>
+              </Alert>
+            </motion.div>
+          )}
+
+          {/* ▸ Degraded overlay — amber alert */}
+          {displayStatus === "degraded" && (
+            <motion.div
+              key="degraded-overlay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={reduced ? fadeInstant : fadeSpring}
+              className="absolute top-4 left-4 right-4 z-20"
+            >
+              <Alert variant="warning" className="backdrop-blur-sm bg-surface-2/90">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 text-warning" />
+                  <div className="flex-1">
+                    <AlertTitle>Connection degraded</AlertTitle>
+                    <AlertDescription>
+                      The stream quality may be reduced. The host's connection is
+                      experiencing issues.
+                    </AlertDescription>
+                  </div>
+                </div>
+              </Alert>
+            </motion.div>
+          )}
+
+          {/* ── Compare / Enhancement / Paused overlays ── */}
           {isCompareActive ? (
             <div className="absolute inset-0 z-10">
               <CompareViewerSurface
@@ -2191,6 +2094,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           )}
           </div> {/* ── End video stage ── */}
 
+          {/* ▸ Compare settings B modal */}
           {isCompareActive && compareSettingsBOpen && (
             <div
               className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 px-4"
@@ -2231,10 +2135,13 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             </div>
           )}
 
-          {/* Top-left exit button — fades in/out with controls */}
+          {/* ▸ Top-left exit button — fades with controls when watching, always visible otherwise */}
           <motion.div
             initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: controlsVisible ? 1 : 0, x: controlsVisible ? 0 : -10 }}
+            animate={{
+              opacity: displayStatus === "watching" ? (controlsVisible ? 1 : 0) : 1,
+              x: displayStatus === "watching" ? (controlsVisible ? 0 : -10) : 0,
+            }}
             exit={{ opacity: 0, x: -10 }}
             transition={{ duration: 0.2, ease: "easeInOut" }}
             className="absolute top-3 left-3 z-30"
@@ -2251,70 +2158,72 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             </Button>
           </motion.div>
 
-          {/* Unified panel shell with video controls as anchor */}
-          <ViewerPanelShell
-            activePanel={activePanel}
-            onActivePanelChange={setActivePanel}
-            session={sessionRef.current}
-            lastRequestedQuality={lastRequestedQuality}
-            effectiveBitrateKbps={effectiveBitrateKbps}
-            configuredBitrateBps={configuredBitrateBps}
-            requestState={viewerRequest}
-            onRequestChange={handleQualityRequestChange}
-            requestPending={qualityRequestPending}
-            lastRequestAccepted={lastQualityAccepted}
-            requestFeedback={qualityFeedback}
-            enhancementSettings={enhancementSettings}
-            onEnhancementChange={handleEnhancementChange}
-            onEnhancementReset={handleEnhancementReset}
-            enhancementStats={enhancementStats}
-            mediaSessionId={watchedSessionId}
-            viewerHistoryId={viewerHistoryId}
-            benchmarkRunning={nvidiaBenchmarkService.running}
-            benchmarkProgress={benchmarkProgress}
-            onRunBenchmark={handleRunBenchmark}
-            onCancelBenchmark={handleCancelBenchmark}
-            onApplyBenchmarkRecommendation={handleApplyBenchmarkRecommendation}
-          >
-            <VideoControlsOverlay
-              isPaused={isPaused}
-              onTogglePlay={() => setIsPaused((p) => !p)}
-              isStreamPaused={streamPauseState === "paused"}
-              isStreamPauseTransitioning={streamPauseTransitioning}
-              onToggleStreamPause={handleToggleStreamPause}
-              volume={volume}
-              isMuted={isMuted}
-              onVolumeChange={handleVolumeChange}
-              onToggleMute={handleToggleMute}
-              currentStreamId={currentStreamId ?? ""}
-              onStreamSwitch={handleStreamSwitch}
-              connectionState={
-                displayStatus === "watching"
-                  ? "connected"
-                  : displayStatus === "degraded"
-                  ? "degraded"
-                  : "connected"
-              }
-              isFullscreen={isFullscreen}
-              onToggleFullscreen={handleToggleFullscreen}
-              onExit={handleExit}
-              controlsVisible={controlsVisible}
-              showControls={showControls}
-              isLive
-              isScreenLinkDeafened={isScreenLinkDeafened}
-              onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
-              currentBandwidthBps={currentBandwidthBps}
-              totalBytesReceived={totalBytesReceived}
-              activeDurationMs={activeDurationMs}
-              discordMuteBinding={discordMuteBinding}
-              discordDeafenBinding={discordDeafenBinding}
-              syncScreenLinkDeafen={syncScreenLinkDeafen}
-              maxVolumePercent={maxVolumePercent}
+          {/* ▸ Controls and panels — shown whenever not connecting */}
+          {displayStatus !== "connecting" && (
+            <ViewerPanelShell
               activePanel={activePanel}
               onActivePanelChange={setActivePanel}
-              onCompareToggle={handleCompareToggleWithSettingsB}
-            />
-          </ViewerPanelShell>
+              session={sessionRef.current}
+              lastRequestedQuality={lastRequestedQuality}
+              effectiveBitrateKbps={effectiveBitrateKbps}
+              configuredBitrateBps={configuredBitrateBps}
+              requestState={viewerRequest}
+              onRequestChange={handleQualityRequestChange}
+              requestPending={qualityRequestPending}
+              lastRequestAccepted={lastQualityAccepted}
+              requestFeedback={qualityFeedback}
+              enhancementSettings={enhancementSettings}
+              onEnhancementChange={handleEnhancementChange}
+              onEnhancementReset={handleEnhancementReset}
+              enhancementStats={enhancementStats}
+              mediaSessionId={watchedSessionId}
+              viewerHistoryId={viewerHistoryId}
+              benchmarkRunning={nvidiaBenchmarkService.running}
+              benchmarkProgress={benchmarkProgress}
+              onRunBenchmark={handleRunBenchmark}
+              onCancelBenchmark={handleCancelBenchmark}
+              onApplyBenchmarkRecommendation={handleApplyBenchmarkRecommendation}
+            >
+              <VideoControlsOverlay
+                isPaused={isPaused}
+                onTogglePlay={() => setIsPaused((p) => !p)}
+                isStreamPaused={streamPauseState === "paused"}
+                isStreamPauseTransitioning={streamPauseTransitioning}
+                onToggleStreamPause={handleToggleStreamPause}
+                volume={volume}
+                isMuted={isMuted}
+                onVolumeChange={handleVolumeChange}
+                onToggleMute={handleToggleMute}
+                currentStreamId={currentStreamId ?? ""}
+                onStreamSwitch={handleStreamSwitch}
+                connectionState={
+                  displayStatus === "watching"
+                    ? "connected"
+                    : displayStatus === "degraded"
+                    ? "degraded"
+                    : "connected"
+                }
+                isFullscreen={isFullscreen}
+                onToggleFullscreen={handleToggleFullscreen}
+                onExit={handleExit}
+                controlsVisible={controlsVisible}
+                showControls={showControls}
+                isLive
+                isScreenLinkDeafened={isScreenLinkDeafened}
+                onToggleScreenLinkDeafen={handleToggleScreenLinkDeafen}
+                currentBandwidthBps={currentBandwidthBps}
+                totalBytesReceived={totalBytesReceived}
+                activeDurationMs={activeDurationMs}
+                discordMuteBinding={discordMuteBinding}
+                discordDeafenBinding={discordDeafenBinding}
+                syncScreenLinkDeafen={syncScreenLinkDeafen}
+                maxVolumePercent={maxVolumePercent}
+                activePanel={activePanel}
+                onActivePanelChange={setActivePanel}
+                onCompareToggle={handleCompareToggleWithSettingsB}
+              />
+            </ViewerPanelShell>
+          )}
       </motion.div>
     </ViewerShell>
   );
