@@ -36,11 +36,9 @@ function formatBytes(bytes: number): string {
 }
 
 function formatBitrate(kbps: number): string {
-  const Bps = kbps * 125; // kbps * 1000 / 8
-  if (Bps < 1000) return `${Math.round(Bps)} B/s`;
-  const kBps = Bps / 1000;
-  if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
-  return `${(kBps / 1000).toFixed(2)} MB/s`;
+  if (kbps <= 0) return "0 kbps";
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
+  return `${Math.round(kbps)} kbps`;
 }
 
 function formatDuration(seconds: number): string {

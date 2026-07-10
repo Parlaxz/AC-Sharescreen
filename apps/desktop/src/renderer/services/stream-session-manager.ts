@@ -87,6 +87,7 @@ export class StreamSessionManager {
   private streamRevision: number = 0;
   private heartbeatSeq: number = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private reannounceTimer: ReturnType<typeof setInterval> | null = null;
   private currentTrack: MediaStreamTrack | null = null;
   private destroyed = false;
   private _hostDeviceId = "local";
@@ -562,6 +563,9 @@ export class StreamSessionManager {
 
     // Start heartbeat timer (every 10s)
     this.startHeartbeat();
+    // Start re-announce timer (every 15s) so late-joining peers
+    // discover the stream even if they missed stream.started.
+    this.startReannounce();
 
     this._state = "active";
     console.log("[stream-session] stream active —", this.logicalStreamId);
@@ -750,6 +754,7 @@ export class StreamSessionManager {
 
     this._state = "stopping";
     this.stopHeartbeat();
+    this.stopReannounce();
 
     // Capture identity before reset
     const lastGroupId = this.groupId;
@@ -852,6 +857,7 @@ export class StreamSessionManager {
 
     this._state = "restarting";
     this.stopHeartbeat();
+    this.stopReannounce();
 
     // ── Phase A: Critical media restart (any failure is fatal) ────────
     let newMediaSessionId: string;
@@ -1061,8 +1067,9 @@ export class StreamSessionManager {
       );
     }
 
-    // 11. Start heartbeat
+    // 11. Start heartbeat + re-announce timer
     this.startHeartbeat();
+    this.startReannounce();
     this._state = "active";
   }
 
@@ -1078,6 +1085,7 @@ export class StreamSessionManager {
     if (this.destroyed) return;
     this.destroyed = true;
     this.stopHeartbeat();
+    this.stopReannounce();
 
     // If stream was active, propagate stream.stopped before clearing state
     const wasActive = this._state === "active" || this._state === "restarting";
@@ -1421,6 +1429,36 @@ export class StreamSessionManager {
     } catch {
       // Heartbeat failures are non-fatal — the stream remains active
       // and the next heartbeat will retry.
+    }
+  }
+
+  private startReannounce(): void {
+    if (this.reannounceTimer) return;
+    this.reannounceTimer = setInterval(() => {
+      void this.sendReannounce();
+    }, 15_000);
+  }
+
+  private stopReannounce(): void {
+    if (this.reannounceTimer) {
+      clearInterval(this.reannounceTimer);
+      this.reannounceTimer = null;
+    }
+  }
+
+  private async sendReannounce(): Promise<void> {
+    if (this._state !== "active" || !this.groupId || !this.logicalStreamId) return;
+    if (this.destroyed) return;
+
+    try {
+      const connManager = this.runtime.getConnectionManager();
+      const announcement = this.buildAnnouncement();
+      await connManager.broadcast(this.groupId, {
+        type: "stream.state.snapshot",
+        streams: [announcement],
+      });
+    } catch {
+      // Re-announce failures are non-fatal.
     }
   }
 }

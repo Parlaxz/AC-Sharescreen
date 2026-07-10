@@ -90,6 +90,11 @@ export async function initializeAppRuntime(
           record.sharedState,
           record.lastClock,
         );
+
+        // Auto-request stream state from all peers so active shares
+        // are discovered immediately on app open without waiting for
+        // the hello-handshake snapshot push.
+        runtime.requestGroupSync(config.groupId)?.catch(() => {});
       }
     } catch (err) {
       console.warn(`[App] Failed to initialize group ${record.groupId}:`, err);

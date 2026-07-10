@@ -143,7 +143,7 @@ export function qualityEditorFieldsValid(value: QualityEditorFieldsValue): strin
     value.bitrate < BITRATE_MIN ||
     value.bitrate > BITRATE_MAX
   ) {
-    return `Bitrate must be between ${BITRATE_MIN} and ${BITRATE_MAX} kbps (≈${(BITRATE_MIN * 125 / 1000).toFixed(1)} kB/s–${(BITRATE_MAX * 125 / 1000).toFixed(0)} kB/s)`;
+    return `Bitrate must be between ${BITRATE_MIN} and ${BITRATE_MAX} kbps`;
   }
   return null;
 }
@@ -262,38 +262,64 @@ export function QualityEditorFields({
 
         {/* FPS */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="quality-fps">Frame rate</Label>
-            <span className="text-xs font-mono tabular-nums text-text-primary">
-              {value.fps} fps
-            </span>
+          <Label htmlFor="quality-fps">Frame rate</Label>
+          <div className="flex items-center gap-2">
+            <Slider
+              value={[value.fps]}
+              onValueChange={([v]) => update({ fps: v ?? FPS_MIN })}
+              min={FPS_MIN}
+              max={FPS_MAX}
+              step={1}
+              disabled={disabled}
+              className="flex-1"
+            />
+            <Input
+              id="quality-fps"
+              type="number"
+              value={value.fps}
+              min={FPS_MIN}
+              max={FPS_MAX}
+              step={1}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (Number.isFinite(v)) update({ fps: Math.min(FPS_MAX, Math.max(FPS_MIN, v)) });
+              }}
+              disabled={disabled}
+              className="w-16"
+            />
+            <span className="text-xs text-text-muted whitespace-nowrap">fps</span>
           </div>
-          <Slider
-            value={[value.fps]}
-            onValueChange={([v]) => update({ fps: v ?? FPS_MIN })}
-            min={FPS_MIN}
-            max={FPS_MAX}
-            step={1}
-            disabled={disabled}
-          />
         </div>
 
         {/* Bitrate */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="quality-bitrate">Bitrate</Label>
-            <span className="text-xs font-mono tabular-nums text-text-primary">
-              {(() => { const Bps = value.bitrate * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; const kBps = Bps / 1000; if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`; return `${(kBps / 1000).toFixed(2)} MB/s`; })()}
-            </span>
+          <Label htmlFor="quality-bitrate">Bitrate</Label>
+          <div className="flex items-center gap-2">
+            <Slider
+              value={[value.bitrate]}
+              onValueChange={([v]) => update({ bitrate: v ?? BITRATE_MIN })}
+              min={BITRATE_MIN}
+              max={BITRATE_MAX}
+              step={50}
+              disabled={disabled}
+              className="flex-1"
+            />
+            <Input
+              id="quality-bitrate"
+              type="number"
+              value={value.bitrate}
+              min={BITRATE_MIN}
+              max={BITRATE_MAX}
+              step={50}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10);
+                if (Number.isFinite(v)) update({ bitrate: Math.min(BITRATE_MAX, Math.max(BITRATE_MIN, v)) });
+              }}
+              disabled={disabled}
+              className="w-20"
+            />
+            <span className="text-xs text-text-muted whitespace-nowrap">kbps</span>
           </div>
-          <Slider
-            value={[value.bitrate]}
-            onValueChange={([v]) => update({ bitrate: v ?? BITRATE_MIN })}
-            min={BITRATE_MIN}
-            max={BITRATE_MAX}
-            step={50}
-            disabled={disabled}
-          />
         </div>
 
         {/* Codec */}

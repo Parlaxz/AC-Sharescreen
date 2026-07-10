@@ -36,3 +36,55 @@ export function resolveViewerQualityFeedbackStreamId(input: {
     ?? input.currentStreamLogicalStreamId
     ?? null;
 }
+
+type ViewerQualityEffectiveFeedbackInput = {
+  videoBitrateKbps?: number | null;
+  clampReasons?: string[] | null;
+};
+
+type ViewerQualityEffectiveFeedback = {
+  accepted: boolean;
+  message: string;
+};
+
+const REJECTED_QUALITY_REASON_PATTERNS = [
+  /^mapping missing$/i,
+  /^sender not ready/i,
+  /^application failed:/i,
+];
+
+function isRejectedQualityReason(reason: string): boolean {
+  return REJECTED_QUALITY_REASON_PATTERNS.some((pattern) => pattern.test(reason));
+}
+
+function formatViewerQualityKbps(kbps?: number | null): string {
+  if (!kbps || kbps <= 0) return "requested rate";
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} MB/s`;
+  return `${kbps} kb/s`;
+}
+
+export function getViewerQualityEffectiveFeedback(
+  input: ViewerQualityEffectiveFeedbackInput,
+): ViewerQualityEffectiveFeedback {
+  const clampReasons = input.clampReasons ?? [];
+  const rejectedReasons = clampReasons.filter(isRejectedQualityReason);
+
+  if (rejectedReasons.length > 0) {
+    return {
+      accepted: false,
+      message: `Pending apply: ${rejectedReasons.join("; ")}`,
+    };
+  }
+
+  if (clampReasons.length > 0) {
+    return {
+      accepted: true,
+      message: `Accepted, capped: ${clampReasons.join("; ")}`,
+    };
+  }
+
+  return {
+    accepted: true,
+    message: `Accepted at ${formatViewerQualityKbps(input.videoBitrateKbps)}`,
+  };
+}

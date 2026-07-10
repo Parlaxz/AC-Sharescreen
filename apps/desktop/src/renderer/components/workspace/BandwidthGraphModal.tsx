@@ -48,7 +48,7 @@ import {
   fmtCumulativeBytes,
   fmtDuration,
   fmtHourlyUsage,
-  estimateHourlyBytes,
+  computeWindowedEstimate,
 } from "@/services/bandwidth-telemetry-types";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
 import { loadSettings } from "@/services/settings-actions";
@@ -216,69 +216,6 @@ function fmtShortDuration(ms: number): string {
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   const minutes = Math.round(ms / 60_000);
   return `${minutes}m`;
-}
-
-// ─── Windowed hourly estimate ───────────────────────────────────────────────
-
-function computeWindowedEstimate(
-  samples: readonly TelemetrySample[],
-  windowMs: number,
-  fallbackTotalBytes: number,
-  fallbackActiveDurationMs: number,
-): { bytesPerHour: number; actualDurationMs: number } {
-  if (samples.length < 2) {
-    return {
-      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
-      actualDurationMs: fallbackActiveDurationMs,
-    };
-  }
-
-  const now = Date.now();
-  const cutoff = now - windowMs;
-
-  // Find first sample within the window
-  let startIdx = 0;
-  for (let i = 0; i < samples.length; i++) {
-    if (samples[i].timestampMs >= cutoff) {
-      startIdx = i;
-      break;
-    }
-  }
-
-  // Not enough samples in window — fall back to session span
-  if (startIdx >= samples.length - 1) {
-    const first = samples[0];
-    const last = samples[samples.length - 1];
-    const byteDelta = last.cumulativeMediaBytes - first.cumulativeMediaBytes;
-    const timeDelta = last.timestampMs - first.timestampMs;
-    if (byteDelta > 0 && timeDelta > 0) {
-      return {
-        bytesPerHour: estimateHourlyBytes(byteDelta, timeDelta),
-        actualDurationMs: timeDelta,
-      };
-    }
-    return {
-      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
-      actualDurationMs: fallbackActiveDurationMs,
-    };
-  }
-
-  const first = samples[startIdx];
-  const last = samples[samples.length - 1];
-  const byteDelta = last.cumulativeMediaBytes - first.cumulativeMediaBytes;
-  const timeDelta = last.timestampMs - first.timestampMs;
-
-  if (byteDelta <= 0 || timeDelta <= 0) {
-    return {
-      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
-      actualDurationMs: fallbackActiveDurationMs,
-    };
-  }
-
-  return {
-    bytesPerHour: estimateHourlyBytes(byteDelta, timeDelta),
-    actualDurationMs: timeDelta,
-  };
 }
 
 // ─── Chart data preparation ─────────────────────────────────────────────────

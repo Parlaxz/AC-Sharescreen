@@ -216,6 +216,24 @@ export class ActiveStreamRegistry {
     return null;
   }
 
+  clearGroupStreams(groupId: string, exceptDeviceId?: string): void {
+    const toDelete: string[] = [];
+    for (const [k, s] of this.streams) {
+      if (s.announcement.groupId === groupId) {
+        if (exceptDeviceId && s.announcement.hostDeviceId === exceptDeviceId) continue;
+        toDelete.push(k);
+      }
+    }
+    for (const k of toDelete) {
+      const s = this.streams.get(k);
+      this.streams.delete(k);
+      this.heartbeatSequences.delete(k);
+      if (s) {
+        this.emit({ type: "stopped", stream: { ...s.announcement } });
+      }
+    }
+  }
+
   getGroupKeys(groupId: string): Array<{ hostDeviceId: string; logicalStreamId: string }> {
     const result: Array<{ hostDeviceId: string; logicalStreamId: string }> = [];
     for (const s of this.streams.values()) {

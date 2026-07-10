@@ -41,6 +41,6 @@ export function computeScale(
 }
 
 /**
- * The minimum configurable video ceiling in kbps (displayed as kB/s in UI).
+ * The minimum configurable video ceiling in kbps.
  */
 export const MIN_CONFIGURABLE_VIDEO_CEILING_KBPS = 100;

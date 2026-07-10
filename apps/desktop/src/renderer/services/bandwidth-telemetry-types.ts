@@ -445,3 +445,83 @@ export function fmtDuration(ms: number): string {
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
 }
+
+/**
+ * Compute an hourly bandwidth usage estimate from raw TelemetrySample[]
+ * within a sliding window. Falls back to session-wide totalBytes/activeDurationMs
+ * when insufficient samples exist.
+ *
+ * Uses per-sample byte deltas (mediaBitsPerSecond * intervalMs / 8000) rather
+ * than cumulativeMediaBytes subtraction, so it works correctly for both
+ * per-connection samples (where cumulativeMediaBytes is truly cumulative) and
+ * aggregated samples (where cumulativeMediaBytes is per-interval only).
+ */
+export function computeWindowedEstimate(
+  samples: readonly TelemetrySample[],
+  windowMs: number,
+  fallbackTotalBytes: number,
+  fallbackActiveDurationMs: number,
+): { bytesPerHour: number; actualDurationMs: number } {
+  if (samples.length < 2) {
+    return {
+      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
+      actualDurationMs: fallbackActiveDurationMs,
+    };
+  }
+
+  const now = Date.now();
+  const cutoff = now - windowMs;
+
+  // Find first sample within the window
+  let startIdx = 0;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i].timestampMs >= cutoff) {
+      startIdx = i;
+      break;
+    }
+  }
+
+  // Helper: compute byte delta by summing per-sample deltas.
+  function sumByteDelta(fromIdx: number, toIdx: number): number {
+    let total = 0;
+    for (let i = fromIdx; i <= toIdx; i++) {
+      total += (samples[i].mediaBitsPerSecond * samples[i].intervalMs) / 8000;
+    }
+    return total;
+  }
+
+  // Not enough samples in window — fall back to session span
+  if (startIdx >= samples.length - 1) {
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const byteDelta = sumByteDelta(0, samples.length - 1);
+    const timeDelta = last.timestampMs - first.timestampMs;
+    if (byteDelta > 0 && timeDelta > 0) {
+      return {
+        bytesPerHour: estimateHourlyBytes(byteDelta, timeDelta),
+        actualDurationMs: timeDelta,
+      };
+    }
+    return {
+      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
+      actualDurationMs: fallbackActiveDurationMs,
+    };
+  }
+
+  const first = samples[startIdx];
+  const last = samples[samples.length - 1];
+  const byteDelta = sumByteDelta(startIdx, samples.length - 1);
+  const timeDelta = last.timestampMs - first.timestampMs;
+
+  if (byteDelta <= 0 || timeDelta <= 0) {
+    return {
+      bytesPerHour: estimateHourlyBytes(fallbackTotalBytes, fallbackActiveDurationMs),
+      actualDurationMs: fallbackActiveDurationMs,
+    };
+  }
+
+  return {
+    bytesPerHour: estimateHourlyBytes(byteDelta, timeDelta),
+    actualDurationMs: timeDelta,
+  };
+}

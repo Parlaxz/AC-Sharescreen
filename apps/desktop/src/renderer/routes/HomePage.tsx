@@ -51,7 +51,7 @@ function presetSummary(
   return {
     id: preset.id,
     name: preset.name,
-    summary: `${w}×${h} @ ${f} fps · ${(() => { const Bps = b * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; return `${(Bps / 1000).toFixed(1)} kB/s`; })()}`,
+    summary: `${w}×${h} @ ${f} fps · ${b >= 1000 ? `${(b / 1000).toFixed(1)} Mbps` : `${Math.round(b)} kbps`}`,
   };
 }
 

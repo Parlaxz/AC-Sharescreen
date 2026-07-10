@@ -248,6 +248,7 @@ export async function stopShare(): Promise<void> {
     store.setIsSharing(false);
     store.setLocalShareState("idle");
     store.setIsDegraded(false);
+    useStore.setState({ viewerCount: 0 });
     return;
   }
 
@@ -261,5 +262,6 @@ export async function stopShare(): Promise<void> {
     store.setSharingGroupId(null);
     store.setLocalShareState("idle");
     store.setIsDegraded(false);
+    useStore.setState({ viewerCount: 0 });
   }
 }

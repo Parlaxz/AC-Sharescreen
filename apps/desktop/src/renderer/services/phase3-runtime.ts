@@ -539,18 +539,26 @@ export class Phase3Runtime {
   private async doRequestGroupSync(groupId: string): Promise<void> {
     if (this.destroyed) return;
 
-    // 1) Trigger group state anti-entropy (name/member/quality sync)
+    // 1) Clear stale remote stream entries before requesting fresh state.
+    //    Keeps local host entries intact.
+    this.activeStreamRegistry.clearGroupStreams(groupId, this._deviceId ?? undefined);
+
+    // 2) Trigger group state anti-entropy (name/member/quality sync)
     await this.syncService.requestSync(groupId);
 
-    // 2) Actively request state from all connected peers.
+    // 3) Actively request state from all peers.
     //    Sends both group.state.request (explicit peer state push)
     //    and stream.state.request (active stream discovery).
+    //    Uses broadcast as a fallback to reach peers not tracked in
+    //    connectedPeers (fixes stale connection-state bugs).
     const conn = this.connManager.getConnection(groupId);
     if (conn && conn.state === "connected") {
       for (const peerUuid of conn.connectedPeers) {
         void conn.sendToPeer(peerUuid, { type: "group.state.request" }).catch(() => {});
         void conn.sendToPeer(peerUuid, { type: "stream.state.request" }).catch(() => {});
       }
+      // Broadcast to reach any peers not in connectedPeers list
+      void conn.broadcast({ type: "stream.state.request" }).catch(() => {});
     }
   }
 }

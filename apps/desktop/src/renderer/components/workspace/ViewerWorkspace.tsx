@@ -47,6 +47,7 @@ import { saveSettings } from "@/services/settings-actions";
 import { StreamInfoCard } from "./viewer/StreamInfoCard.js";
 import { useStreamDiagnostics } from "@/hooks/use-stream-diagnostics";
 import {
+  getViewerQualityEffectiveFeedback,
   getViewerQualityDispatchError,
   resolveViewerQualityFeedbackStreamId,
 } from "./viewer/viewer-quality-helpers.js";
@@ -54,7 +55,7 @@ import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@
 import { getRuntime } from "@/services/phase3-runtime.js";
 import { uiSoundService } from "@/services/ui-sound-service.js";
 import { initializeAppRuntime } from "@/services/initialize-app-runtime.js";
-import type { ScreenLinkAPI } from "../../../preload/api-types.js";
+import type { ScreenLinkAPI, PersistedSettings } from "../../../preload/api-types.js";
 import { navigateToGroupOverview } from "@/services/group-navigation";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
 import { CompareViewerSurface, type CompareDisplayMode } from "@/components/workspace/CompareViewerSurface";
@@ -187,12 +188,9 @@ function formatLiveDuration(startedAt: number): string {
 // ─── Bitrate formatting ──────────────────────────────────────────────────
 
 function fmtKbps(kbps: number): string {
-  if (kbps <= 0) return "0 kB/s";
-  const Bps = kbps * 125; // kbps * 1000 / 8
-  if (Bps < 1000) return `${Math.round(Bps)} B/s`;
-  const kBps = Bps / 1000;
-  if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`;
-  return `${(kBps / 1000).toFixed(2)} MB/s`;
+  if (kbps <= 0) return "0 kbps";
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
+  return `${Math.round(kbps)} kbps`;
 }
 
 // ─── Auto-hide timeout hook ──────────────────────────────────────────────
@@ -433,29 +431,47 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   const [maxVolumePercent, setMaxVolumePercent] = useState(200);
 
+  // ── Settings loader (shared between mount and page-change) ──────────────
+  const applySettings = useCallback((settings: PersistedSettings) => {
+    if (settings.discordMuteShortcut?.key) {
+      setDiscordMuteBinding(settings.discordMuteShortcut);
+    }
+    if (settings.discordDeafenShortcut?.key) {
+      setDiscordDeafenBinding(settings.discordDeafenShortcut);
+    }
+    setSyncScreenLinkDeafen(settings.discordDeafenScreenLink ?? true);
+    setMaxVolumePercent(settings.viewerMaxVolumePercent ?? 200);
+    if (settings.streamInfoCard) {
+      setShowStreamInfoCard(settings.streamInfoCard.visible ?? false);
+      setStreamInfoCardConfig(settings.streamInfoCard);
+    }
+    // Extract codec preference from global quality defaults
+    const codec = settings.globalQualityDefaults?.video?.codec;
+    if (codec) {
+      setRequestedCodec(codec);
+    }
+  }, []);
+
+  // Load settings on mount
   useEffect(() => {
-    void loadSettings().then((settings) => {
-      if (settings.discordMuteShortcut?.key) {
-        setDiscordMuteBinding(settings.discordMuteShortcut);
-      }
-      if (settings.discordDeafenShortcut?.key) {
-        setDiscordDeafenBinding(settings.discordDeafenShortcut);
-      }
-      setSyncScreenLinkDeafen(settings.discordDeafenScreenLink ?? true);
-      setMaxVolumePercent(settings.viewerMaxVolumePercent ?? 200);
-      if (settings.streamInfoCard) {
-        setShowStreamInfoCard(settings.streamInfoCard.visible ?? false);
-        setStreamInfoCardConfig(settings.streamInfoCard);
-      }
-      // Extract codec preference from global quality defaults
-      const codec = settings.globalQualityDefaults?.video?.codec;
-      if (codec) {
-        setRequestedCodec(codec);
-      }
-    }).catch(() => {
+    void loadSettings().then(applySettings).catch(() => {
       // keep defaults
     });
-  }, []);
+  }, [applySettings]);
+
+  // Re-read settings when navigating back to viewer page (e.g. from Settings)
+  // so HUD/overlay config, discord bindings, volume cap, etc. are applied
+  // without requiring an app restart.
+  const currentPage = useStore((s) => s.currentPage);
+  const prevPageRef = useRef(currentPage);
+  useEffect(() => {
+    if (currentPage === "viewer" && prevPageRef.current !== "viewer") {
+      void loadSettings().then(applySettings).catch(() => {
+        // keep defaults
+      });
+    }
+    prevPageRef.current = currentPage;
+  }, [currentPage, applySettings]);
 
   // Clamp current volume when maxVolumePercent changes
   useEffect(() => {
@@ -1986,14 +2002,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       const clampReasons: string[] = detail.clampReasons ?? [];
 
       if (kbps) setEffectiveBitrateKbps(kbps);
-
-      if (clampReasons.length > 0) {
-        setQualityFeedback(`Accepted, capped: ${clampReasons.join("; ")}`);
-        setLastQualityAccepted(true);
-      } else {
-        setQualityFeedback(`Accepted at ${fmtKbps(kbps)}`);
-        setLastQualityAccepted(true);
-      }
+      const feedback = getViewerQualityEffectiveFeedback({
+        videoBitrateKbps: kbps,
+        clampReasons,
+      });
+      setQualityFeedback(feedback.message);
+      setLastQualityAccepted(feedback.accepted);
     };
 
     const handleQualityConfigured = (event: CustomEvent) => {
@@ -2544,12 +2558,22 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           {/* ▸ Stream info card overlay */}
           {showStreamInfoCard && (
             <StreamInfoCard
-              snapshot={diagSnapshot}
+              snapshot={{
+                ...diagSnapshot,
+                // Frame timing provides real displayed FPS from rVFC; the
+                // deprecated useStreamDiagnostics hook always returns null.
+                videoFrameRate:
+                  framePerformanceSamples.length > 0
+                    ? (framePerformanceSamples[framePerformanceSamples.length - 1]
+                        .displayedFps ?? diagSnapshot.videoFrameRate)
+                    : diagSnapshot.videoFrameRate,
+              }}
               droppedFramesInLast5s={droppedFramesInLast5s}
               config={streamInfoCardConfig}
               bandwidthBps={currentBandwidthBps}
               totalBytes={totalBytesReceived}
               activeDurationMs={activeDurationMs}
+              viewerHistoryId={viewerHistoryId}
             />
           )}
 

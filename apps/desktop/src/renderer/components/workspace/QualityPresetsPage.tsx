@@ -494,7 +494,7 @@ export function QualityPresetsPage() {
                         <div className="flex justify-between">
                           <span>Bitrate</span>
                           <span className="font-mono text-text-primary">
-                            {(() => { const Bps = sum.bitrate * 125; if (Bps < 1000) return `${Math.round(Bps)} B/s`; const kBps = Bps / 1000; if (kBps < 1000) return `${kBps.toFixed(1)} kB/s`; return `${(kBps / 1000).toFixed(2)} MB/s`; })()}
+                            {sum.bitrate >= 1000 ? `${(sum.bitrate / 1000).toFixed(1)} Mbps` : `${Math.round(sum.bitrate)} kbps`}
                           </span>
                         </div>
                         <div className="flex justify-between">

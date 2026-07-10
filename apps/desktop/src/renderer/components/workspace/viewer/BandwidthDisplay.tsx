@@ -5,7 +5,8 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
-import { estimateHourlyBytes, fmtHourlyUsage } from "@/services/bandwidth-telemetry-types";
+import { computeWindowedEstimate, fmtHourlyUsage } from "@/services/bandwidth-telemetry-types";
+import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
 
 // ─── Props ──────────────────────────────────────────────────────────────────
 
@@ -103,16 +104,49 @@ function useBandwidthSplit(historyId: string | null | undefined): BandwidthSplit
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
+// ─── Windowed hourly estimate hook ──────────────────────────────────────────
+
+function useWindowedHourlyEstimate(
+  historyId: string | null | undefined,
+  windowMs: number,
+): number {
+  const cachedRef = useRef<number>(0);
+
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    if (!historyId) return () => {};
+    return StreamMetricsService.getInstance().subscribe(historyId, onStoreChange);
+  }, [historyId]);
+
+  const getSnapshot = useCallback((): number => {
+    if (!historyId) return 0;
+    try {
+      const snap: BandwidthSnapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
+      const result = computeWindowedEstimate(
+        snap.aggregate.rawSamples,
+        windowMs,
+        snap.aggregate.totalBytes,
+        snap.aggregate.activeDurationMs,
+      );
+      cachedRef.current = result.bytesPerHour;
+      return result.bytesPerHour;
+    } catch {
+      return cachedRef.current;
+    }
+  }, [historyId, windowMs]);
+
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
 // ─── BandwidthDisplay ───────────────────────────────────────────────────────
 
 /**
  * BandwidthDisplay — Visible viewer bandwidth/data counter.
  *
  * Primary value is total media bitrate. The tooltip shows the video/audio
- * composition breakdown and cumulative totals.
+ * composition breakdown, cumulative totals, and a windowed hourly estimate.
  *
  * Subscribes to StreamMetricsService internally for the video/audio split
- * without requiring additional props from parent wiring.
+ * and windowed hourly estimate without requiring additional props.
  */
 export function BandwidthDisplay({
   currentBandwidthBps,
@@ -122,11 +156,7 @@ export function BandwidthDisplay({
   onOpenBandwidthModal,
 }: BandwidthDisplayProps) {
   const split = useBandwidthSplit(viewerHistoryId);
-
-  const hourlyEstimate = useMemo(
-    () => estimateHourlyBytes(totalBytesReceived, activeDurationMs),
-    [totalBytesReceived, activeDurationMs],
-  );
+  const hourlyEstimate = useWindowedHourlyEstimate(viewerHistoryId, 10_000);
 
   const hasSplitData = split.videoBitsPerSecond > 0 || split.audioBitsPerSecond > 0;
 

@@ -391,9 +391,12 @@ export function GroupOverview({
       const runtime = getRuntime();
       if (runtime) {
         await runtime.requestGroupSync(groupId);
+        toast.success("Group state refreshed");
+      } else {
+        toast.error("Runtime not available");
       }
     } catch {
-      // Silently ignore — refresh is best-effort
+      toast.error("Refresh failed");
     } finally {
       setRefreshing(false);
     }

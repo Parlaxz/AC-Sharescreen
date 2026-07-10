@@ -15,6 +15,7 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { Copy, Check, FolderOpen } from "lucide-react";
 import { loadSettings } from "@/services/settings-actions";
+import { fetchQualityPresets } from "@/services/group-actions";
 import { useStore } from "@/stores/main-store";
 import type { ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
 import {
@@ -475,11 +476,11 @@ interface ViewerSettingsPanelProps {
   requestPending?: boolean;
   /** Whether the last request was accepted (true) or capped/rejected (false) */
   lastRequestAccepted?: boolean | undefined;
-  /** Feedback message (e.g. "Capped at 250 kB/s") */
+  /** Feedback message (e.g. "Capped at 250 kbps") */
   requestFeedback?: string | null;
   /** Called when the popover opens or closes */
   onOpenChange?: (open: boolean) => void;
-  /** Max value for the bitrate slider (kbps, displayed as kB/s; default 5000 ≈ 625 kB/s) */
+  /** Max value for the bitrate slider in kbps (default 5000) */
   maxSliderBitrateKbps?: number;
   /** Current GPU image enhancement settings */
   enhancementSettings?: ViewerImageEnhancementSettings;
@@ -689,6 +690,26 @@ export function ViewerSettingsPanel({
       .catch(() => {
         // fall back to prop default
       });
+  }, []);
+
+  // Auto-load quality presets into store if not yet loaded.
+  // Presets are only populated by QualityPresetsPage on mount; if the
+  // viewer is entered without visiting that page first, the store is
+  // empty and pinned presets won't render. Load them here so the
+  // viewer panel always has presets available.
+  useEffect(() => {
+    if (Array.isArray(rawPresets) && rawPresets.length > 0) return;
+    let cancelled = false;
+    fetchQualityPresets()
+      .then((items) => {
+        if (!cancelled) {
+          useStore.getState().setQualityPresets(items);
+        }
+      })
+      .catch(() => {
+        // best-effort — presets stay empty
+      });
+    return () => { cancelled = true; };
   }, []);
 
   // Local editing state (only applies when user hits Send / Clear)

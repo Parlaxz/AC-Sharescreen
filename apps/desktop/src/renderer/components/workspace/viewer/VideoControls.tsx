@@ -436,23 +436,6 @@ export function VideoControls({
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-7 w-7 text-white/50 hover:bg-white/10"
-                      onClick={handleAltTab}
-                      aria-label="Switch window (Alt+Tab)"
-                    >
-                      <ArrowLeftRight className="h-3.5 w-3.5" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    Alt+Tab
-                  </TooltipContent>
-                </Tooltip>
-
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon"
                       className={cn(
                         "h-7 w-7 hover:bg-white/10",
                         discordDeafened ? "text-white" : "text-white/50",
@@ -469,6 +452,23 @@ export function VideoControls({
                   </TooltipTrigger>
                   <TooltipContent side="top">
                     Toggle Discord deafen ({formatBindingLabel(discordDeafenBinding)}){syncScreenLinkDeafen && isScreenLinkDeafened ? " (+ScreenLink)" : ""}
+                  </TooltipContent>
+                </Tooltip>
+
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-white/50 hover:bg-white/10"
+                      onClick={handleAltTab}
+                      aria-label="Switch window (Alt+Tab)"
+                    >
+                      <ArrowLeftRight className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    Alt+Tab
                   </TooltipContent>
                 </Tooltip>
               </div>

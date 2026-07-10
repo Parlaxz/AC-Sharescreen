@@ -1,5 +1,5 @@
 ﻿import { useCallback, useMemo, useState, useEffect } from "react";
-import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, ArrowRight, UserX } from "lucide-react";
+import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, RotateCcw, ArrowRight, UserX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -213,6 +213,8 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const [switchSourceError, setSwitchSourceError] = useState<string | null>(null);
   const [bandwidthModalOpen, setBandwidthModalOpen] = useState(false);
   const [dismissedViewerTimestamps, setDismissedViewerTimestamps] = useState<Record<string, number>>({});
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const [isRestarting, setIsRestarting] = useState(false);
   const runtime = getRuntime();
   const sdk = runtime
     ?.getStreamSessionManager()
@@ -325,6 +327,27 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     setStopConfirmOpen(false);
     await stopShare();
     navigateToGroupOverview();
+  }, []);
+
+  const handleRestartShare = useCallback(async () => {
+    setRestartConfirmOpen(false);
+    setIsRestarting(true);
+    try {
+      let rt = getRuntime();
+      if (!rt) {
+        const { acquirePhase3Runtime } = await import("../../services/phase3-runtime.js");
+        rt = await acquirePhase3Runtime();
+      }
+      const ssm = rt.getStreamSessionManager();
+      if (!ssm) throw new Error("No active stream session");
+      if (ssm.state !== "active") throw new Error("Stream is not active");
+      await ssm.restartStream();
+      toast.success("Share restarted");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to restart share");
+    } finally {
+      setIsRestarting(false);
+    }
   }, []);
 
   const handlePreview = useCallback(() => {
@@ -518,6 +541,19 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             <RefreshCw className="h-3.5 w-3.5" />
             Change source
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setRestartConfirmOpen(true)}
+            disabled={isRestarting || isSwitchingSource}
+          >
+            {isRestarting ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5" />
+            )}
+            {isRestarting ? "Restarting…" : "Restart share"}
+          </Button>
           {isDegraded ? (
             <Badge variant="warning" className="text-[10px] px-1.5 py-0">
               <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />
@@ -578,6 +614,28 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             <Button variant="destructive" onClick={handleStopSharing}>
               <StopCircle className="h-4 w-4" />
               Stop
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Restart share dialog */}
+      <Dialog open={restartConfirmOpen} onOpenChange={setRestartConfirmOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Restart share?</DialogTitle>
+            <DialogDescription>
+              This will stop and restart your stream with a new media session.
+              Viewers will be briefly disconnected and should reconnect automatically.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button variant="default" onClick={handleRestartShare} disabled={isRestarting}>
+              <RotateCcw className="h-4 w-4" />
+              Restart
             </Button>
           </DialogFooter>
         </DialogContent>

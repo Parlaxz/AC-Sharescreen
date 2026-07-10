@@ -13,6 +13,7 @@ import type { QualityCoordinator, EffectiveQuality } from "./quality-coordinator
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import { showNotification } from "./notifications.js";
 import { uiSoundService } from "./ui-sound-service.js";
+import { useStore } from "../stores/main-store.js";
 
 /**
  * C1: GroupMessageRouter (Stages 4–5)
@@ -106,10 +107,13 @@ export class GroupMessageRouter {
     private connManager: GroupConnectionManager,
     private viewerBinding?: ViewerMediaBinding,
   ) {
-    // Wire viewer presence cue callbacks to the UI sound service
+    // Wire viewer presence cue callbacks to the UI sound service and tray icon
     if (this.viewerBinding) {
       this.viewerBinding.onViewerCue = (name, presence) => {
         void uiSoundService.play(name);
+        // Sync active viewer count to the store for the tray icon
+        const count = this.viewerBinding!.getActivePresences().length;
+        useStore.setState({ viewerCount: count });
       };
     }
   }
@@ -338,14 +342,15 @@ export class GroupMessageRouter {
       return;
     }
 
-    // stream.restart.request → (future: forward to stream manager)
+    // stream.restart.request → RestartCoordinator
     if (type === "stream.restart.request") {
-      // Future: forward to StreamSessionManager or QualityCoordinator
+      void this.handleRestartRequest(groupId, envelope);
       return;
     }
 
-    // stream.restart.result → (future: handle restart outcome)
+    // stream.restart.result → RestartCoordinator
     if (type === "stream.restart.result") {
+      void this.handleRestartResult(envelope);
       return;
     }
 
@@ -962,5 +967,89 @@ export class GroupMessageRouter {
       type: "stream.state.snapshot",
       streams,
     });
+  }
+
+  // ── Restart handling (Stage 14 / Gate 10) ────────────────────────────
+
+  /**
+   * Receive a stream.restart.request from a remote peer and perform
+   * a real lifecycle restart via RestartCoordinator -> StreamSessionManager.
+   * Sends stream.restart.result back to the requesting peer.
+   */
+  private async handleRestartRequest(
+    groupId: string,
+    envelope: GroupControlEnvelope,
+  ): Promise<void> {
+    if (!this.runtime) return;
+    const parsed = parseGroupMessagePayload("stream.restart.request", envelope.payload);
+    if (!parsed.ok) return;
+    const data = parsed.data;
+
+    // Defense-in-depth: reject cross-group payloads
+    if (!this.validatePayloadGroup(groupId, data.groupId, "stream.restart.request")) return;
+
+    const coordinator = this.runtime.getRestartCoordinator();
+
+    let accepted = false;
+    let success = false;
+    let reason: string | undefined;
+    let logicalStreamId = "";
+
+    try {
+      const result = await coordinator.handleIncomingRestartRequest(
+        data.commandId,
+        data.groupId,
+        data.targetSettingsStamp,
+        data.targetSettingsHash,
+        data.requestedByDeviceId,
+      );
+      accepted = result.accepted;
+      success = result.success;
+      reason = result.reason;
+      logicalStreamId = result.logicalStreamIds?.[0]
+        ?? this.runtime.getStreamSessionManager().currentLogicalStreamId
+        ?? "";
+    } catch (err) {
+      accepted = false;
+      success = false;
+      reason = String((err as Error)?.message ?? err);
+    }
+
+    const conn = this.connManager.getConnection(groupId);
+    if (!conn) return;
+    const peerUuid = conn.peerForDevice(envelope.senderDeviceId);
+    if (!peerUuid) return;
+
+    await conn.sendToPeer(peerUuid, {
+      type: "stream.restart.result",
+      commandId: data.commandId,
+      groupId: data.groupId,
+      hostDeviceId: this.runtime.deviceId ?? "local",
+      logicalStreamId,
+      accepted,
+      success,
+      ...(reason ? { failureReason: reason } : {}),
+    }).catch(() => {});
+  }
+
+  /**
+   * Receive a stream.restart.result from a host we asked to restart.
+   * Forwards to RestartCoordinator for per-host status tracking.
+   */
+  private async handleRestartResult(envelope: GroupControlEnvelope): Promise<void> {
+    if (!this.runtime) return;
+    const parsed = parseGroupMessagePayload("stream.restart.result", envelope.payload);
+    if (!parsed.ok) return;
+    const data = parsed.data;
+
+    const coordinator = this.runtime.getRestartCoordinator();
+    coordinator.handleRestartResult(
+      data.commandId,
+      data.hostDeviceId,
+      data.logicalStreamId,
+      data.accepted,
+      data.success,
+      data.failureReason,
+    );
   }
 }

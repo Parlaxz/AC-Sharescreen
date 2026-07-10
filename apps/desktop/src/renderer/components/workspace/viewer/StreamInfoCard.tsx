@@ -1,6 +1,8 @@
-import { useMemo, memo } from "react";
+import { useCallback, useMemo, useRef, useSyncExternalStore, memo } from "react";
 import { formatBandwidth, formatTotalBytes } from "./BandwidthDisplay.js";
-import { estimateHourlyBytes, fmtHourlyUsage } from "@/services/bandwidth-telemetry-types";
+import { computeWindowedEstimate, fmtHourlyUsage } from "@/services/bandwidth-telemetry-types";
+import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
+import { StreamMetricsService } from "@/services/stream-metrics-service";
 
 // ─── Config type ─────────────────────────────────────────────────────────────
 
@@ -14,6 +16,39 @@ export interface StreamInfoCardConfig {
   textColor: string;
   boxOpacity: number;
   boxWidth: number;
+}
+
+// ─── Windowed hourly estimate hook ──────────────────────────────────────────
+
+function useWindowedHourlyEstimate(
+  historyId: string | null | undefined,
+  windowMs: number,
+): number {
+  const cachedRef = useRef<number>(0);
+
+  const subscribe = useCallback((onStoreChange: () => void) => {
+    if (!historyId) return () => {};
+    return StreamMetricsService.getInstance().subscribe(historyId, onStoreChange);
+  }, [historyId]);
+
+  const getSnapshot = useCallback((): number => {
+    if (!historyId) return 0;
+    try {
+      const snap: BandwidthSnapshot = StreamMetricsService.getInstance().getSnapshot(historyId);
+      const result = computeWindowedEstimate(
+        snap.aggregate.rawSamples,
+        windowMs,
+        snap.aggregate.totalBytes,
+        snap.aggregate.activeDurationMs,
+      );
+      cachedRef.current = result.bytesPerHour;
+      return result.bytesPerHour;
+    } catch {
+      return cachedRef.current;
+    }
+  }, [historyId, windowMs]);
+
+  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -30,6 +65,7 @@ interface StreamInfoCardProps {
   bandwidthBps: number;
   totalBytes: number;
   activeDurationMs: number;
+  viewerHistoryId?: string | null;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -41,11 +77,9 @@ function StreamInfoCardInner({
   bandwidthBps,
   totalBytes,
   activeDurationMs,
+  viewerHistoryId,
 }: StreamInfoCardProps) {
-  const hourlyEstimate = useMemo(
-    () => estimateHourlyBytes(totalBytes, activeDurationMs),
-    [totalBytes, activeDurationMs],
-  );
+  const hourlyEstimate = useWindowedHourlyEstimate(viewerHistoryId, 10_000);
 
   const lines: string[] = [];
 
