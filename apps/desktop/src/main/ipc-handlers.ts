@@ -45,6 +45,70 @@ export function clearCurrentVdoCredentials(): void {
   currentVdoPassword = "";
 }
 
+// ── Settings partial sanitization (renderer-supplied updates) ───────────────
+
+/**
+ * Keys that must never appear in a renderer-supplied settings partial
+ * (prototype-pollution defense).
+ */
+const FORBIDDEN_SETTINGS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * Sane bounds for known numeric settings fields. Bounds are chosen around the
+ * shared defaults (e.g. host quality limits default to 1920x1080@60, 5000 kbps)
+ * while still allowing high-DPI displays and high-bitrate streams.
+ */
+const NUMERIC_SETTINGS_BOUNDS: Record<string, { min: number; max: number }> = {
+  width: { min: 16, max: 7680 },
+  height: { min: 16, max: 4320 },
+  fps: { min: 1, max: 240 },
+  bitrate: { min: 100, max: 200_000 },
+};
+
+/**
+ * Conservative runtime guard for renderer-supplied settings partials.
+ *
+ * There is no Zod schema covering PersistedSettings in @screenlink/shared
+ * (settings.ts is types-only), so instead of parsing we:
+ *  1. reject non-object / null / array payloads,
+ *  2. strip prototype-pollution keys (__proto__ / constructor / prototype),
+ *  3. clamp known numeric fields (width/height/fps/bitrate) to sane bounds,
+ *  4. drop unknown top-level keys via an allowlist derived from the current
+ *     persisted settings object's own keys.
+ *
+ * Invalid payloads throw (matching how other handlers report errors).
+ */
+function sanitizeSettingsPartial(
+  partial: unknown,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (partial === null || typeof partial !== "object" || Array.isArray(partial)) {
+    throw new Error("update-settings expects a plain object");
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(partial as Record<string, unknown>)) {
+    if (!allowedKeys.has(key) || FORBIDDEN_SETTINGS_KEYS.has(key)) continue;
+    result[key] = sanitizeSettingsValue(value);
+  }
+  return result;
+}
+
+/** Recursively strip forbidden keys and clamp known numeric fields. */
+function sanitizeSettingsValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(sanitizeSettingsValue);
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (FORBIDDEN_SETTINGS_KEYS.has(key)) continue;
+    const bounds = NUMERIC_SETTINGS_BOUNDS[key];
+    out[key] =
+      bounds && typeof child === "number" && Number.isFinite(child)
+        ? Math.min(bounds.max, Math.max(bounds.min, child))
+        : sanitizeSettingsValue(child);
+  }
+  return out;
+}
+
 // ── Audio helper state (set by main process lifecycle) ──────────────────────
 
 let currentAudioHelper: AudioHelperManager | null = null;
@@ -115,6 +179,19 @@ function ensureVideoHelperManager(): VideoHelperManager {
     videoHelperManager = new VideoHelperManager();
   }
   return videoHelperManager;
+}
+
+/**
+ * Shut down the video helper manager cleanly. Safe to call even when the
+ * manager was never created. Exported so main can stop the helper on quit.
+ */
+export async function stopVideoHelperForQuit(): Promise<void> {
+  if (!videoHelperManager) return;
+  try {
+    await videoHelperManager.stop(true);
+  } catch (err) {
+    console.error("[ipc] Video helper shutdown error:", err);
+  }
 }
 
 export function registerIpcHandlers(
@@ -191,8 +268,17 @@ export function registerIpcHandlers(
 
   ipcMain.handle(
     "update-settings",
-    (_event, partial: Record<string, unknown>) => {
-      settings.update(partial as never);
+    (_event, partial: unknown) => {
+      try {
+        // Allowlist is derived from the current persisted settings' own keys
+        // so newly added fields keep flowing through without changes here.
+        const allowedKeys = new Set(Object.keys(settings.get()));
+        const safe = sanitizeSettingsPartial(partial, allowedKeys);
+        settings.update(safe as never);
+      } catch (err) {
+        console.error("[IPC] update-settings rejected invalid payload:", err);
+        throw err;
+      }
     },
   );
 

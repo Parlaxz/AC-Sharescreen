@@ -173,7 +173,13 @@ export class ViewerClient {
     // In SDK 1.3.18, this fires as a CustomEvent with detail = { uuid }.
     this.setupDataChannelOpenHandler();
 
-    await this.connectWithTimeout(35_000);
+    // 15s signaling-connect ceiling: generous vs typical TLS+WS handshake
+    // times, but bounded so a black-holed link fails fast into the
+    // viewer-session auto-retry instead of burning a giant silent timeout.
+    // Timeout messages intentionally contain "SDK connect timed out" /
+    // "WebSocket to the signaling server" — both are recognized by
+    // ViewerSession.isConnectFailure() so the single auto-retry kicks in.
+    await this.connectWithTimeout(15_000);
   }
 
   /**
@@ -333,7 +339,7 @@ export class ViewerClient {
           video: true,
           label: displayName,
         }),
-        30000,
+        20_000,
         "SDK view timed out — stream may not exist or credentials are wrong",
       );
     } catch (err) {
@@ -433,10 +439,13 @@ export class ViewerClient {
     return this._userPaused;
   }
 
+  /**
+   * Full teardown — delegates to the idempotent shutdown() path so all
+   * listeners, waiters, and SDK state are cleaned (not just nulling the
+   * SDK reference). Safe to call multiple times.
+   */
   async disconnect(): Promise<void> {
-    if (!this.sdk) return;
-    await this.sdk.disconnect();
-    this.sdk = null;
+    await this.shutdown();
   }
 
   /**
@@ -624,12 +633,21 @@ export class ViewerClient {
       this._dataChannelWaiters.set(targetUuid, waiter);
     }
 
-    // Wait for this UUID's data channel to open
-    await withTimeout(
-      waiter.promise,
-      timeout,
-      `Data channel open timed out for peer ${targetUuid}`,
-    );
+    // Wait for this UUID's data channel to open. On timeout (or any
+    // error) remove the waiter from the map — but only if it still maps
+    // to THIS waiter object, so we never delete a newer waiter that a
+    // concurrent call registered for the same UUID.
+    try {
+      await withTimeout(
+        waiter.promise,
+        timeout,
+        `Data channel open timed out for peer ${targetUuid}`,
+      );
+    } finally {
+      if (this._dataChannelWaiters.get(targetUuid) === waiter) {
+        this._dataChannelWaiters.delete(targetUuid);
+      }
+    }
 
     if (this._shuttingDown || this._shutdownPromise) {
       return;

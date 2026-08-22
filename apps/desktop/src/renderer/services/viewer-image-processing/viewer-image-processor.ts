@@ -249,6 +249,11 @@ export class ViewerImageProcessor {
   private _backendDrops = 0;
   private _failures = 0;
 
+  /** Consecutive rejected processCurrentFrameAsync() promises (reset on success). */
+  private consecutiveProcessingRejections = 0;
+  /** After this many consecutive rejections, transition to "error" instead of looping. */
+  private static readonly MAX_CONSECUTIVE_REJECTIONS = 3;
+
   constructor(
     canvas: HTMLCanvasElement,
     videoElement: HTMLVideoElement,
@@ -790,16 +795,55 @@ export class ViewerImageProcessor {
   private beginFrameProcessing(): void {
     this._processingAttempts++;
     this.frameInFlight = true;
-    this.processCurrentFrameAsync().finally(() => {
-      this.frameInFlight = false;
-      if (this.pendingFrame) {
-        // Another frame arrived while we were busy — process the latest
-        this.pendingFrame = false;
-        this.beginFrameProcessing();
-      } else if (this.state === "running") {
-        this.scheduleFrame();
-      }
-    });
+    this.processCurrentFrameAsync().then(
+      () => {
+        this.frameInFlight = false;
+        this.consecutiveProcessingRejections = 0;
+        if (this.pendingFrame) {
+          // Another frame arrived while we were busy — process the latest
+          this.pendingFrame = false;
+          this.beginFrameProcessing();
+        } else if (this.state === "running") {
+          this.scheduleFrame();
+        }
+      },
+      (err) => {
+        // Unexpected rejection from the async pipeline — must be handled here
+        // so it never surfaces as an unhandled promise rejection.
+        this._failures++;
+        this.consecutiveProcessingRejections++;
+        const consecutive = this.consecutiveProcessingRejections;
+        this.frameInFlight = false;
+
+        if (consecutive >= ViewerImageProcessor.MAX_CONSECUTIVE_REJECTIONS) {
+          // Give up after repeated consecutive failures: transition to the
+          // error state (same path as a failed frame result) so the parent
+          // can fall back to native video instead of looping forever.
+          console.error(
+            `[ViewerImageProcessor] Frame processing rejected ${consecutive}x consecutively — entering error state:`,
+            err,
+          );
+          this.pendingFrame = false;
+          this.state = "error";
+          this.cancelFrame();
+          this.callbacks.onStateChange?.("error");
+          return;
+        }
+
+        // Transient failure — log sparingly and keep the pipeline alive.
+        console.warn(
+          `[ViewerImageProcessor] Frame processing rejected (${consecutive}/${ViewerImageProcessor.MAX_CONSECUTIVE_REJECTIONS}):`,
+          err,
+        );
+
+        if (this.pendingFrame && this.state === "running") {
+          this.pendingFrame = false;
+          this.beginFrameProcessing();
+        } else if (this.state === "running") {
+          this.scheduleFrame();
+        }
+      },
+    );
   }
 
   private async processCurrentFrameAsync(): Promise<void> {

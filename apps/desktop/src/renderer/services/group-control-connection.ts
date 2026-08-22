@@ -153,6 +153,15 @@ interface MeshStopHandle {
   streamID: string;
 }
 
+/** Deadline for sdk.autoConnect() — prevents state being stuck in "starting". */
+const AUTO_CONNECT_TIMEOUT_MS = 15_000;
+
+/** Interval between hello retries for peers that never completed handshake. */
+const HELLO_RETRY_INTERVAL_MS = 2_000;
+
+/** Maximum number of hello resends per peer before giving up silently. */
+const HELLO_MAX_RETRIES = 3;
+
 export class GroupControlConnection {
   private sdk: VDONinjaSDKInstance | null = null;
   private handlers: BoundHandlers | null = null;
@@ -173,6 +182,10 @@ export class GroupControlConnection {
   private clock: HybridTimestamp;
   /** Pending hello responses to throttle duplicates. */
   private peersAwaitingHello = new Set<string>();
+  /** Hello retry attempts per peer UUID (bounded by HELLO_MAX_RETRIES). */
+  private helloRetryAttempts = new Map<string, number>();
+  /** Interval timer resending hellos to peers still awaiting a response. */
+  private helloRetryTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: GroupControlConnectionOptions) {
     this.opts = opts;
@@ -247,6 +260,10 @@ export class GroupControlConnection {
     const gen = this.startGeneration;
     this.setState("starting");
 
+    // Deadline race state for sdk.autoConnect() — see below.
+    let timedOut = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
     try {
       const ctor = getSDKConstructor();
       console.log("[group-control] constructing SDK with WebSocket host: wss://wss.vdo.ninja");
@@ -266,7 +283,7 @@ export class GroupControlConnection {
       // Use autoConnect which combines connect() + joinRoom() + announce()
       // with a data-only mesh (audio: false, video: false).
       console.log("[group-control] starting autoConnect (WebSocket + room join + announce)");
-      const result = await sdk.autoConnect({
+      const autoConnectPromise = sdk.autoConnect({
         room: this.opts.controlRoomId,
         mode: "half",
         view: { audio: false, video: false },
@@ -274,6 +291,35 @@ export class GroupControlConnection {
         streamID: this.opts.nodeId,
         label: this.opts.displayName,
       });
+
+      // Race autoConnect against a deadline so a never-settling SDK cannot
+      // leave the connection stuck in "starting" forever.
+      const timeoutPromise = new Promise<never>((_, rejectTimeout) => {
+        timeoutHandle = setTimeout(() => {
+          timedOut = true;
+          rejectTimeout(new Error(`autoConnect did not settle within ${AUTO_CONNECT_TIMEOUT_MS}ms`));
+        }, AUTO_CONNECT_TIMEOUT_MS);
+      });
+
+      // If autoConnect settles after the timeout already fired, clean up its
+      // result — but only when this generation still owns the connection.
+      // A newer start()/destroy() owns teardown at that point, and tearing
+      // down here would destroy the newer SDK.
+      void autoConnectPromise.then(
+        (lateResult) => {
+          if (!timedOut) return; // winner — handled by the await below
+          if (gen !== this.startGeneration || this.destroyed) return;
+          try { lateResult.stop(); } catch { /* best effort */ }
+          void this.teardownSdk().catch(() => {});
+        },
+        () => {
+          // Late rejection after timeout — the catch below already tore down
+          // (or a newer generation owns cleanup). Nothing to do.
+        },
+      );
+
+      const result = await Promise.race([autoConnectPromise, timeoutPromise]);
+      clearTimeout(timeoutHandle);
       if (gen !== this.startGeneration || this.destroyed) {
         result.stop();
         await this.teardownSdk().catch(() => {});
@@ -287,6 +333,7 @@ export class GroupControlConnection {
       // Do NOT broadcastHello here. The first hello is driven by
       // dataChannelOpen so we only send hellos once a usable route exists.
     } catch (err) {
+      clearTimeout(timeoutHandle);
       if (this.destroyed || gen !== this.startGeneration) return;
       this.setState("failed");
       const sanitized = err instanceof Error ? err.message : String(err);
@@ -311,11 +358,13 @@ export class GroupControlConnection {
       this.meshStop = null;
     }
     await this.teardownSdk();
+    this.clearHelloRetryTimer();
     const allDeviceIds = Array.from(this.deviceToPeer.keys());
     this.peerToDevice.clear();
     this.deviceToPeer.clear();
     this.rawPeerIdentity.clear();
     this.peersAwaitingHello.clear();
+    this.helloRetryAttempts.clear();
     this.rawDataPeers.clear();
     for (const deviceId of allDeviceIds) {
       this.opts.onPeerOffline(deviceId);
@@ -611,6 +660,62 @@ export class GroupControlConnection {
   }
 
   /**
+   * Start the bounded hello-retry interval (lazily, once at a time).
+   *
+   * Every HELLO_RETRY_INTERVAL_MS the tick resends a hello to every peer
+   * still in peersAwaitingHello, up to HELLO_MAX_RETRIES per peer. After
+   * that the peer is given up on silently — route-down or a signaling
+   * reconnect will re-trigger the handshake.
+   */
+  private ensureHelloRetryTimer(): void {
+    if (this.helloRetryTimer !== null || this.destroyed) return;
+    const genAtCreate = this.startGeneration;
+    this.helloRetryTimer = setInterval(() => {
+      // Generation guard: a newer start()/destroy() owns hello state now.
+      if (genAtCreate !== this.startGeneration || this.destroyed) {
+        this.clearHelloRetryTimer();
+        return;
+      }
+      if (this.peersAwaitingHello.size === 0) {
+        this.clearHelloRetryTimer();
+        return;
+      }
+      for (const uuid of Array.from(this.peersAwaitingHello)) {
+        const attempts = (this.helloRetryAttempts.get(uuid) ?? 0) + 1;
+        if (attempts > HELLO_MAX_RETRIES) {
+          // Give up silently for this peer — route-down/reconnect re-triggers.
+          this.removePeerAwaitingHello(uuid);
+          continue;
+        }
+        this.helloRetryAttempts.set(uuid, attempts);
+        this.sendHelloToPeer(uuid).catch(() => {});
+      }
+      if (this.peersAwaitingHello.size === 0) {
+        this.clearHelloRetryTimer();
+      }
+    }, HELLO_RETRY_INTERVAL_MS);
+  }
+
+  private clearHelloRetryTimer(): void {
+    if (this.helloRetryTimer !== null) {
+      clearInterval(this.helloRetryTimer);
+      this.helloRetryTimer = null;
+    }
+  }
+
+  /**
+   * Remove a peer from the awaiting-hello set along with its retry counter,
+   * and stop the retry timer when no peers remain.
+   */
+  private removePeerAwaitingHello(uuid: string): void {
+    this.peersAwaitingHello.delete(uuid);
+    this.helloRetryAttempts.delete(uuid);
+    if (this.peersAwaitingHello.size === 0) {
+      this.clearHelloRetryTimer();
+    }
+  }
+
+  /**
    * A peer route (data channel / connection) went down. Clean raw state and,
    * if this was the authenticated route for a device, transparently migrate
    * the mapping to another live raw channel claiming the same identity
@@ -618,7 +723,7 @@ export class GroupControlConnection {
    */
   private handlePeerRouteDown(uuid: string): void {
     this.rawDataPeers.delete(uuid);
-    this.peersAwaitingHello.delete(uuid);
+    this.removePeerAwaitingHello(uuid);
     this.rawPeerIdentity.delete(uuid);
     const deviceId = this.peerToDevice.get(uuid);
     if (!deviceId) return;
@@ -652,6 +757,9 @@ export class GroupControlConnection {
     const sdk = this.sdk;
     this.sdk = null;
     if (!sdk) return;
+
+    // No SDK means no hello handshake can complete — stop retrying.
+    this.clearHelloRetryTimer();
 
     // If the meshStop handle still exists (destroy was not called), invoke it.
     if (this.meshStop) {
@@ -741,6 +849,7 @@ export class GroupControlConnection {
         // immediately map us without waiting for peerConnected.
         if (!this.peerToDevice.has(uuid)) {
           this.peersAwaitingHello.add(uuid);
+          this.ensureHelloRetryTimer();
           this.sendHelloToPeer(uuid).catch(() => {});
         }
       },
@@ -771,6 +880,9 @@ export class GroupControlConnection {
 
         try {
           const result = await validateEnvelope(data, this.opts.groupId, this.opts.groupSecret, this.dedupSet);
+          // Re-check generation/destroyed after the await — the connection may
+          // have been restarted or torn down while validation was in flight.
+          if (gen !== this.startGeneration || this.destroyed) return;
           if (!result.ok) {
             console.warn("[group-control] envelope validation failed:", result.reason, "type:", (data as Record<string, unknown>)?.type ?? "unknown");
             return;
@@ -824,7 +936,7 @@ export class GroupControlConnection {
 
             // If we owe a hello.response, send it now and request full state.
             if (this.peersAwaitingHello.has(uuid)) {
-              this.peersAwaitingHello.delete(uuid);
+              this.removePeerAwaitingHello(uuid);
               this.sendToPeer(uuid, responsePayload).catch(() => {});
               // After authenticated handshake, request state.
               this.requestFullStateFromPeer(uuid).catch(() => {});
@@ -895,6 +1007,7 @@ export class GroupControlConnection {
         for (const peerUuid of this.rawDataPeers) {
           if (!this.peerToDevice.has(peerUuid)) {
             this.peersAwaitingHello.add(peerUuid);
+            this.ensureHelloRetryTimer();
             this.sendHelloToPeer(peerUuid).catch(() => {});
           }
         }

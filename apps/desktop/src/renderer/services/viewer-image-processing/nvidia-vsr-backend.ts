@@ -523,6 +523,24 @@ export class NvidiaVsrBackend implements ViewerImageBackend {
           });
           resolve(false);
         }
+      }).catch((err) => {
+        // The IPC request itself rejected (e.g. main-process error) — without
+        // this handler the rejection is unhandled and acquisition would hang
+        // until the timeout fires.
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener("message", onMessage);
+        console.error("[nvidia-vsr] Frame port request rejected:", err);
+        lifecycleLog("NvidiaBackend", "framePortFailed", {
+          instanceId: this.instanceId,
+          clientId: this.clientId,
+        });
+        // Allow a future acquireFramePort() attempt to issue a fresh request.
+        this.framePortRequested = false;
+        // Release the client lease acquired for this attempt so it doesn't leak.
+        this.releaseClient();
+        resolve(false);
       });
     });
 

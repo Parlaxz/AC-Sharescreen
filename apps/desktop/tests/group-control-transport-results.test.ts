@@ -671,4 +671,79 @@ describe("GroupControlConnection — transport result changes", () => {
     );
     expect(stateRequestSent).toBe(true);
   });
+
+  // ── bounded hello retry ──────────────────────────────────────────
+
+  it("retries hello up to 3 times for a peer that never responds, then gives up", async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = new GroupControlConnection({
+        groupId: GROUP_ID,
+        controlRoomId: CONTROL_ROOM,
+        groupSecret: GROUP_SECRET,
+        nodeId: "alice",
+        displayName: "Alice",
+        memberRecord: null,
+        onPeerOnline: vi.fn(),
+        onPeerOffline: vi.fn(),
+        onMessage: vi.fn(),
+        onStateChange: vi.fn(),
+        onError: vi.fn(),
+      });
+      const startPromise = conn.start();
+      // Flush microtasks so autoConnect resolves and start() completes.
+      await vi.advanceTimersByTimeAsync(0);
+      await startPromise;
+      const sdk = createdSdks[createdSdks.length - 1]!;
+      sdk.sendData.mockClear();
+
+      // Peer opens a data channel but NEVER responds to our hello.
+      sdk.handlers.get("dataChannelOpen")?.[0]({ detail: { uuid: "peer-bob" } });
+
+      const countHellos = () =>
+        sdk.sendData.mock.calls.filter((c) => {
+          const payload = c[0] as Record<string, unknown>;
+          return payload?.type === "group.hello" && (c[1] as Record<string, unknown>)?.uuid === "peer-bob";
+        }).length;
+
+      // Pump fake timers in small steps so async envelope building
+      // (crypto.subtle) settles without firing the 2s retry tick early.
+      // Budget stays <=1000ms of fake time: enough event-loop turns for
+      // native crypto under load, yet never crossing the next 2s tick.
+      const waitHellos = async (n: number): Promise<void> => {
+        for (let i = 0; i < 100 && countHellos() < n; i++) {
+          await vi.advanceTimersByTimeAsync(10);
+        }
+      };
+
+      // Initial hello from dataChannelOpen.
+      await waitHellos(1);
+      expect(countHellos()).toBe(1);
+      expect((conn as any).peersAwaitingHello.has("peer-bob")).toBe(true);
+
+      // Retry 1 at t=2s
+      await vi.advanceTimersByTimeAsync(2_000);
+      await waitHellos(2);
+      expect(countHellos()).toBe(2);
+      // Retry 2 at t=4s
+      await vi.advanceTimersByTimeAsync(2_000);
+      await waitHellos(3);
+      expect(countHellos()).toBe(3);
+      // Retry 3 at t=6s — max retries reached
+      await vi.advanceTimersByTimeAsync(2_000);
+      await waitHellos(4);
+      expect(countHellos()).toBe(4);
+
+      // After max retries the peer is given up on silently — no more sends.
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(countHellos()).toBe(4);
+      expect((conn as any).peersAwaitingHello.has("peer-bob")).toBe(false);
+
+      await conn.destroy();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

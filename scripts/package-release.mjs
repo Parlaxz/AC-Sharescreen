@@ -15,26 +15,16 @@ async function main() {
   const version = process.env.npm_package_version || "0.1.0";
   fs.mkdirSync(OUT, { recursive: true });
 
-  // Build viewer
-  console.log("Building viewer...");
-  execSync("pnpm --filter @screenlink/viewer build", { cwd: ROOT, stdio: "inherit" });
-  
-  // Zip viewer
-  const viewerZip = path.join(OUT, `screenlink-viewer-${version}.zip`);
-  // Use PowerShell for zip
-  execSync(`powershell Compress-Archive -Path "apps/viewer/dist/*" -DestinationPath "${viewerZip}" -Force`, { cwd: ROOT });
-  
-  // Build desktop
+  // Build workspace packages (current pnpm-workspace.yaml members:
+  // apps/desktop, packages/shared, packages/vdo-adapter)
+  console.log("Building shared package...");
+  execSync("pnpm --filter @screenlink/shared build", { cwd: ROOT, stdio: "inherit" });
+
+  console.log("\nBuilding vdo-adapter...");
+  execSync("pnpm --filter @screenlink/vdo-adapter build", { cwd: ROOT, stdio: "inherit" });
+
   console.log("\nBuilding desktop...");
   execSync("pnpm --filter @screenlink/desktop build", { cwd: ROOT, stdio: "inherit" });
-  
-  // Build worker
-  console.log("\nBuilding worker...");
-  execSync("pnpm --filter @screenlink/control-worker build", { cwd: ROOT, stdio: "inherit" });
-
-  // Package worker
-  const workerZip = path.join(OUT, `screenlink-worker-${version}.zip`);
-  execSync(`powershell Compress-Archive -Path "apps/control-worker/dist/*" -DestinationPath "${workerZip}" -Force`, { cwd: ROOT });
 
   // Generate checksums
   const checksums = [];
@@ -48,8 +38,6 @@ async function main() {
   fs.writeFileSync(path.join(OUT, "SHA256SUMS.txt"), checksums.join("\n") + "\n");
 
   console.log(`\nRelease packaged to ${OUT}`);
-  console.log(`  Viewer: ${viewerZip}`);
-  console.log(`  Worker: ${workerZip}`);
   console.log(`  SHA-256: SHA256SUMS.txt`);
 }
 

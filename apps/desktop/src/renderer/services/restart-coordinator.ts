@@ -55,13 +55,17 @@ export class RestartCoordinator {
   private processedRequests = new Set<string>();
   /** Optional listener for status updates (UI / store). */
   private listeners = new Set<(status: RestartAllStatus) => void>();
+  /** Auto-cleanup timer handles per commandId so they can be cleared on early removal / destroy. */
+  private cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private runtime: Phase3Runtime,
   ) {}
 
   destroy(): void {
-    this.activeCommands.clear();
+    for (const commandId of Array.from(this.activeCommands.keys())) {
+      this.removeCommand(commandId);
+    }
     this.processedRequests.clear();
     this.listeners.clear();
   }
@@ -285,9 +289,28 @@ export class RestartCoordinator {
     if (allDone) {
       status.completedAt = Date.now();
       // Auto-remove after 60s so memory does not grow unbounded.
-      setTimeout(() => this.activeCommands.delete(status.commandId), 60_000);
+      // Track the timer handle so it can be cleared on early removal / destroy.
+      const existingTimer = this.cleanupTimers.get(status.commandId);
+      if (existingTimer) clearTimeout(existingTimer);
+      this.cleanupTimers.set(
+        status.commandId,
+        setTimeout(() => {
+          this.cleanupTimers.delete(status.commandId);
+          this.activeCommands.delete(status.commandId);
+        }, 60_000),
+      );
       this.notify(status);
     }
+  }
+
+  /** Remove a command and clear its pending auto-cleanup timer. */
+  private removeCommand(commandId: string): void {
+    const timer = this.cleanupTimers.get(commandId);
+    if (timer) {
+      clearTimeout(timer);
+      this.cleanupTimers.delete(commandId);
+    }
+    this.activeCommands.delete(commandId);
   }
 
   private notify(status: RestartAllStatus): void {

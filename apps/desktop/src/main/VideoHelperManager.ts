@@ -1817,33 +1817,37 @@ export class VideoHelperManager {
 
   private controlDataHandler = (chunk: Buffer): void => {
     this.responseBuffer += chunk.toString();
-    const newlineIdx = this.responseBuffer.indexOf("\n");
-    if (newlineIdx < 0) return;
 
-    const message = this.responseBuffer.substring(0, newlineIdx);
-    this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
+    // Process EVERY complete newline-delimited message currently buffered.
+    // TCP coalescing can deliver multiple responses in a single data event;
+    // handling only one per event stalls queued commands until the next chunk.
+    let newlineIdx: number;
+    while ((newlineIdx = this.responseBuffer.indexOf("\n")) >= 0) {
+      const message = this.responseBuffer.substring(0, newlineIdx);
+      this.responseBuffer = this.responseBuffer.substring(newlineIdx + 1);
 
-    try {
-      const response = JSON.parse(message);
-      const id = response.id as string | undefined;
-      const event = response.event as string | undefined;
+      try {
+        const response = JSON.parse(message);
+        const id = response.id as string | undefined;
+        const event = response.event as string | undefined;
 
-      // Slice 4: Handle unsolicited completion events from native helper
-      if (event === "slotCompleted") {
-        this.handleShmSlotCompleted(response.payload);
-        return;
+        // Slice 4: Handle unsolicited completion events from native helper
+        if (event === "slotCompleted") {
+          this.handleShmSlotCompleted(response.payload);
+          continue;
+        }
+
+        if (id && this.pendingCommands.has(id)) {
+          const pending = this.pendingCommands.get(id)!;
+          clearTimeout(pending.timeout);
+          this.pendingCommands.delete(id);
+          this.commandInFlight = false;
+          pending.resolve(response);
+          this.processQueue();
+        }
+      } catch {
+        // Malformed JSON — skip this line and keep processing the rest of the buffer
       }
-
-      if (id && this.pendingCommands.has(id)) {
-        const pending = this.pendingCommands.get(id)!;
-        clearTimeout(pending.timeout);
-        this.pendingCommands.delete(id);
-        this.commandInFlight = false;
-        pending.resolve(response);
-        this.processQueue();
-      }
-    } catch {
-      // Malformed JSON — ignore
     }
   };
 

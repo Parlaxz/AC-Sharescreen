@@ -5,8 +5,9 @@
 #   Manual workflow_dispatch that creates a draft release, builds everything,
 #   uploads artifacts, verifies integrity, and publishes the draft.
 #
-# Builds the native audio helper, TypeScript packages, and the Electron desktop
-# app, then uploads updater metadata and installers to the draft GitHub Release.
+# Builds the native audio helper, the frame-ring addon, TypeScript packages,
+# and the Electron desktop app, then uploads updater metadata and installers
+# to the draft GitHub Release.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: Build and Release ScreenLink (Windows x64)
@@ -217,6 +218,30 @@ jobs:
           }
           Write-Host "Video enhancer self-test passed."
 
+      # Frame-ring N-API addon — built against the Electron ABI so it can be
+      # require()d from the main process. Mirrors the root package.json
+      # frame-ring:configure / frame-ring:build scripts (--runtime-version must
+      # match the Electron version in apps/desktop/package.json devDependencies).
+      - name: Configure frame-ring addon (cmake-js, Electron runtime)
+        shell: pwsh
+        run: |
+          pnpm dlx cmake-js configure --runtime=electron --runtime-version=42.4.1 --arch=x64 -d native/video-frame-ring
+
+      - name: Build frame-ring addon (Release)
+        shell: pwsh
+        run: |
+          pnpm dlx cmake-js build --runtime=electron --runtime-version=42.4.1 --arch=x64 -d native/video-frame-ring
+
+      - name: Verify frame-ring addon artifact
+        shell: pwsh
+        run: |
+          $addon = "native/video-frame-ring/build/Release/screenlink-video-frame-ring.node"
+          if (-not (Test-Path $addon)) {
+            Write-Host "::error::Frame-ring addon not found at $addon"
+            exit 1
+          }
+          Write-Host "Frame-ring addon verified: $addon"
+
       # ── 6. TypeScript checks and tests ───────────────────────────────
       - name: Build shared package
         run: pnpm build:shared
@@ -324,6 +349,11 @@ jobs:
           $unpackedVideoHelper = "$releaseDir/win-unpacked/resources/screenlink-video-enhancer.exe"
           if (-not (Test-Path $unpackedVideoHelper)) {
             $errors += "Packaged video enhancer is missing from win-unpacked"
+          }
+
+          $unpackedFrameRing = "$releaseDir/win-unpacked/resources/screenlink-video-frame-ring.node"
+          if (-not (Test-Path $unpackedFrameRing)) {
+            $errors += "Packaged frame-ring addon is missing from win-unpacked"
           }
 
           $trayIcons = @("tray-icon-blue.png", "tray-icon-green.png", "tray-icon-orange.png", "tray-icon-red.png")

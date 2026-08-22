@@ -145,6 +145,14 @@ export class ViewerMediaBinding {
   private viewerMap = new Map<string, ViewerMapping>();
   /** Track processed requestIds for idempotency */
   private processedRequests = new Map<string, string>(); // requestEnvelopeId → token
+  /**
+   * Retransmission idempotency: viewers re-send stream.join.request with the
+   * SAME payload requestId (but a fresh transport envelope/messageId) while
+   * waiting for the response. Keyed by
+   * `${viewerDeviceId}::${logicalStreamId}::${requestId}` → original token so
+   * duplicates replay the original outcome instead of minting a second token.
+   */
+  private processedRequestIds = new Map<string, string>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private destroyed = false;
   private readonly TOKEN_TTL_MS = 60_000; // 60 seconds
@@ -238,6 +246,26 @@ export class ViewerMediaBinding {
       const bt = this.tokens.get(existingToken);
       if (bt && !bt.consumed) {
         return { mediaSessionId: bt.mediaSessionId, token: existingToken, viewerSessionId: bt.viewerSessionId };
+      }
+    }
+
+    // Retransmission idempotency: a viewer that did not receive the first
+    // response re-sends stream.join.request with the SAME payload requestId
+    // (new envelope). Re-processing would mint a duplicate token; instead
+    // replay the original accepted outcome — and RE-SEND the response so a
+    // lost first response still lets the viewer proceed.
+    if (requestId) {
+      const dedupKey = `${viewerDeviceId}::${logicalStreamId}::${requestId}`;
+      const existingToken = this.processedRequestIds.get(dedupKey);
+      if (existingToken) {
+        const bt = this.tokens.get(existingToken);
+        if (bt && !bt.consumed && Date.now() <= bt.expiresAt) {
+          void this.sendJoinResponse(envelope, existingToken, bt.mediaSessionId, requestId, bt.viewerSessionId).catch(() => {});
+          return { mediaSessionId: bt.mediaSessionId, token: existingToken, viewerSessionId: bt.viewerSessionId };
+        }
+        // Token consumed or expired — the viewer already progressed past
+        // join; do not mint a replacement for this requestId.
+        return null;
       }
     }
 
@@ -403,6 +431,9 @@ export class ViewerMediaBinding {
     // Track for idempotency
     if (envelope.messageId) {
       this.processedRequests.set(envelope.messageId, token);
+    }
+    if (requestId) {
+      this.processedRequestIds.set(`${viewerDeviceId}::${logicalStreamId}::${requestId}`, token);
     }
 
     // Send join response back to the requesting viewer
@@ -610,8 +641,12 @@ export class ViewerMediaBinding {
         m.viewerDeviceId === input.viewerDeviceId &&
         m.logicalStreamId === input.logicalStreamId &&
         m.mediaSessionId !== input.mediaSessionId);
-    for (const [staleKey] of staleDeviceEntries) {
-      this.viewerMap.delete(staleKey);
+    for (const [, staleMapping] of staleDeviceEntries) {
+      // Route through removeViewerMapping() so the sender-controller
+      // binding (senders/paused-revision state) and media-mode preference
+      // are released alongside the mapping itself. No viewerSessionId is
+      // passed — stale entries must be removed regardless of session ID.
+      this.removeViewerMapping(staleMapping.viewerDeviceId, staleMapping.mediaSessionId);
     }
 
     // Store extended viewer mapping with composite key (viewerDeviceId::mediaSessionId).
@@ -1640,6 +1675,7 @@ export class ViewerMediaBinding {
     this.viewerMap.clear();
     this.viewerMediaModes.clear();
     this.processedRequests.clear();
+    this.processedRequestIds.clear();
     if (this._fallbackSenderController) {
       this._fallbackSenderController.destroy();
       this._fallbackSenderController = null;
@@ -1671,6 +1707,12 @@ export class ViewerMediaBinding {
       const bt = this.tokens.get(token);
       if (!bt) {
         this.processedRequests.delete(reqId);
+      }
+    }
+    // Same TTL cleanup for the requestId-keyed retransmission guard
+    for (const [key, token] of this.processedRequestIds) {
+      if (!this.tokens.has(token)) {
+        this.processedRequestIds.delete(key);
       }
     }
   }

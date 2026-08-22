@@ -37,6 +37,7 @@ function injectConnection(gcm: GroupConnectionManager, groupId: string, initialS
   return {
     setState: (s: string) => { ctrl._state = s; },
     getState: () => ctrl._state,
+    mockConn,
   };
 }
 
@@ -67,14 +68,17 @@ describe("GroupConnectionManager — ensureConnected behavior", () => {
     await expect(gcm.ensureConnected("existing-group", 5_000)).resolves.toBeUndefined();
   });
 
-  it("CHARACTERIZATION: ensureConnected rejects immediately for idle connection", async () => {
+  it("CHARACTERIZATION: ensureConnected triggers one restart for idle connection, then rejects after timeout", async () => {
     vi.useFakeTimers();
     try {
-      injectConnection(gcm, "idle-group", "idle");
-      // The idle path rejects immediately via the "idle" branch (not after timeout)
-      await expect(gcm.ensureConnected("idle-group", 1_000)).rejects.toThrow(
-        "The selected group is not connected"
-      );
+      const handle = injectConnection(gcm, "idle-group", "idle");
+      const promise = gcm.ensureConnected("idle-group", 1_000);
+      // The idle path triggers exactly ONE restart attempt (single-flight),
+      // then keeps polling until connected or timeout.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handle.mockConn.start).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1_100);
+      await expect(promise).rejects.toThrow("The selected group is not connected");
     } finally {
       vi.useRealTimers();
     }

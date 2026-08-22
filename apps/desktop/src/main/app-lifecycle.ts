@@ -10,8 +10,9 @@ import type { WindowManager } from "./window-manager.js";
  * @returns false if this is not the primary instance (caller should quit)
  */
 export function setupSingleInstance(windowManager: WindowManager): boolean {
-  // Allow multiple instances for testing
-  if (process.argv.includes("--multi-instance")) {
+  // Allow multiple instances for testing (dev builds only; packaged builds
+  // always enforce single-instance).
+  if (!app.isPackaged && process.argv.includes("--multi-instance")) {
     return true;
   }
 
@@ -38,6 +39,10 @@ export function setupSingleInstance(windowManager: WindowManager): boolean {
 }
 
 export function getDevProfile(): string | null {
+  // Packaged builds always use the default profile; the dev-only flag is
+  // treated as absent.
+  if (app.isPackaged) return null;
+
   const idx = process.argv.indexOf("--dev-profile");
   if (idx !== -1 && idx + 1 < process.argv.length) {
     return process.argv[idx + 1] ?? null;

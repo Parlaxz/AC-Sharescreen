@@ -213,7 +213,10 @@ describe("ViewerSession", () => {
     await session.start(defaultOptions);
 
     expect(session.state).toBe("error");
-    // Should NOT have auto-retried (this is not a connect failure)
+    // Should NOT have auto-retried (this is not a connect failure).
+    // Flush the event loop so the fire-and-forget teardown (now raced
+    // against a bounded budget) has settled before asserting side effects.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(mockViewClient.shutdown).toHaveBeenCalledTimes(1);
     expect(mockViewClient.view).toHaveBeenCalledTimes(1);
   });
@@ -296,5 +299,116 @@ describe("ViewerSession", () => {
 
     // ViewerClient.shutdown was called during auto-retry teardown
     expect(mockViewClient.shutdown).toHaveBeenCalled();
+  });
+
+  // ─── Total media.bind failure → fail fast into error/retry ─────────────
+
+  it("fails fast into error/retry when every media.bind attempt fails", async () => {
+    session = new ViewerSession();
+    const states: string[] = [];
+    const errors: string[] = [];
+    session.onStateChange = (s) => states.push(s);
+    session.onError = (e) => errors.push(e);
+
+    // One publisher peer; every bind send throws.
+    mockViewClient.getSDK.mockReturnValue({
+      connections: new Map([["publisher-uuid-1", {}]]),
+    });
+    mockViewClient.sendMediaBind.mockRejectedValue(new Error("sendData failed"));
+
+    await session.start(defaultOptions);
+
+    // "media-bind-failed" is classified as a connect failure, so the first
+    // attempt auto-retries; the second attempt fails the same way and the
+    // session lands in "error" — without ever waiting for the 15s readiness
+    // timeout in "connecting-media".
+    expect(mockViewClient.sendMediaBind).toHaveBeenCalledTimes(2);
+    expect(mockViewClient.shutdown).toHaveBeenCalled(); // teardown ran on retry
+    expect(session.state).toBe("error");
+    expect(errors[0]).toContain("media-bind-failed");
+  });
+
+  it("keeps current behavior when at least one media.bind succeeds", async () => {
+    session = new ViewerSession();
+    const errors: string[] = [];
+    session.onError = (e) => errors.push(e);
+
+    // Two publishers: one bind succeeds, one throws → partial success.
+    mockViewClient.getSDK.mockReturnValue({
+      connections: new Map([
+        ["publisher-ok", {}],
+        ["publisher-bad", {}],
+      ]),
+    });
+    mockViewClient.sendMediaBind.mockImplementation(async (uuid: string) => {
+      if (uuid === "publisher-bad") throw new Error("sendData failed");
+    });
+
+    await session.start(defaultOptions);
+
+    // Partial success must NOT trigger the fail-fast path — the session
+    // stays in "connecting-media" waiting for media as before.
+    expect(mockViewClient.sendMediaBind).toHaveBeenCalledTimes(2);
+    expect(mockViewClient.sendMediaBind).toHaveBeenCalledWith(
+      "publisher-ok",
+      "test-token",
+      "media-session-1",
+      expect.any(String),
+    );
+    expect(session.state).toBe("connecting-media");
+    expect(errors).toHaveLength(0);
+  });
+
+  // ─── Join-request retransmission on lost response ──────────────────────
+
+  it("retransmits stream.join.request twice (3 sends total) when no join response arrives", async () => {
+    vi.useFakeTimers();
+
+    session = new ViewerSession();
+    const errors: string[] = [];
+    session.onError = (e) => errors.push(e);
+
+    // Join response never arrives — the runtime waiter rejects at its own
+    // 30s deadline, mirroring the real GroupMessageRouter behavior.
+    mockRuntime.waitForJoinResponse.mockImplementation(
+      () =>
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Join response timeout")), 30_000),
+        ),
+    );
+
+    const startPromise = session.start(defaultOptions);
+
+    // Advance past both retransmit points (8s and 16s)
+    await vi.advanceTimersByTimeAsync(8_000);
+    await vi.advanceTimersByTimeAsync(8_000);
+
+    const conn = mockRuntime.getConnectionManager().getConnection("group-1");
+    const sendToPeer = conn.sendToPeer as ReturnType<typeof vi.fn>;
+    const joinSends = sendToPeer.mock.calls.filter(
+      (c) => (c[1] as Record<string, unknown>).type === "stream.join.request",
+    );
+
+    // Exactly 3 sends: initial + 2 retransmits, same envelope/generation.
+    expect(joinSends).toHaveLength(3);
+    const requestIds = new Set(
+      joinSends.map((c) => (c[1] as Record<string, unknown>).requestId),
+    );
+    expect(requestIds.size).toBe(1);
+
+    // Advance past the 30s join-response deadline → single attempt fails
+    // into error (join timeouts are not connect failures, no auto-retry).
+    await vi.advanceTimersByTimeAsync(14_000);
+    await startPromise;
+
+    expect(session.state).toBe("error");
+    expect(errors[0]).toContain("Join response timeout");
+
+    // No further retransmits fire after the attempt ended.
+    await vi.advanceTimersByTimeAsync(20_000);
+    const joinSendsAfter = (sendToPeer.mock.calls as Array<[string, Record<string, unknown>]>).filter(
+      (c) => c[1].type === "stream.join.request",
+    );
+    expect(joinSendsAfter).toHaveLength(3);
   });
 });

@@ -9,7 +9,7 @@
     "dev:electron": "node scripts/dev-electron.mjs",
     "dev": "node scripts/dev-electron.mjs",
     "build": "vite build && tsc -p tsconfig.main.json --outDir dist/main && tsc -p tsconfig.preload.json --outDir dist/preload",
-    "build:electron": "electron-builder",
+    "build:electron": "electron-builder --win --x64 --config electron-builder.config.cjs --publish never",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.preload.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "test": "vitest run",
     "clean": "if exist dist rmdir /s /q dist & if exist out rmdir /s /q out & if exist .vite rmdir /s /q .vite"
@@ -79,39 +79,5 @@
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vitest": "^3.0.0"
-  },
-  "build": {
-    "appId": "app.screenlink.desktop",
-    "productName": "ScreenLink",
-    "directories": {
-      "output": "out"
-    },
-    "files": [
-      "dist/**/*",
-      "public/**/*"
-    ],
-    "afterPack": "../../scripts/after-pack.cjs",
-    "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ],
-      "icon": "assets/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true
-    },
-    "extraResources": [
-      {
-        "from": "public/vendor",
-        "to": "vendor"
-      },
-      {
-        "from": "assets/tray-icon.png",
-        "to": "tray-icon.png"
-      }
-    ]
   }
 }

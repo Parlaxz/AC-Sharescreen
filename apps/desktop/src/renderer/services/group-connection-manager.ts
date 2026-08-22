@@ -209,10 +209,19 @@ export class GroupConnectionManager {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let restartTriggered = false;
 
       const cleanup = () => {
         settled = true;
         if (timer) clearTimeout(timer);
+      };
+
+      // Single-flight restart trigger. GroupControlConnection.start() itself
+      // guards re-entry via its state check, but we only kick it once here.
+      const triggerRestart = () => {
+        if (restartTriggered) return;
+        restartTriggered = true;
+        void conn.start().catch(() => {});
       };
 
       const onStateChange = (state: ConnectionState) => {
@@ -255,9 +264,10 @@ export class GroupConnectionManager {
           cleanup();
           reject(new Error(GROUP_NOT_CONNECTED));
         } else if (s === "idle") {
-          // Idle — trigger a restart
-          cleanup();
-          reject(new Error(GROUP_NOT_CONNECTED));
+          // Idle — trigger one restart attempt (single-flight), then keep
+          // polling until connected or the timeout fires.
+          triggerRestart();
+          setTimeout(poll, 200);
         } else {
           // "starting" or "reconnecting" — keep polling
           setTimeout(poll, 200);
@@ -265,9 +275,9 @@ export class GroupConnectionManager {
       };
 
       if (conn.state === "idle") {
-        // Trigger one restart attempt
-        cleanup();
-        reject(new Error(GROUP_NOT_CONNECTED));
+        // Trigger one restart attempt, then poll until connected/timeout.
+        triggerRestart();
+        poll();
       } else {
         poll();
       }

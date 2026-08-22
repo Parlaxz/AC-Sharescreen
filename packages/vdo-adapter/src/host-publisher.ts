@@ -37,6 +37,12 @@ export class HostPublisher {
    * RTCErrorEvent "Close called" errors during teardown.
    */
   private _boundErrorHandler: ((...args: unknown[]) => void) | null = null;
+  /**
+   * Internal SDK handlers registered by createAndConnect()
+   * (peerConnected / error / connected). Tracked as (event, fn) pairs
+   * so disconnect() can remove them all via removeAllInternalListeners().
+   */
+  private _internalHandlers: Array<{ event: SDKEvent; handler: (...args: unknown[]) => void }> = [];
 
   /** Register an event handler. Safe to call before createAndConnect. */
   on(event: SDKEvent, handler: (...args: unknown[]) => void): void {
@@ -57,6 +63,9 @@ export class HostPublisher {
   }
 
   async createAndConnect(options: HostPublisherOptions): Promise<void> {
+    if (this.sdk) {
+      throw new Error("publisher-already-active");
+    }
     const Ctor = getSDKConstructor();
     if (!Ctor) {
       throw new CompatibilityError("SDK constructor not found on window.VDONinjaSDK");
@@ -90,9 +99,12 @@ export class HostPublisher {
     // Stage 8: Register peerConnected handler to apply codec preferences
     // on new viewer connections as they are established.
     this._requestedCodec = options.requestedCodec ?? "auto";
-    this.sdk.on("peerConnected", (_uuid: unknown) => {
+    const peerConnectedHandler = (...args: unknown[]): void => {
+      void args;
       this.applyCodecPreferencesOnExistingConnections();
-    });
+    };
+    this.sdk.on("peerConnected", peerConnectedHandler);
+    this._internalHandlers.push({ event: "peerConnected", handler: peerConnectedHandler });
 
     // Suppress expected RTCErrorEvent "Close called" errors that fire when
     // data channels are closed during normal SDK teardown.
@@ -107,13 +119,16 @@ export class HostPublisher {
       console.warn("[HostPublisher] SDK error event:", event);
     };
     this.sdk.on("error", this._boundErrorHandler);
+    this._internalHandlers.push({ event: "error", handler: this._boundErrorHandler });
 
     // Track WebSocket connection status so connectWithTimeout() can classify
     // whether the signaling handshake ever started.
     this._webSocketConnected = false;
-    this.sdk.on("connected", () => {
+    const wsConnectedHandler = (): void => {
       this._webSocketConnected = true;
-    });
+    };
+    this.sdk.on("connected", wsConnectedHandler);
+    this._internalHandlers.push({ event: "connected", handler: wsConnectedHandler });
 
     await this.connectWithTimeout(35_000);
 
@@ -209,12 +224,28 @@ export class HostPublisher {
     await this.sdk.stopPublishing();
   }
 
+  /**
+   * Remove every internally-registered SDK handler tracked in
+   * _internalHandlers. Called from disconnect() so a torn-down SDK
+   * instance cannot fire stale peerConnected/error/connected handlers.
+   */
+  private removeAllInternalListeners(): void {
+    const sdk = this.sdk;
+    if (sdk) {
+      for (const { event, handler } of this._internalHandlers) {
+        try { sdk.off(event, handler); } catch { /* ignore */ }
+      }
+    }
+    this._internalHandlers = [];
+  }
+
   async disconnect(): Promise<void> {
     if (!this.sdk) return;
     if (this._boundErrorHandler) {
       try { this.sdk.off("error", this._boundErrorHandler); } catch { /* ignore */ }
       this._boundErrorHandler = null;
     }
+    this.removeAllInternalListeners();
     await this.sdk.disconnect();
     this.sdk = null;
   }

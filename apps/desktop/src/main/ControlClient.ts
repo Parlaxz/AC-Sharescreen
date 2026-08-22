@@ -145,18 +145,37 @@ export class ControlClient {
     return new Promise<void>((resolve, reject) => {
       const start = Date.now();
       let retryCount = 0;
+      let settled = false;
+      let retryTimer: NodeJS.Timeout | null = null;
+      let inflightSocket: net.Socket | null = null;
+
+      const settleTimeout = (): void => {
+        if (settled) return;
+        settled = true;
+        if (retryTimer !== null) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
+        }
+        if (inflightSocket) {
+          ccTrace(`[${this.id}] destroying in-flight socket after timeout`);
+          try { inflightSocket.destroy(); } catch { /* ignore */ }
+          inflightSocket = null;
+        }
+        ccTrace(`[${this.id}] CONNECT TIMEOUT after ${Date.now() - start}ms`);
+        reject(new Error(`Timeout connecting to control pipe: ${this.pipePath}`));
+      };
 
       const tryConnect = () => {
         const elapsed = Date.now() - start;
         ccTrace(`[${this.id}] tryConnect #${++retryCount} elapsed=${elapsed}ms`);
         if (elapsed > timeoutMs) {
-          ccTrace(`[${this.id}] CONNECT TIMEOUT after ${elapsed}ms`);
-          reject(new Error(`Timeout connecting to control pipe: ${this.pipePath}`));
+          settleTimeout();
           return;
         }
 
         // 1. Create socket BEFORE calling connect (listen before connect per spec)
         const socket = new net.Socket();
+        inflightSocket = socket;
 
         // 2. Attach listeners BEFORE connect
         socket.on('data', (data: Buffer) => {
@@ -188,6 +207,13 @@ export class ControlClient {
         socket.connect(this.pipePath, () => {
           const connectedAt = Date.now() - start;
           ccTrace(`[${this.id}] CONNECTED at ${connectedAt}ms local=${socket.localAddress||''} remote=${socket.remoteAddress||''}`);
+          if (settled) {
+            // Promise already settled (timeout fired) — do not adopt a late socket.
+            ccTrace(`[${this.id}] CONNECTED after settle — destroying late socket`);
+            try { socket.destroy(); } catch { /* ignore */ }
+            return;
+          }
+          settled = true;
           this.socket = socket;
           this.connected = true;
           resolve();
@@ -195,10 +221,10 @@ export class ControlClient {
 
         // 4. Error during connection attempt (before connect fires)
         socket.once('error', (err: Error) => {
-          if (!this.connected) {
+          if (!this.connected && !settled) {
             ccTrace(`[${this.id}] connect ERROR ${err.message} — will retry`);
             socket.destroy();
-            setTimeout(tryConnect, 200);
+            retryTimer = setTimeout(tryConnect, 200);
           }
         });
       };

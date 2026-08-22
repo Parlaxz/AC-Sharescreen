@@ -83,9 +83,22 @@ const VIEWER_READINESS_TIMEOUT_MS = 15_000;
 const HOST_PEER_TIMEOUT_MS = 5_000;
 
 /** Max time (ms) to wait for viewerClient.view() before timing out. */
-const VIEW_TIMEOUT_MS = 30_000;
+const VIEW_TIMEOUT_MS = 20_000;
 /** Interval (ms) between host peer polls. */
 const HOST_PEER_POLL_INTERVAL_MS = 150;
+
+/**
+ * Join-request retransmission: while waiting up to 30s for
+ * stream.join.response, retransmit the identical join request at 8s and
+ * 16s (max 2 retransmits) so a single lost control message on a lossy
+ * link cannot burn the full silent timeout. The host replays the original
+ * outcome for duplicate requestIds (idempotent guard in ViewerMediaBinding).
+ */
+const JOIN_RETRANSMIT_INTERVAL_MS = 8_000;
+const JOIN_RETRANSMIT_MAX = 2;
+
+/** Max time (ms) for any single awaited teardown step before proceeding. */
+const TEARDOWN_STEP_BUDGET_MS = 3_000;
 
 /**
  * Race a promise against a bounded timeout. If the promise does not settle
@@ -188,6 +201,9 @@ export class ViewerSession {
 
   /** Current pending join request ID, for cancellation on stop/destroy/retry. */
   private _pendingRequestId: string | null = null;
+
+  /** Retransmit timers for the in-flight stream.join.request (max 2). */
+  private _joinRetransmitTimers: Array<ReturnType<typeof setTimeout>> = [];
 
   /** Remote-track-ended debounce timer — instance state for proper cleanup. */
   private _remoteTrackEndedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1039,12 +1055,14 @@ export class ViewerSession {
         // 1) Send the leave message FIRST, while the group-control
         //    channel is still healthy. Await delivery so the host
         //    receives a clean leave before the VDO connection drops.
-        await this.sendLeave();
+        //    Bounded: a hung send must not stall the next attempt.
+        await this.boundedTeardownStep("stream.leave", this.sendLeave());
 
         // 2) Cancel waiters and timers so any pending operation bails.
         this.cancelReadinessTimer();
         this.clearStatusInterval();
         this.cancelPendingJoin();
+        this.cancelJoinRetransmits();
         this.cancelPendingPauseResult();
         this.cancelRemoteTrackEndedTimer();
         this.cancelSelfViewRetryTimer();
@@ -1069,7 +1087,9 @@ export class ViewerSession {
         //    root cause of stale SDK connections blocking rejoin.
         if (this.viewerClient) {
           try {
-            await this.viewerClient.shutdown();
+            // Bounded: a hung SDK shutdown cannot stall the next attempt
+            // indefinitely (total teardown budget <= 6s across both steps).
+            await this.boundedTeardownStep("ViewerClient.shutdown", this.viewerClient.shutdown());
           } catch {
             // Best effort — proceed to state cleanup.
           }
@@ -1128,6 +1148,36 @@ export class ViewerSession {
 
     this._teardownPromise = promise;
     return promise;
+  }
+
+  /**
+   * Race a single teardown step against a fixed budget
+   * (TEARDOWN_STEP_BUDGET_MS). If the step has not settled when the budget
+   * lapses, log a warning and continue — the underlying operation keeps
+   * running in the background with its rejection swallowed. Two bounded
+   * steps (stream.leave + ViewerClient.shutdown) cap total teardown at
+   * ~6s so a hung SDK cannot block the next Watch attempt indefinitely.
+   *
+   * Deliberately NOT an async function: it returns the race promise
+   * directly so the happy path adds no extra microtask hops versus the
+   * previous plain `await step()` sequencing.
+   */
+  private boundedTeardownStep(label: string, op: Promise<unknown>): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const lapse = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        console.warn(
+          `[ViewerSession] teardown step '${label}' exceeded ${TEARDOWN_STEP_BUDGET_MS}ms — continuing`,
+        );
+        resolve();
+      }, TEARDOWN_STEP_BUDGET_MS);
+    });
+    // Swallow late rejection from the abandoned operation.
+    op.catch(() => {});
+    return Promise.race([op, lapse]).then(
+      () => { clearTimeout(timer!); },
+      () => { clearTimeout(timer!); },
+    );
   }
 
   // ── Diagnostics access ───────────────────────────────────────────
@@ -1214,7 +1264,7 @@ export class ViewerSession {
       //    envelope HMAC is computed over canonical JSON which matches
       //    JSON.stringify by omitting undefined keys. An undefined value
       //    serialized in the HMAC but stripped by transport breaks signing.
-      await conn.sendToPeer(peerUuid, {
+      const joinEnvelope = {
         type: "stream.join.request",
         logicalStreamId: this.logicalStreamId,
         mediaSessionId: this.mediaSessionId,
@@ -1222,7 +1272,14 @@ export class ViewerSession {
         viewerDisplayName: runtime.displayName ?? "Viewer",
         requestId,
         ...(this._viewerSessionId ? { viewerSessionId: this._viewerSessionId } : {}),
-      });
+      };
+      await conn.sendToPeer(peerUuid, joinEnvelope);
+
+      // Schedule bounded retransmissions of the SAME envelope (same
+      // requestId/generation). The host's join handler is idempotent per
+      // requestId and replays the original response, so a lost request or
+      // lost response recovers within 8s instead of burning the full 30s.
+      this.scheduleJoinRetransmits(conn, peerUuid, joinEnvelope, requestId);
 
       // GENERATION CHECK
       if (!this.isCurrent()) return;
@@ -1230,6 +1287,7 @@ export class ViewerSession {
       // 4) Wait for stream.join.response
       this.setState("waiting-for-host");
       const response = await joinResponsePromise;
+      this.cancelJoinRetransmits();
       if (!response) return;
 
       // Clear pending request id since the waiter resolved
@@ -1424,7 +1482,15 @@ export class ViewerSession {
       this._bindMediaSessionId = responseMediaSessionId;
       const sdk = viewerClient.getSDK();
       if (sdk && joinToken) {
+        // Track whether AT LEAST ONE media.bind was delivered. Total bind
+        // failure means the host will never authorise media forwarding, so
+        // waiting for the readiness timeout would waste ~15s in
+        // "connecting-media" — fail fast into the connect-failure path
+        // instead (auto-retry once, then error).
+        let anyBindSucceeded = false;
+        let bindAttempted = false;
         for (const [publisherUuid] of sdk.connections) {
+          bindAttempted = true;
           try {
             await viewerClient.sendMediaBind(
               publisherUuid,
@@ -1432,10 +1498,24 @@ export class ViewerSession {
               responseMediaSessionId,
               this._viewerSessionId ?? undefined,
             );
+            anyBindSucceeded = true;
             console.log('[ViewerSession] media.bind delivered to', publisherUuid.slice(0, 8) + '…');
           } catch (err) {
             console.warn('[ViewerSession] media.bind failed for', publisherUuid.slice(0, 8) + '…', err);
           }
+        }
+
+        // GENERATION CHECK before failing fast — an abandoned flow must not
+        // throw into the error path of a newer attempt.
+        if (!this.isCurrent()) return;
+
+        // Every attempted bind threw — nothing was delivered to any peer.
+        // Throw through the same path other connect failures use; the catch
+        // below clears pending request state and routes to auto-retry or
+        // setError, both of which run the shared teardown (beginTeardown)
+        // so no ViewerClient/bind state leaks.
+        if (bindAttempted && !anyBindSucceeded) {
+          throw new Error("media-bind-failed");
         }
       }
 
@@ -1451,6 +1531,7 @@ export class ViewerSession {
     } catch (err) {
       // Clear pending request id on any error so the promise is not leaked
       this._pendingRequestId = null;
+      this.cancelJoinRetransmits();
       const message = err instanceof Error ? err.message : String(err);
 
       // One automatic retry on SDK connect failures.  The first attempt can
@@ -1494,8 +1575,11 @@ export class ViewerSession {
 
   /**
    * Detect whether an error represents a connect failure that warrants an
-   * automatic retry.  Matches errors from ViewerClient.connectWithTimeout()
-   * and any bare "Reconnect failed" from the SDK.
+   * automatic retry.  Matches errors from ViewerClient.connectWithTimeout(),
+   * any bare "Reconnect failed" from the SDK, and total media.bind failure
+   * ("media-bind-failed") — when no bind was delivered to any peer the host
+   * will never forward media, so it is treated as a connect failure and
+   * retried once before surfacing as a fatal error.
    */
   private isConnectFailure(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
@@ -1503,7 +1587,8 @@ export class ViewerSession {
       err.message.includes("SDK connect timed out") ||
       err.message.includes("WebSocket to the signaling server") ||
       err.message.includes("Reconnect failed") ||
-      err.message.includes("view timed out")
+      err.message.includes("view timed out") ||
+      err.message.includes("media-bind-failed")
     );
   }
 
@@ -1824,6 +1909,41 @@ export class ViewerSession {
     } catch {
       // Best-effort — the host also reacts to peerDisconnected on VDO.
     }
+  }
+
+  /**
+   * Schedule up to JOIN_RETRANSMIT_MAX retransmissions of the identical
+   * stream.join.request envelope at JOIN_RETRANSMIT_INTERVAL_MS spacing.
+   * Each timer is disarmed automatically once the join attempt is no longer
+   * pending (response arrived, generation bumped, or teardown started).
+   */
+  private scheduleJoinRetransmits(
+    conn: { sendToPeer: (peerUuid: string, payload: Record<string, unknown>) => Promise<unknown> },
+    peerUuid: string,
+    envelope: Record<string, unknown>,
+    requestId: string,
+  ): void {
+    for (let i = 1; i <= JOIN_RETRANSMIT_MAX; i++) {
+      const attempt = i;
+      const timer = setTimeout(() => {
+        // Stale-timer guards: only retransmit while this exact join attempt
+        // is still pending and the session/generation is current.
+        if (this._destructed || !this.isCurrent()) return;
+        if (this._pendingRequestId !== requestId) return;
+        console.warn(
+          `[ViewerSession] no stream.join.response after ${attempt * JOIN_RETRANSMIT_INTERVAL_MS}ms — ` +
+          `retransmitting join request (${attempt}/${JOIN_RETRANSMIT_MAX})`,
+        );
+        void conn.sendToPeer(peerUuid, envelope).catch(() => {});
+      }, attempt * JOIN_RETRANSMIT_INTERVAL_MS);
+      this._joinRetransmitTimers.push(timer);
+    }
+  }
+
+  /** Cancel any scheduled join-request retransmissions. Idempotent. */
+  private cancelJoinRetransmits(): void {
+    for (const t of this._joinRetransmitTimers) clearTimeout(t);
+    this._joinRetransmitTimers = [];
   }
 
   /**

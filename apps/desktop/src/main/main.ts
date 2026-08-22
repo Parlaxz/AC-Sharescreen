@@ -10,7 +10,11 @@ import type { TrayMenuActions } from "./tray-manager.js";
 import { QuickShareShortcutManager } from "./quick-share-shortcut-manager.js";
 import { GroupShortcutManager } from "./group-shortcut-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
-import { registerIpcHandlers } from "./ipc-handlers.js";
+import {
+  registerIpcHandlers,
+  stopCurrentAudioHelper,
+  stopVideoHelperForQuit,
+} from "./ipc-handlers.js";
 import { FullscreenDetector } from "./fullscreen-detector.js";
 import { StreamToastManager } from "./stream-toast-manager.js";
 import { registerPermissionHandler } from "./permissions.js";
@@ -37,10 +41,17 @@ const __dirname = path.dirname(__filename);
 // Create require for CJS modules in ESM context
 const require = createRequire(import.meta.url);
 
+// Guard against stdout/stderr failures (e.g. EPIPE when the terminal closes).
+// Never throw from these callbacks — a throw here becomes an uncaught exception
+// in the main process. Log once per stream, then stop logging for that stream.
+const brokenStreams = new WeakSet<NodeJS.WriteStream>();
 for (const stream of [process.stdout, process.stderr]) {
   stream?.on("error", (err: NodeJS.ErrnoException) => {
-    if (err?.code === "EPIPE") return;
-    throw err;
+    if (brokenStreams.has(stream)) return;
+    brokenStreams.add(stream);
+    const name = stream === process.stderr ? "stderr" : "stdout";
+    // If stderr itself is broken this re-enters, but the WeakSet gate stops it.
+    console.error(`[ScreenLink] ${name} stream error (further ${name} errors suppressed):`, err);
   });
 }
 
@@ -51,7 +62,9 @@ if (process.env.NODE_ENV === "development" || process.env.VITE_DEV_SERVER_URL) {
 // ─── Must be called before app.ready ─────────────────────────────────────────
 registerPrivilegedSchemes();
 
-const isMultiInstance = process.argv.includes("--multi-instance");
+// Dev-only flags are ignored in packaged builds so they always enforce
+// single-instance and the default userData profile.
+const isMultiInstance = !app.isPackaged && process.argv.includes("--multi-instance");
 const devProfile = getDevProfile();
 
 // ─── Module-level state (assigned in whenReady) ──────────────────────────────
@@ -122,6 +135,19 @@ app.whenReady().then(() => {
   // ── Window ─────────────────────────────────────────────────────────────
   const mainWindow = windowManager.create();
 
+  // Safe renderer send for tray/menu paths: the window may be destroyed when
+  // these callbacks race quit/reload ("Object has been destroyed").
+  const safeSend = (channel: string, ...args: unknown[]): void => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        return;
+      }
+      mainWindow.webContents.send(channel, ...args);
+    } catch (err) {
+      console.warn(`[ScreenLink] safeSend("${channel}") failed:`, err);
+    }
+  };
+
   const fullscreenDetector = new FullscreenDetector();
   streamToastManager = new StreamToastManager(
     mainWindow,
@@ -129,7 +155,8 @@ app.whenReady().then(() => {
     path.join(__dirname, "../preload/stream-toast-preload.js"),
   );
 
-  if (process.argv.includes("--test-toast")) {
+  // Dev-only self-test hook: never honor in packaged builds.
+  if (!app.isPackaged && process.argv.includes("--test-toast")) {
     setTimeout(() => {
       const result = streamToastManager?.show({
         groupId: "self-test",
@@ -175,20 +202,20 @@ app.whenReady().then(() => {
   const trayActions: TrayMenuActions = {
     onOpen: () => windowManager.show(),
     onShareScreen: () => {
-      mainWindow.webContents.send("open-source-picker");
+      safeSend("open-source-picker");
     },
     onShareWindow: () => {
-      mainWindow.webContents.send("open-source-picker");
+      safeSend("open-source-picker");
     },
     onStopSharing: () => {
-      mainWindow.webContents.send("stop-sharing");
+      safeSend("stop-sharing");
     },
     onStopWatching: () => {
-      mainWindow.webContents.send("stop-watching");
+      safeSend("stop-watching");
     },
     onQuickShare: () => {
       windowManager.showRestoreOrFocus();
-      mainWindow.webContents.send("quick-share:open");
+      safeSend("quick-share:open");
     },
     onToggleLaunchAtLogin: (checked: boolean) => {
       loginItemManager.setEnabled(checked);
@@ -198,7 +225,7 @@ app.whenReady().then(() => {
       settingsStore.update({ autoResumeLastMonitor: checked });
     },
     onShowDiagnostics: () => {
-      mainWindow.webContents.send("open-diagnostics");
+      safeSend("open-diagnostics");
     },
     onQuit: () => {
       windowManager.setQuitting(true);
@@ -314,6 +341,54 @@ app.whenReady().then(() => {
     electronVersion: process.versions.electron,
     hidden: process.argv.includes("--hidden"),
   });
+}).catch((err: unknown) => {
+  // Startup failure safety net: without this, any constructor/store/tray/IPC
+  // error above becomes an unhandled rejection with a half-initialized app.
+  console.error("[ScreenLink] Fatal error during startup:", err);
+
+  // Best-effort cleanup of whatever module-level services were assigned.
+  try {
+    if (quickShareShortcutManager) {
+      quickShareShortcutManager.destroy();
+      quickShareShortcutManager = null;
+    }
+  } catch (cleanupErr) {
+    console.warn("[ScreenLink] Startup cleanup: quickShareShortcutManager failed:", cleanupErr);
+  }
+  try {
+    if (groupShortcutManager) {
+      groupShortcutManager.destroy();
+      groupShortcutManager = null;
+    }
+  } catch (cleanupErr) {
+    console.warn("[ScreenLink] Startup cleanup: groupShortcutManager failed:", cleanupErr);
+  }
+  try {
+    if (streamToastManager) {
+      streamToastManager.dispose();
+      streamToastManager = null;
+    }
+  } catch (cleanupErr) {
+    console.warn("[ScreenLink] Startup cleanup: streamToastManager failed:", cleanupErr);
+  }
+  try {
+    if (updateManager) {
+      updateManager.destroy();
+      updateManager = null;
+    }
+    removeUpdateIpcHandlers();
+  } catch (cleanupErr) {
+    console.warn("[ScreenLink] Startup cleanup: update manager failed:", cleanupErr);
+  }
+  try {
+    if (trayManager) {
+      trayManager.destroy();
+    }
+  } catch (cleanupErr) {
+    console.warn("[ScreenLink] Startup cleanup: trayManager failed:", cleanupErr);
+  }
+
+  app.quit();
 });
 
 app.on("window-all-closed", () => {
@@ -339,4 +414,36 @@ app.on("before-quit", () => {
     updateManager = null;
   }
   removeUpdateIpcHandlers();
+});
+
+// ── Native helper shutdown on quit ───────────────────────────────────────────
+// The audio helper (AudioHelperManager) is shut down via the exported
+// stopCurrentAudioHelper() from ipc-handlers. Bounded by a 3s timeout so quit
+// can never hang: whichever finishes first (allSettled or the timer) releases
+// the quit exactly once.
+let helperShutdownComplete = false;
+
+app.on("will-quit", (event) => {
+  // Pass through the re-entrant app.quit() issued after shutdown completes.
+  if (helperShutdownComplete) return;
+  event.preventDefault();
+
+  const finishQuit = (): void => {
+    if (helperShutdownComplete) return;
+    helperShutdownComplete = true;
+    clearTimeout(quitTimeout);
+    app.quit();
+  };
+  const quitTimeout = setTimeout(finishQuit, 3000);
+
+  const shutdowns: Array<Promise<unknown>> = [
+    stopCurrentAudioHelper().catch((err: unknown) => {
+      console.warn("[ScreenLink] Audio helper shutdown failed during quit:", err);
+    }),
+    stopVideoHelperForQuit().catch((err: unknown) => {
+      console.warn("[ScreenLink] Video helper shutdown failed during quit:", err);
+    }),
+  ];
+
+  Promise.allSettled(shutdowns).then(finishQuit, finishQuit);
 });

@@ -133,9 +133,17 @@ export class TrayManager {
     }
 
     const iconPath = getTrayIconPath(effectiveState, app.isPackaged);
-    const icon = nativeImage.createFromPath(iconPath);
-    if (!icon.isEmpty()) {
-      this.tray.setImage(icon);
+    try {
+      // The tray can be destroyed while a queued state update runs.
+      // (typeof check keeps this tolerant of non-Electron Tray stand-ins.)
+      if (!this.tray) return;
+      if (typeof this.tray.isDestroyed === "function" && this.tray.isDestroyed()) return;
+      const icon = nativeImage.createFromPath(iconPath);
+      if (!icon.isEmpty()) {
+        this.tray.setImage(icon);
+      }
+    } catch (err) {
+      console.error(`[tray-manager] Failed to update tray icon from ${iconPath}`, err);
     }
   }
 
