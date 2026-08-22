@@ -554,6 +554,24 @@ jobs:
           Write-Host "SHA-512 verification PASSED for $setupPath"
 
       # ── 13. HTTP URL verification ─────────────────────────────────────
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.determine-tag.outputs.tag }}"
+          $releaseType = "${{ github.event.inputs.release_type }}"
+
+          if ($releaseType -eq "prerelease") {
+            gh release edit "$tag" --draft=false --prerelease
+            Write-Host "Draft published as prerelease: $tag"
+          } else {
+            gh release edit "$tag" --draft=false --latest
+            Write-Host "Draft published as latest stable: $tag"
+          }
+
+      # ── 15. Job summary ──────────────────────────────────────────────
+
       - name: Verify download URLs return HTTP 200
         shell: pwsh
         env:
@@ -598,23 +616,6 @@ jobs:
           Write-Host "All download URLs return HTTP 200."
 
       # ── 14. Publish release ───────────────────────────────────────────
-      - name: Publish release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = "${{ steps.determine-tag.outputs.tag }}"
-          $releaseType = "${{ github.event.inputs.release_type }}"
-
-          if ($releaseType -eq "prerelease") {
-            gh release edit "$tag" --draft=false --prerelease
-            Write-Host "Draft published as prerelease: $tag"
-          } else {
-            gh release edit "$tag" --draft=false --latest
-            Write-Host "Draft published as latest stable: $tag"
-          }
-
-      # ── 15. Job summary ──────────────────────────────────────────────
       - name: Generate job summary
         shell: pwsh
         run: |
