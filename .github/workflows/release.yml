@@ -117,8 +117,6 @@ jobs:
 
       - name: Setup pnpm ${{ env.PNPM_VERSION }}
         uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
 
       - name: Get pnpm store directory
         id: pnpm-store
