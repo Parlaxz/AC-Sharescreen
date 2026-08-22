@@ -218,6 +218,12 @@ jobs:
           Write-Host "Video enhancer self-test passed."
 
       # ── 6. TypeScript checks and tests ───────────────────────────────
+      - name: Build shared package
+        run: pnpm build:shared
+
+      - name: Build vdo-adapter
+        run: pnpm build:vdo-adapter
+
       - name: Type check all packages
         shell: pwsh
         run: pnpm typecheck
@@ -228,12 +234,6 @@ jobs:
         run: pnpm test -- --reporter=verbose
 
       # ── 7. Build packages ───────────────────────────────────────────
-      - name: Build shared package
-        run: pnpm build:shared
-
-      - name: Build vdo-adapter
-        run: pnpm build:vdo-adapter
-
       - name: Build desktop
         run: pnpm build:desktop
 
