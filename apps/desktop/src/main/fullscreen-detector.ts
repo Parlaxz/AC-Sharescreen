@@ -40,9 +40,16 @@ export function evaluateFullscreenSuppression(input: FullscreenEvaluationInput):
   return coversMonitor && !hasWindowChrome;
 }
 
+type KoffiFunc = (...args: never[]) => unknown;
+
+interface KoffiLibrary {
+  func: ((name: string, returnType: string, argTypes: string[]) => KoffiFunc) &
+    ((convention: string, name: string, returnType: string, argTypes: string[]) => KoffiFunc);
+}
+
 interface KoffiModule {
   struct: (name: string, definition: Record<string, unknown>) => unknown;
-  load: (name: string) => { func: (name: string, returnType: string, argTypes: string[]) => (...args: never[]) => unknown };
+  load: (name: string) => KoffiLibrary;
 }
 
 interface NativeBindings {
@@ -144,13 +151,13 @@ export class FullscreenDetector {
       const user32 = koffi.load("user32.dll");
       const shell32 = koffi.load("shell32.dll");
       this.bindings = {
-        getForegroundWindow: user32.func("__stdcall GetForegroundWindow", "void *", []),
-        getWindowRect: user32.func("__stdcall GetWindowRect", "bool", ["void *", "_Out_ RECT *"]) as NativeBindings["getWindowRect"],
-        monitorFromWindow: user32.func("__stdcall MonitorFromWindow", "void *", ["void *", "uint"]) as NativeBindings["monitorFromWindow"],
-        getMonitorInfo: user32.func("__stdcall GetMonitorInfoW", "bool", ["void *", "_Inout_ MONITORINFO *"]) as NativeBindings["getMonitorInfo"],
-        getWindowLong: user32.func("__stdcall GetWindowLongW", "long", ["void *", "int"]) as NativeBindings["getWindowLong"],
-        getClassName: user32.func("__stdcall GetClassNameW", "int", ["void *", "_Out_ uint16_t *", "int"]) as NativeBindings["getClassName"],
-        queryNotificationState: shell32.func("__stdcall SHQueryUserNotificationState", "int", ["_Out_ uint *"]) as NativeBindings["queryNotificationState"],
+        getForegroundWindow: user32.func("__stdcall", "GetForegroundWindow", "void *", []),
+        getWindowRect: user32.func("__stdcall", "GetWindowRect", "bool", ["void *", "_Out_ RECT *"]) as NativeBindings["getWindowRect"],
+        monitorFromWindow: user32.func("__stdcall", "MonitorFromWindow", "void *", ["void *", "uint"]) as NativeBindings["monitorFromWindow"],
+        getMonitorInfo: user32.func("__stdcall", "GetMonitorInfoW", "bool", ["void *", "_Inout_ MONITORINFO *"]) as NativeBindings["getMonitorInfo"],
+        getWindowLong: user32.func("__stdcall", "GetWindowLongW", "long", ["void *", "int"]) as NativeBindings["getWindowLong"],
+        getClassName: user32.func("__stdcall", "GetClassNameW", "int", ["void *", "_Out_ uint16_t *", "int"]) as NativeBindings["getClassName"],
+        queryNotificationState: shell32.func("__stdcall", "SHQueryUserNotificationState", "int", ["_Out_ uint *"]) as NativeBindings["queryNotificationState"],
       };
       console.log("[fullscreen-detector] initialized via koffi");
       return true;
