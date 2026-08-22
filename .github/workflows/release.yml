@@ -539,11 +539,15 @@ jobs:
               exit 1
           }
 
-          $actualSha = (Get-FileHash "${{ runner.temp }}/verified-setup.exe" -Algorithm SHA512).Hash.ToLower()
-          $expectedShaNormalized = $expectedSha.ToLower()
+          $actualShaHex = (Get-FileHash "${{ runner.temp }}/verified-setup.exe" -Algorithm SHA512).Hash.ToLower()
+          $actualBytes = [byte[]]::new(64)
+          for ($i = 0; $i -lt 64; $i++) {
+              $actualBytes[$i] = [Convert]::ToByte($actualShaHex.Substring($i * 2, 2), 16)
+          }
+          $actualShaB64 = [Convert]::ToBase64String($actualBytes)
 
-          if ($actualSha -ne $expectedShaNormalized) {
-              Write-Host "::error::SHA-512 mismatch! Expected: $expectedSha, Got: $actualSha"
+          if ($actualShaB64 -ne $expectedSha) {
+              Write-Host "::error::SHA-512 mismatch! Expected: $expectedSha, Got: $actualShaB64"
               exit 1
           }
 
