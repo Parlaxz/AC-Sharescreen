@@ -2217,3 +2217,67 @@ describe("ViewerSession — pause/resume video element", () => {
     expect(session.pauseState).toBe("paused");
   });
 });
+
+// ─── Join rejection classification ─────────────────────────────────────────
+// When the host closes a share while a viewer is connecting or
+// auto-recovering, the host rejects stream.join.request with a
+// "share ended" reason. The session must end gracefully (state "ended",
+// no fatal error) instead of surfacing "Unable to play stream".
+describe("ViewerSession — join rejection handling", () => {
+  let session: ViewerSession;
+  let runtime: ReturnType<typeof makeMockRuntime>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    runtime = makeMockRuntime();
+    (getRuntime as ReturnType<typeof vi.fn>).mockReturnValue(runtime);
+    mockRuntimeMethods.isDestroyed.mockReturnValue(false);
+    session = new ViewerSession();
+  });
+
+  afterEach(() => {
+    session.destroy();
+    vi.restoreAllMocks();
+  });
+
+  async function startWithRejection(reason: string | undefined) {
+    mockRuntimeMethods.waitForJoinResponse.mockResolvedValue({
+      accepted: false,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    const states: string[] = [];
+    const errors: string[] = [];
+    session.onStateChange = (s) => states.push(s);
+    session.onError = (e) => errors.push(e);
+
+    await session.start({
+      groupId: "g-1",
+      hostDeviceId: "host-1",
+      logicalStreamId: "ls-1",
+      mediaSessionId: "ms-1",
+      hostName: "Host",
+    });
+    return { states, errors };
+  }
+
+  it.each([
+    "There is no active share for this stream",
+    "This share is no longer active",
+  ])("ends gracefully when rejected with %s", async (reason) => {
+    const { states, errors } = await startWithRejection(reason);
+
+    expect(session.state).toBe("ended");
+    expect(errors).toEqual([]);
+    expect(states).toContain("ended");
+    expect(mockViewerClientMethods.createAndConnect).not.toHaveBeenCalled();
+    expect(mockViewerClientMethods.view).not.toHaveBeenCalled();
+  });
+
+  it("still surfaces a fatal error for unrelated rejection reasons", async () => {
+    const { errors } = await startWithRejection("Invalid viewer identity");
+
+    expect(session.state).toBe("error");
+    expect(errors).toEqual(["Invalid viewer identity"]);
+    expect(mockViewerClientMethods.createAndConnect).not.toHaveBeenCalled();
+  });
+});
