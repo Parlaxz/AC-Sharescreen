@@ -299,8 +299,11 @@ describe("M6: GroupSettings source/preset race guards", () => {
 describe("M7a: loadConfig stale response guard", () => {
   it("loadConfig uses a generation counter or cancellation flag", async () => {
     const fs = await import("node:fs");
+    const path = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
     const source = fs.readFileSync(
-      "C:\\Users\\parla\\AppData\\Local\\Temp\\opencode\\AC-Sharescreen-ui-overhaul\\apps\\desktop\\src\\renderer\\components\\workspace\\GroupSettingsPage.tsx",
+      path.resolve(__dirname, "..", "src", "renderer", "components", "workspace", "GroupSettingsPage.tsx"),
       "utf-8",
     );
     expect(

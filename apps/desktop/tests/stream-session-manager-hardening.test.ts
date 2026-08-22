@@ -155,8 +155,9 @@ describe("StreamSessionManager — Phase A failure leaves no timers", () => {
     expect(ssm.state).toBe("failed");
 
     // Heartbeat and reannounce timers must NOT have been started
-    expect((ssm as any).heartbeatTimer).toBeNull();
-    expect((ssm as any).reannounceTimer).toBeNull();
+    // (timer lifecycle is owned by the StreamAnnouncer since Phase 3 extraction)
+    expect((ssm as any).announcer.heartbeatTimer).toBeNull();
+    expect((ssm as any).announcer.reannounceTimer).toBeNull();
   });
 
   it("CHARACTERIZATION: cleanupPublisher is idempotent after Phase A failure", async () => {

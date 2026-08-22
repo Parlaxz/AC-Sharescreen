@@ -222,7 +222,7 @@ describe("PublisherManager — bitrate correction behavior", () => {
     await pm.stopCapture().catch(() => {});
   });
 
-  it("CHARACTERIZATION: startPublishing post-publish bitrate enforcement catches mismatch", async () => {
+  it("CHARACTERIZATION: startPublishing leaves mismatched sender bitrate uncorrected (Phase 6C)", async () => {
     // Set up mock sender with mismatched bitrate
     let params: RTCRtpSendParameters = {
       encodings: [{ active: true, maxBitrate: 1_000_000 } as RTCRtpEncodingParameters],
@@ -253,13 +253,15 @@ describe("PublisherManager — bitrate correction behavior", () => {
     // Start with bitrate 2000 Kbps = 2,000,000 bps — but sender has 1,000,000
     await pm.startPublishing(makeMediaStream(), makePublisherConfig({ videoBitrate: 2000 }));
 
-    // Bitrate correction should have updated maxBitrate to 2,000,000
+    // Phase 6C removed post-publish correction loops: the initial publish
+    // configuration is authoritative and mismatches are only logged
+    // diagnostically (logPublisherSenderState), never rewritten.
     const updatedParams = sender.getParameters();
     const maxBitrate = updatedParams.encodings?.[0]?.maxBitrate ?? 0;
-    expect(maxBitrate).toBe(2_000_000);
+    expect(maxBitrate).toBe(1_000_000);
 
-    // Verify setParameters was called for correction
-    expect(sender.setParameters).toHaveBeenCalled();
+    // Verify no corrective setParameters call was made
+    expect(sender.setParameters).not.toHaveBeenCalled();
   });
 
   it("CHARACTERIZATION: startPublishing with zero bitrate does not trigger correction", async () => {

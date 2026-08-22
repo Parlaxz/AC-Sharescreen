@@ -660,11 +660,15 @@ describe("ViewerMediaBinding — pause/resume operation correlation", () => {
 
     // Pause
     await binding.handleViewerPaused("viewer-1", "ms-1", true);
-    expect((binding as any).viewerPausedSenderStates.has("viewer-1::ms-1")).toBe(true);
+    // Phase 6C: paused sender state lives in the ViewerSenderController
+    const mapping = (binding as any).viewerMap.get("viewer-1::ms-1");
+    const bId = (ViewerMediaBinding as any).bindingIdFromMapping(mapping);
+    expect((binding as any).senderController.getPausedState(bId)).not.toBeNull();
 
-    // Remove mapping — paused state should be cleaned up
+    // Remove mapping — paused state should be cleaned up with the binding
     binding.removeViewerMapping("viewer-1", "ms-1");
-    expect((binding as any).viewerPausedSenderStates.has("viewer-1::ms-1")).toBe(false);
+    expect((binding as any).senderController.hasBinding(bId)).toBe(false);
+    expect((binding as any).senderController.getPausedState(bId)).toBeNull();
   });
 
   it("viewerMediaModes cleaned up on mapping removal", async () => {
@@ -690,27 +694,36 @@ describe("ViewerMediaBinding — pause/resume operation correlation", () => {
     expect((binding as any).viewerMediaModes.has("viewer-1::ms-1")).toBe(false);
   });
 
-  it("destroy clears all paused sender states and media modes", async () => {
-    // Store some state
-    (binding as any).viewerPausedSenderStates.set("v1::ms-1", {
-      videoEncodings: [{ active: false }],
-      audioEncodings: [],
+  it("destroy clears all per-viewer state and rejects further pause handling", async () => {
+    // Seed mappings and a media mode preference
+    const mkMapping = (viewerDeviceId: string) => ({
+      viewerDeviceId,
+      viewerSessionId: "session-1",
+      mediaPeerUuid: "peer-uuid-1",
+      groupId: "g-1",
+      logicalStreamId: "stream-1",
+      mediaSessionId: "ms-1",
+      pc: { connectionState: "connected", close: vi.fn() },
+      videoSender: null,
+      audioSender: null,
     });
+    (binding as any).viewerMap.set("v1::ms-1", mkMapping("v1"));
+    (binding as any).viewerMap.set("v2::ms-1", mkMapping("v2"));
     (binding as any).viewerMediaModes.set("v1::ms-1", {
       audioEnabled: true,
       videoEnabled: false,
     });
-    (binding as any).viewerPausedSenderStates.set("v2::ms-1", {
-      videoEncodings: [{ active: false }],
-      audioEncodings: [],
-    });
 
-    expect((binding as any).viewerPausedSenderStates.size).toBe(2);
+    expect((binding as any).viewerMap.size).toBe(2);
     expect((binding as any).viewerMediaModes.size).toBe(1);
 
     binding.destroy();
 
-    expect((binding as any).viewerPausedSenderStates.size).toBe(0);
+    expect((binding as any).viewerMap.size).toBe(0);
     expect((binding as any).viewerMediaModes.size).toBe(0);
+
+    // Post-destroy pause handling is rejected outright
+    const result = await binding.handleViewerPaused("v1", "ms-1", true);
+    expect(result.status).toBe("mapping-missing");
   });
 });

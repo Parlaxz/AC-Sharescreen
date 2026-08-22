@@ -830,9 +830,9 @@ describe("StreamSessionManager Phase 3 — sendHeartbeat error handling", () => 
     broadcastSpy.mockRejectedValue(new Error("Network error"));
 
     // Force a heartbeat — should not throw
-    // Accessing private method via bracket notation
+    // Heartbeat sending is owned by the StreamAnnouncer since Phase 3 extraction
     await expect(
-      (sessionManager as unknown as { sendHeartbeat(): Promise<void> }).sendHeartbeat()
+      (sessionManager as unknown as { announcer: { sendHeartbeat(): Promise<void> } }).announcer.sendHeartbeat()
     ).resolves.toBeUndefined();
 
     // Session should still be active
@@ -854,7 +854,7 @@ describe("StreamSessionManager Phase 3 — sendHeartbeat error handling", () => 
     // Simulate multiple timer ticks
     for (let i = 0; i < 5; i++) {
       await expect(
-        (sessionManager as unknown as { sendHeartbeat(): Promise<void> }).sendHeartbeat()
+        (sessionManager as unknown as { announcer: { sendHeartbeat(): Promise<void> } }).announcer.sendHeartbeat()
       ).resolves.toBeUndefined();
     }
 

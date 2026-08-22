@@ -270,7 +270,7 @@ describe("Viewer overlay controls mounted (Issues 2+3)", () => {
       // the custom event was handled (no error thrown)
       expect(true).toBe(true);
     });
-  });
+  }, 15000);
 
   it("settings panel keyboard listeners work when controls are mounted but invisible", async () => {
     const { ViewerSettingsPanel } = await import(

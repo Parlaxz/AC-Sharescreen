@@ -9,10 +9,12 @@ describe("usePreloadEvents helpers", () => {
   it("subscribes to preload events and cleans up", async () => {
     const openCleanup = vi.fn();
     const stopCleanup = vi.fn();
+    const watchCleanup = vi.fn();
     const diagnosticsCleanup = vi.fn();
     const handlers = {
       onOpenSourcePicker: vi.fn(),
       onStopSharing: vi.fn(),
+      onStopWatching: vi.fn(),
       onOpenDiagnostics: vi.fn(),
     };
 
@@ -27,6 +29,10 @@ describe("usePreloadEvents helpers", () => {
         callback();
         return stopCleanup;
       },
+      onStopWatching: (callback) => {
+        callback();
+        return watchCleanup;
+      },
       onOpenDiagnostics: (callback) => {
         callback();
         return diagnosticsCleanup;
@@ -35,12 +41,14 @@ describe("usePreloadEvents helpers", () => {
 
     expect(handlers.onOpenSourcePicker).toHaveBeenCalledTimes(1);
     expect(handlers.onStopSharing).toHaveBeenCalledTimes(1);
+    expect(handlers.onStopWatching).toHaveBeenCalledTimes(1);
     expect(handlers.onOpenDiagnostics).toHaveBeenCalledTimes(1);
 
     cleanup();
 
     expect(openCleanup).toHaveBeenCalledTimes(1);
     expect(stopCleanup).toHaveBeenCalledTimes(1);
+    expect(watchCleanup).toHaveBeenCalledTimes(1);
     expect(diagnosticsCleanup).toHaveBeenCalledTimes(1);
   });
 
