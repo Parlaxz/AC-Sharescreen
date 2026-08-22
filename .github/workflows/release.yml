@@ -326,9 +326,10 @@ jobs:
             $errors += "Packaged video enhancer is missing from win-unpacked"
           }
 
-          $unpackedTray = "$releaseDir/win-unpacked/resources/tray-icon.png"
-          if (-not (Test-Path $unpackedTray)) {
-            $errors += "Packaged tray icon is missing from win-unpacked"
+          $trayIcons = @("tray-icon-blue.png", "tray-icon-green.png", "tray-icon-orange.png", "tray-icon-red.png")
+          $missingTrayIcons = $trayIcons | Where-Object { -not (Test-Path "$releaseDir/win-unpacked/resources/$_") }
+          if ($missingTrayIcons.Count -gt 0) {
+            $errors += "Packaged tray icons missing from win-unpacked: $($missingTrayIcons -join ', ')"
           }
 
           $appUpdateYml = "$releaseDir/win-unpacked/resources/app-update.yml"
@@ -348,12 +349,25 @@ jobs:
           }
 
           # Main entry in asar
-          $asarMain = "$releaseDir/win-unpacked/resources/app.asar/package.json"
-          if (Test-Path $asarMain) {
-            $asarPkg = Get-Content $asarMain -Raw | ConvertFrom-Json
-            $asarVersion = $asarPkg.version
-            if ($asarVersion -ne $version) {
-              $errors += "Packaged app version ($asarVersion) does not match release version ($version)"
+          $asarFile = "$releaseDir/win-unpacked/resources/app.asar"
+          if (Test-Path $asarFile) {
+            Push-Location $releaseDir
+            try {
+              npx --yes @electron/asar extract-file "win-unpacked/resources/app.asar" "package.json"
+              if ($LASTEXITCODE -ne 0) {
+                $errors += "Failed to extract package.json from app.asar"
+              } else {
+                $asarPkg = Get-Content "package.json" -Raw | ConvertFrom-Json
+                if ($asarPkg.version -ne $version) {
+                  $errors += "Packaged app version ($($asarPkg.version)) does not match release version ($version)"
+                }
+                if (-not $asarPkg.main) {
+                  $errors += "Packaged app package.json has no main entry"
+                }
+              }
+              Remove-Item "package.json" -Force -ErrorAction SilentlyContinue
+            } finally {
+              Pop-Location
             }
           } else {
             # Not using asar — check dist/main/main.js directly
