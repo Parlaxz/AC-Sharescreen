@@ -1273,6 +1273,11 @@ export class StreamSessionManager {
       pcmPortReceived = true;
       return port;
     });
+    // Detach a no-op handler so a timeout rejection is never unhandled when
+    // audio setup fails before reaching `await pcmPortPromise` (e.g.
+    // ensureAudioHelper failure). The awaited branch below still receives
+    // the real rejection for rollback handling.
+    pcmPortPromise.catch(() => {});
 
     try {
       // 1) Ensure the audio helper is up before we touch anything else.

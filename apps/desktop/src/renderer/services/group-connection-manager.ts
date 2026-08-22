@@ -100,6 +100,10 @@ export class GroupConnectionManager {
       const existing = this.connections.get(config.groupId)!;
       if (existing.state === "destroyed" || existing.state === "failed") {
         this.connections.delete(config.groupId);
+        // A "failed" connection may still own a live SDK/mesh (e.g. after
+        // reconnectFailed). Destroy it before replacing so the WebSocket,
+        // peer connections, and listeners are not leaked.
+        await existing.destroy().catch(() => {});
       } else {
         return;
       }

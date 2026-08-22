@@ -13,6 +13,7 @@ import {
   HelperState,
   StartFilteredMonitorResult,
   StartEndpointLoopbackResult,
+  ControlResponse,
 } from './ControlClient.js';
 
 // Diagnostic log file for audio startup debugging (ESM-compatible path)
@@ -291,11 +292,35 @@ export class AudioHelperManager {
       diag(`Control pipe connected`);
       console.log('[AudioHelper] Control pipe connected');
 
-      // 3. Perform handshake
+      // 3. Perform handshake. A freshly spawned helper can transiently
+      //    accept the pipe connection before its control loop is ready to
+      //    service requests (AV scan, first-run provisioning), so retry a
+      //    bounded number of times while the pipe stays connected.
       this.state = 'handshaking';
       diag(`Sending hello...`);
       console.log('[AudioHelper] Sending hello...');
-      const helloResp = await this.control.hello();
+      let helloResp: ControlResponse | null = null;
+      let lastHelloError: Error | null = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          helloResp = await this.control.hello();
+          lastHelloError = null;
+          break;
+        } catch (err) {
+          lastHelloError = err instanceof Error ? err : new Error(String(err));
+          diag(`hello attempt ${attempt}/3 failed: ${lastHelloError.message}`);
+          // Pipe died — the helper process is gone; retrying cannot help.
+          if (!this.control.isConnected()) {
+            throw lastHelloError;
+          }
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        }
+      }
+      if (!helloResp) {
+        throw lastHelloError ?? new Error('Handshake failed');
+      }
       if (!helloResp.success) {
         throw new Error(`Handshake failed: ${helloResp.error ?? 'unknown'}`);
       }

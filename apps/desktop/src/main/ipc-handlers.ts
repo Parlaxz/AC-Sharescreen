@@ -49,6 +49,8 @@ export function clearCurrentVdoCredentials(): void {
 
 let currentAudioHelper: AudioHelperManager | null = null;
 let currentAudioState: string = "disabled";
+/** In-flight helper start, shared so concurrent IPC callers get one spawn. */
+let audioHelperStartPromise: Promise<AudioHelperManager> | null = null;
 
 export function setCurrentAudioHelper(helper: AudioHelperManager | null): void {
   currentAudioHelper = helper;
@@ -77,6 +79,7 @@ export async function stopCurrentAudioHelper(): Promise<void> {
 
 async function ensureAudioHelper(): Promise<AudioHelperManager> {
   if (currentAudioHelper) return currentAudioHelper;
+  if (audioHelperStartPromise) return audioHelperStartPromise;
 
   const helperPath = getHelperPath();
   setCurrentAudioState("starting-helper");
@@ -84,12 +87,23 @@ async function ensureAudioHelper(): Promise<AudioHelperManager> {
   const helper = new AudioHelperManager({ helperPath });
   helper.onPacket(() => {});
   helper.onError((err) => console.error("[Audio] Helper error:", err));
-  await helper.start();
 
-  setCurrentAudioHelper(helper);
-  setCurrentAudioState("connecting-transport");
+  audioHelperStartPromise = helper
+    .start()
+    .then(() => {
+      setCurrentAudioHelper(helper);
+      setCurrentAudioState("connecting-transport");
+      return helper;
+    })
+    .catch((err: unknown) => {
+      setCurrentAudioState("error");
+      throw err;
+    })
+    .finally(() => {
+      audioHelperStartPromise = null;
+    });
 
-  return helper;
+  return audioHelperStartPromise;
 }
 
 // ── Video helper state (singleton manager) ──

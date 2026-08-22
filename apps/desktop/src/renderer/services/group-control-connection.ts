@@ -163,6 +163,8 @@ export class GroupControlConnection {
   /** Authenticated peer-UUID → device-ID mapping (post-handshake). */
   private peerToDevice = new Map<string, string>();
   private deviceToPeer = new Map<string, string>();
+  /** Last identity claimed by each raw peer UUID (validated hellos). */
+  private rawPeerIdentity = new Map<string, string>();
   private _state: ConnectionState = "idle";
   private opts: GroupControlConnectionOptions;
   private destroyed = false;
@@ -312,6 +314,7 @@ export class GroupControlConnection {
     const allDeviceIds = Array.from(this.deviceToPeer.keys());
     this.peerToDevice.clear();
     this.deviceToPeer.clear();
+    this.rawPeerIdentity.clear();
     this.peersAwaitingHello.clear();
     this.rawDataPeers.clear();
     for (const deviceId of allDeviceIds) {
@@ -578,6 +581,66 @@ export class GroupControlConnection {
     return envelope.senderDeviceId === mappedDeviceId;
   }
 
+  /**
+   * Establish or migrate the authenticated device ↔ peer-UUID mapping.
+   *
+   * - If the device is already mapped to THIS peer UUID, nothing changes.
+   * - If it is mapped to a DIFFERENT peer whose data channel is still open,
+   *   keep the existing mapping. Duplicate peer connections for the same
+   *   device (mesh glare) must not flap online state or steal the routing
+   *   target — the first authenticated route wins while it stays usable.
+   * - Otherwise (no mapping, or the mapped peer's channel is gone), take
+   *   over the mapping.
+   *
+   * Returns "new" only when a previously-unmapped device gained a mapping,
+   * i.e. when onPeerOnline should fire.
+   */
+  private establishDeviceMapping(uuid: string, deviceId: string): "new" | "kept" {
+    const oldPeer = this.deviceToPeer.get(deviceId);
+    if (oldPeer === uuid) return "kept";
+    if (oldPeer && this.rawDataPeers.has(oldPeer)) {
+      return "kept";
+    }
+    if (oldPeer) {
+      this.peerToDevice.delete(oldPeer);
+      this.rawPeerIdentity.delete(oldPeer);
+    }
+    this.peerToDevice.set(uuid, deviceId);
+    this.deviceToPeer.set(deviceId, uuid);
+    return "new";
+  }
+
+  /**
+   * A peer route (data channel / connection) went down. Clean raw state and,
+   * if this was the authenticated route for a device, transparently migrate
+   * the mapping to another live raw channel claiming the same identity
+   * instead of flapping the member offline→online.
+   */
+  private handlePeerRouteDown(uuid: string): void {
+    this.rawDataPeers.delete(uuid);
+    this.peersAwaitingHello.delete(uuid);
+    this.rawPeerIdentity.delete(uuid);
+    const deviceId = this.peerToDevice.get(uuid);
+    if (!deviceId) return;
+
+    let replacement: string | null = null;
+    for (const [peerUuid, dev] of this.rawPeerIdentity) {
+      if (dev === deviceId && this.rawDataPeers.has(peerUuid)) {
+        replacement = peerUuid;
+        break;
+      }
+    }
+
+    this.peerToDevice.delete(uuid);
+    this.deviceToPeer.delete(deviceId);
+    if (replacement) {
+      this.peerToDevice.set(replacement, deviceId);
+      this.deviceToPeer.set(deviceId, replacement);
+    } else {
+      this.opts.onPeerOffline(deviceId);
+    }
+  }
+
   private setState(s: ConnectionState): void {
     if (this._state !== s) {
       this._state = s;
@@ -654,14 +717,7 @@ export class GroupControlConnection {
         if (gen !== this.startGeneration || this.destroyed) return;
         const { uuid } = extractPeerUuid(raw);
         if (!uuid) return;
-        this.rawDataPeers.delete(uuid);
-        this.peersAwaitingHello.delete(uuid);
-        const deviceId = this.peerToDevice.get(uuid);
-        if (deviceId) {
-          this.peerToDevice.delete(uuid);
-          this.deviceToPeer.delete(deviceId);
-          this.opts.onPeerOffline(deviceId);
-        }
+        this.handlePeerRouteDown(uuid);
       },
       dataChannelOpen: (raw: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
@@ -699,14 +755,7 @@ export class GroupControlConnection {
           ));
           return;
         }
-        this.rawDataPeers.delete(uuid);
-        this.peersAwaitingHello.delete(uuid);
-        const deviceId = this.peerToDevice.get(uuid);
-        if (deviceId) {
-          this.peerToDevice.delete(uuid);
-          this.deviceToPeer.delete(deviceId);
-          this.opts.onPeerOffline(deviceId);
-        }
+        this.handlePeerRouteDown(uuid);
       },
       dataReceived: async (dataArg: unknown, peerArg?: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
@@ -749,21 +798,14 @@ export class GroupControlConnection {
               ? helloMember
               : null;
 
-            const oldPeer = this.deviceToPeer.get(deviceId);
-            const isNewMapping = !oldPeer || oldPeer !== uuid;
-            if (isNewMapping) {
-              if (oldPeer) {
-                this.peerToDevice.delete(oldPeer);
-              }
-              this.peerToDevice.set(uuid, deviceId);
-              this.deviceToPeer.set(deviceId, uuid);
+            this.rawPeerIdentity.set(uuid, deviceId);
+            const mappingOutcome = this.establishDeviceMapping(uuid, deviceId);
 
-              // Only fire onPeerOnline for genuinely new mappings,
-              // not for duplicate hellos (already mapped).
-              if (!oldPeer) {
-                this.opts.onPeerOnline(deviceId, displayName);
-                console.log("[group-control] member online:", deviceId, displayName);
-              }
+            // Only fire onPeerOnline for genuinely new mappings,
+            // not for duplicate hellos (already mapped).
+            if (mappingOutcome === "new") {
+              this.opts.onPeerOnline(deviceId, displayName);
+              console.log("[group-control] member online:", deviceId, displayName);
             }
 
             // Fire authenticated hello callback for member record merge
@@ -788,7 +830,7 @@ export class GroupControlConnection {
               this.requestFullStateFromPeer(uuid).catch(() => {});
               // Tell the peer we are online now.
               this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
-            } else if (!oldPeer) {
+            } else if (mappingOutcome === "new") {
               // New peer we already greeted — also request state.
               this.requestFullStateFromPeer(uuid).catch(() => {});
               // Tell the peer we are online now.
@@ -812,22 +854,15 @@ export class GroupControlConnection {
               ? responseMember
               : null;
 
-            const oldPeer = this.deviceToPeer.get(deviceId);
-            const isNewMapping = !oldPeer || oldPeer !== uuid;
-            if (isNewMapping) {
-              if (oldPeer) {
-                this.peerToDevice.delete(oldPeer);
-              }
-              this.peerToDevice.set(uuid, deviceId);
-              this.deviceToPeer.set(deviceId, uuid);
+            this.rawPeerIdentity.set(uuid, deviceId);
+            const mappingOutcome = this.establishDeviceMapping(uuid, deviceId);
 
-              // Only fire onPeerOnline for genuinely new mappings.
-              if (!oldPeer) {
-                this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
-                console.log("[group-control] member online via hello.response:", deviceId);
-                // Tell the peer we are online now (first identity mapping).
-                this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
-              }
+            // Only fire onPeerOnline for genuinely new mappings.
+            if (mappingOutcome === "new") {
+              this.opts.onPeerOnline(deviceId, validatedEnvelope.payload?.displayName as string);
+              console.log("[group-control] member online via hello.response:", deviceId);
+              // Tell the peer we are online now (first identity mapping).
+              this.sendMemberOnlineToPeer(uuid, this.opts.nodeId, this.opts.displayName).catch(() => {});
             }
 
             // Fire authenticated hello callback for member record merge
