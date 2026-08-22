@@ -556,6 +556,8 @@ jobs:
       # ── 13. HTTP URL verification ─────────────────────────────────────
       - name: Verify download URLs return HTTP 200
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $ymlContent = Get-Content "${{ runner.temp }}/verified-latest.yml" -Raw
@@ -569,10 +571,16 @@ jobs:
               "$baseUrl/latest.yml"
           )
 
+          # Draft-release assets are not publicly downloadable — authenticate
+          $headers = @{}
+          if ($env:GH_TOKEN) {
+              $headers["Authorization"] = "Bearer $env:GH_TOKEN"
+          }
+
           $errors = @()
           foreach ($url in $urlsToCheck) {
               try {
-                  $response = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30
+                  $response = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30 -Headers $headers
                   if ($response.StatusCode -eq 200) {
                       Write-Host "OK: $url"
                   } else {
