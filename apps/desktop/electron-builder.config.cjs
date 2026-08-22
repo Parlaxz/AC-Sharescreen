@@ -78,8 +78,6 @@ const config = {
       to: "screenlink-video-frame-ring.node",
     },
   ],
-  // koffi loads platform .node binaries at runtime — keep them outside app.asar
-  asarUnpack: ["node_modules/koffi/**"],
   // Do not rebuild native modules unless specifically verified
   npmRebuild: false,
   // GitHub publish provider — the packaged app reads app-update.yml to
