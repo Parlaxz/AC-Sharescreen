@@ -129,6 +129,19 @@ app.whenReady().then(() => {
     path.join(__dirname, "../preload/stream-toast-preload.js"),
   );
 
+  if (process.argv.includes("--test-toast")) {
+    setTimeout(() => {
+      const result = streamToastManager?.show({
+        groupId: "self-test",
+        hostDeviceId: "self-test",
+        logicalStreamId: "self-test",
+        hostName: "ScreenLink",
+        groupName: "Toast self-test",
+      });
+      console.log("[self-test] stream toast result:", JSON.stringify(result));
+    }, 5000);
+  }
+
   registerDisplayMediaHandler(mainWindow);
   registerPermissionHandler(mainWindow);
 

@@ -108,14 +108,21 @@ export class FullscreenDetector {
       const windowStyle = bindings.getWindowLong(foregroundWindow, -16);
       const monitorRect = hasMonitorInfo ? monitorInfo.rcMonitor : null;
 
-      return {
-        fullscreen: evaluateFullscreenSuppression({
+      const suppressed = evaluateFullscreenSuppression({
+        notificationState,
+        windowRect: hasWindowRect ? windowRect : null,
+        monitorRect,
+        windowClassName,
+        windowStyle: hasWindowRect ? windowStyle : null,
+      });
+      if (suppressed) {
+        console.log("[fullscreen-detector] fullscreen application detected:", {
           notificationState,
-          windowRect: hasWindowRect ? windowRect : null,
-          monitorRect,
           windowClassName,
-          windowStyle: hasWindowRect ? windowStyle : null,
-        }),
+        });
+      }
+      return {
+        fullscreen: suppressed,
         ...(monitorRect ? { foregroundMonitorBounds: { x: monitorRect.left, y: monitorRect.top, width: monitorRect.right - monitorRect.left, height: monitorRect.bottom - monitorRect.top } } : {}),
       };
     } catch (error) {
@@ -145,6 +152,7 @@ export class FullscreenDetector {
         getClassName: user32.func("__stdcall GetClassNameW", "int", ["void *", "_Out_ uint16_t *", "int"]) as NativeBindings["getClassName"],
         queryNotificationState: shell32.func("__stdcall SHQueryUserNotificationState", "int", ["_Out_ uint *"]) as NativeBindings["queryNotificationState"],
       };
+      console.log("[fullscreen-detector] initialized via koffi");
       return true;
     } catch (error) {
       this.unavailable = true;

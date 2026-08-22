@@ -34,11 +34,15 @@ export class StreamToastManager {
     const dedupeKey = `${payload.hostDeviceId}|${payload.groupId}`;
     const lastShownAt = this.lastShown.get(dedupeKey);
     if (lastShownAt !== undefined && Date.now() - lastShownAt < TOAST_DEDUPE_MS) {
+      console.log("[stream-toast] suppressed (deduped):", dedupeKey);
       return { shown: false, reason: "deduped" };
     }
 
     const fullscreen = this.fullscreenDetector.checkFullscreen();
-    if (fullscreen.fullscreen) return { shown: false, reason: "fullscreen" };
+    if (fullscreen.fullscreen) {
+      console.log("[stream-toast] suppressed (a fullscreen application is active)");
+      return { shown: false, reason: "fullscreen" };
+    }
 
     this.lastShown.set(dedupeKey, Date.now());
     this.pruneDedupe();
@@ -73,9 +77,15 @@ export class StreamToastManager {
       display.workArea.x + display.workArea.width - 360 - margin,
       display.workArea.y + display.workArea.height - 120 - margin,
     );
-    void toastWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderToastHtml(payload))}`);
+    toastWindow.webContents.on("did-finish-load", () => {
+      console.log("[stream-toast] toast content rendered");
+    });
+    toastWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderToastHtml(payload))}`).catch((err: unknown) => {
+      console.error("[stream-toast] failed to load toast content:", err);
+    });
     toastWindow.showInactive();
     this.dismissTimer = setTimeout(() => this.fadeAndDestroy(), TOAST_DURATION_MS);
+    console.log("[stream-toast] shown for", payload.hostName, "in", payload.groupName);
     return { shown: true };
   }
 

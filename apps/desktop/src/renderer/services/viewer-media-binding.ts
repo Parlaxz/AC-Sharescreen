@@ -3,6 +3,7 @@ import { createDefaultGroupQualitySettings } from "@screenlink/shared";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import type { StreamAnnouncement } from "@screenlink/shared";
 import { ViewerSenderController, type SenderOperationResult, type ViewerBindingId } from "./viewer-sender-controller.js";
+import { JOIN_REJECTION_NO_ACTIVE_SHARE, JOIN_REJECTION_SHARE_INACTIVE } from "./join-rejection.js";
 
 /**
  * Binding token created by the host for a viewer's stream.join.request.
@@ -322,7 +323,7 @@ export class ViewerMediaBinding {
 
       let rejectionReason: string;
       if (ssmOwnsRequestedStream) {
-        rejectionReason = "This share is no longer active";
+        rejectionReason = JOIN_REJECTION_SHARE_INACTIVE;
         console.warn(
           "[ViewerMediaBinding] Rejected local join — SSM not authoritative despite owning stream",
           {
@@ -338,7 +339,7 @@ export class ViewerMediaBinding {
           },
         );
       } else {
-        rejectionReason = "There is no active share for this stream";
+        rejectionReason = JOIN_REJECTION_NO_ACTIVE_SHARE;
         console.warn(
           "[ViewerMediaBinding] Rejected join — no active stream for request",
           {
@@ -367,7 +368,7 @@ export class ViewerMediaBinding {
       this.sendJoinRejection(
         envelope,
         requestId,
-        "There is no active share for this stream",
+        JOIN_REJECTION_NO_ACTIVE_SHARE,
       );
       return null;
     }

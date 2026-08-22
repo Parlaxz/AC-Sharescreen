@@ -3,6 +3,7 @@ import { getRuntime } from "./phase3-runtime.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import { extractTrackEvent } from "./sdk-event-normalizer.js";
 import { StreamMetricsService } from "./stream-metrics-service.js";
+import { isShareEndedRejection } from "./join-rejection.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -1238,7 +1239,15 @@ export class ViewerSession {
       if (!this.isCurrent()) return;
 
       if (!response.accepted) {
-        this.setError(response.reason ?? "join rejected");
+        const reason = response.reason ?? "join rejected";
+        // The host's share is gone (it was closed/ended while we were
+        // connecting or auto-recovering). End gracefully — the UI shows
+        // the "streamer ended the share" state instead of a fatal error.
+        if (isShareEndedRejection(reason)) {
+          this.stop();
+          return;
+        }
+        this.setError(reason);
         return;
       }
 

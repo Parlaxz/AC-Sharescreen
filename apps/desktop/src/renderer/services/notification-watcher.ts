@@ -70,12 +70,15 @@ export function startNotificationWatcher(): () => void {
         if (stream.hostDeviceId !== runtime?.deviceId) {
           const api = getApi();
           if (api) {
+            console.log("[notification-watcher] stream started, requesting toast:", hostName, "in", groupName);
             void api.showStreamToast({
               groupId,
               hostDeviceId: stream.hostDeviceId,
               logicalStreamId: stream.logicalStreamId,
               hostName,
               groupName,
+            }).then((result) => {
+              if (!result.shown) console.log("[notification-watcher] toast not shown:", result.reason ?? "unknown");
             }).catch((error: unknown) => console.warn("[notification-watcher] Stream toast failed:", error));
           } else {
             showNotification({ title: "ScreenLink", body: `${hostName} started streaming in ${groupName}` });
