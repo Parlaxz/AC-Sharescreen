@@ -59,13 +59,15 @@ export function JoinGroupDialog() {
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
+      // Prevent closing (Escape / outside-click) while a request is pending
+      if (!open && joining) return;
       setOpen(open);
       if (!open) {
         setInviteLink("");
         setError(null);
       }
     },
-    [setOpen],
+    [setOpen, joining],
   );
 
   const handleKeyDown = useCallback(
@@ -99,11 +101,12 @@ export function JoinGroupDialog() {
                 placeholder="Paste invite link or code"
                 disabled={joining}
                 autoFocus
+                aria-describedby={error ? "join-invite-link-error" : undefined}
               />
           </div>
 
           {error && (
-            <p className="text-sm text-danger" role="alert">
+            <p id="join-invite-link-error" className="text-sm text-danger" role="alert">
               {error}
             </p>
           )}

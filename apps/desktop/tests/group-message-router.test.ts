@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { GroupMessageRouter } from "../src/renderer/services/group-message-router.js";
+import { GroupMessageRouter, type GroupMessageRouterCallbacks } from "../src/renderer/services/group-message-router.js";
 import { ActiveStreamRegistry } from "../src/renderer/services/active-stream-registry.js";
 import type { GroupSyncService } from "../src/renderer/services/group-sync-service.js";
 import type { GroupControlEnvelope, HybridTimestamp } from "@screenlink/shared";
+import type { ViewerPresence } from "../src/renderer/services/viewer-media-binding.js";
 import { QualityCoordinator } from "../src/renderer/services/quality-coordinator.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -567,7 +568,8 @@ describe("Stage 6: Quality message routing through GroupMessageRouter", () => {
   it("sends an explicit response when quality.viewer.request has no viewer mapping", async () => {
     const sendToPeer = vi.fn().mockResolvedValue(undefined);
     const viewerBinding = {
-      getViewerMapping: vi.fn().mockReturnValue(null),
+      getViewerMapping: vi.fn((_v: string, _m: string) => null),
+      getAllViewers: vi.fn().mockReturnValue([]),
       reconcileViewerQuality: vi.fn(),
     };
     const runtime = {
@@ -742,20 +744,13 @@ describe("viewer.pause.request/result routing", () => {
     router.cancelViewerPauseResult("op-dup");
   });
 
-  it("viewer.pause.result without waiter dispatches browser event", () => {
+  it("viewer.pause.result without waiter is silently ignored", () => {
     const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
 
     const envelope = makePauseResultEnvelope({ operationId: "op-no-waiter" });
     router.routeMessage(GROUP_ID, envelope);
 
-    expect(dispatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "screenlink:viewer-pause-result",
-      }),
-    );
-    const event = dispatchSpy.mock.calls[0][0] as CustomEvent;
-    expect(event.detail.operationId).toBe("op-no-waiter");
-    expect(event.detail.success).toBe(true);
+    expect(dispatchSpy).not.toHaveBeenCalled();
   });
 
   it("viewer.pause.result with waiter does not dispatch browser event", () => {
@@ -849,5 +844,205 @@ describe("viewer.pause.request/result routing", () => {
     // Clean up
     router.cancelViewerPauseResult("op-a");
     await expect(waiter1).rejects.toThrow(/cancel/i);
+  });
+});
+
+// ─── Callback injection tests ────────────────────────────────────────────
+// These tests prove that GroupMessageRouter's injected callbacks receive
+// the same viewer-cue, notification, and viewer-status events that were
+// previously sent directly to Zustand/uiSoundService/showNotification/window.
+// The router itself is now independent of those systems — callbacks are
+// purely opt-in.
+
+describe("GroupMessageRouter callback injection", () => {
+  let router: GroupMessageRouter;
+  let syncService: any;
+  let streamRegistry: any;
+  let connManager: any;
+  let viewerBinding: any;
+  let callbacks: GroupMessageRouterCallbacks;
+
+  function makeFakePresence(overrides?: Partial<ViewerPresence>): ViewerPresence {
+    return {
+      viewerDeviceId: "vd-1",
+      viewerSessionId: "vs-1",
+      mediaSessionId: "ms-1",
+      logicalStreamId: "ls-1",
+      displayName: "Viewer One",
+      state: "ready",
+      joinCuePlayed: false,
+      leaveCuePlayed: false,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    callbacks = {
+      onViewerCue: vi.fn(),
+      showNotification: vi.fn(),
+      onViewerStatus: vi.fn(),
+    };
+    viewerBinding = {
+      handleViewerPaused: vi.fn().mockResolvedValue({ status: "applied" }),
+    };
+    syncService = {
+      handleGroupMessage: vi.fn(),
+      getSyncState: vi.fn().mockReturnValue({
+        state: { name: { value: "Test Group" } },
+      }),
+    };
+    streamRegistry = {
+      handleStarted: vi.fn(),
+      handleHeartbeat: vi.fn(),
+      handleStopped: vi.fn(),
+      handleSnapshot: vi.fn(),
+      getAllStreams: vi.fn().mockReturnValue([]),
+    };
+    connManager = {
+      getConnection: vi.fn().mockReturnValue({
+        peerForDevice: vi.fn().mockReturnValue("peer-uuid"),
+        sendToPeer: vi.fn(),
+      }),
+    };
+
+    router = new GroupMessageRouter(
+      syncService as any,
+      streamRegistry as any,
+      connManager as any,
+      viewerBinding as any,
+      callbacks,
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("onViewerCue callback receives name and presence when viewerBinding cue fires", () => {
+    const presence = makeFakePresence();
+    // The constructor wired viewerBinding.onViewerCue → callbacks.onViewerCue
+    viewerBinding.onViewerCue("user-join", presence);
+
+    expect(callbacks.onViewerCue).toHaveBeenCalledTimes(1);
+    expect(callbacks.onViewerCue).toHaveBeenCalledWith("user-join", presence);
+  });
+
+  it("onViewerCue callback receives user-leave cue with correct presence", () => {
+    const presence = makeFakePresence({ viewerDeviceId: "vd-2", displayName: "Viewer Two" });
+    viewerBinding.onViewerCue("user-leave", presence);
+
+    expect(callbacks.onViewerCue).toHaveBeenCalledWith("user-leave", presence);
+  });
+
+  it("showNotification callback is called for group.member.joined", () => {
+    const joinedBody = {
+      memberDeviceId: "new-dev",
+      memberDisplayName: "New User",
+      joinedAt: Date.now(),
+      groupId: GROUP_ID,
+    };
+    const envelope = makeEnvelope("group.member.joined", joinedBody, ts(100, 0, "new-dev"));
+
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(callbacks.showNotification).toHaveBeenCalledTimes(1);
+    expect(callbacks.showNotification).toHaveBeenCalledWith({
+      title: "ScreenLink",
+      body: "New User joined Test Group",
+    });
+  });
+
+  it("showNotification callback is called for group.member.online", () => {
+    const onlineBody = {
+      memberDeviceId: "online-dev",
+      memberDisplayName: "Online User",
+      onlineAt: Date.now(),
+      groupId: GROUP_ID,
+    };
+    const envelope = makeEnvelope("group.member.online", onlineBody, ts(100, 0, "online-dev"));
+
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(callbacks.showNotification).toHaveBeenCalledTimes(1);
+    expect(callbacks.showNotification).toHaveBeenCalledWith({
+      title: "ScreenLink",
+      body: "Online User is online in Test Group",
+    });
+  });
+
+  it("onViewerStatus callback is called for viewer.status message", () => {
+    const statusData = {
+      viewerDeviceId: "vd-status",
+      streamId: "stream-status",
+      state: "playing" as const,
+      viewerDisplayName: "Status Viewer",
+      receivedBitrateKbps: 2500,
+      receivedWidth: 1280,
+      receivedHeight: 720,
+      displayedFps: 30,
+      sampledAt: Date.now(),
+    };
+    const envelope = makeEnvelope("viewer.status", statusData, ts(100, 0, "vd-status"));
+
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(callbacks.onViewerStatus).toHaveBeenCalledTimes(1);
+    expect(callbacks.onViewerStatus).toHaveBeenCalledWith(statusData);
+  });
+
+  it("onViewerStatus receives viewer.status payload with reconnecting state", () => {
+    const statusData = {
+      viewerDeviceId: "vd-complex",
+      streamId: "stream-complex",
+      state: "reconnecting" as const,
+      viewerDisplayName: "Complex Viewer",
+      receivedBitrateKbps: null,
+      receivedWidth: null,
+      receivedHeight: null,
+      displayedFps: null,
+      sampledAt: Date.now(),
+    };
+    const envelope = makeEnvelope("viewer.status", statusData, ts(100, 0, "vd-complex"));
+
+    router.routeMessage(GROUP_ID, envelope);
+
+    expect(callbacks.onViewerStatus).toHaveBeenCalledWith(statusData);
+    // Protocol behavior unchanged — payload passes through parseGroupMessagePayload
+    expect(callbacks.showNotification).not.toHaveBeenCalled();
+    expect(syncService.handleGroupMessage).not.toHaveBeenCalled();
+  });
+
+  it("router remains independent of Zustand/window when no callbacks provided", () => {
+    const routerNoCallbacks = new GroupMessageRouter(
+      syncService as any,
+      streamRegistry as any,
+      connManager as any,
+    );
+
+    // These should not throw despite no window, no Zustand, no callbacks
+    const joinedBody = {
+      memberDeviceId: "dev-x",
+      memberDisplayName: "Dev X",
+      joinedAt: Date.now(),
+      groupId: GROUP_ID,
+    };
+    const joinedEnvelope = makeEnvelope("group.member.joined", joinedBody, ts(100, 0, "dev-x"));
+    expect(() => routerNoCallbacks.routeMessage(GROUP_ID, joinedEnvelope)).not.toThrow();
+
+    const statusEnvelope = makeEnvelope("viewer.status", {
+      viewerDeviceId: "vd-x",
+      streamId: "stream-x",
+      state: "playing" as const,
+      receivedBitrateKbps: 1000,
+      receivedWidth: 640,
+      receivedHeight: 480,
+      displayedFps: 30,
+      sampledAt: Date.now(),
+    }, ts(100, 0, "vd-x"));
+    expect(() => routerNoCallbacks.routeMessage(GROUP_ID, statusEnvelope)).not.toThrow();
+
+    // Protocol routing still works
+    const pingEnvelope = makeEnvelope("ping", { seq: 1 }, ts(100, 0, "sender-dev"));
+    expect(() => routerNoCallbacks.routeMessage(GROUP_ID, pingEnvelope)).not.toThrow();
   });
 });

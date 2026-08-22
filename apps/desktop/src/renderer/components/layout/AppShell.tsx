@@ -88,9 +88,9 @@ export function AppShell({ children, className }: AppShellProps) {
       {/* ─── Title Bar (Section 4.2) — hidden in focus/fullscreen mode ── */}
       <AnimatePresence>
         {showTitleBar ? (
-          <motion.div
+            <motion.div
             key="title-bar"
-            initial={{ height: 0, opacity: 0 }}
+            initial={false}
             animate={{ height: 32, opacity: 1 }}
             exit={{ height: 0, opacity: 0, overflow: "hidden" }}
             transition={focusMode ? reducedCollapse : columnCollapse}

@@ -13,7 +13,8 @@ import {
   TooltipTrigger,
   TooltipContent,
 } from "@/components/ui/tooltip";
-import { useStore, type StreamAnnouncement } from "@/stores/main-store";
+import type { StreamAnnouncement } from "@screenlink/shared";
+import { useStore } from "@/stores/main-store";
 import { Button } from "@/components/ui/button";
 
 // ─── Duration formatting ─────────────────────────────────────────────────

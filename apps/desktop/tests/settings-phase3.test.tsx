@@ -2,21 +2,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import path from "path";
 import { fileURLToPath } from "url";
+import { readFileSync } from "fs";
+import { Settings } from "../src/renderer/routes/Settings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const settingsSourcePath = path.resolve(__dirname, "..", "src", "renderer", "routes", "Settings.tsx");
+const apiTypesPath = path.resolve(__dirname, "..", "src", "preload", "api-types.ts");
 
 describe("Settings Phase 3 (Stage 12)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("removes all pairing/friend UI from settings renderer path", async () => {
-    const { Settings } = await import("../src/renderer/routes/Settings.js");
+  it("removes all pairing/friend UI from settings renderer path", () => {
     expect(Settings).toBeDefined();
     // Verify no pairing API calls are referenced in the component source
-    const fs = await import("fs");
-    const source = fs.readFileSync(settingsSourcePath, "utf-8");
+    const source = readFileSync(settingsSourcePath, "utf-8");
     // The component should not reference pairing API methods
     expect(source.includes("createPairing")).toBe(false);
     expect(source.includes("importPairing")).toBe(false);
@@ -26,12 +27,10 @@ describe("Settings Phase 3 (Stage 12)", () => {
     expect(source.includes("exportCurrentPairing")).toBe(false);
   });
 
-  it("includes profile, behavior, host quality limits, local transport, Developer Mode", async () => {
-    const { Settings } = await import("../src/renderer/routes/Settings.js");
+  it("includes profile, behavior, host quality limits, local transport, Developer Mode", () => {
     expect(Settings).toBeDefined();
     // These sections should be present in the settings page by checking the source
-    const fs = await import("fs");
-    const source = fs.readFileSync(settingsSourcePath, "utf-8");
+    const source = readFileSync(settingsSourcePath, "utf-8");
     // The component must handle these fields
     expect(source.includes("hostQualityLimits")).toBe(true);
     expect(source.includes("developerMode")).toBe(true);
@@ -42,11 +41,10 @@ describe("Settings Phase 3 (Stage 12)", () => {
     expect(source.includes("Allow viewer quality requests")).toBe(true);
   });
 
-  it("display name save propagates through updateDisplayName into all groups", async () => {
-    // Verify the Settings page calls updateDisplayName API
-    const { PersistedSettings } = await import("../src/preload/api-types.js");
-    const settings = {} as PersistedSettings;
-    expect(settings).toBeDefined();
+  it("display name save propagates through updateDisplayName into all groups", () => {
+    // Verify the Settings page references updateDisplayName API type
+    const source = readFileSync(apiTypesPath, "utf-8");
+    expect(source).toContain("updateDisplayName");
   });
 
   it("IPC updateDisplayName handler persists and returns identity", () => {

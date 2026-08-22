@@ -7,7 +7,6 @@ import {
   createDefaultAudioEncodingSettings,
 } from "@screenlink/shared";
 import { QualityCoordinator } from "../src/renderer/services/quality-coordinator.js";
-import { MediaStatsPoller } from "../src/renderer/services/media-stats-service.js";
 
 // ─── Gap 1: Group defaults drive codec/content-hint/degradation/capture ───
 
@@ -483,42 +482,6 @@ describe("Gap 4: Quality status display for selected target", () => {
     expect(qualityStatus.effective.videoBitrateKbps).toBe(2500);
     expect(qualityStatus.configured.maxBitrate).toBe(2_500_000);
     expect(qualityStatus.configured.degradationPreference).toBe("balanced");
-  });
-
-  it("per-viewer stats accessible for the selected target via MediaStatsPoller", () => {
-    const poller = new MediaStatsPoller();
-
-    poller.accumulateViewerStats({
-      viewerDeviceId: "local-viewer",
-      mediaPeerUuid: "peer-b",
-      videoBitrateKbps: 2400,
-      width: 1280,
-      height: 720,
-      fps: 30,
-      codec: "VP9",
-      qualityLimitationReason: "bandwidth",
-      retransmittedBytes: 500,
-      nackCount: 3,
-      pliCount: 1,
-      availableOutgoingBitrate: 5000,
-      rtt: 15,
-      packetLoss: 0.2,
-      candidateType: "host",
-      relayProtocol: "",
-      audioBitrateKbps: 64,
-      audioCodec: "opus",
-    });
-
-    const stats = poller.getViewerStats(
-      "g-1",
-      "stream-b",
-      "local-viewer",
-      "peer-b"
-    );
-    expect(stats).not.toBeNull();
-    expect(stats!.videoBitrateKbps).toBe(2400);
-    expect(stats!.codec).toBe("VP9");
-    expect(stats!.qualityLimitationReason).toBe("bandwidth");
   });
 
   it("Phase3Runtime.getQualityCoordinator returns the coordinator", async () => {

@@ -1,4 +1,5 @@
-import type { ScreenLinkAPI, PersistedSettings, QuickShareConfigDTO } from "../../preload/api-types.js";
+import type { PersistedSettings } from "@screenlink/shared";
+import type { ScreenLinkAPI, QuickShareConfigDTO } from "../../preload/api-types.js";
 
 /**
  * Get the preload ScreenLinkAPI bridge.

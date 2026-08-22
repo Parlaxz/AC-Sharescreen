@@ -1,11 +1,8 @@
-﻿import type { AudioMode, GroupSharedState, HybridTimestamp, NativePresenterDiagnostics } from "@screenlink/shared";
-
-export type ShortcutBinding = {
-  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
-  key: string;
-};
+﻿import type { GroupSharedState, HybridTimestamp, NativePresenterDiagnostics, ShortcutBinding, PersistedSettings } from "@screenlink/shared";
 
 export interface ScreenLinkAPI {
+  showStreamToast: (payload: StreamToastPayload) => Promise<{ shown: boolean; reason?: string }>;
+  onStreamToastAction: (callback: (action: StreamToastActionEvent) => void) => () => void;
   // Sources
   getSources: () => Promise<CaptureSourceDTO[]>;
   setSource: (sourceId: string | null) => Promise<void>;
@@ -73,6 +70,7 @@ export interface ScreenLinkAPI {
     version: string;
     electronVersion: string;
     chromeVersion: string;
+    nodeVersion?: string;
   }>;
 
   /**
@@ -138,6 +136,7 @@ export interface ScreenLinkAPI {
   // Tray-originated main→renderer events
   onOpenSourcePicker: (callback: () => void) => () => void;
   onStopSharing: (callback: () => void) => () => void;
+  onStopWatching: (callback: () => void) => () => void;
   onOpenDiagnostics: (callback: () => void) => () => void;
 
   // Group shortcut config
@@ -199,6 +198,19 @@ export interface ScreenLinkAPI {
 
   // NativePresenterDiagnostics is imported from @screenlink/shared above
 
+  // External links
+  openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Log folder
+  openLogFolder: () => Promise<{ success: boolean; error?: string }>;
+
+  /**
+   * Read recent application log files from the userData/logs directory.
+   * Returns typed success/data/error with byte/line counts and truncation flag.
+   * Never accepts an arbitrary path — always reads from the app's log directory.
+   */
+  readRecentLogs: () => Promise<ReadRecentLogsResult>;
+
   // Updates
   getUpdateStatus: () => Promise<UpdateStatusDTO>;
   checkForUpdates: () => Promise<UpdateStatusDTO>;
@@ -206,6 +218,19 @@ export interface ScreenLinkAPI {
   restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
   checkDownloadAndInstall: () => Promise<UpdateStatusDTO>;
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
+}
+
+export interface StreamToastPayload {
+  groupId: string;
+  hostDeviceId: string;
+  logicalStreamId: string;
+  hostName: string;
+  groupName: string;
+}
+
+export interface StreamToastActionEvent {
+  action: "join" | "dismiss";
+  payload: StreamToastPayload;
 }
 
 // ─── Quick Share types ───────────────────────────────────────────────────────
@@ -432,122 +457,18 @@ export interface CaptureSourceDTO {
   appIconDataUrl: string | null;
 }
 
-export interface StreamInfoCardConfig {
-  visible: boolean;
-  showResolution: boolean;
-  showFps: boolean;
-  showBitrate: boolean;
-  showDroppedFrames: boolean;
-  showNetworkUsage: boolean;
-  fontSize: number;
-  textColor: string;
-  /** Opacity percentage 0-100 */
-  boxOpacity: number;
-  /** Width in pixels */
-  boxWidth: number;
-}
+// StreamInfoCardConfig imported from @screenlink/shared (Phase 3).
+// PersistedSettings is now imported from @screenlink/shared
+// The local duplicate definition has been removed in Phase 3.
 
-export interface PersistedSettings {
-  version: number;
-  deviceIdentity: { deviceId: string; displayName: string; createdAt: number };
-  hostDisplayName: string;
-  launchAtLogin: boolean;
-  autoResumeLastMonitor: boolean;
-  previewEnabled: boolean;
-  windowBounds: { x: number; y: number; width: number; height: number } | null;
-  monitorFingerprint: {
-    displayId: string;
-    label: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    size: { width: number; height: number };
-    scaleFactor: number;
-    internal: boolean;
-  } | null;
-  lastSourceId: string | null;
-  lastSourceName: string | null;
-  lastSourceFingerprint: string | null;
-  developerMode: boolean;
-  hostQualityLimits: {
-    maxVideoBitrateKbps: number;
-    maxWidth: number;
-    maxHeight: number;
-    maxFps: number;
-    allowViewerQualityRequests: boolean;
-  };
-  globalQualityDefaults: {
-    schemaVersion: 1;
-    video: {
-      videoBitrateKbps: number;
-      sendWidth: number;
-      sendHeight: number;
-      sendFps: number;
-      captureWidth: number;
-      captureHeight: number;
-      captureFps: number;
-      preserveAspectRatio: boolean;
-      preventUpscale: boolean;
-      resolutionMode: "target-dimensions" | "scale-factor";
-      scaleResolutionDownBy: number;
-      codec: "auto" | "vp9" | "av1" | "h264" | "vp8";
-      h264Profile: "auto" | "baseline" | "main" | "high";
-      contentHint: "auto" | "text" | "detail" | "motion";
-      degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
-      scalabilityMode: string | null;
-      cursorMode: "always" | "motion" | "never";
-      rtpPriority: "very-low" | "low" | "medium" | "high";
-    };
-    audio: {
-      bitrateKbps: number;
-      channels: "mono" | "stereo";
-      bitrateMode: "vbr" | "cbr";
-      dtx: boolean;
-      fec: boolean;
-      packetDurationMs: 10 | 20 | 40 | 60;
-      redundantAudio: boolean;
-    };
-  };
-  notificationsEnabled: boolean;
-  localTransportPolicy: Record<string, unknown>;
-  lastAudioMode?: AudioMode;
-  viewerBitrateSliderMaxKbps: number;
-  lastShareSettings: {
-    groupId: string;
-    sourceKind: "screen" | "window";
-    sourceId: string;
-    sourceName: string;
-    audioMode: "none" | "monitor" | "application";
-    selectedPresetId: string | null;
-    customQuality: {
-      resolutionValue: string;
-      customWidth: number;
-      customHeight: number;
-      fps: number;
-      bitrate: number;
-      codec: string;
-      contentHint: string;
-      degradationPreference: string;
-    };
-  } | null;
-  discordMuteShortcut: ShortcutBinding;
-  discordDeafenShortcut: ShortcutBinding;
-  discordDeafenScreenLink: boolean;
-
-  /** Maximum volume percentage for the viewer slider (default 100; allows boost up to 200+) */
-  viewerMaxVolumePercent: number;
-
-  // ── NVIDIA enhancement settings persistence (Phase 6+) ─────────────────
-  /** Viewer image enhancement settings, stored as opaque JSON blob */
-  viewerImageEnhancementSettings: Record<string, unknown> | null;
-  /** Last selected NVIDIA processing mode for quick recall */
-  lastNvidiaProcessingMode: string;
-  /** Last selected NVIDIA quality level for quick recall */
-  lastNvidiaQuality: string;
-
-  /** Duration window (ms) for the bandwidth graph's hourly usage estimate. Default 10_000 (10s). */
-  hourlyEstimateDurationMs: number;
-
-  /** Stream info card overlay configuration for the viewer */
-  streamInfoCard: StreamInfoCardConfig;
+/** Result from readRecentLogs IPC call */
+export interface ReadRecentLogsResult {
+  success: boolean;
+  data: string;
+  byteCount: number;
+  lineCount: number;
+  truncated: boolean;
+  error?: string;
 }
 
 /** Protocol response envelope for helper IPC calls */

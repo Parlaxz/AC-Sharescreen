@@ -456,34 +456,6 @@ export class PublisherManager {
       audioBitrate: 64000, // 64 kbps -> 8 kB/s for Opus stereo
     });
 
-    // Stage 17: Apply degradationPreference to sender encoding parameters
-    if (config.degradationPreference) {
-      try {
-        const sdk = publisher.getSDK();
-        if (sdk) {
-          for (const [, group] of sdk.connections) {
-            const pc = group.publisher?.pc;
-            if (!pc) continue;
-            const sender = pc.getSenders().find(s => s.track?.kind === "video");
-            if (!sender) continue;
-            const params = sender.getParameters();
-            if (params) {
-              // degradationPreference is a top-level RTCRtpSendParameters field.
-              // Setting it on the encoding level is incorrect.
-              (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference = config.degradationPreference as RTCDegradationPreference;
-              try {
-                await sender.setParameters(params);
-              } catch (err) {
-                console.warn("[PublisherManager] Failed to set degradationPreference:", err);
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("[PublisherManager] Failed to apply degradationPreference:", err);
-      }
-    }
-
     this.publisher = publisher;
     this.config = config;
     this._publishedVideoTrack = stream.getVideoTracks()[0] ?? null;
@@ -500,54 +472,45 @@ export class PublisherManager {
 
     this.setState("sharing");
 
-    // Log sender presence immediately after publish
+    // Log sender presence and baseline parameters immediately after publish
     this.logSenderDiagnostics('after-publish');
 
-    // Post-publish bitrate enforcement: verify the sender encoding
-    // actually has the requested maxBitrate (in bps). If not, correct it.
+    // Phase 6C: Post-publish degradationPreference and bitrate corrections
+    // have been removed. The initial publish configuration (videoBitrate)
+    // is the authoritative source. The SDK sets encoding parameters during
+    // publish; redundant post-publish setParameters calls are no longer needed.
+    // Degradation preference is a top-level RTCRtpSendParameters field that
+    // may need a one-time setParameters call — tracked as a deferred item.
+    this.logPublisherSenderState(publisher);
+  }
+
+  /**
+   * Log publisher sender encoding state after publish (diagnostic only).
+   * Phase 6C: Replaces the removed post-publish correction loops.
+   */
+  private logPublisherSenderState(publisher: HostPublisher): void {
     try {
       const sdk = publisher.getSDK();
-      if (sdk) {
-        for (const [, group] of sdk.connections) {
-          const pc = group.publisher?.pc;
-          if (!pc) continue;
-          const sender = pc.getSenders().find(s => s.track?.kind === "video");
-          if (!sender) continue;
-          const params = sender.getParameters();
-          if (!params.encodings || params.encodings.length === 0) continue;
-          const enc = params.encodings[0];
-          if (!enc) continue;
-          const appliedBitrate = enc.maxBitrate ?? 0;
-          const requestedBps = config.videoBitrate * 1000;
-
-          // Log readback
-          const match = appliedBitrate === requestedBps;
-          console.log('[PublisherManager] post-publish bitrate readback', {
-            requestedKbps: config.videoBitrate,
-            requestedBps,
-            appliedBps: appliedBitrate,
-            match,
-          });
-
-          // If mismatch, correct it — preserve other encoding params
-          if (!match && requestedBps > 0) {
-            enc.maxBitrate = requestedBps;
-            await sender.setParameters(params).catch((setErr) => {
-              console.warn('[PublisherManager] bitrate correction setParameters failed:', setErr);
-            });
-            // Read back after correction
-            const correctedParams = sender.getParameters();
-            const correctedBps = correctedParams.encodings?.[0]?.maxBitrate ?? 0;
-            console.log('[PublisherManager] bitrate correction result', {
-              requestedBps,
-              correctedBps,
-              corrected: correctedBps === requestedBps,
-            });
-          }
-        }
+      if (!sdk) return;
+      for (const [, group] of sdk.connections ?? []) {
+        const pc = group.publisher?.pc;
+        if (!pc) continue;
+        const sender = pc.getSenders().find(s => s.track?.kind === "video");
+        if (!sender) continue;
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) continue;
+        const enc = params.encodings[0];
+        if (!enc) continue;
+        const appliedBps = enc.maxBitrate ?? 0;
+        const match = appliedBps === (this.config?.videoBitrate ?? 0) * 1000;
+        console.log('[PublisherManager] post-publish sender state', {
+          requestedKbps: this.config?.videoBitrate,
+          appliedBps,
+          match,
+        });
       }
-    } catch (err) {
-      console.warn('[PublisherManager] Post-publish bitrate enforcement failed:', err);
+    } catch {
+      // diagnostic only
     }
   }
 
@@ -634,6 +597,13 @@ export class PublisherManager {
     oldTrack.onended = null;
 
     await this.publisher.replaceVideoTrack(oldTrack, newTrack);
+
+    // B-15: Check that the publisher is still active after the async SDK call.
+    // stopCapture() can clear this.publisher while we were awaiting replaceVideoTrack.
+    if (!this.publisher || this.state === "stopping" || this.state === "idle") {
+      newTrack.stop();
+      throw new Error("replaceVideoTrack: publisher was stopped during replacement");
+    }
 
     // Update combined stream reference so self-view and track tracking
     // reflect the new source.

@@ -27,6 +27,9 @@ import {
   sendShortcutWithFallback,
   type ShortcutBinding,
 } from "./shortcut-sender.js";
+import { readRecentLogs } from "./log-reader.js";
+import { validateExternalUrl } from "./url-validator.js";
+import { isStreamToastPayload, type StreamToastManager } from "./stream-toast-manager.js";
 
 // In-memory VDO session credentials (set by host when sharing starts)
 let currentVdoStreamId = "";
@@ -109,6 +112,7 @@ export function registerIpcHandlers(
   presetStore?: QualityPresetStore,
   onQuickShareConfigUpdated?: (enabled: boolean, accelerator: string) => void,
   groupShortcutManager?: GroupShortcutManager,
+  streamToastManager?: StreamToastManager,
 ): void {
   // ── VDO session credentials (for LAN testing) ─────────────────────────
 
@@ -117,6 +121,17 @@ export function registerIpcHandlers(
       streamId: currentVdoStreamId,
       password: currentVdoPassword,
     };
+  });
+
+  ipcMain.handle("stream-toast:show", (_event, payload: unknown) => {
+    if (!streamToastManager || !isStreamToastPayload(payload)) {
+      throw new Error("Invalid stream toast payload");
+    }
+    return streamToastManager.show(payload);
+  });
+
+  ipcMain.on("stream-toast:action", (event, value: unknown) => {
+    streamToastManager?.handleAction(event.sender, value);
   });
 
   ipcMain.handle("start-vdo-session", () => {
@@ -1140,6 +1155,61 @@ export function registerIpcHandlers(
     } catch (err) {
       console.error("[IPC] send-shortcut failed:", err);
       return { success: false, error: String(err) };
+    }
+  });
+
+  // ── Open external URL ─────────────────────────────────────────────────────
+  //
+  // Host allowlist derived from the hardcoded external links in About.tsx.
+  // Currently: github.com, screenlink.app
+
+  const ALLOWED_EXTERNAL_HOSTS = ["github.com", "screenlink.app"];
+
+  ipcMain.handle("open-external", async (_event, url: string) => {
+    const validation = validateExternalUrl(url, ALLOWED_EXTERNAL_HOSTS);
+    if (!validation.valid) {
+      return { success: false, error: validation.error ?? "URL validation failed" };
+    }
+    try {
+      await shell.openExternal(url);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // ── Open log folder ───────────────────────────────────────────────────────
+
+  ipcMain.handle("open-log-folder", async () => {
+    try {
+      const logDir = path.join(app.getPath("userData"), "logs");
+      await fs.mkdir(logDir, { recursive: true });
+      await shell.openPath(logDir);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // ── Read recent logs ──────────────────────────────────────────────────────
+  //
+  // Reads actual log content from app.getPath('userData')/logs using the pure
+  // log-reader helper. Never accepts an arbitrary path from the renderer.
+  // Caps at 64 KiB total across up to 5 log files.
+
+  ipcMain.handle("read-recent-logs", async () => {
+    try {
+      const logDir = path.join(app.getPath("userData"), "logs");
+      return readRecentLogs(logDir, { maxBytes: 65536, maxFiles: 5 });
+    } catch (err) {
+      return {
+        success: false,
+        data: "",
+        byteCount: 0,
+        lineCount: 0,
+        truncated: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   });
 

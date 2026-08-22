@@ -339,22 +339,11 @@ export class GroupConnectionManager {
         deliveredKeys.push(key);
         continue;
       }
-      // Do not announce a stopped stream for a logicalStreamId that was
-      // only ever queued as "stopped" without a preceding start — that
-      // would be a no-op for viewers, but skip it anyway.
-      if (msg.type === "stream.stopped") {
-        // Check if there was a pending start/restart for this stream that
-        // was never flushed. If not, skip.
-        const hasPendingStart = Array.from(queue.values()).some(
-          (e) =>
-            e.logicalStreamId === msg.logicalStreamId &&
-            (e.type === "stream.started" || e.type === "stream.restarted"),
-        );
-        if (!hasPendingStart) {
-          deliveredKeys.push(key);
-          continue;
-        }
-      }
+      // Deliver queued stream.stopped even without a matching start/restart
+      // in the queue. The start was announced before the connection dropped;
+      // the stop must still be delivered so viewers learn the stream ended (B-12).
+      // A standalone stop with no preceding start on this connection is still
+      // meaningful — the start was already flushed to peers earlier.
       // Broadcast the pending message
       try {
         const result = await conn.broadcast(msg.payload);
@@ -408,18 +397,7 @@ export class GroupConnectionManager {
         deliveredKeys.push(key);
         continue;
       }
-      if (msg.type === "stream.stopped") {
-        const hasPendingStart = entries.some(
-          ([, e]) =>
-            e.logicalStreamId === msg.logicalStreamId &&
-            (e.type === "stream.started" || e.type === "stream.restarted"),
-        );
-        if (!hasPendingStart) {
-          deliveredKeys.push(key);
-          continue;
-        }
-      }
-
+      // Deliver queued stream.stopped independently (B-12)
       const delivered = await conn.sendToPeer(peerUuid, msg.payload);
       if (delivered) {
         deliveredKeys.push(key);

@@ -10,6 +10,8 @@ import { Separator } from "@/components/ui/separator";
 import { useStore } from "@/stores/main-store";
 import { getInitials } from "@/lib/utils";
 import { fetchQualityPresets } from "@/services/group-actions";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { PageSection } from "@/components/layout/PageSection";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -20,15 +22,6 @@ interface QualityPresetSummary {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase();
-}
 
 function memberCount(
   group: { members: Record<string, unknown> } | undefined,
@@ -122,21 +115,15 @@ export function HomePage() {
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-8">
       {/* ─── Header ───────────────────────────────────────────────── */}
-      <div>
-        <h1 className="text-2xl font-semibold text-text-primary">
-          ScreenLink
-        </h1>
-        <p className="text-sm text-text-secondary mt-1">
-          Share your screen with anyone, anywhere.
-        </p>
-      </div>
+      <PageHeader
+        title="ScreenLink"
+        description="Share your screen with anyone, anywhere."
+      />
 
       {/* ─── Section 1: Group grid ────────────────────────────────── */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-medium text-text-primary">
-            {hasGroups ? "Your groups" : "Groups"}
-          </h2>
+      <PageSection
+        title={hasGroups ? "Your groups" : "Groups"}
+        actions={
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
@@ -153,7 +140,8 @@ export function HomePage() {
               Join group
             </Button>
           </div>
-        </div>
+        }
+      >
 
         {!hasGroups ? (
           <Card>
@@ -184,7 +172,7 @@ export function HomePage() {
                   transition={{ duration: 0.2 }}
                 >
                   <Card
-                    className="cursor-pointer transition-colors hover:bg-surface-hover"
+                    className="cursor-pointer transition-colors hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-accent"
                     onClick={() => handleGroupClick(gid)}
                     role="button"
                     tabIndex={0}
@@ -243,16 +231,14 @@ export function HomePage() {
             })}
           </div>
         )}
-      </section>
+      </PageSection>
 
       {/* ─── Section 2: Personal presets ──────────────────────────── */}
       <Separator />
 
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-sm font-medium text-text-primary">
-            My presets
-          </h2>
+      <PageSection
+        title="My presets"
+        actions={
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
@@ -271,7 +257,8 @@ export function HomePage() {
               Create preset
             </Button>
           </div>
-        </div>
+        }
+      >
 
         {presetsLoading ? (
           <div className="flex gap-3 overflow-x-auto pb-2">
@@ -324,7 +311,7 @@ export function HomePage() {
             ))}
           </div>
         )}
-      </section>
+      </PageSection>
 
     </div>
   );

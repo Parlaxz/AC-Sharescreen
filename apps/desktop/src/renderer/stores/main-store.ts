@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import type { StreamAnnouncement, StreamTarget } from "@screenlink/shared";
+import { createDefaultVideoQualitySettings } from "@screenlink/shared";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -44,20 +46,6 @@ export interface GroupConnectionState {
   error: string | null;
 }
 
-export interface StreamAnnouncement {
-  logicalStreamId: string;
-  mediaSessionId: string;
-  groupId: string;
-  hostDeviceId: string;
-  hostDisplayName: string;
-  sourceKind: string;
-  sourceName: string;
-  startedAt: number;
-  appliedSettingsRevision: number;
-  heartbeatSequence: number;
-  replacesSessionId: string | null;
-}
-
 export interface AppState {
   // Navigation
   currentPage: Page;
@@ -101,7 +89,7 @@ export interface AppState {
   focusMode: boolean;
 
   /** Explicit watched target — replaces first-entry heuristics */
-  watchingTarget: WatchingTarget | null;
+  watchingTarget: StreamTarget | null;
 
   // Group state
   selectedGroupId: string | null;
@@ -110,7 +98,6 @@ export interface AppState {
   groupConnectionStateById: Record<string, GroupConnectionState>;
   onlineDeviceIdsByGroup: Record<string, string[]>;
   activeStreamsByGroup: Record<string, StreamAnnouncement[]>;
-  watchedStreamsBySessionId: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>;
 
   // Share setup dialog (Stage 3.7D)
   openShareSetup: boolean;
@@ -125,9 +112,6 @@ export interface AppState {
 
   // Local streaming state
   localShareState: LocalShareState;
-  localStreamSession: { sessionId: string; streamId: string; password: string } | null;
-  /** True while a source switch is in progress. Used by HostDashboard to disable the switch button. */
-  isSwitchingSource: boolean;
   qualityPresets: unknown[];
 
   // Actions
@@ -157,33 +141,14 @@ export interface AppState {
   setLastScreenAudioMode: (mode: "none" | "monitor") => void;
   setLastWindowAudioMode: (mode: "none" | "application") => void;
   setLocalShareState: (state: LocalShareState) => void;
-  setLocalStreamSession: (s: { sessionId: string; streamId: string; password: string } | null) => void;
-  setSwitchingSource: (switching: boolean) => void;
-  setWatchedStreams: (s: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }> | ((prev: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>) => Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>)) => void;
   /** Set explicit watching target (replaces first-entry heuristics) */
-  setWatchingTarget: (target: WatchingTarget | null) => void;
+  setWatchingTarget: (target: StreamTarget | null) => void;
 
   // Group state actions
   setGroups: (groups: Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>, order: string[]) => void;
   setGroupConnectionState: (stateById: Record<string, GroupConnectionState>) => void;
   setOnlineDevices: (byGroup: Record<string, string[]>) => void;
   setActiveStreams: (byGroup: Record<string, StreamAnnouncement[]>) => void;
-}
-
-/**
- * Explicit watched target — set when starting a watch/self-preview.
- * ViewerWorkspace uses this instead of first-entry / streams[0] heuristics.
- * Multi-stream safe: each watch sets its own target.
- */
-export interface WatchingTarget {
-  groupId: string;
-  logicalStreamId: string;
-  mediaSessionId: string;
-  hostDeviceId: string;
-  hostName: string;
-  startedAt: number;
-  sourceName?: string;
-  sourceKind?: string;
 }
 
 export type LocalShareState =
@@ -206,10 +171,10 @@ const initialState = {
   sourceKind: null as "screen" | "window" | null,
   sourceDisplayId: null as string | null,
   sourceFingerprint: null as string | null,
-  captureWidth: 854,
-  captureHeight: 480,
-  captureFps: 15,
-  captureBitrate: 650,
+  captureWidth: createDefaultVideoQualitySettings().sendWidth,
+  captureHeight: createDefaultVideoQualitySettings().sendHeight,
+  captureFps: createDefaultVideoQualitySettings().sendFps,
+  captureBitrate: createDefaultVideoQualitySettings().videoBitrateKbps,
   viewerCount: 0,
   viewers: [] as ViewerInfo[],
   sessionDuration: 0,
@@ -217,22 +182,19 @@ const initialState = {
   isViewing: false,
   viewStatus: "",
   focusMode: false,
-  watchingTarget: null as WatchingTarget | null,
+  watchingTarget: null as StreamTarget | null,
   selectedGroupId: null as string | null,
   groupsById: {} as Record<string, { id: string; name: string; members: Record<string, { deviceId: string; displayName: string }> }>,
   groupOrder: [] as string[],
   groupConnectionStateById: {} as Record<string, GroupConnectionState>,
   onlineDeviceIdsByGroup: {} as Record<string, string[]>,
   activeStreamsByGroup: {} as Record<string, StreamAnnouncement[]>,
-  watchedStreamsBySessionId: {} as Record<string, { hostDeviceId: string; hostName: string; startedAt: number }>,
   openShareSetup: false,
   openCreateGroupDialog: false,
   openJoinGroupDialog: false,
   lastScreenAudioMode: "none" as "none" | "monitor",
   lastWindowAudioMode: "none" as "none" | "application",
   localShareState: "idle" as LocalShareState,
-  localStreamSession: null as { sessionId: string; streamId: string; password: string } | null,
-  isSwitchingSource: false,
   qualityPresets: [] as unknown[],
 };
 
@@ -297,9 +259,6 @@ export const useStore = create<AppState>((set, get) => ({
   setLastScreenAudioMode: (mode) => set({ lastScreenAudioMode: mode }),
   setLastWindowAudioMode: (mode) => set({ lastWindowAudioMode: mode }),
   setLocalShareState: (state) => set({ localShareState: state }),
-  setLocalStreamSession: (s) => set({ localStreamSession: s }),
-  setSwitchingSource: (switching) => set({ isSwitchingSource: switching }),
-  setWatchedStreams: (s) => set({ watchedStreamsBySessionId: typeof s === "function" ? s(get().watchedStreamsBySessionId) : s }),
   setWatchingTarget: (target) => set({ watchingTarget: target }),
 
   setGroups: (groupsById, groupOrder) => set({ groupsById, groupOrder }),

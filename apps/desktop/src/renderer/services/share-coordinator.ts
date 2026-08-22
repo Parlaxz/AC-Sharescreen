@@ -1,27 +1,18 @@
 import { getRuntime } from "./phase3-runtime.js";
 import { useStore } from "../stores/main-store.js";
-import type {
-  AudioModeValue,
-  SessionQualityOverride,
-  ShareSource,
-} from "./share-quality.js";
+import type { ShareSource, StartShareInput } from "@screenlink/shared";
+import type { SessionQualityOverride } from "./share-quality.js";
 import {
   validateSessionQualityOverride,
-  DEFAULT_VIDEO_BITRATE_KBPS,
 } from "./share-quality.js";
+import {
+  FALLBACK_VIDEO_BITRATE_KBPS as DEFAULT_VIDEO_BITRATE_KBPS,
+  FALLBACK_SEND_WIDTH as DEFAULT_SEND_WIDTH,
+  FALLBACK_SEND_HEIGHT as DEFAULT_SEND_HEIGHT,
+  FALLBACK_SEND_FPS as DEFAULT_SEND_FPS,
+} from "@screenlink/shared";
 
-export type { AudioModeValue, ShareSource, SessionQualityOverride };
-
-/**
- * Typed input for the shared start transaction. Mirrors StartShareInput
- * in share-quality.ts but keeps the local type so other renderer
- * callers don't have to import the type module just to start a share.
- */
-export interface StartShareInput {
-  groupId: string;
-  source: ShareSource;
-  qualityOverride?: SessionQualityOverride;
-}
+export type { ShareSource, StartShareInput, SessionQualityOverride };
 
 /**
  * Resolve the preload API (window.screenlink) for source approval.
@@ -71,7 +62,20 @@ export async function startShare(input: StartShareInput): Promise<void> {
   }
 
   if (input.qualityOverride) {
-    const err = validateSessionQualityOverride(input.qualityOverride);
+    // Fill optional fields with defaults for validation
+    const fullOverride: SessionQualityOverride = {
+      videoBitrateKbps: input.qualityOverride.videoBitrateKbps ?? DEFAULT_VIDEO_BITRATE_KBPS,
+      sendWidth: input.qualityOverride.sendWidth ?? DEFAULT_SEND_WIDTH,
+      sendHeight: input.qualityOverride.sendHeight ?? DEFAULT_SEND_HEIGHT,
+      sendFps: input.qualityOverride.sendFps ?? DEFAULT_SEND_FPS,
+      captureWidth: input.qualityOverride.captureWidth ?? DEFAULT_SEND_WIDTH,
+      captureHeight: input.qualityOverride.captureHeight ?? DEFAULT_SEND_HEIGHT,
+      captureFps: input.qualityOverride.captureFps ?? DEFAULT_SEND_FPS,
+      codec: input.qualityOverride.codec,
+      contentHint: input.qualityOverride.contentHint,
+      degradationPreference: input.qualityOverride.degradationPreference,
+    };
+    const err = validateSessionQualityOverride(fullOverride);
     if (err) {
       store.setLocalShareState("error");
       throw new Error(`Invalid quality override: ${err}`);
@@ -107,9 +111,9 @@ export async function startShare(input: StartShareInput): Promise<void> {
     id: input.source.id,
     name: input.source.name,
     kind: input.source.kind,
-    displayId: input.source.displayId ?? "",
-    fingerprint: input.source.fingerprint,
-  });
+    displayId: input.source.displayId ?? null,
+    fingerprint: input.source.fingerprint ?? null,
+  } as { id: string; name: string; kind: "screen" | "window"; displayId: string; fingerprint: string | null });
   store.setLocalShareState("starting");
 
   // Step 1: Pre-approve the capture source via the main process.
@@ -145,15 +149,24 @@ export async function startShare(input: StartShareInput): Promise<void> {
         id: input.source.id,
         name: input.source.name,
         kind: input.source.kind,
-        displayId: input.source.displayId ?? null,
-        fingerprint: input.source.fingerprint,
+        displayId: (input.source.displayId ?? null) as string | null,
+        fingerprint: (input.source.fingerprint ?? null) as string | null,
       },
     };
     if (input.source.audioMode !== undefined) {
       streamInput.audioMode = input.source.audioMode;
     }
     if (input.qualityOverride) {
-      streamInput.qualityOverride = input.qualityOverride;
+      streamInput.qualityOverride = {
+        ...input.qualityOverride,
+        videoBitrateKbps: input.qualityOverride.videoBitrateKbps ?? DEFAULT_VIDEO_BITRATE_KBPS,
+        sendWidth: input.qualityOverride.sendWidth ?? DEFAULT_SEND_WIDTH,
+        sendHeight: input.qualityOverride.sendHeight ?? DEFAULT_SEND_HEIGHT,
+        sendFps: input.qualityOverride.sendFps ?? DEFAULT_SEND_FPS,
+        captureWidth: input.qualityOverride.captureWidth ?? DEFAULT_SEND_WIDTH,
+        captureHeight: input.qualityOverride.captureHeight ?? DEFAULT_SEND_HEIGHT,
+        captureFps: input.qualityOverride.captureFps ?? DEFAULT_SEND_FPS,
+      } as SessionQualityOverride;
     }
 
     await ssm.startStream(streamInput);
@@ -205,22 +218,6 @@ export async function startShare(input: StartShareInput): Promise<void> {
     store.setLocalShareState("error");
     throw err;
   }
-}
-
-/**
- * Backward-compatible overload for callers that still pass a
- * source-only object. The group is read from selectedGroupId; this
- * is acceptable for in-app flows that have already populated the
- * store. Quick Share must use the explicit `groupId` overload.
- */
-export async function startShareLegacy(source: ShareSource): Promise<void> {
-  const store = useStore.getState();
-  const groupId = store.selectedGroupId;
-  if (!groupId) {
-    store.setLocalShareState("error");
-    throw new Error("No group selected");
-  }
-  return startShare({ groupId, source });
 }
 
 /**

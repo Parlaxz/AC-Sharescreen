@@ -1,9 +1,8 @@
 import { execFile } from "child_process";
+import type { ShortcutBinding } from "@screenlink/shared";
 
-export type ShortcutBinding = {
-  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
-  key: string;
-};
+// Re-export for callers that import the type from this module.
+export type { ShortcutBinding };
 
 export interface ShortcutSendResult {
   success: boolean;

@@ -212,6 +212,7 @@ export class StreamMetricsService {
   private tickCounter = 0;
   private subscribers = new Map<string, Set<() => void>>();
   private pendingBaselines = new Set<string>(); // connectionIds needing forced rebaseline
+  private emptySnapshotCache = new Map<string, BandwidthSnapshot>(); // referential stability for unknown/finalized IDs
 
   static getInstance(): StreamMetricsService {
     if (!StreamMetricsService.instance) {
@@ -242,7 +243,14 @@ export class StreamMetricsService {
 
   getSnapshot(historyId: string): BandwidthSnapshot {
     const state = this.sessions.get(historyId);
-    if (!state) return emptySnapshot(historyId);
+    if (!state) {
+      let cached = this.emptySnapshotCache.get(historyId);
+      if (!cached) {
+        cached = emptySnapshot(historyId);
+        this.emptySnapshotCache.set(historyId, cached);
+      }
+      return cached;
+    }
     if (!state.lastSnapshot) {
       state.lastSnapshot = this.buildSnapshot(state);
     }
@@ -278,6 +286,7 @@ export class StreamMetricsService {
       sessionPeakBps: 0,
     };
     this.sessions.set(historyId, state);
+    this.emptySnapshotCache.delete(historyId);
     this.ensureTimer();
     return historyId;
   }
@@ -309,6 +318,7 @@ export class StreamMetricsService {
       sessionPeakBps: 0,
     };
     this.sessions.set(historyId, state);
+    this.emptySnapshotCache.delete(historyId);
     this.ensureTimer();
     return historyId;
   }
@@ -1475,6 +1485,7 @@ export class StreamMetricsService {
         currentVideoBitsPerSecond: conn.videoBitsPerSecond,
         currentAudioBitsPerSecond: conn.audioBitsPerSecond,
         currentTransportBitsPerSecond: conn.transportBitsPerSecond,
+        cumulativeInboundVideoBytes: conn.direction === "inbound" ? conn.totalVideoBytes : 0,
       };
       allConnections.push(Object.freeze(connSnapshot));
     }
@@ -1483,6 +1494,14 @@ export class StreamMetricsService {
     const activeDurationMs = this.computeSessionActiveDuration(state);
     const totalObservedBits = state.totalBytes * 8;
     const weightedAvg = this.computeWeightedAverage(aggSamples);
+
+    // Sum inbound video bytes across all connections for the aggregate
+    let aggregateInboundVideoBytes = 0;
+    for (const conn of state.connections.values()) {
+      if (conn.direction === "inbound") {
+        aggregateInboundVideoBytes += conn.totalVideoBytes;
+      }
+    }
 
     const aggregate: TelemetrySeriesSnapshot = {
       rawSamples: Object.freeze(aggSamples),
@@ -1503,6 +1522,7 @@ export class StreamMetricsService {
       currentVideoBitsPerSecond: latestSample?.videoBitsPerSecond ?? null,
       currentAudioBitsPerSecond: latestSample?.audioBitsPerSecond ?? null,
       currentTransportBitsPerSecond: latestSample?.transportBitsPerSecond ?? null,
+      cumulativeInboundVideoBytes: aggregateInboundVideoBytes,
     };
 
     return Object.freeze({
@@ -1860,6 +1880,7 @@ function emptySnapshot(historyId: string): BandwidthSnapshot {
       currentVideoBitsPerSecond: null,
       currentAudioBitsPerSecond: null,
       currentTransportBitsPerSecond: null,
+      cumulativeInboundVideoBytes: 0,
     }),
     connections: Object.freeze([]),
   });

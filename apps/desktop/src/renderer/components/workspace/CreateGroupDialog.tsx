@@ -59,13 +59,15 @@ export function CreateGroupDialog() {
 
   const handleOpenChange = useCallback(
     (open: boolean) => {
+      // Prevent closing (Escape / outside-click) while a request is pending
+      if (!open && creating) return;
       setOpen(open);
       if (!open) {
         setGroupName("");
         setError(null);
       }
     },
-    [setOpen],
+    [setOpen, creating],
   );
 
   const handleKeyDown = useCallback(
@@ -100,11 +102,12 @@ export function CreateGroupDialog() {
               placeholder="My Team"
               disabled={creating}
               autoFocus
+              aria-describedby={error ? "create-group-name-error" : undefined}
             />
           </div>
 
           {error && (
-            <p className="text-sm text-danger" role="alert">
+            <p id="create-group-name-error" className="text-sm text-danger" role="alert">
               {error}
             </p>
           )}

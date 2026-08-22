@@ -11,9 +11,7 @@ import type { ReconcileResult, ViewerMapping } from "./viewer-media-binding.js";
 import type { GroupConnectionManager } from "./group-connection-manager.js";
 import type { QualityCoordinator, EffectiveQuality } from "./quality-coordinator.js";
 import type { Phase3Runtime } from "./phase3-runtime.js";
-import { showNotification } from "./notifications.js";
-import { uiSoundService } from "./ui-sound-service.js";
-import { useStore } from "../stores/main-store.js";
+
 
 /**
  * C1: GroupMessageRouter (Stages 4–5)
@@ -70,6 +68,23 @@ export interface RecentMemberEvent {
   at: number;
 }
 
+/**
+ * Optional callbacks for UI side effects.
+ * When provided, the router delegates notifications, sounds, viewer-count
+ * updates, and viewer-status events to these callbacks instead of
+ * directly calling Zustand, window.dispatchEvent, uiSoundService, etc.
+ * When omitted, the side effects are silently no-ops — making the router
+ * testable without a browser/Electron environment.
+ */
+export interface GroupMessageRouterCallbacks {
+  /** Fired when a viewer presence cue fires (join/leave sound + viewer count update) */
+  onViewerCue?: (name: "user-join" | "user-leave", presence: ViewerPresence) => void;
+  /** Called instead of showNotification() for member joined/online events */
+  showNotification?: (notification: { title: string; body: string }) => void;
+  /** Called with parsed viewer.status payload instead of window.dispatchEvent */
+  onViewerStatus?: (data: unknown) => void;
+}
+
 export class GroupMessageRouter {
   private pingTimestamps = new Map<string, number>();
   private pongTimestamps = new Map<string, number>();
@@ -106,14 +121,14 @@ export class GroupMessageRouter {
     private streamRegistry: ActiveStreamRegistry,
     private connManager: GroupConnectionManager,
     private viewerBinding?: ViewerMediaBinding,
+    private callbacks?: GroupMessageRouterCallbacks,
   ) {
-    // Wire viewer presence cue callbacks to the UI sound service and tray icon
+    // Wire viewer presence cue callbacks through injected callbacks.
+    // When callbacks.onViewerCue is provided, it receives join/leave cues
+    // for sound playback and viewer-count updates.
     if (this.viewerBinding) {
       this.viewerBinding.onViewerCue = (name, presence) => {
-        void uiSoundService.play(name);
-        // Sync active viewer count to the store for the tray icon
-        const count = this.viewerBinding!.getActivePresences().length;
-        useStore.setState({ viewerCount: count });
+        this.callbacks?.onViewerCue?.(name, presence);
       };
     }
   }
@@ -238,10 +253,10 @@ export class GroupMessageRouter {
         events.splice(0, events.length - GroupMessageRouter.MAX_RECENT_EVENTS_PER_GROUP);
       }
 
-      // Fire desktop notification.
+      // Fire desktop notification via injected callback.
       const syncState = this.syncService.getSyncState(groupId);
       const groupName = syncState?.state.name.value ?? groupId;
-      showNotification({
+      this.callbacks?.showNotification?.({
         title: "ScreenLink",
         body: `${data.memberDisplayName} joined ${groupName}`,
       });
@@ -253,10 +268,10 @@ export class GroupMessageRouter {
       if (!parsed.ok) return;
       const data = parsed.data;
 
-      // Fire desktop notification.
+      // Fire desktop notification via injected callback.
       const syncState = this.syncService.getSyncState(groupId);
       const groupName = syncState?.state.name.value ?? groupId;
-      showNotification({
+      this.callbacks?.showNotification?.({
         title: "ScreenLink",
         body: `${data.memberDisplayName} is online in ${groupName}`,
       });
@@ -334,8 +349,26 @@ export class GroupMessageRouter {
             this.viewerBinding.removeViewerWithPresence(
               viewerDeviceId, mediaSessionId, viewerSessionId,
             );
+          } else if (viewerSessionId) {
+            // No mediaSessionId but viewerSessionId provided: find the mapping
+            // by viewerSessionId and use exact removal (B-16).
+            const allViewers = this.viewerBinding.getAllViewers();
+            const mapping = allViewers.find(
+              (m) => m.viewerDeviceId === viewerDeviceId && m.viewerSessionId === viewerSessionId,
+            );
+            if (mapping) {
+              this.viewerBinding.removeViewerWithPresence(
+                viewerDeviceId, mapping.mediaSessionId, viewerSessionId,
+              );
+            }
           } else {
-            this.viewerBinding.removeViewer(viewerDeviceId, viewerSessionId);
+            // Legacy fallback: remove all bindings for this device (best-effort).
+            const allViewers = this.viewerBinding.getAllViewers();
+            for (const v of allViewers) {
+              if (v.viewerDeviceId === viewerDeviceId) {
+                this.viewerBinding.removeViewerMapping(v.viewerDeviceId, v.mediaSessionId, v.viewerSessionId);
+              }
+            }
           }
         }
       }
@@ -380,15 +413,11 @@ export class GroupMessageRouter {
       return;
     }
 
-    // viewer.status → dispatch window event for HostDashboard hook
+    // viewer.status → notify via injected callback (HostDashboard hook)
     if (type === "viewer.status") {
-      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-        const parsed = parseGroupMessagePayload("viewer.status", envelope.payload);
-        if (parsed.ok) {
-          window.dispatchEvent(new CustomEvent("screenlink:viewer-status", {
-            detail: parsed.data,
-          }));
-        }
+      const parsed = parseGroupMessagePayload("viewer.status", envelope.payload);
+      if (parsed.ok) {
+        this.callbacks?.onViewerStatus?.(parsed.data);
       }
       return;
     }
@@ -437,7 +466,7 @@ export class GroupMessageRouter {
       return;
     }
 
-    // viewer.pause.result → resolve pending waiter or dispatch browser event
+    // viewer.pause.result → resolve pending waiter
     if (type === "viewer.pause.result") {
       const parsed = parseGroupMessagePayload("viewer.pause.result", envelope.payload);
       if (!parsed.ok) return;
@@ -458,12 +487,6 @@ export class GroupMessageRouter {
           success: resultData.success,
           failureReason: resultData.failureReason,
         });
-      } else {
-        if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-          window.dispatchEvent(new CustomEvent("screenlink:viewer-pause-result", {
-            detail: resultData,
-          }));
-        }
       }
       return;
     }
@@ -750,28 +773,22 @@ export class GroupMessageRouter {
       return;
     }
 
-    // quality.effective — forward to viewer UI via window events
+    // quality.effective — forward to controller subscribers (Phase 4)
     if (type === "quality.effective") {
-      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-        const parsed = parseGroupMessagePayload("quality.effective", envelope.payload);
-        if (parsed.ok) {
-          window.dispatchEvent(new CustomEvent("screenlink:quality-effective", {
-            detail: parsed.data,
-          }));
-        }
+      const parsed = parseGroupMessagePayload("quality.effective", envelope.payload);
+      if (parsed.ok) {
+        const { getActiveController } = await import("./viewer-session-controller.js");
+        getActiveController()?.publishQuality({ type: "effective", data: parsed.data as Record<string, unknown> });
       }
       return;
     }
 
-    // quality.configured — forward to viewer UI via window events
+    // quality.configured — forward to controller subscribers (Phase 4)
     if (type === "quality.configured") {
-      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-        const parsed = parseGroupMessagePayload("quality.configured", envelope.payload);
-        if (parsed.ok) {
-          window.dispatchEvent(new CustomEvent("screenlink:quality-configured", {
-            detail: parsed.data,
-          }));
-        }
+      const parsed = parseGroupMessagePayload("quality.configured", envelope.payload);
+      if (parsed.ok) {
+        const { getActiveController } = await import("./viewer-session-controller.js");
+        getActiveController()?.publishQuality({ type: "configured", data: parsed.data as Record<string, unknown> });
       }
       return;
     }
@@ -789,13 +806,13 @@ export class GroupMessageRouter {
     viewerDeviceId: string,
     logicalStreamId: string,
   ): ViewerMapping | null {
-    const allViewers = typeof viewerBinding.getAllViewers === "function"
-      ? viewerBinding.getAllViewers()
-      : [];
+    const allViewers = viewerBinding.getAllViewers();
 
+    // Exact lookup by device ID + logical stream ID. No legacy first-match
+    // fallback — every quality path must resolve to exactly one mapping (B-03).
     return allViewers.find(
       (mapping) => mapping.viewerDeviceId === viewerDeviceId && mapping.logicalStreamId === logicalStreamId,
-    ) ?? viewerBinding.getViewerMapping(viewerDeviceId);
+    ) ?? null;
   }
 
   private async respondToReconcileResult(

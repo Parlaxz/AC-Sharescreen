@@ -144,15 +144,13 @@ export async function detachGroupFromRuntime(groupId: string): Promise<boolean> 
   const newActiveStreams = { ...store.activeStreamsByGroup };
   delete newActiveStreams[groupId];
 
-  // 6) Clear watched streams (no groupId mapping per entry, so clear all)
-  const newWatchedStreams: Record<string, { hostDeviceId: string; hostName: string; startedAt: number }> = {};
+  // 6) [Phase 2: watched streams store field removed]
 
   // Apply all store changes
   store.setGroups(newGroupsById, newGroupOrder);
   store.setGroupConnectionState(newConnState);
   store.setOnlineDevices(newOnlineDevices);
   store.setActiveStreams(newActiveStreams);
-  store.setWatchedStreams(newWatchedStreams);
 
   // 7) Clear viewing state if this was the active view
   if (store.isViewing) {

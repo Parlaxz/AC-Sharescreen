@@ -95,7 +95,8 @@ if defined NVIDIA_VFX_SDK_ROOT (
             -S native/video-enhancer ^
             -B native/video-enhancer/build ^
             -G "Visual Studio 17 2022" ^
-            -A x64
+            -A x64 ^
+            -DSCREENLINK_ENABLE_NVIDIA_VFX=OFF
         if errorlevel 1 goto :fail
     ) else (
         echo CMake build directory already exists, skipping configure.

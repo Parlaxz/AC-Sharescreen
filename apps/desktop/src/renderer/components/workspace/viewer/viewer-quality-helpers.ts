@@ -43,15 +43,22 @@ type ViewerQualityEffectiveFeedbackInput = {
 };
 
 type ViewerQualityEffectiveFeedback = {
-  accepted: boolean;
+  accepted: boolean | undefined;
   message: string;
 };
 
-const REJECTED_QUALITY_REASON_PATTERNS = [
+const WAITING_QUALITY_REASON_PATTERNS = [
   /^mapping missing$/i,
   /^sender not ready/i,
+];
+
+const REJECTED_QUALITY_REASON_PATTERNS = [
   /^application failed:/i,
 ];
+
+function isWaitingQualityReason(reason: string): boolean {
+  return WAITING_QUALITY_REASON_PATTERNS.some((pattern) => pattern.test(reason));
+}
 
 function isRejectedQualityReason(reason: string): boolean {
   return REJECTED_QUALITY_REASON_PATTERNS.some((pattern) => pattern.test(reason));
@@ -67,12 +74,21 @@ export function getViewerQualityEffectiveFeedback(
   input: ViewerQualityEffectiveFeedbackInput,
 ): ViewerQualityEffectiveFeedback {
   const clampReasons = input.clampReasons ?? [];
+  const waitingReasons = clampReasons.filter(isWaitingQualityReason);
   const rejectedReasons = clampReasons.filter(isRejectedQualityReason);
+
+  if (waitingReasons.length > 0) {
+    // Phase 9: grounded copy — "mapping" is an internal concept.
+    return {
+      accepted: undefined,
+      message: "Waiting for media connection — will apply automatically",
+    };
+  }
 
   if (rejectedReasons.length > 0) {
     return {
       accepted: false,
-      message: `Pending apply: ${rejectedReasons.join("; ")}`,
+      message: `Could not apply quality: ${rejectedReasons.join("; ")}`,
     };
   }
 

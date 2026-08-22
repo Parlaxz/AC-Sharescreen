@@ -80,16 +80,6 @@ function makeMockRuntime(): Phase3Runtime {
     performLocalEdit: vi.fn().mockResolvedValue(undefined),
     handleGroupMessage: vi.fn(),
   };
-  const mediaStatsService = {
-    startViewerPoller: vi.fn(),
-    stopViewerPoller: vi.fn(),
-    disconnectViewer: vi.fn(),
-    hasViewerPoller: vi.fn().mockReturnValue(false),
-    getViewerStats: vi.fn().mockReturnValue(null),
-    getViewerPollerPC: vi.fn().mockReturnValue(null),
-    stopAllViewerPollers: vi.fn(),
-    stop: vi.fn(),
-  };
   const ssm = {
     currentLogicalStreamId: null,
     currentMediaSessionId: null,
@@ -104,7 +94,6 @@ function makeMockRuntime(): Phase3Runtime {
     getStreamSessionManager: () => ssm,
     getViewerMediaBinding: () => viewerBinding,
     getSyncService: () => syncService,
-    getMediaStatsService: () => mediaStatsService,
     getQualityCoordinator: () => new QualityCoordinator(),
     viewerBinding,
     syncService,
@@ -116,8 +105,6 @@ function makeMockRuntime(): Phase3Runtime {
     syncService: typeof syncService;
     ssm: typeof ssm;
   };
-  // Expose mediaStatsService directly on the mock for access via getMediaStatsService
-  (runtime as any)._mss = mediaStatsService;
   return runtime;
 }
 
@@ -211,23 +198,21 @@ describe("Per-Viewer Quality Apply + Stats Wiring (Stage 6/7)", () => {
   });
 
   it("quality.viewer.clear removes only the targeted viewer's request", () => {
-    coordinator.storeViewerRequest("g-1", "s-1", "v-1", {
+    coordinator.handleViewerRequest("g-1", "s-1", "v-1", {
       streamSessionId: "s-1",
       requestId: "req-1",
       revision: 1,
       videoBitrateKbps: 3000,
       maxWidth: 1920, maxHeight: 1080, maxFps: 30,
       degradationPreference: "balanced",
-      requestedAt: Date.now(),
     });
-    coordinator.storeViewerRequest("g-1", "s-1", "v-2", {
+    coordinator.handleViewerRequest("g-1", "s-1", "v-2", {
       streamSessionId: "s-1",
       requestId: "req-2",
       revision: 1,
       videoBitrateKbps: 1000,
       maxWidth: 854, maxHeight: 480, maxFps: 15,
       degradationPreference: "maintain-resolution",
-      requestedAt: Date.now(),
     });
 
     // Clear only v-1
@@ -266,116 +251,6 @@ describe("Per-Viewer Quality Apply + Stats Wiring (Stage 6/7)", () => {
     const params = sender.getParameters();
     expect(params.encodings?.[0]?.maxBitrate).toBe(650_000); // group default * 1000
     expect(params.encodings?.[0]?.maxFramerate).toBe(15); // group default fps
-  });
-
-  // ─── Stats poller starts for exact viewer and is removed on disconnect ──
-
-  it("stats poller starts for the exact viewer when binding is established", () => {
-    const mss = runtime.getMediaStatsService();
-
-    // Simulate the binding lifecycle: consumeBinding starts the poller
-    const pc = createMockPeerConnection();
-    mss.startViewerPoller(
-      "g-1",
-      "s-1",
-      "v-1",
-      "peer-uuid-1",
-      pc,
-      expect.any(Function),
-    );
-
-    expect(mss.startViewerPoller).toHaveBeenCalledWith(
-      "g-1",
-      "s-1",
-      "v-1",
-      "peer-uuid-1",
-      expect.any(Object),
-      expect.any(Function),
-    );
-  });
-
-  it("stats poller uses the exact RTCPeerConnection for the bound viewer", () => {
-    const pc1 = createMockPeerConnection(createMockSender());
-    const pc2 = createMockPeerConnection(createMockSender());
-
-    const mss = runtime.getMediaStatsService();
-
-    // Start poller for v-1 with pc1
-    mss.startViewerPoller("g-1", "s-1", "v-1", "p-1", pc1, vi.fn());
-    // Start poller for v-2 with pc2
-    mss.startViewerPoller("g-1", "s-1", "v-2", "p-2", pc2, vi.fn());
-
-    // Each viewer has its own PC
-    const calls = mss.startViewerPoller.mock.calls;
-    const call1 = calls.find((c: unknown[]) => c[2] === "v-1");
-    const call2 = calls.find((c: unknown[]) => c[2] === "v-2");
-    expect(call1?.[4]).toBe(pc1);
-    expect(call2?.[4]).toBe(pc2);
-    expect(call1?.[4]).not.toBe(call2?.[4]);
-  });
-
-  it("stats poller is stopped and removed when viewer disconnects", () => {
-    const mss = runtime.getMediaStatsService();
-
-    // Simulate removeViewer calling disconnectViewer on the stats service
-    mss.disconnectViewer("g-1", "s-1", "v-1", "peer-uuid-1");
-
-    expect(mss.disconnectViewer).toHaveBeenCalledWith(
-      "g-1",
-      "s-1",
-      "v-1",
-      "peer-uuid-1",
-    );
-  });
-
-  it("stats poller is removed for the exact viewer only, other viewers unaffected", () => {
-    const mss = runtime.getMediaStatsService();
-
-    const pc1 = createMockPeerConnection();
-    const pc2 = createMockPeerConnection();
-
-    // Start two viewer pollers
-    mss.startViewerPoller("g-1", "s-1", "v-1", "p-1", pc1, vi.fn());
-    mss.startViewerPoller("g-1", "s-1", "v-2", "p-2", pc2, vi.fn());
-
-    // Disconnect v-1 only
-    mss.disconnectViewer("g-1", "s-1", "v-1", "p-1");
-
-    // v-1 poller should be removed
-    // v-2 poller should remain
-    const disconnects = mss.disconnectViewer.mock.calls;
-    expect(disconnects.length).toBe(1);
-    expect(disconnects[0][2]).toBe("v-1");
-  });
-
-  it("ViewerMediaBinding.removeViewer calls stats service disconnectViewer", () => {
-    // Create a binding and simulate a mapped viewer
-    const binding = new ViewerMediaBinding(runtime);
-    const mss = runtime.getMediaStatsService();
-
-    // Manually inject a mapping (normally done by consumeBinding)
-    (binding as any).viewerMap.set("viewer-1", {
-      viewerDeviceId: "viewer-1",
-      mediaPeerUuid: "peer-uuid-1",
-      groupId: "g-1",
-      logicalStreamId: "s-1",
-      mediaSessionId: "ms-1",
-      pc: null,
-      videoSender: null,
-    });
-
-    // Remove viewer
-    binding.removeViewer("viewer-1");
-
-    // Should call disconnectViewer with the correct key
-    expect(mss.disconnectViewer).toHaveBeenCalledWith(
-      "g-1",
-      "s-1",
-      "viewer-1",
-      "peer-uuid-1",
-    );
-
-    binding.destroy();
   });
 
   it("ViewerMediaBinding stores the RTCPeerConnection and video sender in the mapping", () => {
@@ -428,16 +303,10 @@ describe("Per-Viewer Quality Apply + Stats Wiring (Stage 6/7)", () => {
 
   it("Phase3Runtime creates QualityCoordinator and wires it into GroupMessageRouter", () => {
     // This tests that the runtime instantiation path creates the coordinator
-    // The initialize method of Phase3Runtime creates:
-    //   this.qualityCoordinator = new QualityCoordinator();
-    //   this.mediaStatsService = new MediaStatsPoller();
-    // Then wires them into GroupMessageRouter
-
-    // Verify that getQualityCoordinator and getMediaStatsService exist
+    // Verify that the quality coordinator remains available after telemetry
+    // ownership moved to StreamMetricsService.
     expect(typeof runtime.getQualityCoordinator).toBe("function");
-    expect(typeof runtime.getMediaStatsService).toBe("function");
 
-    // Verify they return non-null values (runtime mock provides them)
     const qc = runtime.getQualityCoordinator();
     expect(qc).toBeDefined();
   });

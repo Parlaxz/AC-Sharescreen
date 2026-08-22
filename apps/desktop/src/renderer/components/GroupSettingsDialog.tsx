@@ -199,14 +199,7 @@ export function GroupSettingsDialog({ groupId, onClose }: Props) {
         </div>
 
         {conflict && (
-          <div className="conflict-banner" style={{
-            background: "var(--warning-bg, #fff3cd)",
-            border: "1px solid var(--warning-border, #ffc107)",
-            padding: "0.5rem",
-            borderRadius: "4px",
-            marginBottom: "0.75rem",
-            fontSize: "0.85rem",
-          }}>
+          <div className="bg-warning/10 border border-warning/30 rounded-standard px-3 py-2 mb-3 text-xs text-warning">
             <strong>Conflict detected:</strong> The group state has changed remotely while you were editing. Saving will overwrite the remote change.
           </div>
         )}

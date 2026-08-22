@@ -9,18 +9,28 @@
  * existing runtime defaults when omitted.
  */
 
+import {
+  FALLBACK_VIDEO_BITRATE_KBPS as DEFAULT_VIDEO_BITRATE_KBPS,
+  FALLBACK_SEND_WIDTH as DEFAULT_SEND_WIDTH,
+  FALLBACK_SEND_HEIGHT as DEFAULT_SEND_HEIGHT,
+  FALLBACK_SEND_FPS as DEFAULT_SEND_FPS,
+  FALLBACK_CODEC as DEFAULT_CODEC,
+  FALLBACK_CONTENT_HINT as DEFAULT_CONTENT_HINT,
+  FALLBACK_DEGRADATION_PREFERENCE as DEFAULT_DEGRADATION_PREFERENCE,
+  type ShareSource as SharedShareSource,
+  type StartShareInput as SharedStartShareInput,
+} from "@screenlink/shared";
+
 export type AudioModeValue = "none" | "monitor" | "application";
 
-// ─── Default video fallback values ─────────────────────────────────────────
-// Single source of truth shared by SessionQualityOverride builders and
-// StreamSessionManager. Any change here affects all fallback paths.
-export const DEFAULT_VIDEO_BITRATE_KBPS = 650;
-export const DEFAULT_SEND_WIDTH = 854;
-export const DEFAULT_SEND_HEIGHT = 480;
-export const DEFAULT_SEND_FPS = 15;
-export const DEFAULT_CODEC = "vp9";
-export const DEFAULT_CONTENT_HINT = "detail";
-export const DEFAULT_DEGRADATION_PREFERENCE = "maintain-resolution";
+// Re-export shared types under the same names for existing callers.
+// The renderer-local ShareSource narrows displayId/fingerprint from
+// optional to required-but-nullable, matching the pre-shared contract.
+export type ShareSource = Omit<SharedShareSource, "displayId" | "fingerprint"> & {
+  displayId: string | null;
+  fingerprint: string | null;
+};
+export type { SharedStartShareInput as StartShareInput };
 
 /**
  * Per-session quality override. Only fields that affect capture or
@@ -194,28 +204,90 @@ export function validateSessionQualityOverride(
   return null;
 }
 
-/**
- * Source descriptor for starting a share. Aligned with the
- * StartStreamInput.source shape consumed by StreamSessionManager.
- */
-export interface ShareSource {
-  id: string;
-  name: string;
-  kind: "screen" | "window";
-  displayId: string | null;
-  fingerprint: string | null;
-  audioMode?: AudioModeValue;
+// ─── Audio mode shared types and helpers ───────────────────────────────────
+// Single source of truth consumed by ShareSetup and QuickShareDialog.
+
+export type SourceTab = "screen" | "window";
+
+export interface AudioModeOption {
+  value: AudioModeValue;
+  label: string;
+  description: string;
+  icon: React.ReactNode;
 }
 
 /**
- * Typed input for the shared start transaction. Every share flow
- * (normal Share Setup, Quick Share) passes the same shape so the
- * coordinator does not have to discover values indirectly.
+ * Get audio mode options valid for the given source kind.
+ * Screen: No Audio / Filtered Monitor Audio
+ * Window: No Audio / Application Audio
  */
-export interface StartShareInput {
-  /** Explicit group ID; the coordinator no longer reads selectedGroupId. */
-  groupId: string;
-  source: ShareSource;
-  /** Optional session-start quality override. */
-  qualityOverride?: SessionQualityOverride;
+export function getAudioModes(sourceKind: SourceTab): AudioModeOption[] {
+  const modes: AudioModeOption[] = [
+    {
+      value: "none",
+      label: "No audio",
+      description: "No system audio will be shared",
+      icon: null as any, // caller assigns icon
+    },
+  ];
+  if (sourceKind === "screen") {
+    modes.push({
+      value: "monitor",
+      label: "Filtered monitor audio",
+      description:
+        "Audio from your speakers/headphones, filtered to remove echo",
+      icon: null as any,
+    });
+  } else {
+    modes.push({
+      value: "application",
+      label: "Application audio",
+      description:
+        "Captures audio from the selected source if available",
+      icon: null as any,
+    });
+  }
+  return modes;
+}
+
+/**
+ * Resolve the audio mode for the given source kind, falling back to stored last mode.
+ */
+export function resolveAudioMode(
+  sourceKind: SourceTab,
+  currentAudio: AudioModeValue,
+  lastScreen: "none" | "monitor",
+  lastWindow: "none" | "application",
+): AudioModeValue {
+  const validModes: AudioModeValue[] =
+    sourceKind === "screen" ? ["none", "monitor"] : ["none", "application"];
+  if (validModes.includes(currentAudio)) return currentAudio;
+  return sourceKind === "screen" ? lastScreen : lastWindow;
+}
+
+/**
+ * Derive a user-facing error message from the raw fetch-sources error.
+ * The returned text is actionable: it tells the user what went wrong
+ * and how to fix it, instead of a one-size-fits-all static string.
+ *
+ * Shared by ShareSetup and QuickShareDialog so both flows produce
+ * consistent, context-aware source-error text.
+ */
+export function deriveSourceErrorText(err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message?.toLowerCase() ?? "";
+    if (msg.includes("permission") || msg.includes("denied") || msg.includes("not allowed")) {
+      return "Screen recording permission was denied. Please allow screen recording in System Settings > Privacy & Security > Screen Recording, then try again.";
+    }
+    if (msg.includes("timeout") || msg.includes("timed out")) {
+      return "Retrieving sources timed out. Check that no other screen-sharing app is running, then retry.";
+    }
+    if (msg.includes("not found") || msg.includes("cancelled") || msg.includes("cancel")) {
+      return "Source selection was cancelled or the source is no longer available. Try again.";
+    }
+    if (msg.length > 0) {
+      return `Failed to retrieve sources: ${err.message}. Make sure screen recording is permitted and try again.`;
+    }
+  }
+  return "Could not retrieve sources. Make sure screen recording is permitted and no other screen-sharing app is blocking access.";
 }

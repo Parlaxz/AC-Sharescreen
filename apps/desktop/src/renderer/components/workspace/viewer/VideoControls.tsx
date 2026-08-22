@@ -30,7 +30,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import type { ViewerRequestState } from "./ViewerSettingsPanel.js";
 import { StreamSwitcher } from "./StreamSwitcher.js";
-import type { StreamAnnouncement } from "@/stores/main-store";
+import type { StreamAnnouncement, ShortcutBinding } from "@screenlink/shared";
 import type { ActivePanel } from "./ViewerPanelShell.js";
 import { BandwidthDisplay } from "./BandwidthDisplay.js";
 
@@ -635,9 +635,6 @@ export function VideoControls({
 // ─── Re-export types ───────────────────────────────────────────────────────
 export type { ViewerRequestState } from "./ViewerSettingsPanel.js";
 
-// ─── Shortcut binding type ─────────────────────────────────────────────────
+// ─── Shortcut binding type (re-exported from shared) ──────────────────────
 
-export type ShortcutBinding = {
-  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
-  key: string;
-};
+export type { ShortcutBinding };

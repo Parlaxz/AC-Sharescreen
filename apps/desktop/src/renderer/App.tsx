@@ -18,11 +18,14 @@ import { CommandPalette } from "./components/CommandPalette.js";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "./components/layout/AppShell.js";
+import { AppErrorBoundary } from "./components/AppErrorBoundary.js";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts.js";
 import { usePreloadEvents } from "./hooks/use-preload-events.js";
 import { useTrayStateSync } from "./hooks/use-tray-state-sync.js";
 import { initializeAppRuntime } from "./services/initialize-app-runtime.js";
 import { initGroupShortcutListener } from "./services/group-shortcut-service.js";
+import { getApi } from "./services/get-api.js";
+import { startViewingStream } from "./services/group-navigation.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
 
 export function App() {
@@ -65,6 +68,22 @@ export function App() {
   useEffect(() => {
     const cleanup = initGroupShortcutListener();
     return cleanup;
+  }, []);
+
+  useEffect(() => {
+    const api = getApi();
+    if (!api) return;
+    return api.onStreamToastAction(({ action, payload }) => {
+      if (action !== "join") return;
+      const streams = useStore.getState().activeStreamsByGroup[payload.groupId] ?? [];
+      const stream = streams.find((candidate) =>
+        candidate.hostDeviceId === payload.hostDeviceId &&
+        candidate.logicalStreamId === payload.logicalStreamId,
+      );
+      if (!stream) return;
+      useStore.getState().setSelectedGroupId(payload.groupId);
+      startViewingStream(stream);
+    });
   }, []);
 
   // Listen for quick-share:open event from global shortcut or tray
@@ -148,7 +167,9 @@ export function App() {
     <TooltipProvider>
       <Toaster />
       <AppShell>
-        <main className="h-full overflow-auto">{renderPage()}</main>
+        <AppErrorBoundary>
+          <div className="h-full overflow-auto">{renderPage()}</div>
+        </AppErrorBoundary>
       </AppShell>
       {/* ShareSetup dialog — rendered at root level so it can be
           triggered from GroupOverview, UserDock, and SourcePicker */}

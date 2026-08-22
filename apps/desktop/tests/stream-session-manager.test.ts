@@ -130,19 +130,20 @@ describe("StreamSessionManager (Stage 4)", () => {
     (ssm as any)._state = "active";
     expect(ssm.state).toBe("active");
 
+    // Phase 1 fix: startStream now throws when called in wrong state
     await expect(ssm.startStream({
       groupId: "test-g-1",
       source: { id: "s1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
-    })).resolves.toBeUndefined();
+    })).rejects.toThrow("Cannot start stream in state: active");
     expect(ssm.state).toBe("active");
   });
 
   it("rejects startStream when destroyed", async () => {
-    ssm.destroy();
+    await ssm.destroy();
     await expect(ssm.startStream({
       groupId: "test-g-1",
       source: { id: "s1", name: "Screen", kind: "screen", displayId: null, fingerprint: null },
-    })).resolves.toBeUndefined();
+    })).rejects.toThrow("StreamSessionManager is destroyed");
     expect(ssm.state).toBe("destroyed");
   });
 
@@ -205,28 +206,30 @@ describe("StreamSessionManager (Stage 4)", () => {
   });
 
   // ── Destroy ──────────────────────────────────────────────────────
+  // Phase 1: destroy() is now async. Tests must await it.
 
-  it("destroy transitions to destroyed state", () => {
-    ssm.destroy();
+  it("destroy transitions to destroyed state", async () => {
+    await ssm.destroy();
     expect(ssm.state).toBe("destroyed");
   });
 
-  it("destroy is idempotent", () => {
-    ssm.destroy();
-    ssm.destroy();
+  it("destroy is idempotent", async () => {
+    await ssm.destroy();
+    await ssm.destroy();
     expect(ssm.state).toBe("destroyed");
   });
 
   // ── Restart ──────────────────────────────────────────────────────
 
   it("restartStream requires active state", async () => {
-    await expect(ssm.restartStream()).resolves.toBeUndefined();
+    // Phase 1 fix: restartStream now throws when not active
+    await expect(ssm.restartStream()).rejects.toThrow("Cannot restart stream in state: idle");
     expect(ssm.state).toBe("idle");
   });
 
   it("restartStream is no-op when destroyed", async () => {
     await ssm.destroy();
-    await expect(ssm.restartStream()).resolves.toBeUndefined();
+    await expect(ssm.restartStream()).rejects.toThrow("StreamSessionManager is destroyed");
     expect(ssm.state).toBe("destroyed");
   });
 
@@ -240,7 +243,7 @@ describe("StreamSessionManager (Stage 4)", () => {
     (ssm as any)._hostDeviceId = "dev-1";
     (ssm as any)._hostDisplayName = "Host";
     (ssm as any).startedAt = 1000;
-    (ssm as any).heartbeatSeq = 1;
+    ((ssm as any).announcer)._heartbeatSeq = 1;
     (ssm as any).streamRevision = 1;
 
     const ann = (ssm as any).buildAnnouncement();
@@ -258,11 +261,13 @@ describe("StreamSessionManager (Stage 4)", () => {
   // ── Heartbeat ────────────────────────────────────────────────────
 
   it("sendHeartbeat is no-op when not active", async () => {
-    await expect((ssm as any).sendHeartbeat()).resolves.toBeUndefined();
+    const announcer = (ssm as any).announcer;
+    await expect(announcer.sendHeartbeat()).resolves.toBeUndefined();
   });
 
   it("sendHeartbeat broadcasts to the group when active", async () => {
     const connManager = runtime.getConnectionManager();
+    const announcer = (ssm as any).announcer;
     (ssm as any)._state = "active";
     (ssm as any).groupId = "g-1";
     (ssm as any).logicalStreamId = "ls-1";
@@ -270,7 +275,7 @@ describe("StreamSessionManager (Stage 4)", () => {
     (ssm as any)._hostDeviceId = "dev-1";
     (ssm as any)._hostDisplayName = "Host";
 
-    await (ssm as any).sendHeartbeat();
+    await announcer.sendHeartbeat();
 
     expect(connManager.broadcast).toHaveBeenCalledWith("g-1", expect.objectContaining({
       type: "stream.heartbeat",
@@ -741,21 +746,80 @@ describe("StreamSessionManager (Stage 4)", () => {
   });
 
   it("restartStream is no-op when not active", async () => {
-    // SSM is idle
+    // SSM is idle — Phase 1 fix: restartStream throws instead of silent return
     const stopCaptureSpy = vi.spyOn(PublisherManager.prototype, "stopCapture");
-    await ssm.restartStream();
+    await expect(ssm.restartStream()).rejects.toThrow("Cannot restart stream in state: idle");
     expect(stopCaptureSpy).not.toHaveBeenCalled();
     expect(ssm.state).toBe("idle");
     stopCaptureSpy.mockRestore();
   });
 
   it("restartStream is no-op when destroyed", async () => {
-    ssm.destroy();
+    await ssm.destroy();
     const stopCaptureSpy = vi.spyOn(PublisherManager.prototype, "stopCapture");
-    await ssm.restartStream();
+    await expect(ssm.restartStream()).rejects.toThrow("StreamSessionManager is destroyed");
     expect(stopCaptureSpy).not.toHaveBeenCalled();
     expect(ssm.state).toBe("destroyed");
     stopCaptureSpy.mockRestore();
+  });
+
+  it("reannounce timer dispatches snapshot at 3500ms", () => {
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    const announcer = (ssm as any).announcer;
+    try {
+      announcer.startReannounce();
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 3500);
+    } finally {
+      announcer.stopReannounce();
+      setIntervalSpy.mockRestore();
+    }
+  });
+
+  it("sendReannounce broadcasts stream.state.snapshot when active", async () => {
+    const connManager = runtime.getConnectionManager();
+    const announcer = (ssm as any).announcer;
+    (ssm as any)._state = "active";
+    (ssm as any).groupId = "g-reann-1";
+    (ssm as any).logicalStreamId = "ls-reann-1";
+    (ssm as any).mediaSessionId = "ms-reann-1";
+    (ssm as any)._hostDeviceId = "dev-reann-1";
+    (ssm as any)._hostDisplayName = "ReannounceHost";
+    (ssm as any).startedAt = 1000;
+    announcer._heartbeatSeq = 5;
+    (ssm as any).streamRevision = 2;
+
+    await announcer.sendReannounce();
+
+    expect(connManager.broadcast).toHaveBeenCalledWith(
+      "g-reann-1",
+      expect.objectContaining({
+        type: "stream.state.snapshot",
+        streams: expect.arrayContaining([
+          expect.objectContaining({ logicalStreamId: "ls-reann-1" }),
+        ]),
+      }),
+    );
+  });
+
+  it("sendReannounce is no-op when not active", async () => {
+    const connManager = runtime.getConnectionManager();
+    const announcer = (ssm as any).announcer;
+    await announcer.sendReannounce();
+    expect(connManager.broadcast).not.toHaveBeenCalled();
+  });
+
+  it("sendReannounce does not throw when broadcast fails", async () => {
+    const connManager = runtime.getConnectionManager();
+    const announcer = (ssm as any).announcer;
+    (connManager.broadcast as any).mockRejectedValue(new Error("reannounce-failure"));
+    (ssm as any)._state = "active";
+    (ssm as any).groupId = "g-reann-2";
+    (ssm as any).logicalStreamId = "ls-reann-2";
+    (ssm as any).mediaSessionId = "ms-reann-2";
+    (ssm as any)._hostDeviceId = "dev-reann-2";
+    (ssm as any)._hostDisplayName = "FailHost";
+
+    await expect(announcer.sendReannounce()).resolves.toBeUndefined();
   });
 
   it("restartStream with audio failure falls back to degraded video", async () => {

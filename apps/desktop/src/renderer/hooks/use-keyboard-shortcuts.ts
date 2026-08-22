@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from "react";
 import { useStore } from "@/stores/main-store";
+import { getActiveController } from "@/services/viewer-session-controller";
 
 /**
  * useKeyboardShortcuts — Global keyboard shortcut bindings (Section 14).
@@ -196,7 +197,7 @@ export function useKeyboardShortcuts() {
       // Guard: no modifiers, no repeat, prevent page scroll
       if (event.key === " " && !ctrl && !alt && !event.shiftKey && !event.repeat) {
         event.preventDefault();
-        window.dispatchEvent(new CustomEvent("screenlink:viewer-toggle-pause"));
+        getActiveController()?.togglePause().catch(() => {});
         return;
       }
 

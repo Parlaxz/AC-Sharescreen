@@ -38,15 +38,26 @@ describe("viewer quality apply safeguards", () => {
     ).toBe("current-stream");
   });
 
-  it("marks mapping-missing feedback as not accepted", () => {
+  it("marks mapping-missing feedback as pending with grounded copy", () => {
     expect(
       getViewerQualityEffectiveFeedback({
         videoBitrateKbps: 2500,
         clampReasons: ["mapping missing"],
       }),
     ).toEqual({
+      accepted: undefined,
+      message: "Waiting for media connection — will apply automatically",
+    });
+  });
+
+  it("preserves actual application failures as rejected feedback", () => {
+    expect(
+      getViewerQualityEffectiveFeedback({
+        clampReasons: ["application failed: sender timeout"],
+      }),
+    ).toEqual({
       accepted: false,
-      message: "Pending apply: mapping missing",
+      message: "Could not apply quality: application failed: sender timeout",
     });
   });
 

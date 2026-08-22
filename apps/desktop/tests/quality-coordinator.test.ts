@@ -298,16 +298,18 @@ describe("Stage 6: QualityCoordinator — session request storage keyed by group
     coordinator = new QualityCoordinator();
   });
 
-  it("stores and retrieves viewer requests by composite key", () => {
+  it("stores and retrieves viewer requests by composite key via handleViewerRequest", () => {
     const groupId = "group-1";
     const logicalStreamId = "stream-1";
     const viewerDeviceId = "viewer-1";
     const request = makeViewerRequest();
 
-    coordinator.storeViewerRequest(groupId, logicalStreamId, viewerDeviceId, request);
+    coordinator.handleViewerRequest(groupId, logicalStreamId, viewerDeviceId, request);
     const retrieved = coordinator.getViewerRequest(groupId, logicalStreamId, viewerDeviceId);
 
-    expect(retrieved).toEqual(request);
+    expect(retrieved).not.toBeNull();
+    expect(retrieved!.requestId).toBe(request.requestId);
+    expect(retrieved!.revision).toBe(request.revision);
   });
 
   it("returns null for non-existent composite key", () => {
@@ -321,8 +323,8 @@ describe("Stage 6: QualityCoordinator — session request storage keyed by group
     const viewerDeviceId = "viewer-1";
     const request = makeViewerRequest();
 
-    coordinator.storeViewerRequest(groupId, logicalStreamId, viewerDeviceId, request);
-    coordinator.clearViewerRequest(groupId, logicalStreamId, viewerDeviceId);
+    coordinator.handleViewerRequest(groupId, logicalStreamId, viewerDeviceId, request);
+    coordinator.handleViewerClear(groupId, logicalStreamId, viewerDeviceId);
 
     const retrieved = coordinator.getViewerRequest(groupId, logicalStreamId, viewerDeviceId);
     expect(retrieved).toBeNull();
@@ -332,8 +334,8 @@ describe("Stage 6: QualityCoordinator — session request storage keyed by group
     const groupId = "group-1";
     const logicalStreamId = "stream-1";
 
-    coordinator.storeViewerRequest(groupId, logicalStreamId, "viewer-1", makeViewerRequest({ requestId: "req-1" }));
-    coordinator.storeViewerRequest(groupId, logicalStreamId, "viewer-2", makeViewerRequest({ requestId: "req-2" }));
+    coordinator.handleViewerRequest(groupId, logicalStreamId, "viewer-1", makeViewerRequest({ requestId: "req-1" }));
+    coordinator.handleViewerRequest(groupId, logicalStreamId, "viewer-2", makeViewerRequest({ requestId: "req-2" }));
 
     const v1 = coordinator.getViewerRequest(groupId, logicalStreamId, "viewer-1");
     const v2 = coordinator.getViewerRequest(groupId, logicalStreamId, "viewer-2");
@@ -342,29 +344,16 @@ describe("Stage 6: QualityCoordinator — session request storage keyed by group
     expect(v2?.requestId).toBe("req-2");
   });
 
-  it("getAllViewerRequests returns all requests for a group+stream", () => {
+  it("individual getViewerRequest per key after handleViewerClear", () => {
     const groupId = "group-1";
     const logicalStreamId = "stream-1";
 
-    coordinator.storeViewerRequest(groupId, logicalStreamId, "viewer-1", makeViewerRequest({ requestId: "req-1" }));
-    coordinator.storeViewerRequest(groupId, logicalStreamId, "viewer-2", makeViewerRequest({ requestId: "req-2" }));
+    coordinator.handleViewerRequest(groupId, logicalStreamId, "viewer-1", makeViewerRequest({ requestId: "req-1" }));
+    coordinator.handleViewerRequest(groupId, logicalStreamId, "viewer-2", makeViewerRequest({ requestId: "req-2" }));
 
-    const all = coordinator.getAllViewerRequests(groupId, logicalStreamId);
-
-    expect(all).toHaveLength(2);
-    expect(all.find(r => r.requestId === "req-1")).toBeTruthy();
-    expect(all.find(r => r.requestId === "req-2")).toBeTruthy();
-  });
-
-  it("stores all viewer requests for a given groupId and logicalStreamId", () => {
-    const groupId = "group-1";
-    const logicalStreamId = "stream-1";
-
-    coordinator.storeViewerRequest(groupId, logicalStreamId, "viewer-1", makeViewerRequest({ requestId: "req-1" }));
-    coordinator.storeViewerRequest(groupId, logicalStreamId, "viewer-2", makeViewerRequest({ requestId: "req-2" }));
-
-    const requests = coordinator.getAllViewerRequests(groupId, logicalStreamId);
-    expect(requests).toHaveLength(2);
+    // Verify both stored
+    expect(coordinator.getViewerRequest(groupId, logicalStreamId, "viewer-1")).not.toBeNull();
+    expect(coordinator.getViewerRequest(groupId, logicalStreamId, "viewer-2")).not.toBeNull();
   });
 });
 
@@ -436,7 +425,7 @@ describe("Stage 6: QualityCoordinator — quality.viewer.clear handling", () => 
   });
 
   it("handleViewerClear removes the stored request", () => {
-    coordinator.storeViewerRequest("g-1", "s-1", "v-1", makeViewerRequest({ videoBitrateKbps: 3000 }));
+    coordinator.handleViewerRequest("g-1", "s-1", "v-1", makeViewerRequest({ videoBitrateKbps: 3000 }));
 
     // Verify stored
     expect(coordinator.getViewerRequest("g-1", "s-1", "v-1")).not.toBeNull();
@@ -449,8 +438,8 @@ describe("Stage 6: QualityCoordinator — quality.viewer.clear handling", () => 
   });
 
   it("handleViewerClear removes only the specified viewer, not others", () => {
-    coordinator.storeViewerRequest("g-1", "s-1", "v-1", makeViewerRequest({ requestId: "req-1" }));
-    coordinator.storeViewerRequest("g-1", "s-1", "v-2", makeViewerRequest({ requestId: "req-2" }));
+    coordinator.handleViewerRequest("g-1", "s-1", "v-1", makeViewerRequest({ requestId: "req-1" }));
+    coordinator.handleViewerRequest("g-1", "s-1", "v-2", makeViewerRequest({ requestId: "req-2" }));
 
     coordinator.handleViewerClear("g-1", "s-1", "v-1");
 

@@ -1,207 +1,24 @@
 import { app } from "electron";
 import path from "path";
 import fs from "fs";
-import { normalizeAudioMode, type AudioMode } from "@screenlink/shared";
-
-/**
- * Persisted settings shape matching the IPC contract defined by the preload API.
- *
- * Phase 3: removed friends/pairing/share-id/hostTokenEncrypted/viewerToken/workerBaseUrl/viewerBaseUrl.
- * Quality presets and groups live in their own stores; the device identity is stored here.
- */
-export interface PersistedSettings {
-  version: number;
-  deviceIdentity: {
-    deviceId: string;
-    displayName: string;
-    createdAt: number;
-  };
-  hostDisplayName: string;
-  launchAtLogin: boolean;
-  autoResumeLastMonitor: boolean;
-  previewEnabled: boolean;
-  windowBounds: { x: number; y: number; width: number; height: number } | null;
-  monitorFingerprint: {
-    displayId: string;
-    label: string;
-    bounds: { x: number; y: number; width: number; height: number };
-    size: { width: number; height: number };
-    scaleFactor: number;
-    internal: boolean;
-  } | null;
-  lastSourceId: string | null;
-  lastSourceName: string | null;
-  lastSourceFingerprint: string | null;
-  developerMode: boolean;
-  hostQualityLimits: {
-    maxVideoBitrateKbps: number;
-    maxWidth: number;
-    maxHeight: number;
-    maxFps: number;
-    allowViewerQualityRequests: boolean;
-  };
-  globalQualityDefaults: {
-    schemaVersion: 1;
-    video: {
-      videoBitrateKbps: number;
-      sendWidth: number;
-      sendHeight: number;
-      sendFps: number;
-      captureWidth: number;
-      captureHeight: number;
-      captureFps: number;
-      preserveAspectRatio: boolean;
-      preventUpscale: boolean;
-      resolutionMode: "target-dimensions" | "scale-factor";
-      scaleResolutionDownBy: number;
-      codec: "auto" | "vp9" | "av1" | "h264" | "vp8";
-      h264Profile: "auto" | "baseline" | "main" | "high";
-      contentHint: "auto" | "text" | "detail" | "motion";
-      degradationPreference: "balanced" | "maintain-resolution" | "maintain-framerate";
-      scalabilityMode: string | null;
-      cursorMode: "always" | "motion" | "never";
-      rtpPriority: "very-low" | "low" | "medium" | "high";
-    };
-    audio: {
-      bitrateKbps: number;
-      channels: "mono" | "stereo";
-      bitrateMode: "vbr" | "cbr";
-      dtx: boolean;
-      fec: boolean;
-      packetDurationMs: 10 | 20 | 40 | 60;
-      redundantAudio: boolean;
-    };
-  };
-  notificationsEnabled: boolean;
-  localTransportPolicy: Record<string, unknown>;
-  lastAudioMode?: AudioMode;
-  /** Cap for the viewer bitrate slider (kbps → displayed as kB/s) */
-  viewerBitrateSliderMaxKbps: number;
-  /** Quick Share global shortcut configuration */
-  quickShareShortcutEnabled: boolean;
-  quickShareShortcutAccelerator: string;
-  /** Persisted last selections for Quick Share dialog */
-  lastQuickShareGroupId: string | null;
-  lastQuickShareSourceKind: "screen" | "window" | null;
-  lastQuickSharePresetId: string | null;
-  /** Last successful share settings for "Use last settings" restoration */
-  lastShareSettings: {
-    groupId: string;
-    sourceKind: "screen" | "window";
-    sourceId: string;
-    sourceName: string;
-    audioMode: "none" | "monitor" | "application";
-    selectedPresetId: string | null;
-    customQuality: {
-      resolutionValue: string;
-      customWidth: number;
-      customHeight: number;
-      fps: number;
-      bitrate: number;
-      codec: string;
-      contentHint: string;
-      degradationPreference: string;
-    };
-  } | null;
-  /** Discord shortcut bindings */
-  discordMuteShortcut: ShortcutBinding;
-  discordDeafenShortcut: ShortcutBinding;
-  /** Whether deafening Discord also deafens ScreenLink audio */
-  discordDeafenScreenLink: boolean;
-
-  /** Maximum volume percentage for the viewer slider (default 100; allows boost up to 200+) */
-  viewerMaxVolumePercent: number;
-
-  // ── NVIDIA enhancement settings persistence (Phase 6+) ─────────────────
-  /** Viewer image enhancement settings, stored as opaque JSON blob */
-  viewerImageEnhancementSettings: Record<string, unknown> | null;
-  /** Last selected NVIDIA processing mode for quick recall */
-  lastNvidiaProcessingMode: string;
-  /** Last selected NVIDIA quality level for quick recall */
-  lastNvidiaQuality: string;
-
-  /** Duration window (ms) for the bandwidth graph's hourly usage estimate. Default 10_000 (10s). */
-  hourlyEstimateDurationMs: number;
-
-  /** Stream info card overlay configuration for the viewer */
-  streamInfoCard: StreamInfoCardConfig;
-}
-
-export interface StreamInfoCardConfig {
-  visible: boolean;
-  showResolution: boolean;
-  showFps: boolean;
-  showBitrate: boolean;
-  showDroppedFrames: boolean;
-  showNetworkUsage: boolean;
-  fontSize: number;
-  textColor: string;
-  /** Opacity percentage 0-100 */
-  boxOpacity: number;
-  /** Width in pixels */
-  boxWidth: number;
-}
-
-export type ShortcutBinding = {
-  modifiers: Array<"alt" | "ctrl" | "shift" | "win">;
-  key: string;
-};
+import {
+  normalizeAudioMode,
+  type PersistedSettings,
+  defaultHostQualityLimits,
+  defaultGlobalQualityDefaults,
+  defaultStreamInfoCard,
+  defaultQuickShareAccelerator,
+  defaultDiscordMuteShortcut,
+  defaultDiscordDeafenShortcut,
+  defaultViewerBitrateSliderMaxKbps,
+  defaultViewerMaxVolumePercent,
+  defaultNvidiaProcessingMode,
+  defaultNvidiaQuality,
+  defaultHourlyEstimateDurationMs,
+  defaultShowCompareControls,
+} from "@screenlink/shared";
 
 const CURRENT_VERSION = 4;
-
-const DEFAULT_HOST_LIMITS: PersistedSettings["hostQualityLimits"] = {
-  maxVideoBitrateKbps: 5000,
-  maxWidth: 1920,
-  maxHeight: 1080,
-  maxFps: 60,
-  allowViewerQualityRequests: true,
-};
-
-const DEFAULT_STREAM_INFO_CARD: StreamInfoCardConfig = {
-  visible: false,
-  showResolution: true,
-  showFps: true,
-  showBitrate: true,
-  showDroppedFrames: true,
-  showNetworkUsage: true,
-  fontSize: 12,
-  textColor: "#ffffff",
-  boxOpacity: 60,
-  boxWidth: 200,
-};
-
-const DEFAULT_GLOBAL_DEFAULTS: PersistedSettings["globalQualityDefaults"] = {
-  schemaVersion: 1,
-  video: {
-    videoBitrateKbps: 650,
-    sendWidth: 854,
-    sendHeight: 480,
-    sendFps: 15,
-    captureWidth: 854,
-    captureHeight: 480,
-    captureFps: 15,
-    preserveAspectRatio: true,
-    preventUpscale: true,
-    resolutionMode: "target-dimensions",
-    scaleResolutionDownBy: 1,
-    codec: "vp9",
-    h264Profile: "auto",
-    contentHint: "detail",
-    degradationPreference: "maintain-resolution",
-    scalabilityMode: null,
-    cursorMode: "always",
-    rtpPriority: "medium",
-  },
-  audio: {
-    bitrateKbps: 64,
-    channels: "stereo",
-    bitrateMode: "vbr",
-    dtx: false,
-    fec: true,
-    packetDurationMs: 20,
-    redundantAudio: false,
-  },
-};
 
 function getDefaults(): PersistedSettings {
   return {
@@ -221,27 +38,28 @@ function getDefaults(): PersistedSettings {
     lastSourceName: null,
     lastSourceFingerprint: null,
     developerMode: false,
-    hostQualityLimits: { ...DEFAULT_HOST_LIMITS },
-    globalQualityDefaults: { ...DEFAULT_GLOBAL_DEFAULTS },
+    hostQualityLimits: defaultHostQualityLimits(),
+    globalQualityDefaults: defaultGlobalQualityDefaults(),
     notificationsEnabled: true,
     localTransportPolicy: {},
     lastAudioMode: "none",
-    viewerBitrateSliderMaxKbps: 5000,
+    viewerBitrateSliderMaxKbps: defaultViewerBitrateSliderMaxKbps(),
     quickShareShortcutEnabled: true,
-    quickShareShortcutAccelerator: "Super+Alt+S",
+    quickShareShortcutAccelerator: defaultQuickShareAccelerator(),
     lastQuickShareGroupId: null,
     lastQuickShareSourceKind: null,
     lastQuickSharePresetId: null,
     lastShareSettings: null,
-    discordMuteShortcut: { modifiers: ["alt"], key: "M" },
-    discordDeafenShortcut: { modifiers: ["alt"], key: "D" },
+    discordMuteShortcut: defaultDiscordMuteShortcut(),
+    discordDeafenShortcut: defaultDiscordDeafenShortcut(),
     discordDeafenScreenLink: true,
-    viewerMaxVolumePercent: 200,
+    viewerMaxVolumePercent: defaultViewerMaxVolumePercent(),
     viewerImageEnhancementSettings: null,
-    lastNvidiaProcessingMode: "vsr",
-    lastNvidiaQuality: "high",
-    hourlyEstimateDurationMs: 10_000,
-    streamInfoCard: { ...DEFAULT_STREAM_INFO_CARD },
+    lastNvidiaProcessingMode: defaultNvidiaProcessingMode(),
+    lastNvidiaQuality: defaultNvidiaQuality(),
+    hourlyEstimateDurationMs: defaultHourlyEstimateDurationMs(),
+    streamInfoCard: defaultStreamInfoCard(),
+    showCompareControls: defaultShowCompareControls(),
   };
 }
 
@@ -263,7 +81,7 @@ function applyMigrations(raw: unknown): PersistedSettings {
       ...s,
       version: CURRENT_VERSION,
       quickShareShortcutEnabled: s.quickShareShortcutEnabled ?? true,
-      quickShareShortcutAccelerator: s.quickShareShortcutAccelerator ?? "Super+Alt+S",
+      quickShareShortcutAccelerator: s.quickShareShortcutAccelerator ?? defaultQuickShareAccelerator(),
       lastQuickShareGroupId: s.lastQuickShareGroupId ?? null,
       lastQuickShareSourceKind: s.lastQuickShareSourceKind ?? null,
       lastQuickSharePresetId: s.lastQuickSharePresetId ?? null,
@@ -277,10 +95,10 @@ function applyMigrations(raw: unknown): PersistedSettings {
 
   // Add Discord shortcut settings if missing
   if (s.discordMuteShortcut === undefined) {
-    s.discordMuteShortcut = { modifiers: ["alt"], key: "M" };
+    s.discordMuteShortcut = defaultDiscordMuteShortcut();
   }
   if (s.discordDeafenShortcut === undefined) {
-    s.discordDeafenShortcut = { modifiers: ["alt"], key: "D" };
+    s.discordDeafenShortcut = defaultDiscordDeafenShortcut();
   }
   if (s.discordDeafenScreenLink === undefined) {
     s.discordDeafenScreenLink = true;
@@ -288,14 +106,14 @@ function applyMigrations(raw: unknown): PersistedSettings {
 
   // Add viewerMaxVolumePercent if missing
   if (s.viewerMaxVolumePercent === undefined) {
-    s.viewerMaxVolumePercent = 200;
+    s.viewerMaxVolumePercent = defaultViewerMaxVolumePercent();
   }
 
   // v4 migration: add NVIDIA enhancement settings persistence fields
   if (inputVersion < 4) {
     s.viewerImageEnhancementSettings = s.viewerImageEnhancementSettings ?? null;
-    s.lastNvidiaProcessingMode = s.lastNvidiaProcessingMode ?? "vsr";
-    s.lastNvidiaQuality = s.lastNvidiaQuality ?? "high";
+    s.lastNvidiaProcessingMode = s.lastNvidiaProcessingMode ?? defaultNvidiaProcessingMode();
+    s.lastNvidiaQuality = s.lastNvidiaQuality ?? defaultNvidiaQuality();
   }
 
   // Normalize audio mode for current version
@@ -317,6 +135,11 @@ function applyMigrations(raw: unknown): PersistedSettings {
   // globalShortcut only accepts "Super" / "Meta".
   if (typeof s.quickShareShortcutAccelerator === "string") {
     s.quickShareShortcutAccelerator = s.quickShareShortcutAccelerator.replace(/\bWin\b/g, "Super");
+  }
+
+  // Add showCompareControls if absent
+  if (s.showCompareControls === undefined) {
+    s.showCompareControls = defaultShowCompareControls();
   }
 
   return s as PersistedSettings;
@@ -359,8 +182,8 @@ function migrateFromPhase2G(raw: unknown): PersistedSettings {
     lastSourceName: typeof r.lastSourceName === "string" ? (r.lastSourceName as string) : null,
     lastSourceFingerprint: typeof r.lastSourceFingerprint === "string" ? (r.lastSourceFingerprint as string) : null,
     developerMode: false,
-    hostQualityLimits: { ...DEFAULT_HOST_LIMITS },
-    globalQualityDefaults: { ...DEFAULT_GLOBAL_DEFAULTS },
+    hostQualityLimits: defaultHostQualityLimits(),
+    globalQualityDefaults: defaultGlobalQualityDefaults(),
     notificationsEnabled: true,
     localTransportPolicy: {},
     lastAudioMode: r.lastAudioMode
@@ -425,25 +248,29 @@ export class SettingsStore {
       s.lastAudioMode = normalizeAudioMode(s.lastAudioMode);
     }
     if (s.viewerMaxVolumePercent === undefined) {
-      s.viewerMaxVolumePercent = 200;
+      s.viewerMaxVolumePercent = defaultViewerMaxVolumePercent();
     }
     // Add NVIDIA enhancement fields if absent (v4 addition)
     if (s.viewerImageEnhancementSettings === undefined) {
       s.viewerImageEnhancementSettings = null;
     }
     if (s.lastNvidiaProcessingMode === undefined) {
-      s.lastNvidiaProcessingMode = "vsr";
+      s.lastNvidiaProcessingMode = defaultNvidiaProcessingMode();
     }
     if (s.lastNvidiaQuality === undefined) {
-      s.lastNvidiaQuality = "high";
+      s.lastNvidiaQuality = defaultNvidiaQuality();
     }
     // Add hourlyEstimateDurationMs if absent
     if (s.hourlyEstimateDurationMs === undefined) {
-      s.hourlyEstimateDurationMs = 10_000;
+      s.hourlyEstimateDurationMs = defaultHourlyEstimateDurationMs();
     }
     // Add streamInfoCard if absent
     if (s.streamInfoCard === undefined) {
-      s.streamInfoCard = { ...DEFAULT_STREAM_INFO_CARD };
+      s.streamInfoCard = defaultStreamInfoCard();
+    }
+    // Add showCompareControls if absent
+    if (s.showCompareControls === undefined) {
+      s.showCompareControls = defaultShowCompareControls();
     }
     // Normalise "Win" → "Super" in any stored Quick Share accelerator
     // (catches values saved before the IPC-level normalisation was added).

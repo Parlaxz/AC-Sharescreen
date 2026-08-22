@@ -138,6 +138,7 @@ interface BoundHandlers {
   peerConnected: (event: unknown) => void;
   peerDisconnected: (event: unknown) => void;
   dataChannelOpen: (event: unknown) => void;
+  dataChannelClose: (event: unknown) => void;
   dataReceived: (data: unknown, peerUuid?: unknown) => void;
   disconnected: (event: unknown) => void;
   reconnected: (event: unknown) => void;
@@ -599,6 +600,7 @@ export class GroupControlConnection {
       try { sdk.removeEventListener("peerConnected", this.handlers.peerConnected as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("peerDisconnected", this.handlers.peerDisconnected as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("dataChannelOpen", this.handlers.dataChannelOpen as never); } catch { /* ignore */ }
+      try { sdk.removeEventListener("dataChannelClose", this.handlers.dataChannelClose as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("dataReceived", this.handlers.dataReceived as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("disconnected", this.handlers.disconnected as never); } catch { /* ignore */ }
       try { sdk.removeEventListener("reconnected", this.handlers.reconnected as never); } catch { /* ignore */ }
@@ -684,6 +686,26 @@ export class GroupControlConnection {
         if (!this.peerToDevice.has(uuid)) {
           this.peersAwaitingHello.add(uuid);
           this.sendHelloToPeer(uuid).catch(() => {});
+        }
+      },
+      dataChannelClose: (raw: unknown) => {
+        if (gen !== this.startGeneration || this.destroyed) return;
+        const { uuid, valid, malformed } = extractPeerUuid(raw);
+        if (!valid || !uuid) {
+          this.opts.onError(new Error(
+            malformed
+              ? "dataChannelClose: SDK emitted event without a usable UUID"
+              : "dataChannelClose: empty peer UUID",
+          ));
+          return;
+        }
+        this.rawDataPeers.delete(uuid);
+        this.peersAwaitingHello.delete(uuid);
+        const deviceId = this.peerToDevice.get(uuid);
+        if (deviceId) {
+          this.peerToDevice.delete(uuid);
+          this.deviceToPeer.delete(deviceId);
+          this.opts.onPeerOffline(deviceId);
         }
       },
       dataReceived: async (dataArg: unknown, peerArg?: unknown) => {
@@ -824,20 +846,28 @@ export class GroupControlConnection {
       disconnected: (_raw: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
         this.setState("reconnecting");
-        // Mark every connected peer as offline until the mesh recovers.
-        const allDeviceIds = Array.from(this.deviceToPeer.keys());
-        this.peerToDevice.clear();
-        this.deviceToPeer.clear();
-        this.peersAwaitingHello.clear();
-        this.rawDataPeers.clear();
-        for (const deviceId of allDeviceIds) {
-          this.opts.onPeerOffline(deviceId);
-        }
+        // P2P channels may survive signaling outage — do not clear peer maps
+        // or emit peer offline. dataChannelClose handles cleanup when a
+        // data channel actually goes down.
       },
       reconnected: (_raw: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
         this.setState("connected");
-        console.log("[group-control] signaling reconnected; waiting for data-channel reopen events");
+        console.log("[group-control] signaling reconnected; reconciling data peers");
+        // Reconcile surviving raw data peers: for each raw peer without an
+        // authenticated mapping, ensure it is awaiting hello and send a fresh
+        // hello (retry even if already awaiting, since prior send may have lost).
+        for (const peerUuid of this.rawDataPeers) {
+          if (!this.peerToDevice.has(peerUuid)) {
+            this.peersAwaitingHello.add(peerUuid);
+            this.sendHelloToPeer(peerUuid).catch(() => {});
+          }
+        }
+        // For mapped peers, request full state so streams can be restored
+        // after a transient signaling outage.
+        for (const peerUuid of this.peerToDevice.keys()) {
+          this.requestFullStateFromPeer(peerUuid).catch(() => {});
+        }
       },
       reconnectFailed: (_raw: unknown) => {
         if (gen !== this.startGeneration || this.destroyed) return;
@@ -870,6 +900,7 @@ export class GroupControlConnection {
     sdk.addEventListener("peerConnected", handlers.peerConnected as never);
     sdk.addEventListener("peerDisconnected", handlers.peerDisconnected as never);
     sdk.addEventListener("dataChannelOpen", handlers.dataChannelOpen as never);
+    sdk.addEventListener("dataChannelClose", handlers.dataChannelClose as never);
     sdk.addEventListener("dataReceived", handlers.dataReceived as never);
     sdk.addEventListener("disconnected", handlers.disconnected as never);
     sdk.addEventListener("reconnected", handlers.reconnected as never);

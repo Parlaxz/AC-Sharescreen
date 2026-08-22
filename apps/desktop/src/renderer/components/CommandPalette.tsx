@@ -6,6 +6,7 @@ import {
   CommandGroup,
   CommandItem,
 } from "@/components/ui/command";
+import { cn } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
 
 /**
@@ -19,14 +20,23 @@ interface CommandPaletteProps {
   onOpenChange: (open: boolean) => void;
 }
 
+interface CommandActionItem {
+  label: string;
+  shortcut: string;
+  disabled?: boolean;
+  disabledReason?: string;
+  action: () => void;
+}
+
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useStore((s) => s.navigate);
   const toggleContextPanel = useStore((s) => s.toggleContextPanel);
   const toggleFocusMode = useStore((s) => s.toggleFocusMode);
   const isSharing = useStore((s) => s.isSharing);
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
+  const selectedGroupId = useStore((s) => s.selectedGroupId);
 
-  const commandActions = [
+  const commandActions: { group: string; items: CommandActionItem[] }[] = [
     {
       group: "Navigation",
       items: [
@@ -65,6 +75,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         {
           label: "Open invite dialog",
           shortcut: "",
+          disabled: !selectedGroupId,
+          disabledReason: "Select a group first",
           action: () => {
             // Will be wired to the group dashboard's invite dialog
           },
@@ -73,10 +85,6 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     },
   ];
 
-  const toast = (msg: string) => {
-    console.log("[CommandPalette]", msg);
-  };
-
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
       <CommandInput placeholder="Type a command or search..." />
@@ -84,22 +92,35 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         <CommandEmpty>No results found.</CommandEmpty>
         {commandActions.map((group) => (
           <CommandGroup key={group.group} heading={group.group}>
-            {group.items.map((item) => (
-              <CommandItem
-                key={item.label}
-                onSelect={() => {
-                  item.action();
-                  onOpenChange(false);
-                }}
-              >
-                <span className="flex-1">{item.label}</span>
-                {item.shortcut && (
-                  <kbd className="ml-auto text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded-compact">
-                    {item.shortcut}
-                  </kbd>
-                )}
-              </CommandItem>
-            ))}
+            {group.items.map((item) => {
+              const isDisabled = "disabled" in item ? item.disabled : false;
+              return (
+                <CommandItem
+                  key={item.label}
+                  disabled={isDisabled}
+                  onSelect={() => {
+                    if (isDisabled) return;
+                    item.action();
+                    onOpenChange(false);
+                  }}
+                  className={cn(
+                    isDisabled && "cursor-not-allowed opacity-50",
+                  )}
+                >
+                  <span className="flex-1">{item.label}</span>
+                  {isDisabled && item.disabledReason && (
+                    <span className="text-[10px] text-text-muted ml-2">
+                      {item.disabledReason}
+                    </span>
+                  )}
+                  {!isDisabled && item.shortcut && (
+                    <kbd className="ml-auto text-[10px] text-text-muted bg-surface-2 px-1.5 py-0.5 rounded-compact">
+                      {item.shortcut}
+                    </kbd>
+                  )}
+                </CommandItem>
+              );
+            })}
           </CommandGroup>
         ))}
       </CommandList>

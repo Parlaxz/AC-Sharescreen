@@ -1,7 +1,7 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
-import { RefreshCw, AlertTriangle } from "lucide-react";
+import { RefreshCw, AlertTriangle, Save, History } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -23,6 +23,8 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { PageSection } from "@/components/layout/PageSection";
 import {
   loadSettings,
   saveSettings,
@@ -34,7 +36,20 @@ import { useIdentityStore } from "@/stores/identity-store";
 import { getRuntime } from "@/services/phase3-runtime";
 import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSection";
 import { StreamHistorySection } from "@/components/settings/StreamHistorySection";
-import type { PersistedSettings, QuickShareConfigDTO, ShortcutBinding } from "../../../preload/api-types.js";
+import type { PersistedSettings, ShortcutBinding, StreamInfoCardConfig } from "@screenlink/shared";
+import {
+  defaultHostQualityLimits,
+  defaultGlobalQualityDefaults,
+  defaultStreamInfoCard,
+  defaultQuickShareAccelerator,
+  defaultViewerBitrateSliderMaxKbps,
+  defaultViewerMaxVolumePercent,
+  defaultHourlyEstimateDurationMs,
+  defaultDiscordMuteShortcut,
+  defaultDiscordDeafenShortcut,
+  defaultShowCompareControls,
+} from "@screenlink/shared";
+import type { QuickShareConfigDTO } from "../../../preload/api-types.js";
 
 interface SettingsForm {
   displayName: string;
@@ -47,7 +62,7 @@ interface SettingsForm {
   maxFps: number;
   allowViewerQualityRequests: boolean;
   viewerBitrateSliderMaxKbps: number;
-  defaultCodec: "vp9" | "av1" | "h264" | "vp8";
+  defaultCodec: "auto" | "vp9" | "av1" | "h264" | "vp8";
   quickShareEnabled: boolean;
   quickShareAccelerator: string;
   discordMuteShortcut: string;
@@ -61,41 +76,49 @@ interface SettingsForm {
   streamInfoCardShowBitrate: boolean;
   streamInfoCardShowDroppedFrames: boolean;
   streamInfoCardShowNetworkUsage: boolean;
+  streamInfoCardPosition: "top-left" | "top-right" | "bottom-left" | "bottom-right";
   streamInfoCardFontSize: number;
   streamInfoCardTextColor: string;
   streamInfoCardBoxOpacity: number;
   streamInfoCardBoxWidth: number;
+  showCompareControls: boolean;
 }
+
+const _hq = defaultHostQualityLimits();
+const _gq = defaultGlobalQualityDefaults();
+const _sic = defaultStreamInfoCard();
 
 const DEFAULT_FORM: SettingsForm = {
   displayName: "User",
   launchAtLogin: false,
   autoResumeLastMonitor: false,
   notificationsEnabled: true,
-  maxVideoBitrateKbps: 5000,
-  maxWidth: 1920,
-  maxHeight: 1080,
-  maxFps: 60,
-  allowViewerQualityRequests: true,
-  viewerBitrateSliderMaxKbps: 5000,
-  defaultCodec: "vp9",
+  maxVideoBitrateKbps: _hq.maxVideoBitrateKbps,
+  maxWidth: _hq.maxWidth,
+  maxHeight: _hq.maxHeight,
+  maxFps: _hq.maxFps,
+  allowViewerQualityRequests: _hq.allowViewerQualityRequests,
+  viewerBitrateSliderMaxKbps: defaultViewerBitrateSliderMaxKbps(),
+  defaultCodec: _gq.video.codec,
   quickShareEnabled: true,
-  quickShareAccelerator: "Super+Alt+S",
-  discordMuteShortcut: "Alt+M",
-  discordDeafenShortcut: "Alt+D",
+  quickShareAccelerator: defaultQuickShareAccelerator(),
+  discordMuteShortcut: `${defaultDiscordMuteShortcut().modifiers[0] === "alt" ? "Alt" : ""}+${defaultDiscordMuteShortcut().key}`,
+  discordDeafenShortcut: `${defaultDiscordDeafenShortcut().modifiers[0] === "alt" ? "Alt" : ""}+${defaultDiscordDeafenShortcut().key}`,
   discordDeafenScreenLink: true,
-  viewerMaxVolumePercent: 200,
-  hourlyEstimateDurationMs: 10_000,
-  streamInfoCardVisible: false,
-  streamInfoCardShowResolution: true,
-  streamInfoCardShowFps: true,
-  streamInfoCardShowBitrate: true,
-  streamInfoCardShowDroppedFrames: true,
-  streamInfoCardShowNetworkUsage: true,
-  streamInfoCardFontSize: 12,
-  streamInfoCardTextColor: "#ffffff",
-  streamInfoCardBoxOpacity: 60,
-  streamInfoCardBoxWidth: 200,
+  viewerMaxVolumePercent: defaultViewerMaxVolumePercent(),
+  hourlyEstimateDurationMs: defaultHourlyEstimateDurationMs(),
+  streamInfoCardVisible: _sic.visible,
+  streamInfoCardShowResolution: _sic.showResolution,
+  streamInfoCardShowFps: _sic.showFps,
+  streamInfoCardShowBitrate: _sic.showBitrate,
+  streamInfoCardShowDroppedFrames: _sic.showDroppedFrames,
+  streamInfoCardShowNetworkUsage: _sic.showNetworkUsage,
+  streamInfoCardPosition: _sic.position,
+  streamInfoCardFontSize: _sic.fontSize,
+  streamInfoCardTextColor: _sic.textColor,
+  streamInfoCardBoxOpacity: _sic.boxOpacity,
+  streamInfoCardBoxWidth: _sic.boxWidth,
+  showCompareControls: defaultShowCompareControls(),
 };
 
 const DEFAULT_AUDIO_SETTINGS = {
@@ -167,10 +190,12 @@ function buildForm(
     streamInfoCardShowBitrate: settings.streamInfoCard?.showBitrate ?? DEFAULT_FORM.streamInfoCardShowBitrate,
     streamInfoCardShowDroppedFrames: settings.streamInfoCard?.showDroppedFrames ?? DEFAULT_FORM.streamInfoCardShowDroppedFrames,
     streamInfoCardShowNetworkUsage: settings.streamInfoCard?.showNetworkUsage ?? DEFAULT_FORM.streamInfoCardShowNetworkUsage,
+    streamInfoCardPosition: settings.streamInfoCard?.position ?? DEFAULT_FORM.streamInfoCardPosition,
     streamInfoCardFontSize: settings.streamInfoCard?.fontSize ?? DEFAULT_FORM.streamInfoCardFontSize,
     streamInfoCardTextColor: settings.streamInfoCard?.textColor ?? DEFAULT_FORM.streamInfoCardTextColor,
     streamInfoCardBoxOpacity: settings.streamInfoCard?.boxOpacity ?? DEFAULT_FORM.streamInfoCardBoxOpacity,
     streamInfoCardBoxWidth: settings.streamInfoCard?.boxWidth ?? DEFAULT_FORM.streamInfoCardBoxWidth,
+    showCompareControls: settings.showCompareControls ?? DEFAULT_FORM.showCompareControls,
   };
 }
 
@@ -203,7 +228,8 @@ function formsEqual(a: SettingsForm, b: SettingsForm): boolean {
     a.streamInfoCardFontSize === b.streamInfoCardFontSize &&
     a.streamInfoCardTextColor === b.streamInfoCardTextColor &&
     a.streamInfoCardBoxOpacity === b.streamInfoCardBoxOpacity &&
-    a.streamInfoCardBoxWidth === b.streamInfoCardBoxWidth
+    a.streamInfoCardBoxWidth === b.streamInfoCardBoxWidth &&
+    a.showCompareControls === b.showCompareControls
   );
 }
 
@@ -253,6 +279,7 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const setLocalIdentity = useIdentityStore((s) => s.setLocalIdentity);
 
   const load = useCallback(async () => {
@@ -376,6 +403,7 @@ export function SettingsPage() {
         discordDeafenScreenLink: form.discordDeafenScreenLink,
         viewerMaxVolumePercent: form.viewerMaxVolumePercent,
         hourlyEstimateDurationMs: form.hourlyEstimateDurationMs,
+        showCompareControls: form.showCompareControls,
         streamInfoCard: {
           visible: form.streamInfoCardVisible,
           showResolution: form.streamInfoCardShowResolution,
@@ -383,6 +411,7 @@ export function SettingsPage() {
           showBitrate: form.streamInfoCardShowBitrate,
           showDroppedFrames: form.streamInfoCardShowDroppedFrames,
           showNetworkUsage: form.streamInfoCardShowNetworkUsage,
+          position: form.streamInfoCardPosition,
           fontSize: form.streamInfoCardFontSize,
           textColor: form.streamInfoCardTextColor,
           boxOpacity: form.streamInfoCardBoxOpacity,
@@ -422,8 +451,10 @@ export function SettingsPage() {
 
       setForm(verifiedForm);
       setCleanBaseline(verifiedForm);
+      setSaveStatus("saved");
       toast.success("Settings saved");
     } catch (err) {
+      setSaveStatus("error");
       toast.error(err instanceof Error ? err.message : "Failed to save settings");
     } finally {
       setSaving(false);
@@ -432,14 +463,14 @@ export function SettingsPage() {
 
   if (loading) {
     return (
-      <div className="h-full overflow-auto p-5 space-y-5">
+      <div className="h-full overflow-auto p-5 space-y-5" role="status" aria-busy="true">
         <Skeleton className="h-8 w-40" />
         <Skeleton className="h-48 w-full rounded-standard" />
         <Skeleton className="h-32 w-full rounded-standard" />
         <Skeleton className="h-32 w-full rounded-standard" />
     </div>
   );
-}
+  }
 
   if (loadError) {
     return (
@@ -460,65 +491,63 @@ export function SettingsPage() {
   return (
     <div className="h-full flex flex-col">
       <div className="flex-1 overflow-auto p-5 space-y-5">
-        <h1 className="text-xl font-semibold text-text-primary">Settings</h1>
+        <PageHeader
+          title="Settings"
+          description="Configure your ScreenLink preferences"
+        />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Profile</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="display-name">Display Name</Label>
-            <Input
-              id="display-name"
-              value={form.displayName}
-              onChange={(e) => updateField("displayName", e.target.value)}
-              placeholder="Your name shown to viewers"
-              disabled={saving}
+      <PageSection title="Profile" description="Your display name shared with viewers">
+        <Card>
+          <CardContent className="pt-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="display-name">Display Name</Label>
+              <Input
+                id="display-name"
+                value={form.displayName}
+                onChange={(e) => updateField("displayName", e.target.value)}
+                placeholder="Your name shown to viewers"
+                disabled={saving}
+              />
+            </div>
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Startup" description="Behavior when ScreenLink launches">
+        <Card>
+          <CardContent className="pt-4 space-y-1">
+            <SwitchRow
+              id="launch-at-login"
+              label="Launch at login"
+              checked={form.launchAtLogin}
+              onCheckedChange={(value) => updateField("launchAtLogin", value)}
             />
-          </div>
-        </CardContent>
-      </Card>
+            <Separator />
+            <SwitchRow
+              id="auto-resume-last-monitor"
+              label="Auto-resume last monitor/source"
+              checked={form.autoResumeLastMonitor}
+              onCheckedChange={(value) => updateField("autoResumeLastMonitor", value)}
+            />
+          </CardContent>
+        </Card>
+      </PageSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Startup</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1">
-          <SwitchRow
-            id="launch-at-login"
-            label="Launch at login"
-            checked={form.launchAtLogin}
-            onCheckedChange={(value) => updateField("launchAtLogin", value)}
-          />
-          <Separator />
-          <SwitchRow
-            id="auto-resume-last-monitor"
-            label="Auto-resume last monitor/source"
-            checked={form.autoResumeLastMonitor}
-            onCheckedChange={(value) => updateField("autoResumeLastMonitor", value)}
-          />
-        </CardContent>
-      </Card>
+      <PageSection title="Notifications" description="Control when ScreenLink notifies you">
+        <Card>
+          <CardContent className="pt-4 space-y-1">
+            <SwitchRow
+              id="notifications-enabled"
+              label="General notifications enabled"
+              checked={form.notificationsEnabled}
+              onCheckedChange={(value) => updateField("notificationsEnabled", value)}
+            />
+          </CardContent>
+        </Card>
+      </PageSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Notifications</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1">
-          <SwitchRow
-            id="notifications-enabled"
-            label="General notifications enabled"
-            checked={form.notificationsEnabled}
-            onCheckedChange={(value) => updateField("notificationsEnabled", value)}
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Host quality limits</CardTitle>
-        </CardHeader>
+      <PageSection title="Host quality limits" description="Maximum stream quality caps. Applied as a ceiling to all presets and viewer requests.">
+        <Card>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
@@ -575,168 +604,174 @@ export function SettingsPage() {
           />
         </CardContent>
       </Card>
+      </PageSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Viewer bitrate slider cap</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1.5">
-          <Label htmlFor="viewer-bitrate-slider-max">
-            Maximum bitrate (kbps) shown on the viewer quality slider
-          </Label>
-          <Input
-            id="viewer-bitrate-slider-max"
-            type="number"
-            min={100}
-            max={100000}
-            value={form.viewerBitrateSliderMaxKbps}
-            onChange={(e) => updateField("viewerBitrateSliderMaxKbps", parseInt(e.target.value || "0", 10) || 0)}
-            disabled={saving}
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Max viewer volume</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1.5">
-          <Label htmlFor="viewer-max-volume">
-            Maximum volume percentage shown on the viewer volume slider
-          </Label>
-          <Input
-            id="viewer-max-volume"
-            type="number"
-            min={1}
-            max={500}
-            value={form.viewerMaxVolumePercent}
-            onChange={(e) => updateField("viewerMaxVolumePercent", parseInt(e.target.value || "0", 10) || 0)}
-            disabled={saving}
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Hourly usage estimate window</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1.5">
-          <Label htmlFor="hourly-estimate-window">
-            Time window used to compute the bandwidth graph's hourly usage estimate
-          </Label>
-          <Select
-            value={String(form.hourlyEstimateDurationMs)}
-            onValueChange={(value) => updateField("hourlyEstimateDurationMs", Number(value))}
-          >
-            <SelectTrigger id="hourly-estimate-window">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="10000">Last 10 seconds</SelectItem>
-              <SelectItem value="30000">Last 30 seconds</SelectItem>
-              <SelectItem value="60000">Last 1 minute</SelectItem>
-              <SelectItem value="300000">Last 5 minutes</SelectItem>
-            </SelectContent>
-          </Select>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Streaming default</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1.5">
-          <Label htmlFor="default-codec">Default codec</Label>
-          <Select
-            value={form.defaultCodec}
-            onValueChange={(value) => updateField("defaultCodec", value as SettingsForm["defaultCodec"])}
-          >
-            <SelectTrigger id="default-codec">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CODEC_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Updates</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <UpdatesSettingsSection />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Quick Share</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <SwitchRow
-            id="quick-share-enabled"
-            label="Enabled"
-            checked={form.quickShareEnabled}
-            onCheckedChange={(value) => updateField("quickShareEnabled", value)}
-          />
-          <div className="space-y-1.5">
-            <Label htmlFor="quick-share-accelerator">Accelerator</Label>
-            <KeyRecorder
-              value={form.quickShareAccelerator}
-              onChange={(v) => updateField("quickShareAccelerator", v)}
+      <PageSection title="Viewer bitrate slider cap" description="Maximum bitrate visible on the viewer quality slider">
+        <Card>
+          <CardContent className="pt-4 space-y-1.5">
+            <Label htmlFor="viewer-bitrate-slider-max">
+              Maximum bitrate (kbps) shown on the viewer quality slider
+            </Label>
+            <Input
+              id="viewer-bitrate-slider-max"
+              type="number"
+              min={100}
+              max={100000}
+              value={form.viewerBitrateSliderMaxKbps}
+              onChange={(e) => updateField("viewerBitrateSliderMaxKbps", parseInt(e.target.value || "0", 10) || 0)}
               disabled={saving}
             />
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </PageSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Discord Controls</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <p className="text-xs text-text-muted">
-            Configure shortcuts to simulate Discord global keybinds via Win32 SendInput.
-            Discord must have the matching keybind configured as a global shortcut.
-          </p>
-          <div className="space-y-1.5">
-            <Label htmlFor="discord-mute-shortcut">Mute shortcut</Label>
-            <KeyRecorder
-              value={form.discordMuteShortcut}
-              onChange={(v) => updateField("discordMuteShortcut", v)}
+      <PageSection title="Max viewer volume" description="Maximum volume boost for the viewer">
+        <Card>
+          <CardContent className="pt-4 space-y-1.5">
+            <Label htmlFor="viewer-max-volume">
+              Maximum volume percentage shown on the viewer volume slider
+            </Label>
+            <Input
+              id="viewer-max-volume"
+              type="number"
+              min={1}
+              max={500}
+              value={form.viewerMaxVolumePercent}
+              onChange={(e) => updateField("viewerMaxVolumePercent", parseInt(e.target.value || "0", 10) || 0)}
               disabled={saving}
-              placeholder="Alt+M"
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="discord-deafen-shortcut">Deafen shortcut</Label>
-            <KeyRecorder
-              value={form.discordDeafenShortcut}
-              onChange={(v) => updateField("discordDeafenShortcut", v)}
-              disabled={saving}
-              placeholder="Alt+D"
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Hourly usage estimate window" description="Time window for bandwidth graph hourly estimate">
+        <Card>
+          <CardContent className="pt-4 space-y-1.5">
+            <Label htmlFor="hourly-estimate-window">
+              Time window used to compute the bandwidth graph's hourly usage estimate
+            </Label>
+            <Select
+              value={String(form.hourlyEstimateDurationMs)}
+              onValueChange={(value) => updateField("hourlyEstimateDurationMs", Number(value))}
+            >
+              <SelectTrigger id="hourly-estimate-window">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="10000">Last 10 seconds</SelectItem>
+                <SelectItem value="30000">Last 30 seconds</SelectItem>
+                <SelectItem value="60000">Last 1 minute</SelectItem>
+                <SelectItem value="300000">Last 5 minutes</SelectItem>
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Streaming default" description="Default codec for new streams">
+        <Card>
+          <CardContent className="pt-4 space-y-1.5">
+            <Label htmlFor="default-codec">Default codec</Label>
+            <Select
+              value={form.defaultCodec}
+              onValueChange={(value) => updateField("defaultCodec", value as SettingsForm["defaultCodec"])}
+            >
+              <SelectTrigger id="default-codec">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CODEC_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Viewer" description="Controls and features available while watching a stream">
+        <Card>
+          <CardContent className="pt-4 space-y-1">
+            <SwitchRow
+              id="show-compare-controls"
+              label="Show A/B comparison controls"
+              checked={form.showCompareControls}
+              onCheckedChange={(value) => updateField("showCompareControls", value)}
             />
-          </div>
-          <Separator />
-          <SwitchRow
-            id="discord-deafen-screenlink"
-            label="Also deafen ScreenLink share audio"
-            checked={form.discordDeafenScreenLink}
-            onCheckedChange={(value) => updateField("discordDeafenScreenLink", value)}
-          />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <CardTitle>Stream Info Overlay</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
+            <p className="text-xs text-text-muted pt-1">
+              When enabled, a button and keyboard shortcuts (C, V, Alt+1/2/0) allow comparing
+              two GPU enhancement configurations side by side.
+            </p>
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Updates" description="Application update management">
+        <Card>
+          <CardContent className="pt-4">
+            <UpdatesSettingsSection />
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Quick Share" description="One-click sharing with keyboard shortcuts">
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <SwitchRow
+              id="quick-share-enabled"
+              label="Enabled"
+              checked={form.quickShareEnabled}
+              onCheckedChange={(value) => updateField("quickShareEnabled", value)}
+            />
+            <div className="space-y-1.5">
+              <Label htmlFor="quick-share-accelerator">Accelerator</Label>
+              <KeyRecorder
+                value={form.quickShareAccelerator}
+                onChange={(v) => updateField("quickShareAccelerator", v)}
+                disabled={saving}
+              />
+            </div>
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Discord Controls" description="Simulate Discord global keybinds via Win32 SendInput. Discord must have matching global shortcuts configured.">
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="discord-mute-shortcut">Mute shortcut</Label>
+              <KeyRecorder
+                value={form.discordMuteShortcut}
+                onChange={(v) => updateField("discordMuteShortcut", v)}
+                disabled={saving}
+                placeholder="Alt+M"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="discord-deafen-shortcut">Deafen shortcut</Label>
+              <KeyRecorder
+                value={form.discordDeafenShortcut}
+                onChange={(v) => updateField("discordDeafenShortcut", v)}
+                disabled={saving}
+                placeholder="Alt+D"
+              />
+            </div>
+            <Separator />
+            <SwitchRow
+              id="discord-deafen-screenlink"
+              label="Also deafen ScreenLink share audio"
+              checked={form.discordDeafenScreenLink}
+              onCheckedChange={(value) => updateField("discordDeafenScreenLink", value)}
+            />
+          </CardContent>
+        </Card>
+      </PageSection>
+
+      <PageSection title="Stream Info Overlay" description="On-screen data overlay shown while viewing a stream">
+        <Card>
+        <CardContent className="pt-4 space-y-4">
           <p className="text-xs text-text-muted">
             Configure the on-screen data overlay shown in the top-left corner while viewing a stream.
           </p>
@@ -842,28 +877,19 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
-      <StreamHistorySection />
+      </PageSection>
+
+      <PageSection title="Past Streams" description="Stream history and bandwidth usage">
+        <StreamHistorySection />
+      </PageSection>
     </div>
 
       {/* Sticky save bar — always visible at the bottom */}
-      <div
-        style={{
-          flexShrink: 0,
-          borderTop: "1px solid var(--color-border-subtle)",
-          background: "var(--color-surface-1)",
-          padding: "0.75rem 1.25rem",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "0.75rem",
-        }}
-      >
+      <div className="flex-shrink-0 flex items-center justify-between gap-3 px-5 py-3 border-t border-border-subtle bg-surface-1">
         <span
-          style={{
-            fontSize: "0.8125rem",
-            color: isDirty ? "var(--color-text-secondary)" : "var(--color-text-muted)",
-            transition: "color 0.15s ease",
-          }}
+          className={`text-[0.8125rem] transition-colors duration-150 ${
+            isDirty ? "text-text-secondary" : "text-text-muted"
+          }`}
         >
           {isDirty ? "Unsaved changes" : "All settings saved"}
         </span>

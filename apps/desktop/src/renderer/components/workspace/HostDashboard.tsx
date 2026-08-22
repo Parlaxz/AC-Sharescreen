@@ -34,6 +34,7 @@ import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 import { useHostViewerDiagnostics, type ViewerRow } from "@/hooks/use-host-viewer-diagnostics";
 import { Separator } from "@/components/ui/separator";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
 import { formatBitrateKbps } from "@/lib/utils";
 import { toast } from "sonner";
@@ -75,10 +76,10 @@ function getConnectionClass(label: string): string {
 function ViewerRowItem({ row, onBitrateClick, onKick }: { row: ViewerRow; onBitrateClick?: () => void; onKick?: (viewerDeviceId: string) => void | Promise<void> }) {
   const statusDot = (() => {
     switch (row.state) {
-      case "playing": return "bg-green-500";
-      case "paused": return "bg-amber-500";
-      case "reconnecting": return "bg-orange-500 animate-pulse";
-      default: return "bg-gray-400";
+      case "playing": return "bg-success";
+      case "paused": return "bg-warning";
+      case "reconnecting": return "bg-warning animate-pulse";
+      default: return "bg-text-muted";
     }
   })();
 
@@ -203,8 +204,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const onlineDeviceIdsByGroup = useStore((s) => s.onlineDeviceIdsByGroup);
   const setOpenShareSetup = useStore((s) => s.setOpenShareSetup);
   const setSource = useStore((s) => s.setSource);
-  const isSwitchingSource = useStore((s) => s.isSwitchingSource);
-  const setSwitchingSource = useStore((s) => s.setSwitchingSource);
+  const [isSwitchingSource, setSwitchingSource] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [switchSourceOpen, setSwitchSourceOpen] = useState(false);
   const [sources, setSources] = useState<CaptureSourceDTO[] | null>(null);
@@ -379,13 +379,6 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
         sourceName: localStream.sourceName,
         sourceKind: localStream.sourceKind,
       };
-      s.setWatchedStreams({
-        [localStream.mediaSessionId]: {
-          hostDeviceId: localStream.hostDeviceId,
-          hostName: localStream.hostDisplayName,
-          startedAt: localStream.startedAt,
-        },
-      });
       s.setWatchingTarget(target);
       s.setSelectedGroupId(targetGroupId);
       s.setIsViewing(true);
@@ -423,8 +416,13 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       }
     }
 
-    // 2) Remove the viewer binding (mapping + stats polling)
-    viewerBinding.removeViewer(viewerDeviceId);
+    // 2) Remove the viewer binding (mapping + stats polling) using exact mapping (B-16)
+    const viewerEntry = viewerBinding.getAllViewers().find(
+      (v) => v.viewerDeviceId === viewerDeviceId,
+    );
+    if (viewerEntry) {
+      viewerBinding.removeViewerMapping(viewerEntry.viewerDeviceId, viewerEntry.mediaSessionId, viewerEntry.viewerSessionId);
+    }
 
     if (reason === "manual") {
       toast.success("Viewer kicked out");
@@ -440,40 +438,49 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
     }
   }, [kickViewer, visibleViewerRows]);
 
-  if (loading || !isSharing) {
+  if (loading) {
+    return (
+      <div
+        className="p-6 max-w-3xl space-y-4"
+        role="status"
+        aria-label="Loading host dashboard"
+      >
+        {/* Header skeleton */}
+        <div className="mb-6 space-y-2">
+          <Skeleton className="h-6 w-48 rounded-standard" />
+          <Skeleton className="h-4 w-32 rounded-standard" />
+        </div>
+        {/* Card skeletons */}
+        <Skeleton className="h-28 w-full rounded-standard" />
+        <Skeleton className="h-36 w-full rounded-standard" />
+        <Skeleton className="h-16 w-full rounded-standard" />
+        <Skeleton className="h-12 w-full rounded-standard" />
+      </div>
+    );
+  }
+
+  if (!isSharing) {
     return null;
   }
 
   return (
     <div className="p-6 max-w-3xl space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-semibold text-text-primary">
-              {group?.name ?? "Sharing"}
-            </h1>
-            <Badge variant="success" className="text-[10px] px-2 py-0.5 leading-none">
-              <Radio className="h-2.5 w-2.5 mr-1" />
-              Live
-            </Badge>
-          </div>
-          <div className="flex items-center gap-3 mt-1 text-xs text-text-muted">
-            <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              {liveDuration}
-            </span>
-            <span className="flex items-center gap-1">
-              <Eye className="h-3 w-3" />
-              {visibleViewerRows.length} {visibleViewerRows.length === 1 ? "viewer" : "viewers"}
-            </span>
-          </div>
-        </div>
-
-        <Button variant="destructive" size="sm" onClick={() => setStopConfirmOpen(true)}>
-          <StopCircle className="h-4 w-4" />
-          Stop sharing
-        </Button>
-      </div>
+      <PageHeader
+        title={group?.name ?? "Sharing"}
+        status={
+          <Badge variant="success" className="text-[10px] px-2 py-0.5 leading-none">
+            <Radio className="h-2.5 w-2.5 mr-1" />
+            Live
+          </Badge>
+        }
+        description={`${liveDuration} · ${visibleViewerRows.length} ${visibleViewerRows.length === 1 ? "viewer" : "viewers"}`}
+        actions={
+          <Button variant="destructive" size="sm" onClick={() => setStopConfirmOpen(true)}>
+            <StopCircle className="h-4 w-4" />
+            Stop sharing
+          </Button>
+        }
+      />
 
       <Card>
         <CardHeader>
@@ -680,8 +687,9 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
                             key={s.id}
                             type="button"
                             onClick={() => setSelectedSwitchSource(s)}
+                            aria-pressed={selectedSwitchSource?.id === s.id}
                             className={cn(
-                              "w-full flex items-center gap-3 rounded-lg border p-2.5 text-left transition-colors",
+                              "w-full flex items-center gap-3 rounded-lg border p-2.5 text-left transition-colors focus-visible:ring-2 focus-visible:ring-accent",
                               selectedSwitchSource?.id === s.id
                                 ? "border-accent bg-accent/10"
                                 : "border-border hover:border-accent/50 hover:bg-accent/5",
@@ -744,7 +752,6 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       {/* Bandwidth graph modal */}
       <BandwidthGraphModal
         open={bandwidthModalOpen}
-        onOpenChange={setBandwidthModalOpen}
         mediaSessionId={mediaSessionId}
         viewerMode={false}
       />

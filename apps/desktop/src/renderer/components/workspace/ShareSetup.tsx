@@ -65,7 +65,13 @@ import { startShare } from "@/services/share-coordinator";
 import {
   customPresetToOverride,
   presetSettingsToOverride,
+  deriveSourceErrorText,
+  getAudioModes,
+  resolveAudioMode,
+  type AudioModeValue,
+  type AudioModeOption,
   type SessionQualityOverride,
+  type SourceTab,
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
 import { getRuntime } from "@/services/phase3-runtime";
@@ -77,13 +83,7 @@ import {
   qualityEditorFieldsValid,
 } from "./QualityEditorFields.js";
 
-// ─── Types ─────────────────────────────────────────────────────────────────
-
-type SourceTab = "screen" | "window";
-
-type AudioModeValue = "none" | "monitor" | "application";
-
-// ─── Audio mode type ───────────────────────────────────────────────────────
+// ─── Resolve quality override ──────────────────────────────────────────────
 
 function resolveSelectedQualityOverride(args: {
   selectedPresetId: string | null;
@@ -111,62 +111,6 @@ function resolveSelectedQualityOverride(args: {
     contentHint: customQuality.contentHint,
     degradationPreference: customQuality.degradationPreference,
   });
-}
-
-/** User-facing audio mode descriptor used for radio cards. */
-interface AudioModeOption {
-  value: AudioModeValue;
-  label: string;
-  description: string;
-  icon: React.ReactNode;
-}
-
-/**
- * Get audio mode options valid for the given source kind.
- * Screen: No Audio / Filtered Monitor Audio
- * Window: No Audio / Application Audio
- */
-function getAudioModes(sourceKind: SourceTab): AudioModeOption[] {
-  const modes: AudioModeOption[] = [
-    {
-      value: "none",
-      label: "No audio",
-      description: "No system audio will be shared",
-      icon: <VolumeX className="h-4 w-4" />,
-    },
-  ];
-  if (sourceKind === "screen") {
-    modes.push({
-      value: "monitor",
-      label: "Filtered monitor audio",
-      description:
-        "Audio from your speakers/headphones, filtered to remove echo",
-      icon: <Headphones className="h-4 w-4" />,
-    });
-  } else {
-    modes.push({
-      value: "application",
-      label: "Application audio",
-      description:
-        "Captures audio from the selected source if available",
-      icon: <Volume2 className="h-4 w-4" />,
-    });
-  }
-  return modes;
-}
-
-/** Resolve the audio mode for the given source kind, falling back to stored last mode. */
-function resolveAudioMode(
-  sourceKind: SourceTab,
-  currentAudio: AudioModeValue,
-  lastScreen: "none" | "monitor",
-  lastWindow: "none" | "application",
-): AudioModeValue {
-  const validModes: AudioModeValue[] =
-    sourceKind === "screen" ? ["none", "monitor"] : ["none", "application"];
-  if (validModes.includes(currentAudio)) return currentAudio;
-  // Invalid for new source kind — fall back to stored default for this kind
-  return sourceKind === "screen" ? lastScreen : lastWindow;
 }
 
 // ─── Helper: get preload API ───────────────────────────────────────────────
@@ -235,10 +179,10 @@ export function ShareSetup() {
   const [loadingSources, setLoadingSources] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [audioMode, setAudioMode] = useState<AudioModeValue>(() => {
-    // Default audio to enabled: screen => monitor, window => application
-    // Respect saved No Audio, but default to enabled when no prior preference
-    const saved = resolveAudioMode("screen", "none", lastScreenAudioMode, lastWindowAudioMode);
-    return saved === "none" ? "none" : activeTab === "screen" ? "monitor" : "application";
+    // Initialize from the stored per-kind preference, validated for the
+    // active tab (screen by default). This avoids a one-frame wrong-state
+    // where audio temporarily shows "none" before the mount-effect fires.
+    return resolveAudioMode(activeTab, lastScreenAudioMode, lastScreenAudioMode, lastWindowAudioMode);
   });
   const [customQuality, setCustomQuality] = useState<QualityEditorFieldsValue>({
     resolutionValue: "1280x720",
@@ -314,9 +258,9 @@ export function ShareSetup() {
       setSourceError(null);
     } catch (err) {
       console.error("Failed to fetch sources:", err);
-      setSourceError(
-        "Could not retrieve sources. Make sure screen recording is permitted.",
-      );
+      // Derive an actionable message from the actual error instead of
+      // showing a one-size-fits-all static string.
+      setSourceError(deriveSourceErrorText(err));
     } finally {
       setLoadingSources(false);
     }
@@ -496,7 +440,8 @@ export function ShareSetup() {
       const message =
         err instanceof Error ? err.message : "Unknown error";
       toast.error(`Sharing failed: ${message}`);
-      setOpenShareSetup(false);
+      // Do NOT close the dialog on failure — preserve all form selections
+      // (source, audio mode, quality) so the user can retry or adjust.
       // Fire-and-forget refresh so the group overview or host dashboard
       // shows up-to-date state when the user returns to it.
       const refreshGroupId = useStore.getState().selectedGroupId;
@@ -520,9 +465,6 @@ export function ShareSetup() {
     setOpenShareSetup,
     navigate,
     audioMode,
-    audioModeOptions,
-    lastScreenAudioMode,
-    lastWindowAudioMode,
   ]);
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -562,38 +504,37 @@ export function ShareSetup() {
 
             <Tooltip>
               <TooltipTrigger asChild>
-                <span tabIndex={0}>
-                  <Button
-                    variant="default"
-                    disabled={!canStart || startingShare}
-                    onClick={handleStartSharing}
-                    className={cn(
-                      "min-w-[140px] transition-opacity",
-                      !canStart && "opacity-50",
-                    )}
-                  >
-                    {startingShare ? (
-                      <>
-                        <motion.div
-                          animate={{ rotate: 360 }}
-                          transition={{
-                            repeat: Infinity,
-                            duration: 1,
-                            ease: "linear",
-                          }}
-                        >
-                          <RefreshCw className="h-4 w-4" />
-                        </motion.div>
-                        Starting...
-                      </>
-                    ) : (
-                      <>
-                        <Monitor className="h-4 w-4" />
-                        Start sharing
-                      </>
-                    )}
-                  </Button>
-                </span>
+                <Button
+                  variant="default"
+                  disabled={!canStart || startingShare}
+                  onClick={handleStartSharing}
+                  className={cn(
+                    "min-w-[140px] transition-opacity",
+                    !canStart && "opacity-50",
+                  )}
+                  aria-disabled={!canStart || startingShare}
+                >
+                  {startingShare ? (
+                    <>
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{
+                          repeat: Infinity,
+                          duration: 1,
+                          ease: "linear",
+                        }}
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </motion.div>
+                      Starting...
+                    </>
+                  ) : (
+                    <>
+                      <Monitor className="h-4 w-4" />
+                      Start sharing
+                    </>
+                  )}
+                </Button>
               </TooltipTrigger>
               {!canStart && (
                 <TooltipContent side="top">
@@ -701,6 +642,8 @@ export function ShareSetup() {
                   <motion.div
                     key="sources"
                     {...transitionProps}
+                    role="radiogroup"
+                    aria-label="Select source"
                     className="grid grid-cols-2 sm:grid-cols-3 gap-3"
                   >
                     {filteredSources.map((src) => {
@@ -720,6 +663,7 @@ export function ShareSetup() {
                             onClick={() => setSelectedSourceId(src.id)}
                             role="radio"
                             aria-checked={isSelected}
+                            aria-label={src.name}
                             tabIndex={0}
                             onKeyDown={(e) => {
                               if (e.key === "Enter" || e.key === " ") {

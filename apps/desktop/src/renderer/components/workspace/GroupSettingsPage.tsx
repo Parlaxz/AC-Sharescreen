@@ -4,16 +4,14 @@ import {
   LogOut,
   Bell,
   Users,
-  Info,
-  Keyboard,
   Monitor,
   Trash2,
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   Card,
-  CardHeader,
-  CardTitle,
   CardContent,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -43,6 +41,10 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { PageSection } from "@/components/layout/PageSection";
 import { useStore } from "@/stores/main-store";
 import { setGroupNotifications } from "@/services/settings-actions";
 import { leaveGroupAction } from "@/services/group-leave-action";
@@ -101,30 +103,49 @@ export function GroupSettingsPage() {
   const [sources, setSources] = useState<CaptureSourceDTO[]>([]);
   const [presets, setPresets] = useState<Array<{ id: string; name: string }>>([]);
   const [configLoading, setConfigLoading] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [savingQuickShare, setSavingQuickShare] = useState(false);
   const [savingQuickJoin, setSavingQuickJoin] = useState(false);
 
   const prevGroupIdRef = useRef<string | null>(null);
+  const configGenerationRef = useRef(0);
 
   // Load shortcut config, sources, and presets when group changes
+  const loadConfig = useCallback(async () => {
+    if (!selectedGroupId) return;
+    const api = getApi();
+    if (!api) return;
+
+    const generation = ++configGenerationRef.current;
+    setConfigLoading(true);
+    setConfigError(null);
+    try {
+      const [cfg, srcs, prsts] = await Promise.all([
+        api.getGroupShortcutConfig(selectedGroupId),
+        api.getSources(),
+        api.listQualityPresets(),
+      ]);
+      // M7a: ignore stale responses after group change or unmount
+      if (generation !== configGenerationRef.current) return;
+      setShortcutConfig(cfg);
+      setSources(srcs);
+      setPresets(prsts as Array<{ id: string; name: string }>);
+    } catch (err) {
+      if (generation !== configGenerationRef.current) return;
+      setConfigError(err instanceof Error ? err.message : "Failed to load configuration");
+    } finally {
+      if (generation === configGenerationRef.current) {
+        setConfigLoading(false);
+      }
+    }
+  }, [selectedGroupId]);
+
   useEffect(() => {
     if (!selectedGroupId) return;
     if (prevGroupIdRef.current === selectedGroupId) return;
     prevGroupIdRef.current = selectedGroupId;
-
-    const api = getApi();
-    if (!api) return;
-
-    setConfigLoading(true);
-    Promise.all([
-      api.getGroupShortcutConfig(selectedGroupId).then(setShortcutConfig).catch(() => {}),
-      api.getSources().then(setSources).catch(() => {}),
-      api.listQualityPresets().then(setPresets).catch(() => {}),
-    ]).finally(() => setConfigLoading(false));
-  }, [selectedGroupId]);
-
-  const quickShareError = shortcutConfig?.quickShareShortcut ? "" : "";
-  const quickJoinError = shortcutConfig?.quickJoinShortcut ? "" : "";
+    void loadConfig();
+  }, [selectedGroupId, loadConfig]);
 
   // ── Validate and save Quick Share shortcut ──────────────────────────
   const handleQuickShareShortcutChange = useCallback(
@@ -165,6 +186,7 @@ export function GroupSettingsPage() {
   // ── Clear Quick Share shortcut ──────────────────────────────────────
   const handleClearQuickShareShortcut = useCallback(async () => {
     if (!selectedGroupId) return;
+    if (savingQuickShare) return; // S3: guard against repeat while pending
     const api = getApi();
     if (!api) return;
 
@@ -180,7 +202,7 @@ export function GroupSettingsPage() {
     } finally {
       setSavingQuickShare(false);
     }
-  }, [selectedGroupId]);
+  }, [selectedGroupId, savingQuickShare]);
 
   // ── Validate and save Quick Join shortcut ──────────────────────────
   const handleQuickJoinShortcutChange = useCallback(
@@ -219,6 +241,7 @@ export function GroupSettingsPage() {
   // ── Clear Quick Join shortcut ──────────────────────────────────────
   const handleClearQuickJoinShortcut = useCallback(async () => {
     if (!selectedGroupId) return;
+    if (savingQuickJoin) return; // S3: guard against repeat while pending
     const api = getApi();
     if (!api) return;
 
@@ -234,18 +257,21 @@ export function GroupSettingsPage() {
     } finally {
       setSavingQuickJoin(false);
     }
-  }, [selectedGroupId]);
+  }, [selectedGroupId, savingQuickJoin]);
 
   // ── Save Quick Share source ───────────────────────────────────────
+  const [sourceSaving, setSourceSaving] = useState(false);
   const handleQuickShareSourceChange = useCallback(
     async (sourceId: string) => {
       if (!selectedGroupId) return;
+      if (sourceSaving) return; // M6: guard concurrent duplicate requests
       const api = getApi();
       if (!api) return;
 
       const source = sources.find((s) => s.id === sourceId);
       if (!source) return;
 
+      setSourceSaving(true);
       try {
         const updated = await api.updateGroupShortcutConfig(selectedGroupId, {
           quickShareSource: {
@@ -259,18 +285,23 @@ export function GroupSettingsPage() {
         toast.success("Quick Share source updated");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to save source");
+      } finally {
+        setSourceSaving(false);
       }
     },
-    [selectedGroupId, sources],
+    [selectedGroupId, sources, sourceSaving],
   );
 
   // ── Save Quick Share default preset ───────────────────────────────
+  const [presetSaving, setPresetSaving] = useState(false);
   const handleQuickSharePresetChange = useCallback(
     async (presetId: string) => {
       if (!selectedGroupId) return;
+      if (presetSaving) return; // M6: guard concurrent duplicate requests
       const api = getApi();
       if (!api) return;
 
+      setPresetSaving(true);
       try {
         const updated = await api.updateGroupShortcutConfig(selectedGroupId, {
           quickShareDefaultPresetId: presetId === "__none" ? null : presetId,
@@ -279,9 +310,11 @@ export function GroupSettingsPage() {
         toast.success("Default preset updated");
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to save preset");
+      } finally {
+        setPresetSaving(false);
       }
     },
-    [selectedGroupId],
+    [selectedGroupId, presetSaving],
   );
 
   // ── Copy invite link ────────────────────────────────────────────
@@ -358,42 +391,52 @@ export function GroupSettingsPage() {
   // ── Render ──────────────────────────────────────────────────────
   return (
     <div className="h-full overflow-auto p-6 space-y-6">
-      <h1 className="text-xl font-semibold text-text-primary">
-        Group settings
-      </h1>
+      <PageHeader
+        title="Group settings"
+        description={`Manage "${group.name}" group preferences`}
+        status={
+          <span className="text-xs text-text-muted tabular-nums">
+            {memberCount} {memberCount === 1 ? "member" : "members"}
+          </span>
+        }
+      />
+
+      {configError && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Failed to load configuration</AlertTitle>
+          <AlertDescription>{configError}</AlertDescription>
+          <Button variant="outline" size="sm" className="mt-2" onClick={loadConfig}>
+            <RefreshCw className="h-3.5 w-3.5 mr-1" />
+            Retry
+          </Button>
+        </Alert>
+      )}
 
       {/* ─── Group info ──────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Info className="h-4 w-4" />
-            Group info
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div>
-            <Label className="text-xs text-text-muted block">Name</Label>
-            <span className="text-sm text-text-primary font-medium">
-              {group.name}
-            </span>
-          </div>
-          <div>
-            <Label className="text-xs text-text-muted block">Members</Label>
-            <span className="text-sm text-text-primary">
-              {memberCount} {memberCount === 1 ? "member" : "members"}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+      <PageSection title="Group info">
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div>
+              <Label className="text-xs text-text-muted block">Name</Label>
+              <span className="text-sm text-text-primary font-medium">
+                {group.name}
+              </span>
+            </div>
+            <div>
+              <Label className="text-xs text-text-muted block">Members</Label>
+              <span className="text-sm text-text-primary">
+                {memberCount} {memberCount === 1 ? "member" : "members"}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      </PageSection>
 
       {/* ─── Actions ─────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            Actions
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
+      <PageSection title="Actions">
+        <Card>
+        <CardContent className="pt-4 space-y-3">
           <Button
             variant="outline"
             className="w-full justify-start"
@@ -447,18 +490,19 @@ export function GroupSettingsPage() {
           </Button>
         </CardContent>
       </Card>
+      </PageSection>
 
       {/* ─── Quick Actions ────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Keyboard className="h-4 w-4" />
-            Quick Actions
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-6">
+      <PageSection title="Quick Actions" description="Per-group keyboard shortcuts and default source/preset">
+        <Card>
+        <CardContent className="pt-4 space-y-6">
           {configLoading && (
-            <p className="text-sm text-text-muted">Loading configuration...</p>
+            <div data-testid="loading-skeleton" className="space-y-3">
+              <Skeleton className="h-5 w-32 rounded-compact" />
+              <Skeleton className="h-9 w-full rounded-standard" />
+              <Skeleton className="h-9 w-full rounded-standard" />
+              <Skeleton className="h-9 w-full rounded-standard" />
+            </div>
           )}
 
           {!configLoading && (
@@ -503,6 +547,7 @@ export function GroupSettingsPage() {
                   <Select
                     value={selectedSourceId}
                     onValueChange={handleQuickShareSourceChange}
+                    disabled={sourceSaving}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder="Select a source" />
@@ -530,6 +575,7 @@ export function GroupSettingsPage() {
                   <Select
                     value={selectedPresetId}
                     onValueChange={handleQuickSharePresetChange}
+                    disabled={presetSaving}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder="Select a preset" />
@@ -587,6 +633,7 @@ export function GroupSettingsPage() {
           )}
         </CardContent>
       </Card>
+      </PageSection>
 
       {/* ─── Leave group confirmation dialog ─────────────────── */}
       <Dialog open={leaveConfirmOpen} onOpenChange={setLeaveConfirmOpen}>

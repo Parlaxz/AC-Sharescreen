@@ -284,6 +284,8 @@ export interface TelemetrySeriesSnapshot {
   currentAudioBitsPerSecond: number | null;
   /** Current aggregate transport bits per second (null when unavailable/not measured). */
   currentTransportBitsPerSecond: number | null;
+  /** Cumulative inbound video bytes (0 for outbound-only sessions). */
+  cumulativeInboundVideoBytes: number;
 }
 
 // ─── Viewer reported status ─────────────────────────────────────────────────

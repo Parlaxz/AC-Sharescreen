@@ -1,5 +1,5 @@
 ﻿import type { Phase3Runtime } from "./phase3-runtime.js";
-import type { StreamAnnouncement } from "./active-stream-registry.js";
+import type { StreamAnnouncement } from "@screenlink/shared";
 import { PublisherManager } from "./publisher-manager.js";
 import { extractPeerUuid } from "./sdk-event-normalizer.js";
 import {
@@ -11,16 +11,19 @@ import {
 import { ProcessAudioController } from "../audio/ProcessAudioController.js";
 import type { SessionQualityOverride } from "./share-quality.js";
 import { StreamMetricsService } from "./stream-metrics-service.js";
+import { StreamAnnouncer, type AnnouncerDependencies } from "./stream-announcer.js";
 import {
   validateSessionQualityOverride,
-  DEFAULT_VIDEO_BITRATE_KBPS,
-  DEFAULT_SEND_WIDTH,
-  DEFAULT_SEND_HEIGHT,
-  DEFAULT_SEND_FPS,
-  DEFAULT_CODEC,
-  DEFAULT_CONTENT_HINT,
-  DEFAULT_DEGRADATION_PREFERENCE,
 } from "./share-quality.js";
+import {
+  FALLBACK_VIDEO_BITRATE_KBPS as DEFAULT_VIDEO_BITRATE_KBPS,
+  FALLBACK_SEND_WIDTH as DEFAULT_SEND_WIDTH,
+  FALLBACK_SEND_HEIGHT as DEFAULT_SEND_HEIGHT,
+  FALLBACK_SEND_FPS as DEFAULT_SEND_FPS,
+  FALLBACK_CODEC as DEFAULT_CODEC,
+  FALLBACK_CONTENT_HINT as DEFAULT_CONTENT_HINT,
+  FALLBACK_DEGRADATION_PREFERENCE as DEFAULT_DEGRADATION_PREFERENCE,
+} from "@screenlink/shared";
 
 /**
  * Stream session state machine:
@@ -85,9 +88,7 @@ export class StreamSessionManager {
   private mediaSessionId: string | null = null;
   private startedAt: number = 0;
   private streamRevision: number = 0;
-  private heartbeatSeq: number = 0;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private reannounceTimer: ReturnType<typeof setInterval> | null = null;
+  private announcer: StreamAnnouncer;
   private currentTrack: MediaStreamTrack | null = null;
   private destroyed = false;
   private _hostDeviceId = "local";
@@ -113,10 +114,48 @@ export class StreamSessionManager {
   private _sessionQualityOverride: SessionQualityOverride | null = null;
   /** Guard against concurrent source switches. Set during switchSource. */
   private isSwitchingSource = false;
+  /**
+   * Serialized operation queue. Every public lifecycle method chains through
+   * this promise to prevent overlapping start/stop/switch/restart operations.
+   */
+  private _opQueue = Promise.resolve<void>(undefined);
 
   constructor(
     private runtime: Phase3Runtime,
-  ) {}
+  ) {
+    const announcerDeps: AnnouncerDependencies = {
+      getState: () => ({
+        groupId: this.groupId,
+        logicalStreamId: this.logicalStreamId,
+        mediaSessionId: this.mediaSessionId,
+        hostDeviceId: this._hostDeviceId,
+        hostDisplayName: this._hostDisplayName,
+      }),
+      isActive: () => this._state === "active",
+      isDestroyed: () => this.destroyed,
+      buildAnnouncement: () => this.buildAnnouncement(),
+      broadcast: (groupId: string, message: Record<string, unknown>): Promise<unknown> =>
+        this.runtime.getConnectionManager().broadcast(groupId, message),
+    };
+    this.announcer = new StreamAnnouncer(announcerDeps);
+  }
+  
+  /**
+   * Run an async operation serially through the operation queue.
+   * Rejections are propagated to the caller; the queue continues
+   * so subsequent operations are not blocked by one failure.
+   */
+  private enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = this._opQueue;
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const result = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    this._opQueue = prev.then(
+      () => fn().then(resolve, reject),
+      () => fn().then(resolve, reject),
+    );
+    return result;
+  }
 
   get state(): StreamSessionState {
     return this._state;
@@ -303,7 +342,7 @@ export class StreamSessionManager {
       sourceName: this._sourceName || this.currentTrack?.label || "",
       startedAt: this.startedAt,
       appliedSettingsRevision: 0,
-      heartbeatSequence: this.heartbeatSeq,
+      heartbeatSequence: this.announcer.heartbeatSeq,
       streamRevision: this.streamRevision,
       mediaJoinMetadata: "",
       replacesSessionId: null,
@@ -323,8 +362,14 @@ export class StreamSessionManager {
    * for delivery when the group control connection recovers.
    */
   async startStream(input: StartStreamInput): Promise<void> {
-    if (this._state !== "idle" && this._state !== "failed") return;
-    if (this.destroyed) return;
+    return this.enqueueOp(() => this.startStreamImpl(input));
+  }
+
+  private async startStreamImpl(input: StartStreamInput): Promise<void> {
+    if (this.destroyed) throw new Error("StreamSessionManager is destroyed");
+    if (this._state !== "idle" && this._state !== "failed") {
+      throw new Error(`Cannot start stream in state: ${this._state}`);
+    }
 
     if (input.qualityOverride) {
       const err = validateSessionQualityOverride(input.qualityOverride);
@@ -339,7 +384,7 @@ export class StreamSessionManager {
     this.mediaSessionId = crypto.randomUUID();
     this.startedAt = Date.now();
     this.streamRevision++;
-    this.heartbeatSeq = 0;
+    this.announcer.resetHeartbeatSeq();
     this._sourceId = input.source.id;
     this._sourceName = input.source.name ?? "";
     this._sourceKind = input.source.kind;
@@ -510,10 +555,12 @@ export class StreamSessionManager {
       registry.registerLocalStream(this.buildAnnouncement());
     } catch (err) {
       this._state = "failed";
-      // Clean up on failure — this tears down the publisher, stops capture,
-      // and removes any partial registration.
+      this.announcer.stopAll();
       console.error("[stream-session] Phase A (media startup) failed:", err instanceof Error ? err.message : String(err));
       await this.cleanupPublisher();
+      this.stopCaptureTracks();
+      this.finalizeMetricsSession();
+      this.resetSessionState();
       throw err;
     }
 
@@ -533,7 +580,7 @@ export class StreamSessionManager {
         sourceName: input.source.name,
         startedAt: this.startedAt,
         appliedSettingsRevision: 0,
-        heartbeatSequence: this.heartbeatSeq,
+        heartbeatSequence: this.announcer.heartbeatSeq,
         streamRevision: this.streamRevision,
         mediaJoinMetadata: "",
         replacesSessionId: null,
@@ -562,10 +609,10 @@ export class StreamSessionManager {
     }
 
     // Start heartbeat timer (every 10s)
-    this.startHeartbeat();
+    this.announcer.startHeartbeat();
     // Start re-announce timer (every 15s) so late-joining peers
     // discover the stream even if they missed stream.started.
-    this.startReannounce();
+    this.announcer.startReannounce();
 
     this._state = "active";
     console.log("[stream-session] stream active —", this.logicalStreamId);
@@ -591,13 +638,21 @@ export class StreamSessionManager {
     name: string;
     kind: "screen" | "window";
   }): Promise<void> {
-    if (this._state !== "active") return;
-    if (this.destroyed) return;
+    return this.enqueueOp(() => this.switchSourceImpl(source));
+  }
+
+  private async switchSourceImpl(source: {
+    id: string;
+    name: string;
+    kind: "screen" | "window";
+  }): Promise<void> {
+    if (this.destroyed) throw new Error("StreamSessionManager is destroyed");
+    if (this._state !== "active") throw new Error(`Cannot switch source in state: ${this._state}`);
     if (this.isSwitchingSource) {
       console.log("[stream-session] switchSource: already switching, ignoring");
       return;
     }
-    if (!this.publisherManager) return;
+    if (!this.publisherManager) throw new Error("Cannot switch source: no publisher");
 
     this.isSwitchingSource = true;
 
@@ -618,7 +673,7 @@ export class StreamSessionManager {
         if (api?.setSource) {
           await api.setSource(null).catch(() => {});
         }
-        return;
+        throw new Error("switchSource: session is no longer active after source approval");
       }
 
       // 2. Detach the old track's ended handler BEFORE calling getDisplayMedia.
@@ -634,6 +689,14 @@ export class StreamSessionManager {
         video: true,
         audio: false,
       });
+
+      // Check state again after getDisplayMedia — stopStream may have run (B-14)
+      if (this._state !== "active" || this.destroyed || !this.publisherManager) {
+        if (newCaptureStream) {
+          newCaptureStream.getTracks().forEach(t => t.stop());
+        }
+        throw new Error("switchSource: session was stopped during source acquisition");
+      }
 
       const videoTracks = newCaptureStream.getVideoTracks();
       if (videoTracks.length === 0) {
@@ -749,12 +812,15 @@ export class StreamSessionManager {
    *   idle (idempotent)
    */
   async stopStream(): Promise<void> {
-    if (this._state !== "active" && this._state !== "failed" && this._state !== "restarting") return;
+    return this.enqueueOp(() => this.stopStreamImpl());
+  }
+
+  private async stopStreamImpl(): Promise<void> {
     if (this.destroyed) return;
+    if (this._state !== "active" && this._state !== "failed" && this._state !== "restarting") return;
 
     this._state = "stopping";
-    this.stopHeartbeat();
-    this.stopReannounce();
+    this.announcer.stopAll();
 
     // Capture identity before reset
     const lastGroupId = this.groupId;
@@ -815,17 +881,16 @@ export class StreamSessionManager {
         ).catch(() => {});
       }
 
-      // Stop publication/capture
+      // Stop publication
       await this.cleanupPublisher();
 
-      // Notify metrics service
-      if (this.mediaSessionId) {
-        const svc = StreamMetricsService.getInstance();
-        const historyId = svc.findHistoryIdByMediaSessionId(this.mediaSessionId);
-        if (historyId) {
-          svc.finalizeSession(historyId);
-        }
-      }
+      // Stop capture tracks explicitly (B-09)
+      this.stopCaptureTracks();
+
+      // Finalize metrics session (B-11)
+      this.finalizeMetricsSession();
+
+      // Clear remaining session state
       this.resetSessionState();
       this._state = "idle";
     } catch (err) {
@@ -846,8 +911,12 @@ export class StreamSessionManager {
    * Transitions: active → restarting → active
    */
   async restartStream(): Promise<void> {
-    if (this._state !== "active") return;
-    if (this.destroyed) return;
+    return this.enqueueOp(() => this.restartStreamImpl());
+  }
+
+  private async restartStreamImpl(): Promise<void> {
+    if (this.destroyed) throw new Error("StreamSessionManager is destroyed");
+    if (this._state !== "active") throw new Error(`Cannot restart stream in state: ${this._state}`);
 
     const oldGroupId = this.groupId!;
     const oldLogicalStreamId = this.logicalStreamId!;
@@ -856,12 +925,15 @@ export class StreamSessionManager {
     const oldSourceKind = this._sourceKind;
 
     this._state = "restarting";
-    this.stopHeartbeat();
-    this.stopReannounce();
+    this.announcer.stopAll();
 
     // ── Phase A: Critical media restart (any failure is fatal) ────────
     let newMediaSessionId: string;
     try {
+      // 0. Finalize the OLD metrics session BEFORE replacing this.mediaSessionId
+      //    so finalizeMetricsSession() looks up the correct (old) session ID. (B-11)
+      this.finalizeMetricsSession();
+
       // 1. Stop current publication and audio cleanly
       await this.cleanupPublisher();
       // Also stop capture display tracks
@@ -876,7 +948,7 @@ export class StreamSessionManager {
       this.mediaSessionId = newMediaSessionId;
       this.startedAt = Date.now();
       this.streamRevision++;
-      this.heartbeatSeq = 0;
+      this.announcer.resetHeartbeatSeq();
 
       // 3. New VDO credentials (streamId + password)
       const vdoStreamId = generateVdoStreamId();
@@ -955,6 +1027,9 @@ export class StreamSessionManager {
       const captureHeight =
         ov?.captureHeight ?? quality?.video?.captureHeight ?? DEFAULT_SEND_HEIGHT;
       const captureFps = ov?.captureFps ?? quality?.video?.captureFps ?? DEFAULT_SEND_FPS;
+      // Start new metrics session for the replacement publication (B-11).
+      // The old session was finalized just before this.mediaSessionId was replaced
+      // (see step 0 above), so only the new session is active now.
       StreamMetricsService.getInstance().startHostSession(
         this.mediaSessionId!,
         this.logicalStreamId!,
@@ -1021,8 +1096,12 @@ export class StreamSessionManager {
       registry.registerLocalStream(this.buildAnnouncement());
     } catch (err) {
       this._state = "failed";
+      this.announcer.stopAll();
       console.error("[stream-session] Phase A (media restart) failed:", err instanceof Error ? err.message : String(err));
       await this.cleanupPublisher();
+      this.stopCaptureTracks();
+      this.finalizeMetricsSession();
+      this.resetSessionState();
       throw err;
     }
 
@@ -1041,7 +1120,7 @@ export class StreamSessionManager {
         sourceName: this.currentTrack?.label ?? "",
         startedAt: this.startedAt,
         appliedSettingsRevision: 0,
-        heartbeatSequence: this.heartbeatSeq,
+        heartbeatSequence: this.announcer.heartbeatSeq,
         streamRevision: this.streamRevision,
         mediaJoinMetadata: "",
         replacesSessionId: oldMediaSessionId,
@@ -1068,8 +1147,8 @@ export class StreamSessionManager {
     }
 
     // 11. Start heartbeat + re-announce timer
-    this.startHeartbeat();
-    this.startReannounce();
+    this.announcer.startHeartbeat();
+    this.announcer.startReannounce();
     this._state = "active";
   }
 
@@ -1081,11 +1160,10 @@ export class StreamSessionManager {
    * - closes viewer mappings
    * - stops publication/capture
    */
-  destroy(): void {
+  async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.stopHeartbeat();
-    this.stopReannounce();
+    this.announcer.stopAll();
 
     // If stream was active, propagate stream.stopped before clearing state
     const wasActive = this._state === "active" || this._state === "restarting";
@@ -1099,7 +1177,8 @@ export class StreamSessionManager {
       if (viewerBinding) {
         const allViewers = viewerBinding.getAllViewers();
         for (const v of allViewers) {
-          viewerBinding.removeViewer(v.viewerDeviceId);
+          // Use exact removeViewerMapping to handle multiple mappings per device (B-16)
+          viewerBinding.removeViewerMapping(v.viewerDeviceId, v.mediaSessionId, v.viewerSessionId);
         }
       }
     } catch { /* best effort */ }
@@ -1108,17 +1187,19 @@ export class StreamSessionManager {
     if (wasActive && lastGroupId && lastLogicalStreamId) {
       const connManager = this.runtime.getConnectionManager();
       connManager.clearPendingForStream(lastGroupId, lastLogicalStreamId);
-      void connManager.sendOrQueueStreamLifecycle(
-        lastGroupId,
-        lastLogicalStreamId,
-        "stream.stopped",
-        {
-          type: "stream.stopped",
-          groupId: lastGroupId,
-          hostDeviceId: lastHostDeviceId,
-          logicalStreamId: lastLogicalStreamId,
-        },
-      ).catch(() => {});
+      try {
+        await connManager.sendOrQueueStreamLifecycle(
+          lastGroupId,
+          lastLogicalStreamId,
+          "stream.stopped",
+          {
+            type: "stream.stopped",
+            groupId: lastGroupId,
+            hostDeviceId: lastHostDeviceId,
+            logicalStreamId: lastLogicalStreamId,
+          },
+        );
+      } catch { /* best effort */ }
 
       this.runtime.getActiveStreamRegistry().handleStopped({
         groupId: lastGroupId,
@@ -1127,13 +1208,18 @@ export class StreamSessionManager {
       });
     }
 
-    // Always clear the active sharing group reference in the store when
-    // the session is destroyed. Otherwise selecting another group after
-    // restart would show stale "Host" UI for the wrong group. Fire-and-
-    // forget so the destroy() promise resolves promptly.
-    void this.clearSharingGroupInStore();
+    // Stop capture tracks (B-09)
+    this.stopCaptureTracks();
 
-    this.cleanupPublisher().catch(() => {});
+    // Finalize metrics session
+    this.finalizeMetricsSession();
+
+    // Await publisher cleanup
+    await this.cleanupPublisher();
+
+    // Clear the active sharing group reference in the store
+    await this.clearSharingGroupInStore();
+
     this.resetSessionState();
     this._state = "destroyed";
   }
@@ -1371,13 +1457,47 @@ export class StreamSessionManager {
     this.actualCaptureFps = settings.frameRate ?? 0;
   }
 
+  /**
+   * Stop all capture video tracks. Called on every terminal path so
+   * display-capture tracks are never orphaned (B-09).
+   * Safe to call multiple times — track.stop() is idempotent.
+   */
+  private stopCaptureTracks(): void {
+    if (this.captureStream) {
+      this.captureStream.getTracks().forEach(t => {
+        try { t.stop(); } catch { /* track may already be ended */ }
+      });
+      this.captureStream = null;
+    }
+    this.currentTrack = null;
+  }
+
+  /**
+   * Finalize the current metrics session if one exists (B-11).
+   * Safe to call multiple times — findHistoryIdByMediaSessionId returns
+   * null if the session was already finalized.
+   */
+  private finalizeMetricsSession(): void {
+    if (this.mediaSessionId) {
+      try {
+        const svc = StreamMetricsService.getInstance();
+        const historyId = svc.findHistoryIdByMediaSessionId(this.mediaSessionId);
+        if (historyId) {
+          svc.finalizeSession(historyId);
+        }
+      } catch {
+        // Metrics service may be unavailable in test environments
+      }
+    }
+  }
+
   private resetSessionState(): void {
+    // Ensure capture tracks are stopped before nulling references (B-09)
+    this.stopCaptureTracks();
     this.groupId = null;
     this.logicalStreamId = null;
     this.mediaSessionId = null;
     this.startedAt = 0;
-    this.currentTrack = null;
-    this.captureStream = null;
     this.vdoConfig = null;
     this._sourceId = null;
     this._sourceName = "";
@@ -1395,71 +1515,5 @@ export class StreamSessionManager {
     }
   }
 
-  private startHeartbeat(): void {
-    if (this.heartbeatTimer) return;
-    this.heartbeatTimer = setInterval(() => {
-      void this.sendHeartbeat();
-    }, 10_000);
-  }
-
-  private stopHeartbeat(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-  }
-
-  private async sendHeartbeat(): Promise<void> {
-    if (this._state !== "active" || !this.groupId || !this.logicalStreamId) return;
-    if (this.destroyed) return;
-
-    this.heartbeatSeq++;
-    try {
-      const connManager = this.runtime.getConnectionManager();
-      await connManager.broadcast(this.groupId, {
-        type: "stream.heartbeat",
-        groupId: this.groupId,
-        hostDeviceId: this._hostDeviceId,
-        hostDisplayName: this._hostDisplayName,
-        logicalStreamId: this.logicalStreamId,
-        mediaSessionId: this.mediaSessionId,
-        heartbeatSequence: this.heartbeatSeq,
-        appliedSettingsRevision: 0,
-      });
-    } catch {
-      // Heartbeat failures are non-fatal — the stream remains active
-      // and the next heartbeat will retry.
-    }
-  }
-
-  private startReannounce(): void {
-    if (this.reannounceTimer) return;
-    this.reannounceTimer = setInterval(() => {
-      void this.sendReannounce();
-    }, 15_000);
-  }
-
-  private stopReannounce(): void {
-    if (this.reannounceTimer) {
-      clearInterval(this.reannounceTimer);
-      this.reannounceTimer = null;
-    }
-  }
-
-  private async sendReannounce(): Promise<void> {
-    if (this._state !== "active" || !this.groupId || !this.logicalStreamId) return;
-    if (this.destroyed) return;
-
-    try {
-      const connManager = this.runtime.getConnectionManager();
-      const announcement = this.buildAnnouncement();
-      await connManager.broadcast(this.groupId, {
-        type: "stream.state.snapshot",
-        streams: [announcement],
-      });
-    } catch {
-      // Re-announce failures are non-fatal.
-    }
-  }
 }
 

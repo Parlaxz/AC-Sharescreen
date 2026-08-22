@@ -463,8 +463,11 @@ export function DiagnosticsPanel({
   const displayedFps = latestFrameSample?.displayedFps ?? null;
   const primaryFps = displayedFps ?? decodedFps;
 
-  // Quality values
+  // Quality values — requested / effective / configured / observed (Phase 9)
   const reqBitrateKbps = requestedQuality?.videoBitrateKbps ?? null;
+  const reqWidth = requestedQuality?.maxWidth ?? null;
+  const reqHeight = requestedQuality?.maxHeight ?? null;
+  const reqFps = requestedQuality?.maxFps ?? null;
   const effBitrateBps = effectiveBitrateKbps != null ? effectiveBitrateKbps * 1000 : (agg?.effectiveBitsPerSecond ?? null);
   const confBitrateBps = configuredBitrateBps ?? agg?.configuredBitsPerSecond ?? null;
 
@@ -530,16 +533,24 @@ export function DiagnosticsPanel({
           </GlanceValue>
           <GlanceValue
             label="FPS"
-            sub={displayedFps != null && decodedFps != null ? `decoded: ${decodedFps.toFixed(1)}` : undefined}
+            sub={[
+              reqFps != null ? `requested: ${reqFps}` : null,
+              decodedFps != null ? `decoded: ${decodedFps.toFixed(1)}` : null,
+            ].filter(Boolean).join(" \u00B7 ") || undefined}
           >
             {primaryFps != null ? `${primaryFps.toFixed(1)}` : "Collecting\u2026"}
           </GlanceValue>
-          <GlanceValue label="Quality">
-            {reqBitrateKbps != null
-              ? formatBitrateBps(reqBitrateKbps * 1000)
-              : effBitrateBps != null
-                ? fmtBps(effBitrateBps)
-                : "Collecting\u2026"}
+          <GlanceValue label="Requested">
+            {reqBitrateKbps != null ? formatBitrateBps(reqBitrateKbps * 1000) : "\u2014"}
+          </GlanceValue>
+          <GlanceValue label="Effective">
+            {effBitrateBps != null ? fmtBps(effBitrateBps) : "\u2014"}
+          </GlanceValue>
+          <GlanceValue label="Applied">
+            {confBitrateBps != null ? fmtBps(confBitrateBps) : "\u2014"}
+          </GlanceValue>
+          <GlanceValue label="Observed">
+            {videoBps != null ? fmtBps(videoBps) : "Collecting\u2026"}
           </GlanceValue>
           <GlanceValue label="Codec">
             {activeCodecDisplay ? (
@@ -619,10 +630,20 @@ export function DiagnosticsPanel({
               </DetailSection>
             </div>
 
-            {/* ── NVIDIA & Benchmark sections ── */}
+            {/* ── Quality section — requested / effective / configured / observed ── */}
             <div className="grid grid-cols-2 gap-4">
-              <BenchmarkResultsSummary />
-              <NvidiaDiagnosticsSection />
+              <DetailSection title="Quality">
+                <DetailRow label="Requested" value={reqBitrateKbps != null ? formatBitrateBps(reqBitrateKbps * 1000) : "\u2014"} mono />
+                <DetailRow label="Effective (host)" value={fmtBps(effBitrateBps)} mono />
+                <DetailRow label="Configured (sender)" value={fmtBps(confBitrateBps)} mono />
+                <DetailRow label="Observed (wire)" value={fmtBps(videoBps)} mono />
+                <DetailRow label="Requested FPS" value={reqFps != null ? String(reqFps) : "\u2014"} />
+                <DetailRow label="Requested resolution" value={reqWidth != null && reqHeight != null ? `${reqWidth}\u00D7${reqHeight}` : "\u2014"} />
+              </DetailSection>
+              <div className="space-y-4">
+                <BenchmarkResultsSummary />
+                <NvidiaDiagnosticsSection />
+              </div>
             </div>
           </CollapsibleContent>
         </Collapsible>

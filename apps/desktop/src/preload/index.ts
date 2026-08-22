@@ -2,6 +2,12 @@
 import type { ScreenLinkAPI } from "./api-types.js";
 
 const api: ScreenLinkAPI = {
+  showStreamToast: (payload) => ipcRenderer.invoke("stream-toast:show", payload),
+  onStreamToastAction: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, action: Parameters<ScreenLinkAPI["onStreamToastAction"]>[0] extends (value: infer T) => void ? T : never) => callback(action);
+    ipcRenderer.on("stream-toast:action", handler);
+    return () => { ipcRenderer.removeListener("stream-toast:action", handler); };
+  },
   getSources: () => ipcRenderer.invoke("get-sources"),
 
   // ── Window controls ──────────────────────────────────────────────────────
@@ -87,6 +93,15 @@ const api: ScreenLinkAPI = {
   getMixerDiagnostics: () => ipcRenderer.invoke("get-mixer-diagnostics"),
   getPipelineSnapshot: () => ipcRenderer.invoke("get-pipeline-snapshot"),
 
+  // ── External links ──────────────────────────────────────────────────────────
+  openExternal: (url) => ipcRenderer.invoke("open-external", url),
+
+  // ── Log folder ──────────────────────────────────────────────────────────────
+  openLogFolder: () => ipcRenderer.invoke("open-log-folder"),
+
+  // ── Read recent logs ─────────────────────────────────────────────────────────
+  readRecentLogs: () => ipcRenderer.invoke("read-recent-logs"),
+
   // ── Updates ──────────────────────────────────────────────────────────────
   getUpdateStatus: () => ipcRenderer.invoke("updates:get-status"),
   checkForUpdates: () => ipcRenderer.invoke("updates:check"),
@@ -127,6 +142,12 @@ const api: ScreenLinkAPI = {
     const handler = () => callback();
     ipcRenderer.on("stop-sharing", handler);
     return () => { ipcRenderer.removeListener("stop-sharing", handler); };
+  },
+
+  onStopWatching: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("stop-watching", handler);
+    return () => { ipcRenderer.removeListener("stop-watching", handler); };
   },
 
   onOpenDiagnostics: (callback) => {

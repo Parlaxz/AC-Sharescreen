@@ -1,9 +1,12 @@
-﻿import { useState, useEffect, useCallback } from "react";
+﻿import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { StreamMetricsService, type StreamHistoryRecord } from "@/services/stream-metrics-service";
 import { formatBytes, formatDuration } from "@/lib/utils";
-import { Monitor, Users, ArrowUp, ArrowDown, Clock, Wifi, AlertCircle } from "lucide-react";
+import { Monitor, Users, ArrowUp, ArrowDown, Clock, Wifi, AlertCircle, AlertTriangle, RefreshCw } from "lucide-react";
 
 function fmtBytesPerSecond(bps: number): string {
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} MB/s`;
@@ -28,16 +31,35 @@ function Sparkline({ samples, width = 120, height = 28 }: { samples: Array<{ tim
 export function StreamHistorySection() {
   const [records, setRecords] = useState<StreamHistoryRecord[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const loadGenerationRef = useRef(0);
 
-  const load = useCallback(() => {
-    StreamMetricsService.getInstance().getHistory().then(setRecords).catch(() => {});
+  const load = useCallback(async () => {
+    const generation = ++loadGenerationRef.current;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const result = await StreamMetricsService.getInstance().getHistory();
+      // Guard: only apply if this generation is still current
+      if (generation !== loadGenerationRef.current) return;
+      setRecords(result);
+    } catch (err) {
+      if (generation !== loadGenerationRef.current) return;
+      setLoadError(err instanceof Error ? err.message : "Failed to load stream history");
+      // Keep existing records when load fails (don't clear them)
+    } finally {
+      if (generation === loadGenerationRef.current) {
+        setLoading(false);
+      }
+    }
   }, []);
 
   useEffect(() => {
-    load();
+    void load();
     const svc = StreamMetricsService.getInstance();
     svc.setOnHistoryChanged(load);
-    return () => svc.setOnHistoryChanged(null);
+    return () => { svc.setOnHistoryChanged(null); };
   }, [load]);
 
   const toggleExpand = (id: string) => {
@@ -49,6 +71,9 @@ export function StreamHistorySection() {
     });
   };
 
+  // Stable ID for aria-controls
+  const panelId = (historyId: string) => `stream-history-panel-${historyId}`;
+
   return (
     <Card className="overflow-hidden border-border-subtle">
       <CardHeader className="pb-3">
@@ -59,18 +84,49 @@ export function StreamHistorySection() {
               Past Streams
             </CardTitle>
           </div>
-          <span className="text-[11px] text-text-muted tabular-nums">{records.length} session{records.length !== 1 ? "s" : ""}</span>
+          {!loading && (
+            <span className="text-[11px] text-text-muted tabular-nums">{records.length} session{records.length !== 1 ? "s" : ""}</span>
+          )}
+          {loading && <Skeleton className="h-3 w-16 rounded-compact" data-testid="history-count-skeleton" />}
         </div>
       </CardHeader>
       <CardContent className="pt-0">
-        {records.length === 0 ? (
+        {/* Loading state */}
+        {loading && (
+          <div className="space-y-3 py-2" data-testid="stream-history-loading" role="status" aria-busy="true">
+            <Skeleton className="h-12 w-full rounded-standard" />
+            <Skeleton className="h-12 w-full rounded-standard" />
+            <Skeleton className="h-12 w-full rounded-standard" />
+          </div>
+        )}
+
+        {/* Error state with retry — preserves existing records */}
+        {loadError && (
+          <Alert variant="destructive" className="mb-3">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Failed to load stream history</AlertTitle>
+            <AlertDescription>{loadError}</AlertDescription>
+            <Button variant="outline" size="sm" className="mt-2" onClick={load}>
+              <RefreshCw className="h-3.5 w-3.5 mr-1" />
+              Retry
+            </Button>
+          </Alert>
+        )}
+
+        {/* Empty state — only when no records AND not loading AND no error */}
+        {!loading && !loadError && records.length === 0 && (
           <p className="text-xs text-text-muted italic">No past streams yet.</p>
-        ) : (
+        )}
+
+        {/* Records list */}
+        {!loading && records.length > 0 && (
           <div className="space-y-1">
             {[...records].reverse().map((r, i) => (
               <div key={r.historyId}>
                 {i > 0 && <Separator className="my-1.5" />}
                 <button type="button" onClick={() => toggleExpand(r.historyId)}
+                  aria-expanded={expanded.has(r.historyId)}
+                  aria-controls={panelId(r.historyId)}
                   className="w-full text-left hover:bg-accent/5 rounded-lg px-2.5 py-2 -mx-0.5 transition-colors group">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
@@ -78,9 +134,9 @@ export function StreamHistorySection() {
                       {r.role === "host" ? (
                         <Monitor className="w-3.5 h-3.5 shrink-0 text-accent" />
                       ) : (
-                        <Users className="w-3.5 h-3.5 shrink-0 text-blue-400" />
+                        <Users className="w-3.5 h-3.5 shrink-0 text-text-secondary" />
                       )}
-                      <span className="text-sm font-medium text-text-primary truncate">
+                      <span id={`${panelId(r.historyId)}-label`} className="text-sm font-medium text-text-primary truncate">
                         {r.role === "host" ? (r.groupName || "Stream") : (r.remoteDisplayName || "Viewing")}
                       </span>
                     </div>
@@ -88,17 +144,17 @@ export function StreamHistorySection() {
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
                         r.role === "host"
                           ? "bg-accent/10 text-accent"
-                          : "bg-blue-500/10 text-blue-400"
+                          : "bg-text-secondary/10 text-text-secondary"
                       }`}>
                         {r.role === "host" ? "HOST" : "VIEW"}
                       </span>
                       {r.interrupted ? (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-amber-500/10 text-amber-400 flex items-center gap-0.5">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-warning/10 text-warning flex items-center gap-0.5">
                           <AlertCircle className="w-2.5 h-2.5" />
                           Interrupted
                         </span>
                       ) : (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-green-500/10 text-green-400">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-success/10 text-success">
                           Done
                         </span>
                       )}
@@ -130,17 +186,18 @@ export function StreamHistorySection() {
                 </button>
 
                 {expanded.has(r.historyId) && (
-                  <div className="ml-5.5 pl-2.5 mt-1 mb-1.5 space-y-2 border-l-2 border-border-subtle">
-                    {/* Bandwidth sparkline */}
-                    {r.samples.length > 0 && (
-                      <div className="flex items-center gap-2 py-1 px-2">
-                        <Wifi className="w-3 h-3 text-text-muted shrink-0" />
-                        <Sparkline samples={r.samples} width={200} height={28} />
+                  <div id={panelId(r.historyId)} role="region" aria-labelledby={`${panelId(r.historyId)}-label`}
+                    className="ml-5.5 pl-2.5 mt-1 mb-1.5 space-y-2 border-l-2 border-border-subtle">
+                    {/* Bandwidth sparkline — always render so Sparkline's "No data" fallback is reachable */}
+                    <div className="flex items-center gap-2 py-1 px-2">
+                      <Wifi className="w-3 h-3 text-text-muted shrink-0" />
+                      <Sparkline samples={r.samples} width={200} height={28} />
+                      {r.samples.length > 0 && (
                         <span className="text-[10px] tabular-nums text-text-muted whitespace-nowrap">
                           {fmtBytesPerSecond(r.averageBytesPerSecond)} avg
                         </span>
-                      </div>
-                    )}
+                      )}
+                    </div>
 
                     {/* Settings markers */}
                     {r.markers.length > 0 && (
@@ -164,7 +221,7 @@ export function StreamHistorySection() {
                       <div><span className="text-text-muted">Total:</span> <span className="tabular-nums">{formatBytes(r.totalBytes)}</span></div>
                       <div><span className="text-text-muted">Avg rate:</span> <span className="tabular-nums">{fmtBytesPerSecond(r.averageBytesPerSecond)}</span></div>
                       <div><span className="text-text-muted">Samples:</span> <span className="tabular-nums">{r.samples.length}</span></div>
-                      <div><span className="text-text-muted">Status:</span> {r.interrupted ? <span className="text-amber-400">Interrupted</span> : <span className="text-green-400">Completed</span>}</div>
+                      <div><span className="text-text-muted">Status:</span> {r.interrupted ? <span className="text-warning">Interrupted</span> : <span className="text-success">Completed</span>}</div>
                     </div>
                   </div>
                 )}

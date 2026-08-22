@@ -382,7 +382,7 @@ describe('getAudioCapabilities API type', () => {
 });
 
 describe('Audio capture result handling', () => {
-  // Simulates the renderer-side logic in Dashboard.tsx's handleShareScreen.
+  // Simulates the renderer-side capture-and-check logic.
   // These tests verify the contract: capture result is checked BEFORE waitUntilPrimed.
 
   async function testCapturePath(
@@ -410,7 +410,7 @@ describe('Audio capture result handling', () => {
     let appliedMode = 'none';
     let isSynthetic = false;
 
-    // Simulate the real capture-and-check logic from Dashboard.tsx lines 375-460
+    // Simulate the real capture-and-check logic
     if (!captureResult || !captureResult.success) {
       // attemptDevSyntheticFallback
       let fallbackResult: 'synthetic' | 'none' = 'none';

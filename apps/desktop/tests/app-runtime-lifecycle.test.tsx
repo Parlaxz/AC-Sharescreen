@@ -54,6 +54,10 @@ describe("App runtime lifecycle", () => {
     vi.clearAllMocks();
     (window as unknown as { screenlink?: unknown }).screenlink = {
       onQuickShareOpen: () => () => undefined,
+      onStreamToastAction: () => () => undefined,
+      traySetSharing: vi.fn(),
+      traySetViewing: vi.fn(),
+      traySetViewerCount: vi.fn(),
     };
   });
 

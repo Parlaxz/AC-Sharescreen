@@ -6,13 +6,28 @@ import { StreamSessionManager } from "./stream-session-manager.js";
 import { ViewerMediaBinding } from "./viewer-media-binding.js";
 import { RestartCoordinator } from "./restart-coordinator.js";
 import { QualityCoordinator } from "./quality-coordinator.js";
-import { MediaStatsPoller } from "./media-stats-service.js";
+import { ViewerSenderController } from "./viewer-sender-controller.js";
 import { showNotification } from "./notifications.js";
 import { uiSoundService } from "./ui-sound-service.js";
 import type { GroupSharedState, GroupMemberRecord, HybridTimestamp, HostQualityLimits } from "@screenlink/shared";
 import { createDefaultHostQualityLimits } from "@screenlink/shared";
 import type { PublisherManager } from "./publisher-manager.js";
 import type { VdoSessionConfig } from "./stream-session-manager.js";
+
+export type GroupSyncRequestResult =
+  | { status: "dispatched" }
+  | { status: "no-connection" }
+  | { status: "suppressed"; reason: "destroyed" | "cooldown" };
+
+/** Optional parameters for requestGroupSync. */
+export interface GroupSyncOptions {
+  /**
+   * When true, the active stream registry is NOT cleared before sync.
+   * Used by viewer recovery to preserve still-valid remote streams.
+   * @default false
+   */
+  preserveActiveStreams?: boolean;
+}
 
 /**
  * Phase3Runtime owns all Phase 3 services:
@@ -38,7 +53,7 @@ export class Phase3Runtime {
   private viewerMediaBinding!: ViewerMediaBinding;
   private restartCoordinator!: RestartCoordinator;
   private qualityCoordinator!: QualityCoordinator;
-  private mediaStatsService!: MediaStatsPoller;
+  private viewerSenderController!: ViewerSenderController;
   private destroyed = false;
   private initialized = false;
   private initGen = 0;
@@ -55,7 +70,7 @@ export class Phase3Runtime {
   /** Last refresh timestamp per group (for cooldown). */
   private refreshCooldowns = new Map<string, number>();
   /** In-flight refresh promise per group (for deduplication). */
-  private refreshInFlight = new Map<string, Promise<void>>();
+  private refreshInFlight = new Map<string, Promise<GroupSyncRequestResult>>();
 
   /**
    * Tracks which member device IDs have already produced a "joined"
@@ -190,8 +205,16 @@ export class Phase3Runtime {
         prevOnline.delete(deviceId);
       }
 
-      // Remove viewer binding when peer goes offline
-      this.viewerMediaBinding.removeViewer(deviceId);
+      // Remove all viewer bindings for the offline device using exact
+      // ViewerBindingId (B-16: avoids skipping multi-mapping devices).
+      try {
+        const allViewers = this.viewerMediaBinding.getAllViewers();
+        for (const v of allViewers) {
+          if (v.viewerDeviceId === deviceId) {
+            this.viewerMediaBinding.removeViewerMapping(v.viewerDeviceId, v.mediaSessionId, v.viewerSessionId);
+          }
+        }
+      } catch { /* best effort */ }
     });
 
     // Listen for stream announcements
@@ -246,9 +269,16 @@ export class Phase3Runtime {
 
     // ── Create Phase 3 services (C2, C7) ──────────────────────────────
 
-    // Create QualityCoordinator and MediaStatsPoller
+    // Create QualityCoordinator and ViewerSenderController
     this.qualityCoordinator = new QualityCoordinator();
-    this.mediaStatsService = new MediaStatsPoller();
+    this.viewerSenderController = new ViewerSenderController({
+      requirePcForObservation: false,
+      pauseObservation: {
+        sampleIntervalMs: 250,
+        confirmationWindowMs: 1500,
+        maxBytesPerSecond: 8_000,
+      },
+    });
 
     // Create ViewerMediaBinding
     this.viewerMediaBinding = new ViewerMediaBinding(this);
@@ -259,6 +289,19 @@ export class Phase3Runtime {
       this.activeStreamRegistry,
       this.connManager,
       this.viewerMediaBinding,
+      {
+        onViewerCue: (name, presence) => {
+          void uiSoundService.play(name);
+          const count = this.viewerMediaBinding.getActivePresences().length;
+          store.setState({ viewerCount: count });
+        },
+        showNotification: (n) => showNotification(n),
+        onViewerStatus: (data) => {
+          if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+            window.dispatchEvent(new CustomEvent("screenlink:viewer-status", { detail: data }));
+          }
+        },
+      },
     );
     // Wire QualityCoordinator into the message router
     this.messageRouter.setQualityCoordinator(this.qualityCoordinator);
@@ -374,8 +417,9 @@ export class Phase3Runtime {
     this.initGen++;
     this.destroyPromise = (async () => {
       this.activeStreamRegistry.destroy();
-      this.streamSessionManager.destroy();
+      await this.streamSessionManager.destroy();
       this.viewerMediaBinding.destroy();
+      this.viewerSenderController.destroy();
       this.restartCoordinator.destroy();
       this.syncService.destroy();
       await this.connManager.destroyAll();
@@ -413,8 +457,8 @@ export class Phase3Runtime {
     return this.qualityCoordinator;
   }
 
-  getMediaStatsService(): MediaStatsPoller {
-    return this.mediaStatsService;
+  getViewerSenderController(): ViewerSenderController {
+    return this.viewerSenderController;
   }
 
   /**
@@ -505,25 +549,24 @@ export class Phase3Runtime {
    * Useful when the UI appears stale and the user wants to refresh.
    *
    * Rate-limited per group: calls within REFRESH_COOLDOWN_MS are
-   * deduplicated (returns in-flight promise) or suppressed if no
-   * refresh is in-flight.
+   * suppressed. In-flight calls are deduplicated.
    *
-   * Non-async so we can return the in-flight promise reference for
-   * deduplication (async functions always create a new outer promise).
+   * Returns a truthful dispatch, suppression, or connection outcome.
+   *
+   * Non-async so suppressed returns are synchronous (async functions
+   * always wrap in a new promise).
    */
-  requestGroupSync(groupId: string): Promise<void> | void {
-    if (this.destroyed) return;
+  requestGroupSync(groupId: string, options?: GroupSyncOptions): GroupSyncRequestResult | Promise<GroupSyncRequestResult> {
+    if (this.destroyed) return { status: "suppressed", reason: "destroyed" };
 
-    // In-flight deduplication: return the active promise if one exists
     const inFlight = this.refreshInFlight.get(groupId);
     if (inFlight) return inFlight;
 
-    // Cooldown: skip if the last refresh was too recent
     const now = Date.now();
     const last = this.refreshCooldowns.get(groupId) ?? 0;
-    if (now - last < Phase3Runtime.REFRESH_COOLDOWN_MS) return;
+    if (now - last < Phase3Runtime.REFRESH_COOLDOWN_MS) return { status: "suppressed", reason: "cooldown" };
 
-    const promise = this.doRequestGroupSync(groupId).finally(() => {
+    const promise = this.doRequestGroupSync(groupId, options).finally(() => {
       this.refreshCooldowns.set(groupId, Date.now());
       this.refreshInFlight.delete(groupId);
     });
@@ -536,30 +579,29 @@ export class Phase3Runtime {
    * Broadcasts anti-entropy summary and actively requests
    * group + stream state from all connected peers.
    */
-  private async doRequestGroupSync(groupId: string): Promise<void> {
-    if (this.destroyed) return;
+  private async doRequestGroupSync(groupId: string, options?: GroupSyncOptions): Promise<GroupSyncRequestResult> {
+    if (this.destroyed) return { status: "suppressed", reason: "destroyed" };
 
-    // 1) Clear stale remote stream entries before requesting fresh state.
-    //    Keeps local host entries intact.
-    this.activeStreamRegistry.clearGroupStreams(groupId, this._deviceId ?? undefined);
+    const conn = this.connManager.getConnection(groupId);
+    if (!conn || conn.state !== "connected") {
+      return { status: "no-connection" };
+    }
 
-    // 2) Trigger group state anti-entropy (name/member/quality sync)
+    // Viewer recovery should preserve already-registered remote streams;
+    // only clear when the caller wants a full refresh.
+    if (!options?.preserveActiveStreams) {
+      this.activeStreamRegistry.clearGroupStreams(groupId, this._deviceId ?? undefined);
+    }
+
     await this.syncService.requestSync(groupId);
 
-    // 3) Actively request state from all peers.
-    //    Sends both group.state.request (explicit peer state push)
-    //    and stream.state.request (active stream discovery).
-    //    Uses broadcast as a fallback to reach peers not tracked in
-    //    connectedPeers (fixes stale connection-state bugs).
-    const conn = this.connManager.getConnection(groupId);
-    if (conn && conn.state === "connected") {
-      for (const peerUuid of conn.connectedPeers) {
-        void conn.sendToPeer(peerUuid, { type: "group.state.request" }).catch(() => {});
-        void conn.sendToPeer(peerUuid, { type: "stream.state.request" }).catch(() => {});
-      }
-      // Broadcast to reach any peers not in connectedPeers list
-      void conn.broadcast({ type: "stream.state.request" }).catch(() => {});
+    for (const peerUuid of conn.connectedPeers) {
+      void conn.sendToPeer(peerUuid, { type: "group.state.request" }).catch(() => {});
+      void conn.sendToPeer(peerUuid, { type: "stream.state.request" }).catch(() => {});
     }
+    void conn.broadcast?.({ type: "group.state.request" })?.catch(() => {});
+    void conn.broadcast?.({ type: "stream.state.request" })?.catch(() => {});
+    return { status: "dispatched" };
   }
 }
 

@@ -1,13 +1,14 @@
 // @vitest-environment node
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { GroupSettingsDialog } from "../src/renderer/components/GroupSettingsDialog.js";
+import { GroupSettingsPage } from "../src/renderer/components/workspace/GroupSettingsPage.js";
 
 describe("GroupSettingsDialog (Stage 11)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("replaces prompt()-based Group Settings with proper dialog", async () => {
-    const { GroupSettingsDialog } = await import("../src/renderer/components/GroupSettingsDialog.js");
+  it("replaces prompt()-based Group Settings with proper dialog", () => {
     expect(GroupSettingsDialog).toBeDefined();
   });
 
@@ -24,9 +25,8 @@ describe("GroupSettingsDialog (Stage 11)", () => {
     );
   });
 
-  it("shows conflict banner when dirty form receives newer remote state", () => {
-    // The component should detect when remote state changes while form is dirty
-    // This is a behavioral test for the conflict detection UI
-    expect(true).toBe(true); // Placeholder — full test requires React rendering
+  it("imports GroupSettingsPage as the active settings component", () => {
+    expect(GroupSettingsPage).toBeDefined();
+    expect(typeof GroupSettingsPage).toBe("function");
   });
 });

@@ -2135,4 +2135,85 @@ describe("ViewerSession — pause/resume video element", () => {
     // After fresh video track arrives, poster should be cleared
     expect(session.pausePoster).toBeNull();
   });
+
+  // ── Bug-regression: pause timeout restores video + client intent ─────
+  // When waitForViewerPauseResult rejects after the local video.pause() and
+  // viewerClient.pauseMedia() have already been called, the session MUST
+  // restore both: call videoElement.play() to resume playback and call
+  // viewerClient.resumeMedia() to undo the local paused intent.
+  it("pause timeout restores video playback and ViewerClient local intent", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+
+    mockRuntimeMethods.waitForViewerPauseResult.mockReturnValue(
+      Promise.reject(new Error("Pause result timed out")),
+    );
+
+    await expect(session.pause()).rejects.toThrow("Pause result timed out");
+
+    // Must restore video playback (undo the local video.pause())
+    expect(videoEl.play).toHaveBeenCalled();
+    // Must restore ViewerClient local intent (undo pauseMedia())
+    expect((session as any).viewerClient.resumeMedia).toHaveBeenCalled();
+    // State must be playing after recovery
+    expect(session.pauseState).toBe("playing");
+  });
+
+  // ── Bug-regression: sendToPeer failure for pause request ─────────────
+  // When conn.sendToPeer rejects for the viewer.pause.request message (not the
+  // host ack timeout), the session MUST recover promptly — it must NOT block
+  // waiting for the full host timeout (5s). It should restore video playback
+  // and ViewerClient local intent, ending in "playing" state.
+  it("sendToPeer failure for pause request recovers promptly without blocking on host timeout", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+
+    // Make sendToPeer reject specifically for viewer.pause.request
+    (runtime as any).__sendToPeer.mockImplementation(
+      async (_peer: string, payload: { type?: string }) => {
+        if (payload.type === "viewer.pause.request") {
+          throw new Error("sendToPeer failed");
+        }
+      },
+    );
+
+    // Spy on waitForViewerPauseResult — should NOT be called after send failure
+    const pauseResultSpy = vi.fn();
+    mockRuntimeMethods.waitForViewerPauseResult.mockImplementation(pauseResultSpy);
+
+    await expect(session.pause()).rejects.toThrow();
+
+    // Must NOT call waitForViewerPauseResult (recovered before host timeout)
+    expect(pauseResultSpy).not.toHaveBeenCalled();
+    // Must restore video playback
+    expect(videoEl.play).toHaveBeenCalled();
+    // Must restore ViewerClient local intent
+    expect((session as any).viewerClient.resumeMedia).toHaveBeenCalled();
+    // State must be playing after recovery
+    expect(session.pauseState).toBe("playing");
+  });
+
+  // ── Bug-regression: resume failure restores paused local intent ──────
+  // When resume() calls viewerClient.resumeMedia() then the host ack fails,
+  // the session MUST restore the paused local intent by calling
+  // viewerClient.pauseMedia(). Without this, the ViewerClient believes it is
+  // resumed while the session state is "paused" — a contradiction that leaves
+  // the SDK encoding in the wrong direction.
+  it("resume failure restores ViewerClient paused local intent", async () => {
+    const videoEl = mockVideoEl();
+    setupNonSelfViewSession(videoEl);
+    Object.defineProperty(session, "_pauseState", { value: "paused", writable: true });
+    Object.defineProperty(session, "_pausePoster", { value: "data:image/jpeg;base64,abc", writable: true });
+
+    mockRuntimeMethods.waitForViewerPauseResult.mockReturnValue(
+      Promise.reject(new Error("Resume result timed out")),
+    );
+
+    await expect(session.resume()).rejects.toThrow("Resume result timed out");
+
+    // Must restore ViewerClient paused local intent (undo resumeMedia())
+    expect((session as any).viewerClient.pauseMedia).toHaveBeenCalled();
+    // State must remain paused after failure
+    expect(session.pauseState).toBe("paused");
+  });
 });

@@ -221,6 +221,56 @@ describe("StreamMetricsService", () => {
     });
   });
 
+  describe("getSnapshot - referential stability", () => {
+    it("returns same reference for repeated calls with unknown historyId", () => {
+      const a = svc.getSnapshot("never-existed");
+      const b = svc.getSnapshot("never-existed");
+      const c = svc.getSnapshot("never-existed");
+      expect(a).toBe(b);
+      expect(b).toBe(c);
+    });
+
+    it("returns same reference across different unknown historyIds (different objects per ID)", () => {
+      const a = svc.getSnapshot("unknown-1");
+      const b = svc.getSnapshot("unknown-2");
+      expect(a).not.toBe(b);
+    });
+
+    it("returns stable reference after finalizeSession", async () => {
+      const historyId = svc.startHostSession("ms-stable", "ls-stable", "g1", "G1");
+      // Read snapshot once while active
+      const activeSnapshot = svc.getSnapshot(historyId);
+      expect(activeSnapshot.role).toBe("host");
+
+      await svc.finalizeSession(historyId);
+
+      // First read after finalize — may differ from active snapshot
+      const afterFinalize1 = svc.getSnapshot(historyId);
+      // Second read MUST be referentially identical
+      const afterFinalize2 = svc.getSnapshot(historyId);
+      expect(afterFinalize1).toBe(afterFinalize2);
+      // Should preserve requested historyId
+      expect(afterFinalize1.historyId).toBe(historyId);
+    });
+
+    it("active session snapshot is NOT the same as the cached empty snapshot", () => {
+      const historyId = svc.startHostSession("ms-ref", "ls-ref", "g1", "G1");
+      const emptyBefore = svc.getSnapshot("some-other-id");
+      const activeSnapshot = svc.getSnapshot(historyId);
+      expect(activeSnapshot).not.toBe(emptyBefore);
+    });
+
+    it("active session invalidates snapshot on mutation (buildSnapshot still fresh)", () => {
+      const historyId = svc.startHostSession("ms-mut", "ls-mut", "g1", "G1");
+      const snap1 = svc.getSnapshot(historyId);
+      // Adding a marker invalidates lastSnapshot
+      svc.addMarker(historyId, "other", null, "val", "label");
+      const snap2 = svc.getSnapshot(historyId);
+      expect(snap2).not.toBe(snap1);
+      expect(snap2.aggregate.markers.length).toBe(1);
+    });
+  });
+
   describe("schema migration", () => {
     it("converts legacy v1 record to StreamHistoryRecord", async () => {
       const mock = (globalThis as any).window.screenlink;
@@ -682,6 +732,238 @@ describe("StreamMetricsService", () => {
       // No video or audio observations should have been processed
       expect(snapshot.connections[0].currentVideoBitsPerSecond).toBeNull();
       expect(snapshot.connections[0].currentAudioBitsPerSecond).toBeNull();
+    });
+  });
+
+  // ─── cumulativeInboundVideoBytes ────────────────────────────────────────
+
+  describe("cumulativeInboundVideoBytes", () => {
+    function makeOutboundPC(videoBytes: number, ssrc: number): RTCPeerConnection {
+      const pc = createMockPC();
+      const stats = (pc as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      stats.set("rtp-video", {
+        type: "outbound-rtp",
+        kind: "video",
+        bytesSent: videoBytes,
+        ssrc,
+        mid: "0",
+        codecId: "codec-vp9",
+        frameWidth: 1920,
+        frameHeight: 1080,
+        framesPerSecond: 60,
+      });
+      stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+      stats.set("cp", {
+        type: "candidate-pair", state: "succeeded", selected: true,
+        bytesSent: videoBytes, currentRoundTripTime: 0.01,
+        localCandidateId: "lc", remoteCandidateId: "rc",
+      });
+      stats.set("lc", { type: "local-candidate", candidateType: "host" });
+      stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+      return pc;
+    }
+
+    it("is 0 in emptySnapshot", () => {
+      const empty = svc.getSnapshot("nonexistent");
+      expect(empty.aggregate.cumulativeInboundVideoBytes).toBe(0);
+    });
+
+    it("is 0 for outbound connections in connection snapshot", async () => {
+      const historyId = svc.startHostSession("ms-cib", "ls-cib", "g1", "G1");
+      const pc = makeOutboundPC(1_000_000, 1);
+      svc.registerConnection({
+        historyId, connectionId: "host-out-1",
+        viewerDeviceId: "dev1", displayName: "V1",
+        peerConnection: pc, direction: "outbound",
+      });
+      await advanceTime(2000);
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.connections.length).toBe(1);
+      expect(snapshot.connections[0].cumulativeInboundVideoBytes).toBe(0);
+    });
+
+    it("equals totalVideoBytes for inbound connections in connection snapshot", async () => {
+      const historyId = svc.startViewerSession("ms-cib2", "ls-cib2", "g1", "G1");
+      const pc = createMockPC();
+      const stats = (pc as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      // Tick 1: baseline — no delta yet
+      stats.set("rtp-video", {
+        type: "inbound-rtp", kind: "video",
+        bytesReceived: 0, ssrc: 1, mid: "0", codecId: "codec-vp9",
+        frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+      });
+      stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+      stats.set("cp", {
+        type: "candidate-pair", state: "succeeded", selected: true,
+        bytesReceived: 0, currentRoundTripTime: 0.01,
+        localCandidateId: "lc", remoteCandidateId: "rc",
+      });
+      stats.set("lc", { type: "local-candidate", candidateType: "host" });
+      stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+      svc.registerConnection({
+        historyId, connectionId: "viewer-in-1",
+        viewerDeviceId: null, displayName: null,
+        peerConnection: pc, direction: "inbound",
+      });
+      await advanceTime(1000);
+
+      // Tick 2: bytes increase — delta captured
+      stats.set("rtp-video", {
+        type: "inbound-rtp", kind: "video",
+        bytesReceived: 2_000_000, ssrc: 1, mid: "0", codecId: "codec-vp9",
+        frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+      });
+      stats.set("cp", {
+        type: "candidate-pair", state: "succeeded", selected: true,
+        bytesReceived: 2_000_000, currentRoundTripTime: 0.01,
+        localCandidateId: "lc", remoteCandidateId: "rc",
+      });
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.connections.length).toBe(1);
+      expect(snapshot.connections[0].cumulativeInboundVideoBytes).toBeGreaterThan(0);
+      expect(snapshot.connections[0].cumulativeInboundVideoBytes)
+        .toBe(snapshot.connections[0].totalBytes);
+    });
+
+    it("aggregate sums inbound-only totalVideoBytes, excluding outbound", async () => {
+      const historyId = svc.startHostSession("ms-cib3", "ls-cib3", "g1", "G1");
+
+      function setInboundStats(stats: Map<string, Record<string, unknown>>, bytes: number): void {
+        stats.set("rtp-video", {
+          type: "inbound-rtp", kind: "video",
+          bytesReceived: bytes, ssrc: 1, mid: "0", codecId: "codec-vp9",
+          frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+        });
+        stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+        stats.set("cp", {
+          type: "candidate-pair", state: "succeeded", selected: true,
+          bytesReceived: bytes, currentRoundTripTime: 0.01,
+          localCandidateId: "lc", remoteCandidateId: "rc",
+        });
+        stats.set("lc", { type: "local-candidate", candidateType: "host" });
+        stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+      }
+
+      function setOutboundStats(stats: Map<string, Record<string, unknown>>, bytes: number): void {
+        stats.set("rtp-video", {
+          type: "outbound-rtp", kind: "video",
+          bytesSent: bytes, ssrc: 2, mid: "0", codecId: "codec-vp9",
+          frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+        });
+        stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+        stats.set("cp", {
+          type: "candidate-pair", state: "succeeded", selected: true,
+          bytesSent: bytes, currentRoundTripTime: 0.01,
+          localCandidateId: "lc", remoteCandidateId: "rc",
+        });
+        stats.set("lc", { type: "local-candidate", candidateType: "host" });
+        stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+      }
+
+      // Inbound connection
+      const inPc = createMockPC();
+      const inStats = (inPc as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      setInboundStats(inStats, 0);
+      svc.registerConnection({
+        historyId, connectionId: "in-1",
+        viewerDeviceId: null, displayName: null,
+        peerConnection: inPc, direction: "inbound",
+      });
+
+      // Outbound connection
+      const outPc = createMockPC();
+      const outStats = (outPc as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      setOutboundStats(outStats, 0);
+      svc.registerConnection({
+        historyId, connectionId: "out-1",
+        viewerDeviceId: "dev1", displayName: "V1",
+        peerConnection: outPc, direction: "outbound",
+      });
+
+      await advanceTime(1000); // tick 1 — baseline
+
+      // Tick 2: inbound bytes increase
+      setInboundStats(inStats, 1_000_000);
+      // Outbound bytes increase too
+      setOutboundStats(outStats, 2_000_000);
+
+      await advanceTime(1000);
+
+      const snapshot = svc.getSnapshot(historyId);
+      const inboundConn = snapshot.connections.find(c => c.connectionId === "in-1")!;
+      const outboundConn = snapshot.connections.find(c => c.connectionId === "out-1")!;
+
+      // Inbound has positive cumulativeInboundVideoBytes
+      expect(inboundConn.cumulativeInboundVideoBytes).toBeGreaterThan(0);
+      // Outbound has 0
+      expect(outboundConn.cumulativeInboundVideoBytes).toBe(0);
+
+      // Aggregate cumulativeInboundVideoBytes equals the inbound connection's value (outbound excluded)
+      expect(snapshot.aggregate.cumulativeInboundVideoBytes)
+        .toBe(inboundConn.cumulativeInboundVideoBytes);
+      // totalBytes includes both connections
+      expect(snapshot.aggregate.totalBytes)
+        .toBe(inboundConn.totalBytes + outboundConn.totalBytes);
+    });
+
+    it("aggregate sums multiple inbound connections", async () => {
+      // Need a helper to set inbound stats
+      function setInboundStats(
+        stats: Map<string, Record<string, unknown>>, bytes: number, ssrc: number,
+      ): void {
+        stats.set("rtp-video", {
+          type: "inbound-rtp", kind: "video",
+          bytesReceived: bytes, ssrc, mid: "0", codecId: "codec-vp9",
+          frameWidth: 1920, frameHeight: 1080, framesPerSecond: 60,
+        });
+        stats.set("codec-vp9", { type: "codec", id: "codec-vp9", mimeType: "video/VP9" });
+        stats.set("cp", {
+          type: "candidate-pair", state: "succeeded", selected: true,
+          bytesReceived: bytes, currentRoundTripTime: 0.01,
+          localCandidateId: "lc", remoteCandidateId: "rc",
+        });
+        stats.set("lc", { type: "local-candidate", candidateType: "host" });
+        stats.set("rc", { type: "remote-candidate", candidateType: "host" });
+      }
+
+      const historyId = svc.startViewerSession("ms-cib4", "ls-cib4", "g1", "G1");
+
+      const pc1 = createMockPC();
+      const stats1 = (pc1 as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      setInboundStats(stats1, 0, 1);
+      svc.registerConnection({
+        historyId, connectionId: "in-1",
+        viewerDeviceId: null, displayName: null,
+        peerConnection: pc1, direction: "inbound",
+      });
+
+      const pc2 = createMockPC();
+      const stats2 = (pc2 as unknown as { _stats: Map<string, Record<string, unknown>> })._stats;
+      setInboundStats(stats2, 0, 2);
+      svc.registerConnection({
+        historyId, connectionId: "in-2",
+        viewerDeviceId: null, displayName: null,
+        peerConnection: pc2, direction: "inbound",
+      });
+
+      await advanceTime(1000); // tick 1 — baseline
+
+      // Both connections get bytes
+      setInboundStats(stats1, 1_500_000, 1);
+      setInboundStats(stats2, 3_000_000, 2);
+
+      await advanceTime(1000); // tick 2 — measurement
+
+      const snapshot = svc.getSnapshot(historyId);
+      expect(snapshot.connections.length).toBe(2);
+
+      const sumInbound = snapshot.connections
+        .reduce((sum, c) => sum + c.cumulativeInboundVideoBytes, 0);
+
+      expect(snapshot.aggregate.cumulativeInboundVideoBytes).toBe(sumInbound);
+      expect(snapshot.aggregate.cumulativeInboundVideoBytes).toBeGreaterThan(0);
     });
   });
 });

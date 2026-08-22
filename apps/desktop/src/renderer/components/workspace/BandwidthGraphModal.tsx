@@ -87,6 +87,7 @@ const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
     activeDurationMs: 0,
     configuredBitsPerSecond: null,
     effectiveBitsPerSecond: null,
+    cumulativeInboundVideoBytes: 0,
     currentVideoBitsPerSecond: null,
     currentAudioBitsPerSecond: null,
     currentTransportBitsPerSecond: null,
@@ -99,7 +100,7 @@ const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
 
 interface BandwidthGraphModalProps {
   open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onOpenChange?: (open: boolean) => void;
   mediaSessionId: string | null;
   viewerMode?: boolean;
   viewerHistoryId?: string | null;
@@ -579,7 +580,7 @@ function SeriesToggle({
 
 export function BandwidthGraphModal({
   open,
-  onOpenChange,
+  onOpenChange: _onOpenChange,
   mediaSessionId,
   viewerMode = false,
   viewerHistoryId = null,
@@ -1260,18 +1261,22 @@ export function BandwidthGraphModal({
     </Fragment>
   );
 
+  if (!contentOnly && !open) {
+    return null;
+  }
+
   if (!contentOnly) {
     return (
       <TooltipProvider>
-        <div className="w-[950px] p-3">{content}</div>
+        <div className="w-[950px] max-w-[calc(100vw-2rem)] p-3">{content}</div>
       </TooltipProvider>
     );
   }
 
+  // contentOnly mode: no TooltipProvider wrapper — parent context provides it.
+  // Use responsive sizing instead of fixed 950px to prevent overflow.
   return (
-    <TooltipProvider>
-      <div className="w-[950px] p-3">{content}</div>
-    </TooltipProvider>
+    <div className="max-w-[950px] w-full p-3">{content}</div>
   );
 }
 

@@ -3,20 +3,9 @@ import { formatBandwidth, formatTotalBytes } from "./BandwidthDisplay.js";
 import { computeWindowedEstimate, fmtHourlyUsage } from "@/services/bandwidth-telemetry-types";
 import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
+import type { StreamInfoCardConfig } from "@screenlink/shared";
 
-// ─── Config type ─────────────────────────────────────────────────────────────
-
-export interface StreamInfoCardConfig {
-  showResolution: boolean;
-  showFps: boolean;
-  showBitrate: boolean;
-  showDroppedFrames: boolean;
-  showNetworkUsage: boolean;
-  fontSize: number;
-  textColor: string;
-  boxOpacity: number;
-  boxWidth: number;
-}
+// ─── Config type (imported from @screenlink/shared, Phase 3) ───────────────
 
 // ─── Windowed hourly estimate hook ──────────────────────────────────────────
 
@@ -90,7 +79,7 @@ function StreamInfoCardInner({
 
   // 2. FPS
   if (config.showFps && snapshot.videoFrameRate != null) {
-    lines.push(`${snapshot.videoFrameRate} fps`);
+    lines.push(`${Math.round(snapshot.videoFrameRate)} fps`);
   }
 
   // 3. Bitrate

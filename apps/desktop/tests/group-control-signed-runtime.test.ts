@@ -164,8 +164,9 @@ async function tick(): Promise<void> {
   await new Promise<void>((r) => setImmediate(r));
 }
 
-async function waitFor<T>(getter: () => T | null, maxTicks = 200): Promise<T> {
-  for (let i = 0; i < maxTicks; i++) {
+async function waitFor<T>(getter: () => T | null, timeoutMs = 3000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     const result = getter();
     if (result !== null && result !== undefined) return result;
     await tick();

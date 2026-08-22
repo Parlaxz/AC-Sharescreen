@@ -11,6 +11,8 @@ import { QuickShareShortcutManager } from "./quick-share-shortcut-manager.js";
 import { GroupShortcutManager } from "./group-shortcut-manager.js";
 import { registerDisplayMediaHandler } from "./display-media-handler.js";
 import { registerIpcHandlers } from "./ipc-handlers.js";
+import { FullscreenDetector } from "./fullscreen-detector.js";
+import { StreamToastManager } from "./stream-toast-manager.js";
 import { registerPermissionHandler } from "./permissions.js";
 import { SettingsStore } from "./settings-store.js";
 import { SecureStore } from "./secure-store.js";
@@ -64,6 +66,7 @@ let presetStore: QualityPresetStore;
 let updateManager: UpdateManager | null = null;
 let quickShareShortcutManager: QuickShareShortcutManager | null = null;
 let groupShortcutManager: GroupShortcutManager | null = null;
+let streamToastManager: StreamToastManager | null = null;
 
 app.whenReady().then(() => {
   if (isMultiInstance && !devProfile) {
@@ -118,6 +121,13 @@ app.whenReady().then(() => {
 
   // ── Window ─────────────────────────────────────────────────────────────
   const mainWindow = windowManager.create();
+
+  const fullscreenDetector = new FullscreenDetector();
+  streamToastManager = new StreamToastManager(
+    mainWindow,
+    fullscreenDetector,
+    path.join(__dirname, "../preload/stream-toast-preload.js"),
+  );
 
   registerDisplayMediaHandler(mainWindow);
   registerPermissionHandler(mainWindow);
@@ -276,6 +286,7 @@ app.whenReady().then(() => {
       quickShareShortcutManager?.updateConfig(enabled, accelerator);
     },
     groupShortcutManager ?? undefined,
+    streamToastManager,
   );
 
   // ── Startup visibility ─────────────────────────────────────────────────
@@ -305,6 +316,10 @@ app.on("before-quit", () => {
   if (groupShortcutManager) {
     groupShortcutManager.destroy();
     groupShortcutManager = null;
+  }
+  if (streamToastManager) {
+    streamToastManager.dispose();
+    streamToastManager = null;
   }
   if (updateManager) {
     updateManager.destroy();

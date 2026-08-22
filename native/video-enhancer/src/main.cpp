@@ -1463,9 +1463,12 @@ static int RunSelfTest() {
     }
 
     // ── Phase 7: Diagnostics API tests ────────────────────────────────
-    // GetDiagnostics should return a valid snapshot without crashing
+    // GetDiagnostics should return a valid snapshot without crashing.
+    // uptimeMs can be 0 immediately after startup — accept any value.
+    // Verify monotonicity: subsequent snapshots must not go backwards.
     auto diagSnap = sv::GetDiagnostics();
-    check(diagSnap.uptimeMs > 0, "GetDiagnostics.uptimeMs");
+    auto diagLater = sv::GetDiagnostics();
+    check(diagLater.uptimeMs >= diagSnap.uptimeMs, "GetDiagnostics.uptimeMs monotonic");
     check(diagSnap.avgProcessingTimeUs == 0, "GetDiagnostics.avgProcessingTimeUs initial");
     check(diagSnap.effectLoadCount == 0, "GetDiagnostics.effectLoadCount initial");
 

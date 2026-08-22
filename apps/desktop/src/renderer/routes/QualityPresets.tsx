@@ -19,83 +19,10 @@ interface QualityStatusProps {
 
 /**
  * Display requested/effective/observed quality status for the selected
- * watched target. Reads data from the runtime's QualityCoordinator and
- * MediaStatsPoller where available.
+ * watched target. Reads requested data from the runtime's QualityCoordinator.
+ * Canonical observed telemetry is deferred to the Phase 9 quality display.
  */
-function QualityStatusDisplay({ groupId, sessionId, hostDeviceId, hostName }: QualityStatusProps) {
-  const [observedStats, setObservedStats] = useState<{
-    videoBitrateKbps?: number;
-    codec?: string;
-    fps?: number;
-    width?: number;
-    height?: number;
-    rtt?: number;
-    packetLoss?: number;
-    qualityLimitationReason?: string | null;
-  } | null>(null);
-
-  // Attempt to read per-viewer stats from the runtime
-  useEffect(() => {
-    const runtime = getRuntime();
-    if (!runtime) return;
-
-    const mss = runtime.getMediaStatsService();
-    if (!mss || !mss.getViewerStats) return;
-
-    // The viewer's own device ID is the runtime's deviceId
-    const viewerDeviceId = runtime.deviceId ?? "unknown";
-
-    // Try to find stats for this viewer+target combo.
-    // For the viewer side, getViewerStats uses viewerDeviceId::mediaPeerUuid key.
-    // We iterate known stats by querying the poller's internal map.
-    // If we can resolve the mediaPeerUuid for this target, use it.
-    const viewerBinding = runtime.getViewerMediaBinding();
-    const hostMediaPeerUuid = viewerBinding?.getViewerMediaPeer(hostDeviceId);
-    if (hostMediaPeerUuid) {
-      const stats = mss.getViewerStats(groupId, sessionId, viewerDeviceId, hostMediaPeerUuid);
-      if (stats) {
-        setObservedStats({
-          videoBitrateKbps: stats.videoBitrateKbps,
-          codec: stats.codec,
-          fps: stats.fps,
-          width: stats.width,
-          height: stats.height,
-          rtt: stats.rtt,
-          packetLoss: stats.packetLoss,
-          qualityLimitationReason: stats.qualityLimitationReason,
-        });
-        return;
-      }
-    }
-
-    // Fallback: try without mediaPeerUuid (viewer side — poller uses own deviceId)
-    // The per-viewer poller on the viewer side stores stats keyed by viewerDeviceId::mediaPeerUuid
-    // where viewerDeviceId = hostDeviceId (the host being watched) minus the mediaPeerUuid.
-    // On the viewer side, the stats service was started with the host's media peer UUID.
-    // Try by convention: the viewer's own stats are keyed by runtime.deviceId.
-    const selfDeviceId = runtime.deviceId ?? "unknown";
-    // Try the viewer's own accumulated stats (from legacy poller)
-    const viewerStats = (mss as any).viewerStats as Map<string, unknown> | undefined;
-    if (viewerStats) {
-      // Look for any entry matching this session
-      for (const [, entry] of viewerStats.entries()) {
-        const s = entry as Record<string, unknown>;
-        if (s.viewerDeviceId === selfDeviceId || s.viewerDeviceId === hostDeviceId) {
-          setObservedStats({
-            videoBitrateKbps: s.videoBitrateKbps as number,
-            codec: s.codec as string,
-            fps: s.fps as number,
-            width: s.width as number,
-            height: s.height as number,
-            rtt: s.rtt as number,
-            packetLoss: s.packetLoss as number,
-            qualityLimitationReason: s.qualityLimitationReason as string | null,
-          });
-          return;
-        }
-      }
-    }
-  }, [groupId, sessionId, hostDeviceId]);
+function QualityStatusDisplay({ groupId, sessionId, hostName }: QualityStatusProps) {
 
   /**
    * Resolve effective quality from the runtime's QualityCoordinator.
@@ -147,24 +74,7 @@ function QualityStatusDisplay({ groupId, sessionId, hostDeviceId, hostName }: Qu
         </div>
       )}
 
-      {/* Observed stats (from RTC stats pipeline) */}
-      {observedStats ? (
-        <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
-          <p style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.15rem" }}>Observed</p>
-          <p className="dim" style={{ fontSize: "0.75rem", lineHeight: 1.4 }}>
-            {observedStats.videoBitrateKbps != null ? (observedStats.videoBitrateKbps >= 1000 ? `${(observedStats.videoBitrateKbps / 1000).toFixed(1)} Mbps` : `${Math.round(observedStats.videoBitrateKbps)} kbps`) : "?"} &middot; {observedStats.width ?? "?"}&times;{observedStats.height ?? "?"} @ {observedStats.fps ?? "?"} fps
-            &middot; {observedStats.codec ?? "?"}
-            {observedStats.qualityLimitationReason ? ` &middot; Limited: ${observedStats.qualityLimitationReason}` : ""}
-            {observedStats.rtt !== undefined ? ` &middot; RTT: ${observedStats.rtt}ms` : ""}
-          </p>
-        </div>
-      ) : (
-        <div className="quality-info-block" style={{ marginTop: "0.25rem" }}>
-          <p className="dim" style={{ fontSize: "0.75rem", fontStyle: "italic" }}>
-            No observed stats yet. Stats appear after the stream is connected.
-          </p>
-        </div>
-      )}
+      {/* Canonical observed telemetry is added by the Phase 9 quality display. */}
     </div>
   );
 }
@@ -262,29 +172,24 @@ export function QualityPresets() {
     }
   };
 
-  /** Subscribe to store for reactive watched hosts */
-  const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
+  /** Subscribe to store for reactive watched hosts (Phase 2: derived from activeStreamsByGroup only) */
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
   /** Stage 17: All available watched hosts (computed reactively from store) */
   const watchedHosts = useMemo<Array<{ id: string; groupId: string; sessionId: string; hostDeviceId: string; hostName: string }>>(() => {
     const result: Array<{ id: string; groupId: string; sessionId: string; hostDeviceId: string; hostName: string }> = [];
-    for (const [sessionId, w] of Object.entries(watchedStreamsBySessionId)) {
-      for (const [gid, streams] of Object.entries(activeStreamsByGroup)) {
-        for (const stream of streams) {
-          if (stream.mediaSessionId === sessionId) {
-            result.push({
-              id: `${gid}::${sessionId}`,
-              groupId: gid,
-              sessionId,
-              hostDeviceId: w.hostDeviceId,
-              hostName: w.hostName,
-            });
-          }
-        }
+    for (const [gid, streams] of Object.entries(activeStreamsByGroup)) {
+      for (const stream of streams) {
+        result.push({
+          id: `${gid}::${stream.mediaSessionId}`,
+          groupId: gid,
+          sessionId: stream.mediaSessionId,
+          hostDeviceId: stream.hostDeviceId,
+          hostName: stream.hostDisplayName,
+        });
       }
     }
     return result;
-  }, [watchedStreamsBySessionId, activeStreamsByGroup]);
+  }, [activeStreamsByGroup]);
 
   /** Resolve the currently selected target object from selectedTargetId */
   const selectedTarget = useMemo(() => {

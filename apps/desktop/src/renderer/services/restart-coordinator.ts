@@ -43,14 +43,12 @@ export interface RestartAllStatus {
  *    verifies the target settings are available, and performs a
  *    REAL lifecycle restart via StreamSessionManager.restartStream.
  *  - Per-host results are tracked. Failures remain visible.
- *  - WatchedStreamManager sees replacement for a watched logical
- *    stream and reconnects automatically.
+ *  - Viewers see replacement for a watched logical stream (via
+ *    ViewerSession retry/registry update) and reconnect automatically.
  *  - No duplicate share notification is fired for a replacement
  *    media session of the same logical stream.
  */
 export class RestartCoordinator {
-  /** Tracks target hashes per host device for idempotency */
-  private restartTargets = new Map<string, string>();
   /** Tracks per-commandId host restart outcomes */
   private activeCommands = new Map<string, RestartAllStatus>();
   /** Tracks which (commandId, hostDeviceId) we have already processed locally to dedup. */
@@ -63,7 +61,6 @@ export class RestartCoordinator {
   ) {}
 
   destroy(): void {
-    this.restartTargets.clear();
     this.activeCommands.clear();
     this.processedRequests.clear();
     this.listeners.clear();
@@ -72,24 +69,6 @@ export class RestartCoordinator {
   onStatusChange(cb: (status: RestartAllStatus) => void): () => void {
     this.listeners.add(cb);
     return () => this.listeners.delete(cb);
-  }
-
-  /**
-   * Check if a restart has already been initiated for this host/target combo.
-   * Returns true if this exact target hash has already been seen for the host.
-   */
-  hasRestartTarget(hostDeviceId: string, stampHash: string): boolean {
-    const existing = this.restartTargets.get(hostDeviceId);
-    if (existing === stampHash) return true;
-    this.restartTargets.set(hostDeviceId, stampHash);
-    return false;
-  }
-
-  /**
-   * Clear a restart target for a given host (e.g., after restart completes).
-   */
-  clearRestartTarget(hostDeviceId: string): void {
-    this.restartTargets.delete(hostDeviceId);
   }
 
   /**
@@ -317,55 +296,4 @@ export class RestartCoordinator {
     }
   }
 
-  /**
-   * Execute a restart of all streams for a given host. Used by the
-   * legacy single-host path; the new distributed path uses
-   * restartAllStreams above.
-   */
-  async restartHostStreams(
-    groupId: string,
-    hostDeviceId: string,
-    stampHash: string,
-  ): Promise<void> {
-    if (this.hasRestartTarget(hostDeviceId, stampHash)) {
-      return;
-    }
-    try {
-      if (hostDeviceId === this.runtime.deviceId) {
-        const ssm = this.runtime.getStreamSessionManager();
-        await ssm.restartStream();
-        this.clearRestartTarget(hostDeviceId);
-        return;
-      }
-      const registry = this.runtime.getActiveStreamRegistry();
-      const connManager = this.runtime.getConnectionManager();
-      const streams = registry.getStreamsByGroup(groupId);
-      const hostStreams = streams.filter((s) => s.hostDeviceId === hostDeviceId);
-      for (const stream of hostStreams) {
-        const newMediaSessionId = crypto.randomUUID();
-        await connManager.broadcast(groupId, {
-          type: "stream.restarted",
-          logicalStreamId: stream.logicalStreamId,
-          mediaSessionId: newMediaSessionId,
-          previousMediaSessionId: stream.mediaSessionId,
-          groupId,
-          hostDeviceId,
-          hostDisplayName: stream.hostDisplayName,
-          sourceKind: stream.sourceKind,
-          sourceName: stream.sourceName,
-          startedAt: Date.now(),
-          appliedSettingsRevision: stream.appliedSettingsRevision,
-          heartbeatSequence: 0,
-          streamRevision: stream.streamRevision + 1,
-          mediaJoinMetadata: stream.mediaJoinMetadata,
-          replacesSessionId: stream.mediaSessionId,
-          isAudioDegraded: stream.isAudioDegraded,
-        });
-      }
-      this.clearRestartTarget(hostDeviceId);
-    } catch (err) {
-      console.error("[RestartCoordinator] Failed to restart host streams:", err);
-      this.clearRestartTarget(hostDeviceId);
-    }
-  }
 }

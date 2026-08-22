@@ -194,6 +194,132 @@ describe("Task 3 SettingsStore persistence", () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("defaults showCompareControls to false", async () => {
+    const { SettingsStore } = await import("../src/main/settings-store.js");
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "screenlink-settings-"));
+    try {
+      const store = new SettingsStore(tempDir);
+      expect(store.get().showCompareControls).toBe(false);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads showCompareControls as false from legacy settings that omit the field", async () => {
+    const { SettingsStore } = await import("../src/main/settings-store.js");
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "screenlink-settings-"));
+    try {
+      // Write a legacy settings.json that has the current version but no showCompareControls
+      const settingsPath = path.join(tempDir, "settings.json");
+      const legacySettings = {
+        version: 4,
+        deviceIdentity: { deviceId: "legacy-id", displayName: "Legacy", createdAt: 1000 },
+        hostDisplayName: "Legacy",
+        launchAtLogin: false,
+        autoResumeLastMonitor: false,
+        previewEnabled: false,
+        windowBounds: null,
+        monitorFingerprint: null,
+        lastSourceId: null,
+        lastSourceName: null,
+        lastSourceFingerprint: null,
+        developerMode: false,
+        hostQualityLimits: {
+          maxVideoBitrateKbps: 5000,
+          maxWidth: 1920,
+          maxHeight: 1080,
+          maxFps: 30,
+          allowViewerQualityRequests: true,
+        },
+        globalQualityDefaults: {
+          schemaVersion: 1,
+          video: {
+            videoBitrateKbps: 4000,
+            sendWidth: 1920,
+            sendHeight: 1080,
+            sendFps: 30,
+            captureWidth: 1920,
+            captureHeight: 1080,
+            captureFps: 30,
+            preserveAspectRatio: true,
+            preventUpscale: true,
+            resolutionMode: "target-dimensions",
+            scaleResolutionDownBy: 1,
+            codec: "vp9",
+            h264Profile: "auto",
+            contentHint: "detail",
+            degradationPreference: "maintain-resolution",
+            scalabilityMode: null,
+            cursorMode: "always",
+            rtpPriority: "medium",
+          },
+          audio: {
+            bitrateKbps: 64,
+            channels: "stereo",
+            bitrateMode: "vbr",
+            dtx: false,
+            fec: true,
+            packetDurationMs: 20,
+            redundantAudio: false,
+          },
+        },
+        notificationsEnabled: true,
+        localTransportPolicy: {},
+        lastAudioMode: "none",
+        viewerBitrateSliderMaxKbps: 5000,
+        quickShareShortcutEnabled: true,
+        quickShareShortcutAccelerator: "Super+Alt+S",
+        lastQuickShareGroupId: null,
+        lastQuickShareSourceKind: null,
+        lastQuickSharePresetId: null,
+        lastShareSettings: null,
+        discordMuteShortcut: { modifiers: ["alt"], key: "M" },
+        discordDeafenShortcut: { modifiers: ["alt"], key: "D" },
+        discordDeafenScreenLink: true,
+        viewerMaxVolumePercent: 200,
+        viewerImageEnhancementSettings: null,
+        lastNvidiaProcessingMode: "vsr",
+        lastNvidiaQuality: "high",
+        hourlyEstimateDurationMs: 10_000,
+        streamInfoCard: {
+          visible: false,
+          showResolution: true,
+          showFps: true,
+          showBitrate: true,
+          showDroppedFrames: true,
+          showNetworkUsage: true,
+          position: "top-right",
+          fontSize: 12,
+          textColor: "#ffffff",
+          boxOpacity: 60,
+          boxWidth: 200,
+        },
+      };
+      fs.writeFileSync(settingsPath, JSON.stringify(legacySettings), "utf-8");
+
+      const store = new SettingsStore(tempDir);
+      expect(store.get().showCompareControls).toBe(false);
+      expect(store.get().version).toBe(4);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips showCompareControls through save and reload", async () => {
+    const { SettingsStore } = await import("../src/main/settings-store.js");
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "screenlink-settings-"));
+    try {
+      const first = new SettingsStore(tempDir);
+      first.update({ showCompareControls: true });
+      expect(first.get().showCompareControls).toBe(true);
+
+      const second = new SettingsStore(tempDir);
+      expect(second.get().showCompareControls).toBe(true);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Task 3 Phase3Runtime identity update", () => {

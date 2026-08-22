@@ -1,31 +1,4 @@
-export interface StreamAnnouncement {
-  logicalStreamId: string;
-  mediaSessionId: string;
-  groupId: string;
-  hostDeviceId: string;
-  hostDisplayName: string;
-  sourceKind: string;
-  sourceName: string;
-  startedAt: number;
-  appliedSettingsRevision: number;
-  heartbeatSequence: number;
-  streamRevision: number;
-  /** Per-viewer join metadata (not the actual media secret) */
-  mediaJoinMetadata: string;
-  replacesSessionId: string | null;
-  /** Stage 13: Whether audio has failed (video preserved) */
-  isAudioDegraded?: boolean;
-  /** Wall-time the host asserts the lease is still valid through.
-   *  Long-running streams stay discoverable as long as this remains
-   *  in the future relative to now. Optional but recommended. */
-  leaseValidUntil?: number;
-  /** HLC stamp of the synchronized group settings applied at publication. */
-  sharedSettingsRevision?: string;
-  /** HLC stamp of the live-applied group settings. */
-  appliedLiveSettingsRevision?: string;
-  /** HLC stamp of the last restart-applied settings. */
-  appliedRestartSettingsRevision?: string;
-}
+import type { StreamAnnouncement } from "@screenlink/shared";
 
 interface InternalStream {
   announcement: StreamAnnouncement;
@@ -189,10 +162,14 @@ export class ActiveStreamRegistry {
     // If no active entry, silently ignore (idempotent)
   }
 
+  private isTombstoned(k: string): boolean {
+    return this.stopTombstones.has(k);
+  }
+
   getStreamsByGroup(groupId: string): StreamAnnouncement[] {
     const result: StreamAnnouncement[] = [];
-    for (const s of this.streams.values()) {
-      if (!s.stopped && s.announcement.groupId === groupId) {
+    for (const [k, s] of this.streams) {
+      if (!s.stopped && !this.isTombstoned(k) && s.announcement.groupId === groupId) {
         result.push({ ...s.announcement });
       }
     }
@@ -201,14 +178,15 @@ export class ActiveStreamRegistry {
 
   getAllStreams(): StreamAnnouncement[] {
     const result: StreamAnnouncement[] = [];
-    for (const s of this.streams.values()) {
-      if (!s.stopped) result.push({ ...s.announcement });
+    for (const [k, s] of this.streams) {
+      if (!s.stopped && !this.isTombstoned(k)) result.push({ ...s.announcement });
     }
     return result;
   }
 
   getStream(key: { groupId: string; hostDeviceId: string; logicalStreamId: string }): StreamAnnouncement | null {
     const k = this.key(key.groupId, key.hostDeviceId, key.logicalStreamId);
+    if (this.isTombstoned(k)) return null;
     const existing = this.streams.get(k);
     if (existing && !existing.stopped) {
       return { ...existing.announcement };
@@ -236,8 +214,8 @@ export class ActiveStreamRegistry {
 
   getGroupKeys(groupId: string): Array<{ hostDeviceId: string; logicalStreamId: string }> {
     const result: Array<{ hostDeviceId: string; logicalStreamId: string }> = [];
-    for (const s of this.streams.values()) {
-      if (!s.stopped && s.announcement.groupId === groupId) {
+    for (const [k, s] of this.streams) {
+      if (!s.stopped && !this.isTombstoned(k) && s.announcement.groupId === groupId) {
         result.push({
           hostDeviceId: s.announcement.hostDeviceId,
           logicalStreamId: s.announcement.logicalStreamId,
@@ -258,6 +236,8 @@ export class ActiveStreamRegistry {
    */
   registerLocalStream(announcement: StreamAnnouncement): void {
     const k = this.key(announcement.groupId, announcement.hostDeviceId, announcement.logicalStreamId);
+
+    this.stopTombstones.delete(k);
 
     const existing = this.streams.get(k);
     if (existing) {
@@ -358,6 +338,11 @@ export class ActiveStreamRegistry {
       const expireBefore = now - this.expiryMs;
       for (const [k, s] of this.streams) {
         if (!s.stopped && s.lastHeartbeatAt < expireBefore) {
+          // If the host has asserted a future lease, keep the stream alive
+          // regardless of heartbeat staleness.
+          if (s.announcement.leaseValidUntil && s.announcement.leaseValidUntil > now) {
+            continue;
+          }
           // Delete active entry
           this.streams.delete(k);
           // Remove heartbeat state

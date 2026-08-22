@@ -43,7 +43,7 @@ describe("Phase3Runtime.requestGroupSync", () => {
   it("sends group.state.request + stream.state.request", async () => {
     Phase3Runtime.REFRESH_COOLDOWN_MS = 0;
     const send = vi.fn().mockResolvedValue(undefined);
-    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue({ state: "connected", connectedPeers: ["p1","p2"], sendToPeer: send });
+    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue({ state: "connected", connectedPeers: ["p1","p2"], sendToPeer: send, broadcast: vi.fn().mockResolvedValue({ attempted: 0, sent: 0, failed: 0 }) });
     await runtime.requestGroupSync("g-4");
     expect(send).toHaveBeenCalledTimes(4);
     expect(send).toHaveBeenCalledWith("p1", { type: "group.state.request" });
@@ -54,6 +54,12 @@ describe("Phase3Runtime.requestGroupSync", () => {
 
   it("cooldown on error", async () => {
     Phase3Runtime.REFRESH_COOLDOWN_MS = 0;
+    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue({
+      state: "connected",
+      connectedPeers: [],
+      sendToPeer: vi.fn().mockResolvedValue(true),
+      broadcast: vi.fn().mockResolvedValue({ attempted: 0, sent: 0, failed: 0 }),
+    });
     vi.spyOn((runtime as any).syncService, "requestSync").mockRejectedValue(new Error("e"));
     const doSync = vi.spyOn(runtime as any, "doRequestGroupSync");
     await expect(runtime.requestGroupSync("g-5")).rejects.toThrow("e");
@@ -61,5 +67,57 @@ describe("Phase3Runtime.requestGroupSync", () => {
     Phase3Runtime.REFRESH_COOLDOWN_MS = 10_000;
     await runtime.requestGroupSync("g-5");
     expect(doSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns { status: 'dispatched' } when sync is started", async () => {
+    Phase3Runtime.REFRESH_COOLDOWN_MS = 0;
+    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue({
+      state: "connected",
+      connectedPeers: [],
+      sendToPeer: vi.fn().mockResolvedValue(true),
+      broadcast: vi.fn().mockResolvedValue({ attempted: 0, sent: 0, failed: 0 }),
+    });
+    const result = await runtime.requestGroupSync("g-truth-dispatch");
+    expect(result).toEqual({ status: "dispatched" });
+  });
+
+  it("returns { status: 'suppressed', reason: 'cooldown' } when on cooldown", async () => {
+    Phase3Runtime.REFRESH_COOLDOWN_MS = 10_000;
+    await runtime.requestGroupSync("g-truth-cooldown");
+    const result = runtime.requestGroupSync("g-truth-cooldown");
+    expect(result).toEqual({ status: "suppressed", reason: "cooldown" });
+  });
+
+  it("returns { status: 'no-connection' } when no connected transport", async () => {
+    Phase3Runtime.REFRESH_COOLDOWN_MS = 0;
+    const clearGroupStreams = vi.spyOn((runtime as any).activeStreamRegistry, "clearGroupStreams");
+    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue(null);
+    const result = await runtime.requestGroupSync("g-truth-no-transport");
+    expect(result).toEqual({ status: "no-connection" });
+    expect(clearGroupStreams).not.toHaveBeenCalled();
+  });
+
+  it("does not crash when broadcast is absent on connection", async () => {
+    Phase3Runtime.REFRESH_COOLDOWN_MS = 0;
+    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue({
+      state: "connected",
+      connectedPeers: ["p1"],
+      sendToPeer: vi.fn().mockResolvedValue(true),
+      // Note: no broadcast method — fallback should handle gracefully
+    } as any);
+    await expect(runtime.requestGroupSync("g-bf-1")).resolves.toEqual({ status: "dispatched" });
+  });
+
+  it("sends stream.state.request via broadcast when present", async () => {
+    Phase3Runtime.REFRESH_COOLDOWN_MS = 0;
+    const broadcast = vi.fn().mockResolvedValue({ attempted: 1, sent: 1, failed: 0 });
+    vi.spyOn((runtime as any).connManager, "getConnection").mockReturnValue({
+      state: "connected",
+      connectedPeers: ["p1"],
+      sendToPeer: vi.fn().mockResolvedValue(true),
+      broadcast,
+    });
+    await runtime.requestGroupSync("g-bf-2");
+    expect(broadcast).toHaveBeenCalledWith({ type: "stream.state.request" });
   });
 });

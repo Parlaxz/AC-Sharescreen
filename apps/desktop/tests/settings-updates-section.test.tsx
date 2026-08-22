@@ -29,7 +29,7 @@ describe("User Settings — Updates section is real", () => {
 
   it("SettingsPage renders the Updates card with a heading", () => {
     const source = fs.readFileSync(SETTINGS_PAGE, "utf-8");
-    expect(source).toContain("<CardTitle>Updates</CardTitle>");
+    expect(source).toContain('title="Updates"');
     expect(source).toContain("<UpdatesSettingsSection");
   });
 

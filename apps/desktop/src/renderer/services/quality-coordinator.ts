@@ -2,7 +2,7 @@ import {
   type GroupQualitySettings,
   type HostQualityLimits,
   type ViewerQualityRequest,
-  RANGES,
+  calculateEffectiveQuality as sharedCalculateEffectiveQuality,
 } from "@screenlink/shared";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -28,28 +28,13 @@ export interface EffectiveQuality {
 }
 
 /**
- * Result of a request-handling call. Distinct from EffectiveQuality
- * so that the host can drive "stale / idempotent / conflict / accept"
- * outcomes through a single decision object.
+ * Minimal record of an accepted viewer request revision for idempotency
+ * in the production quality route. Replaces the removed
+ * decideViewerRequest/acceptedRequests machinery (Phase 2).
  */
-export type ViewerRequestDecision =
-  | { kind: "accepted"; quality: EffectiveQuality }
-  | { kind: "stale"; reason: "lower-revision" }
-  | { kind: "idempotent"; reason: "same-request-id" }
-  | { kind: "conflict"; reason: "same-revision-different-request" }
-  | { kind: "rejected-no-stream"; reason: "host has no active stream" }
-  | { kind: "rejected-no-viewer"; reason: "viewer not bound" }
-  | { kind: "rejected-disabled"; reason: "host disabled viewer requests" };
-
-/**
- * Stored per-viewer accepted request state. Used to drive revision
- * ordering and idempotency.
- */
-export interface AcceptedViewerRequest {
+export interface AcceptedRequestRecord {
   requestId: string;
   revision: number;
-  payload: ViewerQualityRequest;
-  acceptedAt: number;
 }
 
 // ─── Shared Sender-Setting Utilities ───────────────────────────────────────
@@ -81,8 +66,7 @@ export interface SenderSettingsReadback {
 /**
  * Apply sender encoding settings to an RTCRtpSender and read back the
  * actual applied values. This is the canonical low-level implementation
- * shared across PublisherManager (applyVideoSenderSettings) and
- * GroupSettingsLiveApply.
+ * used by PublisherManager (applyVideoSenderSettings).
  *
  * Preserves existing encoding fields not specified in `settings` (e.g.
  * priority, codec payload type, header extensions).
@@ -126,44 +110,25 @@ export async function applySenderSettings(
   };
 }
 
-// ─── Helper ─────────────────────────────────────────────────────────────────
-
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
-}
-
 /** Composite key for viewer request storage: groupId::logicalStreamId::viewerDeviceId */
 function viewerRequestKey(groupId: string, logicalStreamId: string, viewerDeviceId: string): string {
   return `${groupId}::${logicalStreamId}::${viewerDeviceId}`;
-}
-
-/** Composite key for viewer request iteration by group+stream */
-function streamViewerRequestsKey(groupId: string, logicalStreamId: string): string {
-  return `${groupId}::${logicalStreamId}`;
 }
 
 // ─── QualityCoordinator ─────────────────────────────────────────────────────
 
 export class QualityCoordinator {
   /**
+   * Minimum revision record for idempotency in the production route.
+   * Keyed by groupId::logicalStreamId::viewerDeviceId.
+   */
+  private acceptedRevisions = new Map<string, AcceptedRequestRecord>();
+
+  /**
    * Stored viewer requests keyed by composite key.
    * Stage 6: Session request storage keyed by groupId + logicalStreamId + viewerDeviceId.
    */
   private viewerRequests = new Map<string, ViewerQualityRequest>();
-
-  /**
-   * Accepted-request state keyed by the same composite key. Holds the
-   * highest accepted revision, the requestId that produced it, and the
-   * full payload — used to drive Gate 6.2 ordering (stale,
-   * idempotent, conflict, accept).
-   */
-  private acceptedRequests = new Map<string, AcceptedViewerRequest>();
-
-  /**
-   * Index: streamViewerRequestsKey -> Set of composite keys for that group+stream.
-   * Enables getAllViewerRequests without scanning all entries.
-   */
-  private streamViewerIndex = new Map<string, Set<string>>();
 
   /**
    * Handle an incoming viewer quality request from the group message router.
@@ -172,6 +137,19 @@ export class QualityCoordinator {
    *
    * The router provides the resolved logicalStreamId (from the payload's
    * streamSessionId or registry context) so the key is always correct.
+   *
+   * **Monotonic revision / idempotency guarantees:**
+   * - If the incoming `revision` is **strictly less than** the stored accepted
+   *   revision for the same key, the request is **rejected** (no state change).
+   * - If the incoming `revision` **equals** the stored accepted revision **and**
+   *   the `requestId` matches, the store is **left unchanged** (idempotent no-op).
+   * - If the incoming `revision` is **greater than** the stored accepted revision,
+   *   the request is **accepted** and the stored revision advances.
+   *
+   * Simplified Phase 2: stores the request and records the accepted revision
+   * for idempotency. The full decideViewerRequest/acceptedRequests machinery
+   * has been removed — the production route (handleViewerRequest) is the only
+   * entry point and stores the revision directly.
    */
   handleViewerRequest(
     groupId: string,
@@ -188,6 +166,19 @@ export class QualityCoordinator {
       degradationPreference: string;
     },
   ): void {
+    const key = viewerRequestKey(groupId, logicalStreamId, viewerDeviceId);
+    const current = this.acceptedRevisions.get(key);
+
+    // Stale revision check: reject if incoming < stored
+    if (current && payload.revision < current.revision) {
+      return;
+    }
+
+    // Idempotency check: no-op if equal revision with same requestId
+    if (current && payload.revision === current.revision && current.requestId === payload.requestId) {
+      return;
+    }
+
     const request: ViewerQualityRequest = {
       streamSessionId: payload.streamSessionId,
       requestId: payload.requestId,
@@ -200,7 +191,9 @@ export class QualityCoordinator {
       requestedAt: Date.now(),
     };
 
-    this.storeViewerRequest(groupId, logicalStreamId, viewerDeviceId, request);
+    // Store the accepted revision for idempotency
+    this.acceptedRevisions.set(key, { requestId: payload.requestId, revision: payload.revision });
+    this.viewerRequests.set(key, request);
   }
 
   /**
@@ -213,101 +206,9 @@ export class QualityCoordinator {
     logicalStreamId: string,
     viewerDeviceId: string,
   ): void {
-    this.clearViewerRequest(groupId, logicalStreamId, viewerDeviceId);
-  }
-
-  /**
-   * Apply Gate 6.2 revision semantics to a viewer request.
-   *
-   * Outcomes:
-   *   - lower revision  → stale (rejected)
-   *   - same requestId  → idempotent (returns the original payload)
-   *   - same revision, different requestId → conflict (rejected)
-   *   - higher revision → accepted (replaces previous accepted state)
-   */
-  decideViewerRequest(
-    groupId: string,
-    logicalStreamId: string,
-    viewerDeviceId: string,
-    payload: ViewerQualityRequest,
-  ): ViewerRequestDecision {
     const key = viewerRequestKey(groupId, logicalStreamId, viewerDeviceId);
-    const prior = this.acceptedRequests.get(key);
-
-    if (prior) {
-      // Same requestId is always idempotent — same revision or
-      // otherwise, the request is "this is the same request
-      // re-presented".
-      if (prior.requestId === payload.requestId) {
-        return { kind: "idempotent", reason: "same-request-id" };
-      }
-      if (payload.revision < prior.revision) {
-        return { kind: "stale", reason: "lower-revision" };
-      }
-      if (payload.revision === prior.revision) {
-        return { kind: "conflict", reason: "same-revision-different-request" };
-      }
-    }
-
-    // Higher (or no prior) — accept and store.
-    this.acceptedRequests.set(key, {
-      requestId: payload.requestId,
-      revision: payload.revision,
-      payload,
-      acceptedAt: Date.now(),
-    });
-    this.storeViewerRequest(groupId, logicalStreamId, viewerDeviceId, payload);
-    // The actual effective quality is filled in by the host when it
-    // knows the source dimensions and host limits. The decision here
-    // only attests to revision acceptance.
-    return {
-      kind: "accepted",
-      quality: {
-        requested: null,
-        effective: {
-          videoBitrateKbps: payload.videoBitrateKbps,
-          maxWidth: payload.maxWidth,
-          maxHeight: payload.maxHeight,
-          maxFps: payload.maxFps,
-          degradationPreference: payload.degradationPreference,
-        },
-        configured: null,
-        clampReasons: [],
-      },
-    };
-  }
-
-  /**
-   * Read the accepted request state for a composite key.
-   */
-  getAcceptedRequest(
-    groupId: string,
-    logicalStreamId: string,
-    viewerDeviceId: string,
-  ): AcceptedViewerRequest | null {
-    return this.acceptedRequests.get(viewerRequestKey(groupId, logicalStreamId, viewerDeviceId)) ?? null;
-  }
-
-  /**
-   * Store a viewer quality request keyed by composite key.
-   */
-  storeViewerRequest(
-    groupId: string,
-    logicalStreamId: string,
-    viewerDeviceId: string,
-    request: ViewerQualityRequest,
-  ): void {
-    const key = viewerRequestKey(groupId, logicalStreamId, viewerDeviceId);
-    this.viewerRequests.set(key, request);
-
-    // Update the stream index
-    const streamKey = streamViewerRequestsKey(groupId, logicalStreamId);
-    let index = this.streamViewerIndex.get(streamKey);
-    if (!index) {
-      index = new Set();
-      this.streamViewerIndex.set(streamKey, index);
-    }
-    index.add(key);
+    this.viewerRequests.delete(key);
+    this.acceptedRevisions.delete(key);
   }
 
   /**
@@ -324,41 +225,16 @@ export class QualityCoordinator {
   }
 
   /**
-   * Clear a stored viewer request by composite key.
+   * Get the accepted revision record for a composite key.
+   * Used by the production quality route for idempotency checks
+   * (replaces the removed getAcceptedRequest).
    */
-  clearViewerRequest(
+  getAcceptedRevision(
     groupId: string,
     logicalStreamId: string,
     viewerDeviceId: string,
-  ): void {
-    const key = viewerRequestKey(groupId, logicalStreamId, viewerDeviceId);
-    this.viewerRequests.delete(key);
-    this.acceptedRequests.delete(key);
-
-    // Update stream index
-    const streamKey = streamViewerRequestsKey(groupId, logicalStreamId);
-    const index = this.streamViewerIndex.get(streamKey);
-    if (index) {
-      index.delete(key);
-      if (index.size === 0) {
-        this.streamViewerIndex.delete(streamKey);
-      }
-    }
-  }
-
-  /**
-   * Get all viewer requests for a given group and stream.
-   */
-  getAllViewerRequests(groupId: string, logicalStreamId: string): ViewerQualityRequest[] {
-    const streamKey = streamViewerRequestsKey(groupId, logicalStreamId);
-    const index = this.streamViewerIndex.get(streamKey);
-    if (!index) return [];
-    const requests: ViewerQualityRequest[] = [];
-    for (const key of index) {
-      const req = this.viewerRequests.get(key);
-      if (req) requests.push(req);
-    }
-    return requests;
+  ): AcceptedRequestRecord | null {
+    return this.acceptedRevisions.get(viewerRequestKey(groupId, logicalStreamId, viewerDeviceId)) ?? null;
   }
 
   /**
@@ -366,7 +242,12 @@ export class QualityCoordinator {
    * the viewer's request (if any and allowed), schema ranges, host limits, and source
    * dimensions.
    *
+   * Delegates to the shared pure resolver {@link sharedCalculateEffectiveQuality}
+   * for all quality-arbitration logic. This method exists for backward compatibility
+   * and adds the `configured: null` field expected by callers.
+   *
    * Stage 6:
+   * - Delegates to shared pure resolver.
    * - Enforce `allowViewerQualityRequests === false` rejection path.
    * - Correct resolution scaling: use actual source width/height and prevent upscale.
    */
@@ -376,101 +257,15 @@ export class QualityCoordinator {
     viewerRequest: ViewerQualityRequest | null,
     sourceDimensions: { width: number; height: number },
   ): EffectiveQuality {
-    // 1. Start from group defaults for viewer-requestable fields
-    let bitrate = groupSettings.video.videoBitrateKbps;
-    let width = groupSettings.video.sendWidth;
-    let height = groupSettings.video.sendHeight;
-    let fps = groupSettings.video.sendFps;
-    let degradation = groupSettings.video.degradationPreference;
-    const reasons: string[] = [];
-
-    // 2. If viewer request exists AND host allows viewer quality requests, use those values
-    //    Stage 6: Enforce allowViewerQualityRequests === false rejection path
-    if (viewerRequest && hostLimits.allowViewerQualityRequests) {
-      bitrate = viewerRequest.videoBitrateKbps;
-      width = viewerRequest.maxWidth;
-      height = viewerRequest.maxHeight;
-      fps = viewerRequest.maxFps;
-      degradation = viewerRequest.degradationPreference;
-    }
-
-    // 3. Clamp to schema ranges
-    bitrate = clamp(bitrate, RANGES.videoBitrateKbps.min, RANGES.videoBitrateKbps.max);
-    width = clamp(width, RANGES.sendWidth.min, RANGES.sendWidth.max);
-    height = clamp(height, RANGES.sendHeight.min, RANGES.sendHeight.max);
-    fps = clamp(fps, RANGES.sendFps.min, RANGES.sendFps.max);
-
-    // 4. Clamp to host limits
-    if (bitrate > hostLimits.maxVideoBitrateKbps) {
-      reasons.push(`Bitrate clamped from ${bitrate} to host limit ${hostLimits.maxVideoBitrateKbps}`);
-      bitrate = hostLimits.maxVideoBitrateKbps;
-    }
-    if (width > hostLimits.maxWidth) {
-      reasons.push(`Width clamped from ${width} to host limit ${hostLimits.maxWidth}`);
-      width = hostLimits.maxWidth;
-    }
-    if (height > hostLimits.maxHeight) {
-      reasons.push(`Height clamped from ${height} to host limit ${hostLimits.maxHeight}`);
-      height = hostLimits.maxHeight;
-    }
-    if (fps > hostLimits.maxFps) {
-      reasons.push(`FPS clamped from ${fps} to host limit ${hostLimits.maxFps}`);
-      fps = hostLimits.maxFps;
-    }
-
-    // 5. Clamp to source dimensions when preventUpscale
-    //    Stage 6: Use actual source width/height, prevent upscale
-    if (groupSettings.video.preventUpscale) {
-      if (width > sourceDimensions.width) {
-        reasons.push(`Width clamped from ${width} to source ${sourceDimensions.width} (preventUpscale)`);
-        width = sourceDimensions.width;
-      }
-      if (height > sourceDimensions.height) {
-        reasons.push(`Height clamped from ${height} to source ${sourceDimensions.height} (preventUpscale)`);
-        height = sourceDimensions.height;
-      }
-    }
-
-    // 6. Apply scaleResolutionDownBy only when using group defaults.
-    //    When the viewer explicitly requested dimensions (and host allows it),
-    //    those ARE the final output dimensions — do NOT compound group-level
-    //    scaling on top. The sender-side applyToSender() computes one
-    //    source-to-target scaleResolutionDownBy, which is the correct single
-    //    scaling operation.
-    //    Stage 6: Correct scaling using actual source width/height.
-    const usingViewerDimensions = viewerRequest && hostLimits.allowViewerQualityRequests;
-    let outputWidth: number;
-    let outputHeight: number;
-    if (usingViewerDimensions) {
-      // Viewer specified final dimensions — do not apply group scaling
-      outputWidth = width;
-      outputHeight = height;
-    } else {
-      // Group defaults — apply group-level scaleResolutionDownBy
-      const scale = groupSettings.video.scaleResolutionDownBy;
-      outputWidth = Math.round(width / scale);
-      outputHeight = Math.round(height / scale);
-    }
-
+    const resolved = sharedCalculateEffectiveQuality(
+      groupSettings,
+      hostLimits,
+      viewerRequest,
+      sourceDimensions,
+    );
     return {
-      requested: usingViewerDimensions
-        ? {
-            videoBitrateKbps: viewerRequest.videoBitrateKbps,
-            maxWidth: viewerRequest.maxWidth,
-            maxHeight: viewerRequest.maxHeight,
-            maxFps: viewerRequest.maxFps,
-            degradationPreference: viewerRequest.degradationPreference,
-          }
-        : null,
-      effective: {
-        videoBitrateKbps: bitrate,
-        maxWidth: outputWidth,
-        maxHeight: outputHeight,
-        maxFps: fps,
-        degradationPreference: degradation,
-      },
+      ...resolved,
       configured: null, // filled in after sender application
-      clampReasons: reasons,
     };
   }
 

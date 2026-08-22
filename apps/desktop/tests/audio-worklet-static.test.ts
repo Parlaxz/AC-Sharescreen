@@ -268,12 +268,4 @@ describe('AudioWorklet module', () => {
       expect(content).toContain('this.stats.processCalls++');
     });
   });
-
-  describe('Dashboard.tsx - Phase 3 rewrite', () => {
-    it('Phase 3 Dashboard uses useState for audio mode (text display only), no provisionalController', () => {
-      const content = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'renderer', 'routes', 'Dashboard.tsx'), 'utf-8');
-      expect(content).toContain('const [audioMode, setAudioMode]');
-      expect(content).not.toContain('provisionalController');
-    });
-  });
 });

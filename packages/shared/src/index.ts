@@ -1,6 +1,7 @@
 export * from "./errors.js";
 export * from "./ids.js";
 export * from "./schemas.js";
+export * from "./backoff.js";
 export * from "./presets.js";
 // Re-export value exports from control-protocol.js (avoiding names that
 // conflict with the newer control-messages.js protocol definitions)
@@ -145,6 +146,15 @@ export type {
   GroupControlEnvelopeInput,
   GroupControlPayloadMap,
 } from "./group-control-messages.js";
+
+// ── Phase 3: Domain contracts ──────────────────────────────────────────────
+export * from "./streaming.js";
+export * from "./shortcuts.js";
+export * from "./share.js";
+
+// ── Phase 6: Quality Arbitration (pure resolver) ───────────────────────────
+export { calculateEffectiveQuality } from "./quality-arbitration.js";
+export type { EffectiveQualityResult } from "./quality-arbitration.js";
 
 // Phase 2: NVIDIA Quality Level Canonical Mapping
 export {

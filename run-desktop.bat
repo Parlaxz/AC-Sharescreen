@@ -56,12 +56,14 @@ if "%VIDEO_VFX_ENABLED%"=="1" (
       "-DNVIDIA_VFX_SDK_ROOT=%NVIDIA_VFX_SDK_ROOT%" ^
       "-DNVIDIA_VFX_MODEL_DIR=%NVIDIA_VFX_MODEL_DIR%"
 ) else (
-    REM Build without NVIDIA VFX -- binary still provides capability probing
+    REM Build without NVIDIA VFX -- binary still provides capability probing.
+    REM Explicitly set OFF to override any stale CMakeCache entry from a prior SDK build.
     cmake ^
       -S "%VIDEO_SOURCE%" ^
       -B "%VIDEO_BUILD%" ^
       -G "Visual Studio 17 2022" ^
-      -A x64
+      -A x64 ^
+      -DSCREENLINK_ENABLE_NVIDIA_VFX=OFF
 )
 
 if errorlevel 1 (

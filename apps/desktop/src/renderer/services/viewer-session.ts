@@ -78,6 +78,34 @@ export interface ViewerSessionEvents {
 /** Max time (ms) to wait for a video track after view() before timing out. */
 const VIEWER_READINESS_TIMEOUT_MS = 15_000;
 
+/** Max time (ms) to wait for host peer UUID resolution in runJoinFlow. */
+const HOST_PEER_TIMEOUT_MS = 5_000;
+
+/** Max time (ms) to wait for viewerClient.view() before timing out. */
+const VIEW_TIMEOUT_MS = 30_000;
+/** Interval (ms) between host peer polls. */
+const HOST_PEER_POLL_INTERVAL_MS = 150;
+
+/**
+ * Race a promise against a bounded timeout. If the promise does not settle
+ * within `ms` milliseconds, rejects with `message`. Prevents unhandled
+ * rejection from the underlying promise if the timeout wins the race.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer!);
+    // Prevent unhandled rejection from the underlying promise after the
+    // race has already settled (timeout won).
+    promise.catch(() => {});
+  }
+}
+
 // ─── ViewerSession ─────────────────────────────────────────────────────────
 
 /**
@@ -329,7 +357,7 @@ export class ViewerSession {
       // 5) Send acknowledged pause request to host with operationId
       const operationId = crypto.randomUUID();
       this._pendingPauseOperationId = operationId;
-      this.sendViewerPauseRequest(true, operationId);
+      await this.sendViewerPauseRequest(true, operationId);
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) {
@@ -355,7 +383,10 @@ export class ViewerSession {
       this.setPauseState("paused");
     } catch (err) {
       // Pause failed or timed out — revert to playing
+      this._pendingPauseOperationId = null;
       this.clearPosterFrame();
+      this.videoElement?.play().catch(() => {});
+      this.viewerClient?.resumeMedia();
       this.setPauseState("playing");
       console.error("[ViewerSession] pause failed, returning to playing:", err);
       throw err;
@@ -407,7 +438,7 @@ export class ViewerSession {
       // 3) Send acknowledged resume request to host with operationId
       const operationId = crypto.randomUUID();
       this._pendingPauseOperationId = operationId;
-      this.sendViewerPauseRequest(false, operationId);
+      await this.sendViewerPauseRequest(false, operationId);
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) {
@@ -448,6 +479,7 @@ export class ViewerSession {
       this.setPauseState("playing");
     } catch (err) {
       // Resume failed — revert to paused so the user can retry
+      this.viewerClient?.pauseMedia();
       this.setPauseState("paused");
       console.error("[ViewerSession] resume failed, remaining paused:", err);
       throw err;
@@ -467,7 +499,7 @@ export class ViewerSession {
    * @param paused true to pause, false to resume
    * @param operationId unique operation identifier for result correlation
    */
-  private sendViewerPauseRequest(paused: boolean, operationId: string): void {
+  private async sendViewerPauseRequest(paused: boolean, operationId: string): Promise<void> {
     const runtime = getRuntime();
     if (!runtime || runtime.isDestroyed()) return;
     if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
@@ -478,7 +510,7 @@ export class ViewerSession {
     const peerUuid = conn.peerForDevice(this.hostDeviceId);
     if (!peerUuid) return;
 
-    void conn.sendToPeer(peerUuid, {
+    await conn.sendToPeer(peerUuid, {
       type: "viewer.pause.request",
       groupId: this.groupId,
       logicalStreamId: this.logicalStreamId,
@@ -487,7 +519,7 @@ export class ViewerSession {
       viewerDeviceId: runtime.deviceId ?? "viewer",
       operationId,
       paused,
-    }).catch(() => {});
+    });
   }
 
   private assertPauseResult(
@@ -659,6 +691,37 @@ export class ViewerSession {
 		return !this._destructed && this._pauseGeneration === this._nextPauseGeneration;
 	}
 
+	/**
+	 * Bounded wait for the host peer UUID to appear in the connection's
+	 * device-to-peer mapping. Returns immediately if already mapped;
+	 * otherwise polls every ~150ms for up to 5 seconds.
+	 *
+	 * Generation-safe: if the session is destroyed or the generation
+	 * changes during the wait, returns null without setting an error.
+	 * The caller must check isCurrent() after the await before acting.
+	 */
+	private async waitForHostPeer(
+		conn: { peerForDevice: (deviceId: string) => string | null },
+		hostDeviceId: string,
+	): Promise<string | null> {
+		// Fast path: already mapped
+		const existing = conn.peerForDevice(hostDeviceId);
+		if (existing) return existing;
+
+		const deadline = Date.now() + HOST_PEER_TIMEOUT_MS;
+		while (Date.now() < deadline) {
+			await this.delay(HOST_PEER_POLL_INTERVAL_MS);
+			if (!this.isCurrent()) return null;
+			const peer = conn.peerForDevice(hostDeviceId);
+			if (peer) return peer;
+		}
+		return null;
+	}
+
+	private delay(ms: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
   /**
    * Bind or rebind the video element. If a stream is already received,
    * it is immediately attached.
@@ -825,8 +888,8 @@ export class ViewerSession {
       try {
         const syncResult = runtime.requestGroupSync(this.groupId);
         // Best-effort: await if it returned a promise (in-flight or fresh)
-        if (syncResult && typeof (syncResult as Promise<void>).then === "function") {
-          await (syncResult as Promise<void>);
+        if (syncResult && typeof (syncResult as Promise<{ status: string }>).then === "function") {
+          await (syncResult as Promise<{ status: string }>);
         }
       } catch {
         // Non-fatal — proceed with whatever state we have
@@ -1119,9 +1182,10 @@ export class ViewerSession {
         return;
       }
 
-      // 1) Resolve host peer
+      // 1) Resolve host peer with bounded wait for the mapping to appear
       this.setState("connecting");
-      const peerUuid = conn.peerForDevice(this.hostDeviceId);
+      const peerUuid = await this.waitForHostPeer(conn, this.hostDeviceId);
+      if (!this.isCurrent()) return;
       if (!peerUuid) {
         this.setError("host not connected");
         return;
@@ -1329,9 +1393,13 @@ export class ViewerSession {
       // GENERATION CHECK
       if (!this.isCurrent()) return;
 
-      // View the stream
+      // View the stream (bounded timeout prevents indefinite hang)
       const vdoStreamId = response.streamId ?? this.logicalStreamId;
-      await viewerClient.view(vdoStreamId, runtime.displayName ?? "Viewer");
+      await withTimeout(
+        viewerClient.view(vdoStreamId, runtime.displayName ?? "Viewer"),
+        VIEW_TIMEOUT_MS,
+        `view timed out after ${VIEW_TIMEOUT_MS}ms`,
+      );
 
       // GENERATION CHECK
       if (!this.isCurrent()) return;
@@ -1425,7 +1493,8 @@ export class ViewerSession {
     return (
       err.message.includes("SDK connect timed out") ||
       err.message.includes("WebSocket to the signaling server") ||
-      err.message.includes("Reconnect failed")
+      err.message.includes("Reconnect failed") ||
+      err.message.includes("view timed out")
     );
   }
 
@@ -1600,10 +1669,6 @@ export class ViewerSession {
   }
 
   /** Reset the viewer ready flag (called on retry/restart) */
-  private resetViewerReady(): void {
-    this._viewerReadySent = false;
-  }
-
   // ── Internal helpers ────────────────────────────────────────────────
 
   private setState(state: ViewerSessionState): void {

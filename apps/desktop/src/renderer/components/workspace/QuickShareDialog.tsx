@@ -1,6 +1,14 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { toast } from "sonner";
-import { Monitor, VolumeX, Headphones, Volume2, Users } from "lucide-react";
+import {
+  Monitor,
+  VolumeX,
+  Headphones,
+  Volume2,
+  Users,
+  AlertTriangle,
+  RefreshCw,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -8,6 +16,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
@@ -22,6 +31,9 @@ import { startShare, type ShareSource } from "@/services/share-coordinator";
 import {
   customPresetToOverride,
   presetSettingsToOverride,
+  deriveSourceErrorText,
+  resolveAudioMode,
+  type AudioModeValue,
   type SessionQualityOverride,
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
@@ -49,28 +61,6 @@ function getApi() {
   } catch {
     return null;
   }
-}
-
-// ─── Audio mode helpers ──────────────────────────────────────────────────
-
-type AudioModeValue = "none" | "monitor" | "application";
-
-interface AudioOption {
-  value: AudioModeValue;
-  label: string;
-  icon: React.ReactNode;
-}
-
-function audioOptionsForKind(kind: "screen" | "window"): AudioOption[] {
-  const opts: AudioOption[] = [
-    { value: "none", label: "No audio", icon: <VolumeX className="h-3.5 w-3.5" /> },
-  ];
-  if (kind === "screen") {
-    opts.push({ value: "monitor", label: "Filtered monitor audio", icon: <Headphones className="h-3.5 w-3.5" /> });
-  } else {
-    opts.push({ value: "application", label: "Application audio", icon: <Volume2 className="h-3.5 w-3.5" /> });
-  }
-  return opts;
 }
 
 // ─── QuickShareDialog ────────────────────────────────────────────────────
@@ -126,9 +116,16 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
   const [audioMode, setAudioMode] = useState<AudioModeValue>(() => lastScreenAudioMode);
   const [starting, setStarting] = useState(false);
   const [loadingSources, setLoadingSources] = useState(false);
+  const [sourceError, setSourceError] = useState<string | null>(null);
 
-  // Audio options based on current source kind
-  const audioOptions = useMemo(() => audioOptionsForKind(sourceKind), [sourceKind]);
+  // Audio options based on current source kind (icons added locally)
+  const audioOptions = useMemo(() => {
+    const none = { value: "none" as AudioModeValue, label: "No audio", icon: <VolumeX className="h-3.5 w-3.5" /> };
+    if (sourceKind === "screen") {
+      return [none, { value: "monitor" as AudioModeValue, label: "Filtered monitor audio", icon: <Headphones className="h-3.5 w-3.5" /> }];
+    }
+    return [none, { value: "application" as AudioModeValue, label: "Application audio", icon: <Volume2 className="h-3.5 w-3.5" /> }];
+  }, [sourceKind]);
 
   // Validity check: selectedPresetId is truthy for both personal presets and Custom sentinel
   const canStart =
@@ -186,12 +183,15 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
 
       // Load sources
       setLoadingSources(true);
+      setSourceError(null);
       if (api) {
         try {
           const srcs = await api.getSources();
           if (!cancelled) setSources(srcs);
-        } catch {
-          // Sources unavailable
+        } catch (err) {
+          if (!cancelled) {
+            setSourceError(deriveSourceErrorText(err));
+          }
         }
       }
       if (!cancelled) setLoadingSources(false);
@@ -217,11 +217,8 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
 
   // ── Reset audio when source kind changes ───────────────────────
   useEffect(() => {
-    const validModes: AudioModeValue[] =
-      sourceKind === "screen" ? ["none", "monitor"] : ["none", "application"];
-    const remembered = sourceKind === "screen" ? lastScreenAudioMode : lastWindowAudioMode;
     setAudioMode((prev) =>
-      validModes.includes(prev) ? prev : remembered,
+      resolveAudioMode(sourceKind, prev, lastScreenAudioMode, lastWindowAudioMode),
     );
   }, [sourceKind, lastScreenAudioMode, lastWindowAudioMode]);
 
@@ -307,8 +304,8 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
     } catch (err) {
       // Failure — leave dialog open, do not persist the
       // failed selection as the last successful Quick Share.
-      const msg = err instanceof Error ? err.message : "Quick share failed";
-      toast.error(msg);
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast.error(`Sharing failed: ${msg}`);
     } finally {
       setStarting(false);
     }
@@ -326,6 +323,28 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
     resolveQualityOverride,
     groupsById,
   ]);
+
+  // ── Retry / refresh sources ────────────────────────────────────
+  const refetchSources = useCallback(async () => {
+    const api = getApi();
+    if (!api) return;
+    setLoadingSources(true);
+    setSourceError(null);
+    try {
+      const srcs = await api.getSources();
+      setSources(srcs);
+    } catch (err) {
+      setSourceError(deriveSourceErrorText(err));
+    } finally {
+      setLoadingSources(false);
+    }
+  }, []);
+
+  // ── Derived: filtered source count ─────────────────────────────
+  const filteredSources = useMemo(
+    () => sources.filter((s) => s.kind === sourceKind),
+    [sources, sourceKind],
+  );
 
   // ── No groups state ────────────────────────────────────────────
   const hasGroups = groupOrder.length > 0;
@@ -378,9 +397,9 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
           <div className="space-y-4 py-2">
             {/* Group selection */}
             <div className="space-y-1.5">
-              <Label>Group</Label>
+              <Label htmlFor="quick-share-group">Group</Label>
               <Select value={selectedGroup} onValueChange={setSelectedGroup} disabled={starting}>
-                <SelectTrigger>
+                <SelectTrigger id="quick-share-group">
                   <SelectValue placeholder="Select a group" />
                 </SelectTrigger>
                 <SelectContent>
@@ -398,13 +417,14 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
             </div>
 
             {/* Source kind */}
-            <div className="space-y-1.5">
+            <div className="space-y-1.5" role="group" aria-label="Source type">
               <Label>Source type</Label>
               <div className="flex gap-2">
                 <Button
                   variant={sourceKind === "screen" ? "default" : "outline"}
                   size="sm"
                   className="flex-1"
+                  aria-pressed={sourceKind === "screen"}
                   onClick={() => setSourceKind("screen")}
                   disabled={starting}
                 >
@@ -415,6 +435,7 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
                   variant={sourceKind === "window" ? "default" : "outline"}
                   size="sm"
                   className="flex-1"
+                  aria-pressed={sourceKind === "window"}
                   onClick={() => setSourceKind("window")}
                   disabled={starting}
                 >
@@ -426,34 +447,68 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
 
             {/* Source picker */}
             <div className="space-y-1.5">
-              <Label>Source</Label>
-              <Select
-                value={selectedSourceId}
-                onValueChange={setSelectedSourceId}
-                disabled={starting || loadingSources}
-              >
-                <SelectTrigger>
-                  <SelectValue
-                    placeholder={loadingSources ? "Loading sources…" : "Select a source"}
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {sources
-                    .filter((s) => s.kind === sourceKind)
-                    .map((s) => (
+              <Label htmlFor="quick-share-source">Source</Label>
+              {sourceError ? (
+                <Alert variant="destructive" className="py-2">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertTitle className="text-xs">Source error</AlertTitle>
+                  <AlertDescription className="text-xs">
+                    {sourceError}
+                  </AlertDescription>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-1"
+                    onClick={refetchSources}
+                  >
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                    Retry
+                  </Button>
+                </Alert>
+              ) : !loadingSources && filteredSources.length === 0 ? (
+                <Alert variant="default" className="py-2">
+                  <AlertTriangle className="h-4 w-4" />
+                  <AlertTitle className="text-xs">No sources</AlertTitle>
+                  <AlertDescription className="text-xs">
+                    No {sourceKind === "screen" ? "screens" : "windows"} found.
+                  </AlertDescription>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-1"
+                    onClick={refetchSources}
+                  >
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                    Refresh
+                  </Button>
+                </Alert>
+              ) : (
+                <Select
+                  value={selectedSourceId}
+                  onValueChange={setSelectedSourceId}
+                  disabled={starting || loadingSources}
+                >
+                  <SelectTrigger id="quick-share-source">
+                    <SelectValue
+                      placeholder={loadingSources ? "Loading sources\u2026" : "Select a source"}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {filteredSources.map((s) => (
                       <SelectItem key={s.id} value={s.id}>
                         {s.name}
                       </SelectItem>
                     ))}
-                </SelectContent>
-              </Select>
+                  </SelectContent>
+                </Select>
+              )}
             </div>
 
             {/* Preset — Custom always available + personal presets */}
             <div className="space-y-1.5">
-              <Label>Quality preset</Label>
+              <Label htmlFor="quick-share-preset">Quality preset</Label>
               <Select value={selectedPresetId} onValueChange={setSelectedPresetId} disabled={starting}>
-                <SelectTrigger>
+                <SelectTrigger id="quick-share-preset">
                   <SelectValue placeholder="Select a preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -470,15 +525,16 @@ export function QuickShareDialog({ open, onOpenChange }: QuickShareDialogProps) 
             </div>
 
             {/* Audio mode (source-aware) */}
-            <div className="space-y-1.5">
+            <div className="space-y-1.5" role="group" aria-label="Audio mode">
               <Label>Audio</Label>
-              <div className="flex gap-2">
+              <div className="flex gap-2" role="radiogroup" aria-label="Audio options">
                 {audioOptions.map((opt) => (
                   <Button
                     key={opt.value}
                     variant={audioMode === opt.value ? "default" : "outline"}
                     size="sm"
                     className="flex-1"
+                    aria-pressed={audioMode === opt.value}
                     onClick={() => setAudioMode(opt.value)}
                     disabled={starting}
                   >

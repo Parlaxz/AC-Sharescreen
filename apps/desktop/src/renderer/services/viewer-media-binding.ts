@@ -1,7 +1,8 @@
 import type { GroupControlEnvelope, HostQualityLimits } from "@screenlink/shared";
 import { createDefaultGroupQualitySettings } from "@screenlink/shared";
 import type { Phase3Runtime } from "./phase3-runtime.js";
-import type { StreamAnnouncement } from "./active-stream-registry.js";
+import type { StreamAnnouncement } from "@screenlink/shared";
+import { ViewerSenderController, type SenderOperationResult, type ViewerBindingId } from "./viewer-sender-controller.js";
 
 /**
  * Binding token created by the host for a viewer's stream.join.request.
@@ -79,22 +80,9 @@ export type ReconcileResult =
   | { status: "apply-failed"; error: string };
 
 /**
- * Captures the active state of a single sender encoding.
- * Used by pause/resume to perserve per-encoding active state.
+ * Paused sender state is now authoritative in ViewerSenderController.
+ * Phase 6C: This interface has been removed from VMB.
  */
-interface SenderEncodingState {
-  active: boolean;
-}
-
-/**
- * Complete paused sender state for one viewer (composite key).
- * Stores the prior active state of every encoding on both video
- * and audio senders so resume restores only previously active ones.
- */
-interface PausedSenderState {
-  videoEncodings: SenderEncodingState[];
-  audioEncodings: SenderEncodingState[];
-}
 
 /**
  * Viewer presence state for join/leave audio cue lifecycle.
@@ -161,8 +149,42 @@ export class ViewerMediaBinding {
   private readonly TOKEN_TTL_MS = 60_000; // 60 seconds
   private readonly CLEANUP_INTERVAL_MS = 30_000; // every 30s
 
+  /**
+   * Locally-owned fallback controller used when the runtime does not
+   * provide getViewerSenderController() (e.g. minimal test doubles).
+   * Pre-initialized in the constructor so the property getter is
+   * synchronous.
+   */
+  private _fallbackSenderController: ViewerSenderController | null;
+
   constructor(private runtime: Phase3Runtime) {
+    // Pre-init fallback — the getter checks this only when the runtime
+    // doesn't provide its own controller.
+    this._fallbackSenderController = null;
     this.startCleanup();
+  }
+
+  /** Get the ViewerSenderController from the runtime, with fallback. */
+  private get senderController(): ViewerSenderController {
+    const runtimeCtrl = typeof this.runtime.getViewerSenderController === "function"
+      ? this.runtime.getViewerSenderController()
+      : null;
+    if (runtimeCtrl) return runtimeCtrl;
+    // Lazy-init the local fallback on first access (VSC is statically imported)
+    if (!this._fallbackSenderController) {
+      this._fallbackSenderController = new ViewerSenderController();
+    }
+    return this._fallbackSenderController;
+  }
+
+  /** Build a ViewerBindingId from the mapping's identity fields. */
+  private static bindingIdFromMapping(mapping: ViewerMapping): ViewerBindingId {
+    return {
+      groupId: mapping.groupId,
+      logicalStreamId: mapping.logicalStreamId,
+      viewerDeviceId: mapping.viewerDeviceId,
+      mediaSessionId: mapping.mediaSessionId,
+    };
   }
 
   /** Build a composite key from viewer device ID and media session ID. */
@@ -587,8 +609,7 @@ export class ViewerMediaBinding {
         m.viewerDeviceId === input.viewerDeviceId &&
         m.logicalStreamId === input.logicalStreamId &&
         m.mediaSessionId !== input.mediaSessionId);
-    for (const [staleKey, staleMapping] of staleDeviceEntries) {
-      this.stopStatsForMapping(staleMapping);
+    for (const [staleKey] of staleDeviceEntries) {
       this.viewerMap.delete(staleKey);
     }
 
@@ -608,6 +629,14 @@ export class ViewerMediaBinding {
       audioSender,
     });
 
+    // Register senders with the ViewerSenderController for exact-binding writes
+    if (videoSender || audioSender) {
+      this.senderController.registerSenders(
+        ViewerMediaBinding.bindingIdFromMapping(this.viewerMap.get(key)!),
+        { videoSender, audioSender, pc },
+      );
+    }
+
     this.upsertPresence({
       viewerDeviceId: input.viewerDeviceId,
       viewerSessionId: input.viewerSessionId ?? bindingToken.viewerSessionId,
@@ -615,23 +644,6 @@ export class ViewerMediaBinding {
       logicalStreamId: input.logicalStreamId,
       state: "media-bound",
     });
-
-    // Start per-viewer stats polling when binding is established
-    if (pc) {
-      const statsService = this.runtime.getMediaStatsService();
-      if (statsService) {
-        statsService.startViewerPoller(
-          input.groupId,
-          input.logicalStreamId,
-          input.viewerDeviceId,
-          input.mediaPeerUuid,
-          pc,
-          () => {
-            // Stats callback — no-op for now, stats flow through store in future
-          },
-        );
-      }
-    }
 
     // If the video sender was not ready yet, start bounded retry.
     // This handles the race where media.bind arrives before the
@@ -660,6 +672,38 @@ export class ViewerMediaBinding {
   /** Maximum bounded retry attempts for sender resolution (50ms * 40 = 2s). */
   private static readonly SENDER_RETRY_MAX = 40;
   private static readonly SENDER_RETRY_INTERVAL_MS = 50;
+  private static readonly REAPPLY_RETRY_MAX = 5;
+  private static readonly REAPPLY_RETRY_INTERVAL_MS = 100;
+
+  private async reapplyPausedStateWithRetry(
+    bId: ViewerBindingId,
+    sourceDims: { width: number; height: number },
+    effective?: import("@screenlink/shared").EffectiveQualityResult["effective"],
+  ): Promise<SenderOperationResult> {
+    let result: SenderOperationResult = { status: "sender-not-ready" };
+
+    for (let attempt = 0; attempt < ViewerMediaBinding.REAPPLY_RETRY_MAX; attempt++) {
+      try {
+        result = await this.senderController.reapplyState(bId, sourceDims, effective);
+      } catch (err) {
+        result = {
+          status: "apply-failed",
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+
+      if (result.status === "applied") return result;
+      if (attempt < ViewerMediaBinding.REAPPLY_RETRY_MAX - 1) {
+        await new Promise<void>((resolve) => setTimeout(resolve, ViewerMediaBinding.REAPPLY_RETRY_INTERVAL_MS));
+      }
+    }
+
+    console.warn(
+      '[ViewerMediaBinding] reapplyState returned non-applied after retries',
+      { bId, sourceDims, result },
+    );
+    return result;
+  }
 
   /**
    * Bounded retry to resolve the RTCPeerConnection and senders for a
@@ -689,23 +733,31 @@ export class ViewerMediaBinding {
 
       if (this.resolveSendersForMapping(mapping)) {
         clearInterval(timer);
-        this.startStatsForMapping(mapping);
-        // Sender found — reconcile any stored quality request
-        void this.reconcileViewerQuality(viewerDeviceId, mediaSessionId);
-        // Also re-apply any stored media mode preference
-        const mediaMode = this.viewerMediaModes.get(key);
-        if (mediaMode) {
-          void this.handleViewerMediaRequest(
-            viewerDeviceId,
-            mediaSessionId,
-            mediaMode.audioEnabled,
-            mediaMode.videoEnabled,
-          );
-        }
-        const pausedState = this.viewerPausedSenderStates.get(key);
-        if (pausedState) {
-          void this.applyPausedState(key, mapping, pausedState);
-        }
+
+        // Register re-resolved senders with the controller
+        const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
+        this.senderController.registerSenders(bId, {
+          videoSender: mapping.videoSender,
+          audioSender: mapping.audioSender,
+          pc: mapping.pc,
+        });
+
+        void (async () => {
+          // Sender found — reconcile any stored quality request
+          await this.reconcileViewerQuality(viewerDeviceId, mediaSessionId);
+          // Also re-apply any stored media mode preference
+          const mediaMode = this.viewerMediaModes.get(key);
+          if (mediaMode) {
+            await this.handleViewerMediaRequest(
+              viewerDeviceId,
+              mediaSessionId,
+              mediaMode.audioEnabled,
+              mediaMode.videoEnabled,
+            );
+          }
+          // Reapply paused state from controller (authoritative source)
+          await this.reapplyPausedStateWithRetry(bId, { width: 1920, height: 1080 });
+        })();
       }
     }, ViewerMediaBinding.SENDER_RETRY_INTERVAL_MS);
   }
@@ -743,34 +795,6 @@ export class ViewerMediaBinding {
   }
 
   /**
-   * Start per-viewer stats polling for a mapping if not already started.
-   * Safe to call multiple times.
-   */
-  private startStatsForMapping(mapping: ViewerMapping): void {
-    if (!mapping.pc) return;
-    try {
-      const statsService = this.runtime.getMediaStatsService();
-      if (statsService && !statsService.hasViewerPoller(
-        mapping.groupId,
-        mapping.logicalStreamId,
-        mapping.viewerDeviceId,
-        mapping.mediaPeerUuid,
-      )) {
-        statsService.startViewerPoller(
-          mapping.groupId,
-          mapping.logicalStreamId,
-          mapping.viewerDeviceId,
-          mapping.mediaPeerUuid,
-          mapping.pc,
-          () => {},
-        );
-      }
-    } catch {
-      // stats polling is best-effort
-    }
-  }
-
-  /**
    * Reconcile viewer quality for an exact viewer identified by device ID
    * and media session. This is the central reconciliation operation:
    *
@@ -800,13 +824,19 @@ export class ViewerMediaBinding {
     const senderFound = this.resolveSendersForMapping(mapping);
     if (!senderFound || !mapping.videoSender) return { status: "sender-not-ready" };
 
-    // Start stats polling if not already running
-    this.startStatsForMapping(mapping);
+    // Update controller with re-resolved senders
+    const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
+    this.senderController.registerSenders(bId, {
+      videoSender: mapping.videoSender,
+      audioSender: mapping.audioSender,
+      pc: mapping.pc,
+    });
 
     // Check for a stored viewer quality request and apply it
     const qualityCoordinator = this.runtime.getQualityCoordinator();
     if (!qualityCoordinator) {
-      return { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) };
+      const configured = this.readConfiguredSenderState(mapping.videoSender);
+      return { status: "applied", configured };
     }
 
     const request = qualityCoordinator.getViewerRequest(
@@ -815,78 +845,87 @@ export class ViewerMediaBinding {
       mapping.viewerDeviceId,
     );
     if (!request) {
-      return { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) };
-    }
-
-    // Apply the stored request — compute effective quality from group
-    // settings, host limits, and source dimensions
-    try {
-      const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
-      const quality = syncState?.state?.defaultQuality?.value;
-      const groupSettings = quality ?? createDefaultGroupQualitySettings();
-
-      const ssm = this.runtime.getStreamSessionManager();
-      const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
-      const sourceDimensions = {
-        width: actualDims.width || groupSettings.video.sendWidth || 1920,
-        height: actualDims.height || groupSettings.video.sendHeight || 1080,
-      };
-
-      const runtimeLimits = this.runtime.getHostQualityLimits();
-      const hostLimits: HostQualityLimits = {
-        maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
-        maxWidth: runtimeLimits.maxWidth,
-        maxHeight: runtimeLimits.maxHeight,
-        maxFps: runtimeLimits.maxFps,
-        allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
-      };
-
-      const effective = qualityCoordinator.calculateEffectiveQuality(
-        groupSettings,
-        hostLimits,
-        request,
-        sourceDimensions,
-      );
-
-      const configured = await qualityCoordinator.applyToExactViewer(
-        mapping.viewerDeviceId,
-        mapping.mediaPeerUuid,
-        mapping.videoSender,
-        effective.effective,
-      ) as SenderSettingsReadback;
-
-      // Send quality feedback back to the viewer
-      const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
-      const peerUuid = conn?.peerForDevice(mapping.viewerDeviceId);
-      if (conn && peerUuid) {
-        await conn.sendToPeer(peerUuid, {
-          type: "quality.effective",
-          streamSessionId: mapping.logicalStreamId,
-          videoBitrateKbps: effective.effective.videoBitrateKbps,
-          maxWidth: effective.effective.maxWidth,
-          maxHeight: effective.effective.maxHeight,
-          maxFps: effective.effective.maxFps,
-          degradationPreference: effective.effective.degradationPreference,
-          clampReasons: effective.clampReasons,
-        }).catch(() => {});
-
-        await conn.sendToPeer(peerUuid, {
-          type: "quality.configured",
-          streamSessionId: mapping.logicalStreamId,
-          videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
-          maxFramerate: configured.maxFramerate ?? undefined,
-          scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
-          degradationPreference: configured.degradationPreference ?? undefined,
-        }).catch(() => {});
-        }
-
+      const configured = this.readConfiguredSenderState(mapping.videoSender);
       return { status: "applied", configured };
-    } catch (error) {
-      return {
-        status: "apply-failed",
-        error: error instanceof Error ? error.message : String(error),
-      };
     }
+
+    // Compute effective quality
+    const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+    const quality = syncState?.state?.defaultQuality?.value;
+    const groupSettings = quality ?? createDefaultGroupQualitySettings();
+
+    const ssm = this.runtime.getStreamSessionManager();
+    const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+    const sourceDimensions = {
+      width: actualDims.width || groupSettings.video.sendWidth || 1920,
+      height: actualDims.height || groupSettings.video.sendHeight || 1080,
+    };
+
+    const runtimeLimits = this.runtime.getHostQualityLimits();
+    const hostLimits: HostQualityLimits = {
+      maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+      maxWidth: runtimeLimits.maxWidth,
+      maxHeight: runtimeLimits.maxHeight,
+      maxFps: runtimeLimits.maxFps,
+      allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+    };
+
+    const resolved = this.senderController.computeEffectiveQuality(
+      groupSettings, hostLimits, request, sourceDimensions,
+    );
+
+    // Apply via the controller (not QualityCoordinator — Phase 6B migration)
+    const result = await this.senderController.applyQuality(
+      bId, resolved.effective, sourceDimensions, request.revision,
+    );
+
+    if (result.status === "stale-revision") {
+      return { status: "applied" as const, configured: this.readConfiguredSenderState(mapping.videoSender!) };
+    }
+    if (result.status !== "applied") {
+      return result.status === "apply-failed"
+        ? { status: "apply-failed" as const, error: result.error ?? "unknown error" }
+        : { status: result.status === "binding-not-found" ? ("mapping-missing" as const) : ("sender-not-ready" as const) };
+    }
+
+    // Send quality feedback
+    await this.sendQualityFeedback(mapping, resolved, result.configured!);
+
+    return { status: "applied", configured: result.configured! };
+  }
+
+  /**
+   * Send quality.effective and quality.configured messages to the viewer.
+   * Extracted to a shared helper used by reconcileViewerQuality and resume paths.
+   */
+  private async sendQualityFeedback(
+    mapping: ViewerMapping,
+    effective: import("@screenlink/shared").EffectiveQualityResult,
+    configured: SenderSettingsReadback,
+  ): Promise<void> {
+    const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+    const peerUuid = conn?.peerForDevice(mapping.viewerDeviceId);
+    if (!conn || !peerUuid) return;
+
+    await conn.sendToPeer(peerUuid, {
+      type: "quality.effective",
+      streamSessionId: mapping.logicalStreamId,
+      videoBitrateKbps: effective.effective.videoBitrateKbps,
+      maxWidth: effective.effective.maxWidth,
+      maxHeight: effective.effective.maxHeight,
+      maxFps: effective.effective.maxFps,
+      degradationPreference: effective.effective.degradationPreference,
+      clampReasons: effective.clampReasons,
+    }).catch(() => {});
+
+    await conn.sendToPeer(peerUuid, {
+      type: "quality.configured",
+      streamSessionId: mapping.logicalStreamId,
+      videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
+      maxFramerate: configured.maxFramerate ?? undefined,
+      scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
+      degradationPreference: configured.degradationPreference ?? undefined,
+    }).catch(() => {});
   }
 
   /**
@@ -902,15 +941,56 @@ export class ViewerMediaBinding {
     for (const [, mapping] of this.viewerMap) {
       if (mapping.mediaPeerUuid === mediaPeerUuid) {
         this.recoverViewerPresence(mapping.viewerDeviceId, mapping.mediaSessionId, mapping.viewerSessionId, "media-bound");
-        const result = await this.reconcileViewerQuality(mapping.viewerDeviceId, mapping.mediaSessionId);
-        if (result.status === "applied") reconciled = true;
 
+        // Re-resolve senders and register with the controller
+        const senderFound = this.resolveSendersForMapping(mapping);
+        if (senderFound) {
+          const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
+          this.senderController.registerSenders(bId, {
+            videoSender: mapping.videoSender,
+            audioSender: mapping.audioSender,
+            pc: mapping.pc,
+          });
+        }
+
+        // Use controller's reapplyState for persisted pause/media-mode/quality state
+        const sourceDims = { width: 1920, height: 1080 };
+        const qualityCoordinator = this.runtime.getQualityCoordinator();
+        let effective: import("@screenlink/shared").EffectiveQualityResult["effective"] | undefined;
+
+        if (qualityCoordinator) {
+          const request = qualityCoordinator.getViewerRequest(
+            mapping.groupId, mapping.logicalStreamId, mapping.viewerDeviceId,
+          );
+          if (request) {
+            const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+            const q = syncState?.state?.defaultQuality?.value;
+            const groupSettings = q ?? createDefaultGroupQualitySettings();
+            const ssm = this.runtime.getStreamSessionManager();
+            const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+            sourceDims.width = actualDims.width || groupSettings.video.sendWidth || 1920;
+            sourceDims.height = actualDims.height || groupSettings.video.sendHeight || 1080;
+            const runtimeLimits = this.runtime.getHostQualityLimits();
+            const hostLimits: HostQualityLimits = {
+              maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+              maxWidth: runtimeLimits.maxWidth,
+              maxHeight: runtimeLimits.maxHeight,
+              maxFps: runtimeLimits.maxFps,
+              allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+            };
+            const resolved = this.senderController.computeEffectiveQuality(
+              groupSettings, hostLimits, request, sourceDims,
+            );
+            effective = resolved.effective;
+          }
+        }
+
+        const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
         // Re-apply stored media mode preference so disabled senders stay disabled
-        // after a host restart or peer reconnect.
         const modeKey = ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId);
         const mediaMode = this.viewerMediaModes.get(modeKey);
         if (mediaMode) {
-          void this.handleViewerMediaRequest(
+          await this.handleViewerMediaRequest(
             mapping.viewerDeviceId,
             mapping.mediaSessionId,
             mediaMode.audioEnabled,
@@ -918,16 +998,9 @@ export class ViewerMediaBinding {
           );
         }
 
-        const pausedState = this.viewerPausedSenderStates.get(
-          ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId),
-        );
-        if (pausedState) {
-          void this.applyPausedState(
-            ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId),
-            mapping,
-            pausedState,
-          );
-        }
+        await this.reapplyPausedStateWithRetry(bId, sourceDims, effective);
+
+        reconciled = true;
       }
     }
     return reconciled;
@@ -955,9 +1028,8 @@ export class ViewerMediaBinding {
 
   // ─── Pause / Resume (host-side) ─────────────────────────────────
 
-  /**
-   */
-  private viewerPausedSenderStates = new Map<string, PausedSenderState>();
+  // Phase 6C: Paused sender state is now authoritative in ViewerSenderController.
+  // The VMB no longer maintains a duplicate viewerPausedSenderStates map.
 
   /**
    * Per-viewer media mode preference (which senders should be enabled).
@@ -988,46 +1060,28 @@ export class ViewerMediaBinding {
   }
 
   private async applyPause(key: string, mapping: ViewerMapping): Promise<ReconcileResult> {
-    let videoEncodings: SenderEncodingState[] = [];
-    let audioEncodings: SenderEncodingState[] = [];
+    const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
 
-    try {
-      if (mapping.videoSender) {
-        const params = mapping.videoSender.getParameters();
-        if (!params.encodings || params.encodings.length === 0) {
-          return { status: "sender-not-ready" };
-        }
-        videoEncodings = params.encodings.map((e) => ({ active: !!e.active }));
-        for (const enc of params.encodings) {
-          enc.active = false;
-        }
-        await mapping.videoSender.setParameters(params);
-        if (!this.verifyEncodingStates(mapping.videoSender, params.encodings.map(() => false))) {
-          return { status: "apply-failed", error: "video sender pause readback mismatch" };
-        }
-      } else {
-        return { status: "mapping-missing" };
-      }
+    // Ensure senders are registered with the controller (auto-register from mapping)
+    if (!this.senderController.hasBinding(bId)) {
+      this.senderController.registerSenders(bId, {
+        videoSender: mapping.videoSender,
+        audioSender: mapping.audioSender,
+          pc: mapping.pc,
+      });
+    }
 
-      if (mapping.audioSender) {
-        const params = mapping.audioSender.getParameters();
-        audioEncodings = (params.encodings ?? []).map((e) => ({ active: !!e.active }));
-        for (const enc of (params.encodings ?? [])) {
-          enc.active = false;
-        }
-        await mapping.audioSender.setParameters(params);
-        if (!this.verifyEncodingStates(mapping.audioSender, (params.encodings ?? []).map(() => false))) {
-          return { status: "apply-failed", error: "audio sender pause readback mismatch" };
-        }
-      }
+    const result = await this.senderController.applyPause(bId);
 
-      this.viewerPausedSenderStates.set(key, { videoEncodings, audioEncodings });
-      return { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) };
-    } catch (err) {
-      return {
-        status: "apply-failed",
-        error: err instanceof Error ? err.message : String(err),
-      };
+    if (result.status === "applied") {
+      return { status: "applied", configured: result.configured! };
+    }
+
+    // Map controller result to legacy ReconcileResult
+    switch (result.status) {
+      case "binding-not-found": return { status: "mapping-missing" as const };
+      case "sender-not-ready": return { status: "sender-not-ready" as const };
+      default: return { status: "apply-failed" as const, error: result.error ?? "unknown error" };
     }
   }
 
@@ -1037,177 +1091,105 @@ export class ViewerMediaBinding {
     viewerDeviceId: string,
     mediaSessionId: string,
   ): Promise<ReconcileResult> {
-    const savedState = this.viewerPausedSenderStates.get(key);
-    const mediaMode = this.viewerMediaModes.get(key);
+    const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
 
-    try {
-      if (mapping.videoSender) {
-        const params = mapping.videoSender.getParameters();
-        if (!params.encodings || params.encodings.length === 0) {
-          return { status: "sender-not-ready" };
-        }
-
-        for (let i = 0; i < params.encodings.length; i++) {
-          const enc = params.encodings[i]!;
-          enc.active = savedState && i < savedState.videoEncodings.length
-            ? savedState.videoEncodings[i]!.active
-            : true;
-        }
-
-        if (mediaMode && !mediaMode.videoEnabled) {
-          for (const enc of params.encodings) {
-            enc.active = false;
-          }
-        }
-
-        const qualityCoordinator = this.runtime.getQualityCoordinator();
-        if (qualityCoordinator) {
-          const request = qualityCoordinator.getViewerRequest(
-            mapping.groupId, mapping.logicalStreamId, viewerDeviceId,
-          );
-          if (request) {
-            const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
-            const q = syncState?.state?.defaultQuality?.value;
-            const groupSettings = q ?? createDefaultGroupQualitySettings();
-            const ssm = this.runtime.getStreamSessionManager();
-            const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
-            const sourceDimensions = {
-              width: actualDims.width || groupSettings.video.sendWidth || 1920,
-              height: actualDims.height || groupSettings.video.sendHeight || 1080,
-            };
-            const runtimeLimits = this.runtime.getHostQualityLimits();
-            const hostLimits: HostQualityLimits = {
-              maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
-              maxWidth: runtimeLimits.maxWidth,
-              maxHeight: runtimeLimits.maxHeight,
-              maxFps: runtimeLimits.maxFps,
-              allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
-            };
-            const effective = qualityCoordinator.calculateEffectiveQuality(
-              groupSettings, hostLimits, request, sourceDimensions,
-            );
-            const enc = params.encodings[0]!;
-            enc.maxBitrate = effective.effective.videoBitrateKbps * 1000;
-            enc.maxFramerate = effective.effective.maxFps;
-            if (effective.effective.maxWidth > 0 && effective.effective.maxHeight > 0 &&
-                sourceDimensions.width > 0 && sourceDimensions.height > 0) {
-              const widthScale = sourceDimensions.width / effective.effective.maxWidth;
-              const heightScale = sourceDimensions.height / effective.effective.maxHeight;
-              enc.scaleResolutionDownBy = Math.max(1, widthScale, heightScale);
-            }
-            (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
-              effective.effective.degradationPreference as RTCDegradationPreference;
-          }
-        }
-
-        await mapping.videoSender.setParameters(params);
-        if (!this.verifyEncodingStates(mapping.videoSender, params.encodings.map((enc) => !!enc.active))) {
-          return { status: "apply-failed", error: "video sender resume readback mismatch" };
-        }
-      }
-
-      if (mapping.audioSender) {
-        const params = mapping.audioSender.getParameters();
-        if (params.encodings && params.encodings.length > 0) {
-          for (let i = 0; i < params.encodings.length; i++) {
-            const enc = params.encodings[i]!;
-            enc.active = savedState && i < savedState.audioEncodings.length
-              ? savedState.audioEncodings[i]!.active
-              : true;
-          }
-
-          if (mediaMode && !mediaMode.audioEnabled) {
-            for (const enc of params.encodings) {
-              enc.active = false;
-            }
-          }
-
-          await mapping.audioSender.setParameters(params);
-          if (!this.verifyEncodingStates(mapping.audioSender, params.encodings.map((enc) => !!enc.active))) {
-            return { status: "apply-failed", error: "audio sender resume readback mismatch" };
-          }
-        }
-      }
-
-      this.viewerPausedSenderStates.delete(key);
-
-      if (mapping.videoSender) {
-        const configured = this.readConfiguredSenderState(mapping.videoSender);
-        const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
-        const peerUuid = conn?.peerForDevice(viewerDeviceId);
-        if (conn && peerUuid) {
-          void conn.sendToPeer(peerUuid, {
-            type: "quality.effective",
-            streamSessionId: mapping.logicalStreamId,
-            videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
-            maxWidth: undefined,
-            maxHeight: undefined,
-            maxFps: configured.maxFramerate ?? undefined,
-            degradationPreference: configured.degradationPreference ?? undefined,
-            clampReasons: [],
-          }).catch(() => {});
-          void conn.sendToPeer(peerUuid, {
-            type: "quality.configured",
-            streamSessionId: mapping.logicalStreamId,
-            videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
-            maxFramerate: configured.maxFramerate ?? undefined,
-            scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
-            degradationPreference: configured.degradationPreference ?? undefined,
-          }).catch(() => {});
-        }
-        return { status: "applied", configured };
-      }
-
-      return { status: "applied", configured: this.readConfiguredSenderState(mapping.audioSender!) };
-    } catch (err) {
-      return {
-        status: "apply-failed",
-        error: err instanceof Error ? err.message : String(err),
-      };
+    // Ensure senders are registered with the controller
+    if (!this.senderController.hasBinding(bId)) {
+      this.senderController.registerSenders(bId, {
+        videoSender: mapping.videoSender,
+        audioSender: mapping.audioSender,
+          pc: mapping.pc,
+      });
     }
-  }
 
-  private async applyPausedState(
-    key: string,
-    mapping: ViewerMapping,
-    pausedState: PausedSenderState,
-  ): Promise<ReconcileResult> {
-    try {
-      if (mapping.videoSender) {
-        const params = mapping.videoSender.getParameters();
-        if (!params.encodings || params.encodings.length === 0) {
-          return { status: "sender-not-ready" };
-        }
-        for (const enc of params.encodings) {
-          enc.active = false;
-        }
-        await mapping.videoSender.setParameters(params);
-        if (!this.verifyEncodingStates(mapping.videoSender, params.encodings.map(() => false))) {
-          return { status: "apply-failed", error: "video sender pause readback mismatch" };
-        }
-      }
-
-      if (mapping.audioSender) {
-        const params = mapping.audioSender.getParameters();
-        for (const enc of (params.encodings ?? [])) {
-          enc.active = false;
-        }
-        await mapping.audioSender.setParameters(params);
-        if (!this.verifyEncodingStates(mapping.audioSender, (params.encodings ?? []).map(() => false))) {
-          return { status: "apply-failed", error: "audio sender pause readback mismatch" };
-        }
-      }
-
-      this.viewerPausedSenderStates.set(key, pausedState);
-      return mapping.videoSender
-        ? { status: "applied", configured: this.readConfiguredSenderState(mapping.videoSender) }
-        : { status: "mapping-missing" };
-    } catch (err) {
-      return {
-        status: "apply-failed",
-        error: err instanceof Error ? err.message : String(err),
-      };
+    // Sync media mode to controller so it's available during resume
+    const mediaModeKey = ViewerMediaBinding.compositeKey(mapping.viewerDeviceId, mapping.mediaSessionId);
+    const mode = this.viewerMediaModes.get(mediaModeKey);
+    if (mode) {
+      this.senderController.setMediaMode(bId, mode.audioEnabled, mode.videoEnabled);
     }
+
+    // Compute effective quality if there is a stored viewer request
+    const qualityCoordinator = this.runtime.getQualityCoordinator();
+    let effective: import("@screenlink/shared").EffectiveQualityResult["effective"] | undefined;
+    let sourceDimensions = { width: 1920, height: 1080 };
+    let revision: number | undefined;
+
+    if (qualityCoordinator) {
+      const request = qualityCoordinator.getViewerRequest(
+        mapping.groupId, mapping.logicalStreamId, viewerDeviceId,
+      );
+      if (request) {
+        const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+        const q = syncState?.state?.defaultQuality?.value;
+        const groupSettings = q ?? createDefaultGroupQualitySettings();
+        const ssm = this.runtime.getStreamSessionManager();
+        const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+        sourceDimensions = {
+          width: actualDims.width || groupSettings.video.sendWidth || 1920,
+          height: actualDims.height || groupSettings.video.sendHeight || 1080,
+        };
+        const runtimeLimits = this.runtime.getHostQualityLimits();
+        const hostLimits: HostQualityLimits = {
+          maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+          maxWidth: runtimeLimits.maxWidth,
+          maxHeight: runtimeLimits.maxHeight,
+          maxFps: runtimeLimits.maxFps,
+          allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+        };
+        const resolved = this.senderController.computeEffectiveQuality(
+          groupSettings, hostLimits, request, sourceDimensions,
+        );
+        effective = resolved.effective;
+        revision = request.revision;
+      }
+    }
+
+    // Delegate to controller for the single setParameters write
+    const result = await this.senderController.applyResume(bId, {
+      paused: false,
+      effective,
+      revision,
+    }, sourceDimensions);
+
+    if (result.status !== "applied") {
+      switch (result.status) {
+        case "binding-not-found": return { status: "mapping-missing" as const };
+        case "sender-not-ready": return { status: "sender-not-ready" as const };
+        default: return { status: "apply-failed" as const, error: result.error ?? "unknown error" };
+      }
+    }
+
+    // viewerPausedSenderStates removed in Phase 6C — controller is authoritative
+
+    // Send quality feedback
+    if (mapping.videoSender && result.configured) {
+      const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+      const peerUuid = conn?.peerForDevice(viewerDeviceId);
+      if (conn && peerUuid) {
+        void conn.sendToPeer(peerUuid, {
+          type: "quality.effective",
+          streamSessionId: mapping.logicalStreamId,
+          videoBitrateKbps: result.configured.maxBitrate ? Math.round(result.configured.maxBitrate / 1000) : undefined,
+          maxWidth: undefined,
+          maxHeight: undefined,
+          maxFps: result.configured.maxFramerate ?? undefined,
+          degradationPreference: result.configured.degradationPreference ?? undefined,
+          clampReasons: [],
+        }).catch(() => {});
+        void conn.sendToPeer(peerUuid, {
+          type: "quality.configured",
+          streamSessionId: mapping.logicalStreamId,
+          videoBitrateKbps: result.configured.maxBitrate ? Math.round(result.configured.maxBitrate / 1000) : undefined,
+          maxFramerate: result.configured.maxFramerate ?? undefined,
+          scaleResolutionDownBy: result.configured.scaleResolutionDownBy ?? undefined,
+          degradationPreference: result.configured.degradationPreference ?? undefined,
+        }).catch(() => {});
+      }
+      return { status: "applied" as const, configured: result.configured };
+    }
+
+    return { status: "applied" as const, configured: result.configured ?? this.readConfiguredSenderState(mapping.videoSender!) };
   }
 
   private verifyEncodingStates(sender: RTCRtpSender, expected: boolean[]): boolean {
@@ -1224,6 +1206,9 @@ export class ViewerMediaBinding {
   /**
    * Apply resume quality: reactivate the sender and restore stored quality settings
    * in a single setParameters() call. Sends quality feedback afterward.
+   *
+   * Phase 6B: Delegates to ViewerSenderController for the single setParameters write,
+   * merging pause+quality into one desired-state operation.
    */
   private async applyResumeWithQuality(
     viewerDeviceId: string,
@@ -1231,116 +1216,98 @@ export class ViewerMediaBinding {
     sender: RTCRtpSender,
     mapping: ViewerMapping,
   ): Promise<ReconcileResult> {
-    try {
-      const params = sender.getParameters();
-      if (!params.encodings || params.encodings.length === 0) {
-        return { status: "sender-not-ready" };
-      }
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const enc = params.encodings[0]!;
+    const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
 
-      // 1) Reactivate the encoding
-      enc.active = true;
-
-      // 1b) Check stored media mode preference — if the viewer requested
-      //     audio-only, override the re-activation so we don't waste bandwidth
-      //     re-enabling a sender the viewer explicitly disabled.
-      const mediaModeKey = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
-      const storedMediaMode = this.viewerMediaModes.get(mediaModeKey);
-      if (storedMediaMode && !storedMediaMode.videoEnabled) {
-        enc.active = false;
-      }
-
-      // 2) Apply stored quality settings
-      const qualityCoordinator = this.runtime.getQualityCoordinator();
-      if (qualityCoordinator) {
-        const request = qualityCoordinator.getViewerRequest(
-          mapping.groupId,
-          mapping.logicalStreamId,
-          viewerDeviceId,
-        );
-
-        if (request) {
-          // Recalculate effective quality from the stored request
-          const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
-          const q = syncState?.state?.defaultQuality?.value;
-          const groupSettings = q ?? createDefaultGroupQualitySettings();
-          const ssm = this.runtime.getStreamSessionManager();
-          const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
-          const sourceDimensions = {
-            width: actualDims.width || groupSettings.video.sendWidth || 1920,
-            height: actualDims.height || groupSettings.video.sendHeight || 1080,
-          };
-          const runtimeLimits = this.runtime.getHostQualityLimits();
-          const hostLimits: HostQualityLimits = {
-            maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
-            maxWidth: runtimeLimits.maxWidth,
-            maxHeight: runtimeLimits.maxHeight,
-            maxFps: runtimeLimits.maxFps,
-            allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
-          };
-
-          const effective = qualityCoordinator.calculateEffectiveQuality(
-            groupSettings, hostLimits, request, sourceDimensions,
-          );
-
-          // Apply all quality parameters to the encoding
-          enc.maxBitrate = effective.effective.videoBitrateKbps * 1000;
-          enc.maxFramerate = effective.effective.maxFps;
-
-          // Calculate scale from source to target (exactly once)
-          if (effective.effective.maxWidth > 0 && effective.effective.maxHeight > 0 &&
-              sourceDimensions.width > 0 && sourceDimensions.height > 0) {
-            const widthScale = sourceDimensions.width / effective.effective.maxWidth;
-            const heightScale = sourceDimensions.height / effective.effective.maxHeight;
-            enc.scaleResolutionDownBy = Math.max(1, widthScale, heightScale);
-          }
-
-          // degradationPreference is top-level RTCRtpSendParameters
-          (params as unknown as { degradationPreference: RTCDegradationPreference }).degradationPreference =
-            effective.effective.degradationPreference as RTCDegradationPreference;
-        }
-      }
-
-      // 3) Apply in a single setParameters call (active=true + complete quality)
-      await sender.setParameters(params);
-
-      // 4) Read back, clear any paused state for this viewer
-      this.viewerPausedSenderStates.delete(ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId));
-      const configured = this.readConfiguredSenderState(sender);
-
-      // 5) Send quality feedback
-      const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
-      const peerUuid = conn?.peerForDevice(viewerDeviceId);
-      if (conn && peerUuid) {
-        void conn.sendToPeer(peerUuid, {
-          type: "quality.effective",
-          streamSessionId: mapping.logicalStreamId,
-          videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
-          maxWidth: undefined,
-          maxHeight: undefined,
-          maxFps: configured.maxFramerate ?? undefined,
-          degradationPreference: configured.degradationPreference ?? undefined,
-          clampReasons: [],
-        }).catch(() => {});
-
-        void conn.sendToPeer(peerUuid, {
-          type: "quality.configured",
-          streamSessionId: mapping.logicalStreamId,
-          videoBitrateKbps: configured.maxBitrate ? Math.round(configured.maxBitrate / 1000) : undefined,
-          maxFramerate: configured.maxFramerate ?? undefined,
-          scaleResolutionDownBy: configured.scaleResolutionDownBy ?? undefined,
-          degradationPreference: configured.degradationPreference ?? undefined,
-        }).catch(() => {});
-      }
-
-      return { status: "applied", configured };
-    } catch (err) {
-      return {
-        status: "apply-failed",
-        error: err instanceof Error ? err.message : String(err),
-      };
+    // Ensure senders are registered with the controller
+    if (!this.senderController.hasBinding(bId)) {
+      this.senderController.registerSenders(bId, {
+        videoSender: mapping.videoSender,
+        audioSender: mapping.audioSender,
+          pc: mapping.pc,
+      });
     }
+
+    // Compute effective quality from stored request
+    const qualityCoordinator = this.runtime.getQualityCoordinator();
+    let effective: import("@screenlink/shared").EffectiveQualityResult["effective"] | undefined;
+    let sourceDimensions = { width: 1920, height: 1080 };
+    let revision: number | undefined;
+
+    if (qualityCoordinator) {
+      const request = qualityCoordinator.getViewerRequest(
+        mapping.groupId, mapping.logicalStreamId, viewerDeviceId,
+      );
+      if (request) {
+        const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+        const q = syncState?.state?.defaultQuality?.value;
+        const groupSettings = q ?? createDefaultGroupQualitySettings();
+        const ssm = this.runtime.getStreamSessionManager();
+        const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+        sourceDimensions = {
+          width: actualDims.width || groupSettings.video.sendWidth || 1920,
+          height: actualDims.height || groupSettings.video.sendHeight || 1080,
+        };
+        const runtimeLimits = this.runtime.getHostQualityLimits();
+        const hostLimits: HostQualityLimits = {
+          maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+          maxWidth: runtimeLimits.maxWidth,
+          maxHeight: runtimeLimits.maxHeight,
+          maxFps: runtimeLimits.maxFps,
+          allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+        };
+        const resolved = this.senderController.computeEffectiveQuality(
+          groupSettings, hostLimits, request, sourceDimensions,
+        );
+        effective = resolved.effective;
+        revision = request.revision;
+      }
+    }
+
+    // Delegate to controller for the single setParameters write.
+    // The controller handles active=true, media mode, and quality in one operation.
+    const result = await this.senderController.applyResume(bId, {
+      paused: false,
+      videoEnabled: true,
+      effective,
+      revision,
+    }, sourceDimensions);
+
+    if (result.status !== "applied") {
+      return result.status === "apply-failed"
+        ? { status: "apply-failed" as const, error: result.error ?? "unknown error" }
+        : { status: result.status === "binding-not-found" ? ("mapping-missing" as const) : ("sender-not-ready" as const) };
+    }
+
+    // Clear paused state
+    const key = ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId);
+    // viewerPausedSenderStates removed in Phase 6C — controller is authoritative
+
+    // Send quality feedback
+    const conn = this.runtime.getConnectionManager().getConnection(mapping.groupId);
+    const peerUuid = conn?.peerForDevice(viewerDeviceId);
+    if (conn && peerUuid && result.configured) {
+      void conn.sendToPeer(peerUuid, {
+        type: "quality.effective",
+        streamSessionId: mapping.logicalStreamId,
+        videoBitrateKbps: result.configured.maxBitrate ? Math.round(result.configured.maxBitrate / 1000) : undefined,
+        maxWidth: undefined,
+        maxHeight: undefined,
+        maxFps: result.configured!.maxFramerate ?? undefined,
+        degradationPreference: result.configured!.degradationPreference ?? undefined,
+        clampReasons: [],
+      }).catch(() => {});
+
+      void conn.sendToPeer(peerUuid, {
+        type: "quality.configured",
+        streamSessionId: mapping.logicalStreamId,
+        videoBitrateKbps: result.configured!.maxBitrate ? Math.round(result.configured!.maxBitrate / 1000) : undefined,
+        maxFramerate: result.configured!.maxFramerate ?? undefined,
+        scaleResolutionDownBy: result.configured!.scaleResolutionDownBy ?? undefined,
+        degradationPreference: result.configured!.degradationPreference ?? undefined,
+      }).catch(() => {});
+    }
+
+    return { status: "applied", configured: result.configured! };
   }
 
   // ─── Viewer media request (audio/video enable) ──────────────────
@@ -1373,46 +1340,64 @@ export class ViewerMediaBinding {
     // Store the mode preference so pause/resume respects it
     this.viewerMediaModes.set(key, { audioEnabled, videoEnabled });
 
-    // ── Audio sender ──────────────────────────────────────────────
-    if (mapping.audioSender) {
-      try {
-        const params = mapping.audioSender.getParameters();
-        if (params.encodings && params.encodings.length > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          const enc = params.encodings[0]!;
-          enc.active = audioEnabled;
-          await mapping.audioSender.setParameters(params);
-        }
-      } catch (err) {
-        console.warn(
-          '[ViewerMediaBinding] Failed to update audio sender for viewer',
-          { viewerDeviceId, mediaSessionId, audioEnabled, error: err },
+    const bId = ViewerMediaBinding.bindingIdFromMapping(mapping);
+
+    // Ensure senders are registered with the controller
+    if (!this.senderController.hasBinding(bId)) {
+      this.senderController.registerSenders(bId, {
+        videoSender: mapping.videoSender,
+        audioSender: mapping.audioSender,
+          pc: mapping.pc,
+      });
+    }
+
+    // Compute effective quality if re-enabling video with a stored viewer request
+    let effective: import("@screenlink/shared").EffectiveQualityResult["effective"] | undefined;
+    let sourceDimensions = { width: 1920, height: 1080 };
+
+    if (videoEnabled) {
+      const qualityCoordinator = this.runtime.getQualityCoordinator();
+      if (qualityCoordinator) {
+        const request = qualityCoordinator.getViewerRequest(
+          mapping.groupId, mapping.logicalStreamId, viewerDeviceId,
         );
+        if (request) {
+          const syncState = this.runtime.getSyncService().getSyncState(mapping.groupId);
+          const q = syncState?.state?.defaultQuality?.value;
+          const groupSettings = q ?? createDefaultGroupQualitySettings();
+          const ssm = this.runtime.getStreamSessionManager();
+          const actualDims = ssm.getActualCaptureDimensions?.() ?? {};
+          sourceDimensions = {
+            width: actualDims.width || groupSettings.video.sendWidth || 1920,
+            height: actualDims.height || groupSettings.video.sendHeight || 1080,
+          };
+          const runtimeLimits = this.runtime.getHostQualityLimits();
+          const hostLimits: HostQualityLimits = {
+            maxVideoBitrateKbps: runtimeLimits.maxVideoBitrateKbps,
+            maxWidth: runtimeLimits.maxWidth,
+            maxHeight: runtimeLimits.maxHeight,
+            maxFps: runtimeLimits.maxFps,
+            allowViewerQualityRequests: runtimeLimits.allowViewerQualityRequests,
+          };
+          const resolved = this.senderController.computeEffectiveQuality(
+            groupSettings, hostLimits, request, sourceDimensions,
+          );
+          effective = resolved.effective;
+        }
       }
     }
 
-    // ── Video sender ──────────────────────────────────────────────
-    if (mapping.videoSender) {
-      if (!videoEnabled) {
-        // Disable: same as pause but without quality restore
-        try {
-          const params = mapping.videoSender.getParameters();
-          if (params.encodings && params.encodings.length > 0) {
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            const enc = params.encodings[0]!;
-            enc.active = false;
-            await mapping.videoSender.setParameters(params);
-          }
-        } catch (err) {
-          console.warn(
-            '[ViewerMediaBinding] Failed to disable video sender for viewer',
-            { viewerDeviceId, mediaSessionId, error: err },
-          );
-        }
-      } else {
-        // Re-enable with quality: use applyResumeWithQuality (same path as resume)
-        await this.applyResumeWithQuality(viewerDeviceId, mediaSessionId, mapping.videoSender, mapping);
-      }
+    // Delegate entirely to the controller for audio/video toggle + quality
+    // Phase 6B: Only ViewerSenderController calls setParameters for viewer paths.
+    const result = await this.senderController.applyMediaMode(
+      bId, audioEnabled, videoEnabled, sourceDimensions, effective,
+    );
+
+    if (result.status !== "applied" && !result.status.startsWith("stale")) {
+      console.warn(
+        '[ViewerMediaBinding] applyMediaMode returned non-applied',
+        { viewerDeviceId, mediaSessionId, audioEnabled, videoEnabled, result },
+      );
     }
   }
 
@@ -1497,27 +1482,13 @@ export class ViewerMediaBinding {
   }
 
   /**
-   * Get viewer mapping by composite key (viewerDeviceId + mediaSessionId).
+   * Get viewer mapping by exact composite key (viewerDeviceId + mediaSessionId).
    * Returns the exact mapping for this device + session combination,
-   * or null if not found.
-   *
-   * When called with a single argument (legacy), returns the first mapping
-   * found for that device ID.
+   * or null if not found. All callers must provide both IDs — no legacy
+   * first-match fallback (Phase 2).
    */
-  getViewerMapping(viewerDeviceId: string): ViewerMapping | null;
-  getViewerMapping(viewerDeviceId: string, mediaSessionId: string): ViewerMapping | null;
-  getViewerMapping(viewerDeviceId: string, mediaSessionId?: string): ViewerMapping | null {
-    if (mediaSessionId) {
-      // Exact composite-key lookup
-      return this.viewerMap.get(ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId)) ?? null;
-    }
-    // Legacy: return first match for this device
-    for (const [, mapping] of this.viewerMap) {
-      if (mapping.viewerDeviceId === viewerDeviceId) {
-        return mapping;
-      }
-    }
-    return null;
+  getViewerMapping(viewerDeviceId: string, mediaSessionId: string): ViewerMapping | null {
+    return this.viewerMap.get(ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId)) ?? null;
   }
 
   /**
@@ -1538,12 +1509,12 @@ export class ViewerMediaBinding {
       return false;
     }
 
-    // Stop per-viewer stats polling
-    this.stopStatsForMapping(mapping);
+    // Unregister senders from the controller
+    this.senderController.unregisterSenders(ViewerMediaBinding.bindingIdFromMapping(mapping));
 
     this.viewerMap.delete(key);
     this.viewerMediaModes.delete(key);
-    this.viewerPausedSenderStates.delete(key);
+    // viewerPausedSenderStates removed in Phase 6C — controller is authoritative
     return true;
   }
 
@@ -1556,10 +1527,10 @@ export class ViewerMediaBinding {
     let removed = 0;
     for (const [key, mapping] of this.viewerMap) {
       if (sessionSet.has(mapping.mediaSessionId)) {
-        this.stopStatsForMapping(mapping);
+        this.senderController.unregisterSenders(ViewerMediaBinding.bindingIdFromMapping(mapping));
         this.viewerMap.delete(key);
         this.viewerMediaModes.delete(key);
-        this.viewerPausedSenderStates.delete(key);
+        // viewerPausedSenderStates removed in Phase 6C — controller is authoritative
         removed++;
       }
     }
@@ -1581,69 +1552,9 @@ export class ViewerMediaBinding {
     return Array.from(devices);
   }
 
-  // ─── Legacy removal (backward compat) ───────────────────────────
-
-  /**
-   * Remove a viewer from the binding map (legacy single-key path).
-   *
-   * When called with only `viewerDeviceId`:
-   * - If the device has exactly one mapping, it is removed (pre-compare behavior).
-   * - If the device has multiple mappings (compare mode), removal is SKIPPED
-   *   to avoid accidentally removing an unrelated compare mapping.
-   *   Callers should use removeViewerMapping() for exact targeting.
-   *
-   * When called with `viewerSessionId`, only the mapping(s) with a matching
-   * session ID are removed.
-   *
-   * Cleanup is restricted to ScreenLink-owned state (mapping entry,
-   * per-viewer stats polling). The peer connection is owned by the
-   * VDO.Ninja SDK and is closed by the SDK itself when the viewer
-   * tears down; closing it here is unsafe because it can leave the
-   * SDK's internal connection map in a broken state.
-   */
-  removeViewer(viewerDeviceId: string, viewerSessionId?: string): boolean {
-    // Find all entries for this device
-    const entries = Array.from(this.viewerMap.entries())
-      .filter(([, m]) => m.viewerDeviceId === viewerDeviceId);
-
-    if (entries.length === 0) return false;
-
-    if (viewerSessionId) {
-      // Remove only entries with matching session ID
-      let removed = false;
-      for (const [key, mapping] of entries) {
-        if (mapping.viewerSessionId === viewerSessionId) {
-          this.stopStatsForMapping(mapping);
-          this.viewerMap.delete(key);
-          this.viewerMediaModes.delete(key);
-          this.viewerPausedSenderStates.delete(key);
-          removed = true;
-        }
-      }
-      return removed;
-    }
-
-    // No session ID provided. Legacy safe fallback:
-    // - Single mapping: remove it (pre-compare behavior)
-    // - Multiple mappings: skip to avoid removing an unrelated compare mapping
-    if (entries.length === 1) {
-      const [key, mapping] = entries[0];
-      this.stopStatsForMapping(mapping);
-      this.viewerMap.delete(key);
-      this.viewerMediaModes.delete(key);
-      this.viewerPausedSenderStates.delete(key);
-      return true;
-    }
-
-    // Multiple mappings with no session ID — do not touch (compare mode active).
-    // The caller should use removeViewerMapping() with the exact mediaSessionId,
-    // or removeMappingsForMediaSessions().
-    console.warn(
-      '[ViewerMediaBinding] removeViewer called without mediaSessionId for device with multiple mappings — skipping',
-      { viewerDeviceId, mappingCount: entries.length },
-    );
-    return false;
-  }
+  // ─── Legacy removal removed in Phase 2.
+  // All callers now use removeViewerMapping() (exact composite key),
+  // removeViewerByPeerUuid(), or removeMappingsForMediaSessions().
 
   /**
    * Remove a viewer by media peer UUID. Used by the host's SDK
@@ -1656,10 +1567,10 @@ export class ViewerMediaBinding {
       if (mapping.mediaPeerUuid === mediaPeerUuid) {
         const presence = this.getViewerPresence(mapping.viewerDeviceId, mapping.mediaSessionId);
         if (!presence) {
-          this.stopStatsForMapping(mapping);
+          this.senderController.unregisterSenders(ViewerMediaBinding.bindingIdFromMapping(mapping));
           this.viewerMap.delete(key);
           this.viewerMediaModes.delete(key);
-          this.viewerPausedSenderStates.delete(key);
+          // viewerPausedSenderStates removed in Phase 6C — controller is authoritative
           return true;
         }
 
@@ -1668,10 +1579,10 @@ export class ViewerMediaBinding {
           immediate,
         });
         if (immediate) {
-          this.stopStatsForMapping(mapping);
+          this.senderController.unregisterSenders(ViewerMediaBinding.bindingIdFromMapping(mapping));
           this.viewerMap.delete(key);
           this.viewerMediaModes.delete(key);
-          this.viewerPausedSenderStates.delete(key);
+          // viewerPausedSenderStates removed in Phase 6C — controller is authoritative
         }
         return departed;
       }
@@ -1727,8 +1638,11 @@ export class ViewerMediaBinding {
     this.tokens.clear();
     this.viewerMap.clear();
     this.viewerMediaModes.clear();
-    this.viewerPausedSenderStates.clear();
     this.processedRequests.clear();
+    if (this._fallbackSenderController) {
+      this._fallbackSenderController.destroy();
+      this._fallbackSenderController = null;
+    }
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
@@ -1761,33 +1675,13 @@ export class ViewerMediaBinding {
   }
 
   /**
-   * Stop per-viewer stats polling for a given mapping.
-   * Safe to call multiple times — idempotent.
-   */
-  private stopStatsForMapping(mapping: ViewerMapping): void {
-    try {
-      const statsService = this.runtime.getMediaStatsService();
-      if (statsService) {
-        statsService.disconnectViewer(
-          mapping.groupId,
-          mapping.logicalStreamId,
-          mapping.viewerDeviceId,
-          mapping.mediaPeerUuid,
-        );
-      }
-    } catch {
-      // Stats cleanup is best-effort
-    }
-  }
-
-  /**
    * Build a minimal StreamAnnouncement from StreamSessionManager's public state.
    * Used for self-healing when the registry entry is missing.
    */
   private buildSsmAnnouncement(
     ssm: import("./stream-session-manager.js").StreamSessionManager,
     hostDeviceId: string,
-  ): import("./active-stream-registry.js").StreamAnnouncement {
+  ): import("@screenlink/shared").StreamAnnouncement {
     return {
       logicalStreamId: ssm.currentLogicalStreamId ?? "",
       mediaSessionId: ssm.currentMediaSessionId ?? "",
@@ -1935,7 +1829,6 @@ export class ViewerMediaBinding {
       this.presenceMap.delete(key);
       const mapping = this.viewerMap.get(key);
       if (mapping) {
-        this.stopStatsForMapping(mapping);
         this.viewerMap.delete(key);
       }
       return true;
@@ -1957,7 +1850,6 @@ export class ViewerMediaBinding {
       this.presenceMap.delete(key);
       const mapping = this.viewerMap.get(key);
       if (mapping) {
-        this.stopStatsForMapping(mapping);
         this.viewerMap.delete(key);
       }
       return true;
@@ -1971,7 +1863,6 @@ export class ViewerMediaBinding {
       this.presenceMap.delete(key);
       const mapping = this.viewerMap.get(key);
       if (mapping) {
-        this.stopStatsForMapping(mapping);
         this.viewerMap.delete(key);
       }
       return true;
@@ -1993,7 +1884,6 @@ export class ViewerMediaBinding {
       }
       const mapping = this.viewerMap.get(key);
       if (mapping) {
-        this.stopStatsForMapping(mapping);
         this.viewerMap.delete(key);
       }
       this.presenceMap.delete(key);

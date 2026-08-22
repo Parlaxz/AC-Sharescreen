@@ -103,6 +103,7 @@ const EMPTY_SNAPSHOT: BandwidthSnapshot = Object.freeze({
     activeDurationMs: 0,
     configuredBitsPerSecond: null,
     effectiveBitsPerSecond: null,
+    cumulativeInboundVideoBytes: 0,
     currentVideoBitsPerSecond: null,
     currentAudioBitsPerSecond: null,
     currentTransportBitsPerSecond: null,

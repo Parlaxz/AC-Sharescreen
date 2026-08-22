@@ -252,15 +252,6 @@ const controllerPath = path.resolve(
   'ProcessAudioController.ts',
 );
 
-const dashboardPath = path.resolve(
-  __dirname,
-  '..',
-  'src',
-  'renderer',
-  'routes',
-  'Dashboard.tsx',
-);
-
 describe('ProcessAudioController — pcm:reset uses streamGeneration', () => {
   const content = fs.readFileSync(controllerPath, 'utf-8');
   const resetCaseStart = content.indexOf("case 'pcm:reset'");
@@ -281,22 +272,4 @@ describe('ProcessAudioController — pcm:reset uses streamGeneration', () => {
   });
 });
 
-describe('Dashboard share button regression', () => {
-  const content = fs.readFileSync(dashboardPath, 'utf-8');
 
-  it('does not permanently block Share Screen while localShareState is selecting-source', () => {
-    expect(content).not.toContain("localShareState === 'selecting-source'");
-  });
-
-  it('resets localShareState before navigating to source-picker when no source is selected', () => {
-    const handleStart = content.indexOf('const handleStartStream = useCallback(async () => {');
-    const handleBlock = content.slice(handleStart, handleStart + 900);
-    expect(handleBlock).toContain('if (!sourceId || !selectedGroupId)');
-    expect(handleBlock).toContain('setLocalShareState("starting")');
-  });
-
-  it('shows derived audio mode as text (no radio buttons in Phase 3)', () => {
-    expect(content).toContain('import { getRuntime }');
-    expect(content).not.toContain('<input type="radio" name="audioMode"');
-  });
-});

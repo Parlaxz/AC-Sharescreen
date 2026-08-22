@@ -1,7 +1,7 @@
 {
 	"name": "screenlink",
 	"private": true,
-	"version": "0.7.2",
+	"version": "0.8.0",
 	"description": "ScreenLink - Private screen sharing with permanent links",
 	"scripts": {
 		"build": "pnpm build:shared && pnpm build:vdo-adapter && node scripts/check-version-consistency.mjs && pnpm build:desktop",
@@ -30,6 +30,7 @@
 		"frame-ring:clean": "powershell -NoProfile -Command \"if (Test-Path 'native/video-frame-ring/build') { Remove-Item -Recurse -Force 'native/video-frame-ring/build' }\"",
 		"frame-ring:check": "pnpm frame-ring:build && echo frame-ring built successfully",
 		"test": "pnpm --filter @screenlink/shared test",
+		"test:all": "pnpm -r test",
 		"test:run": "pnpm test",
 		"typecheck": "pnpm -r typecheck",
 		"clean": "pnpm -r clean",

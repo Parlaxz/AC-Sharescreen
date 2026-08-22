@@ -182,27 +182,22 @@ describe("Fix 3: Settings validation/clamping", () => {
 // ─── Fix 4: Bounded TTL dedup in notification-watcher ─────────────────────
 
 describe("Fix 4: Bounded TTL dedup", () => {
-  it("DedupSet has bounded size with TTL expiry", async () => {
+  it("stream-start toast dedup is bounded TTL-based", async () => {
     const mod = await import("../src/renderer/services/notification-watcher.js");
-    // The DedupSet class is not exported, but the startNotificationWatcher and
-    // notifyStreamStarted functions use bounded TTL dedup internally.
-    // Verify the source includes bounded dedup patterns.
+    // Visible-toast deduplication is owned by the main-process StreamToastManager;
+    // the watcher keeps heartbeat filtering via mediaSessionId comparison.
     const fs = await import("fs");
     const path = await import("path");
     const { fileURLToPath } = await import("url");
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const source = fs.readFileSync(
-      path.resolve(__dirname, "..", "src", "renderer", "services", "notification-watcher.ts"),
+    const managerSource = fs.readFileSync(
+      path.resolve(__dirname, "..", "src", "main", "stream-toast-manager.ts"),
       "utf-8",
     );
 
     // Must have TTL-based dedup (not unbounded Set)
-    expect(source.includes("DEDUP_TTL_MS")).toBe(true);
-    expect(source.includes("DEDUP_MAX_ENTRIES")).toBe(true);
-    expect(source.includes("prune")).toBe(true);
-
-    // Must NOT use Set directly (the old unbounded pattern)
-    // The DedupSet class wraps a Map, not a Set
+    expect(managerSource.includes("TOAST_DEDUPE_MS")).toBe(true);
+    expect(managerSource.includes("pruneDedupe")).toBe(true);
     expect(typeof mod.startNotificationWatcher).toBe("function");
     expect(typeof mod.notifyStreamStarted).toBe("function");
   });

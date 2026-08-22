@@ -496,4 +496,179 @@ describe("GroupControlConnection — transport result changes", () => {
     // Peer should NOT be mapped due to identity mismatch
     expect((conn as any).deviceToPeer.has("bob")).toBe(false);
   });
+
+  // ── dataChannelClose handler ─────────────────────────────────────
+
+  it("dataChannelClose removes a mapped peer and emits onPeerOffline", async () => {
+    const onPeerOffline = vi.fn();
+    const conn = new GroupControlConnection({
+      groupId: GROUP_ID,
+      controlRoomId: CONTROL_ROOM,
+      groupSecret: GROUP_SECRET,
+      nodeId: "alice",
+      displayName: "Alice",
+      memberRecord: null,
+      onPeerOnline: vi.fn(),
+      onPeerOffline,
+      onMessage: vi.fn(),
+      onStateChange: vi.fn(),
+      onError: vi.fn(),
+    });
+    await conn.start();
+    await tick();
+    const sdk = createdSdks[createdSdks.length - 1]!;
+
+    // Set up a mapped peer with both raw channel and authenticated mapping
+    (conn as any).rawDataPeers.add("peer-bob");
+    (conn as any).peersAwaitingHello.add("peer-bob");
+    (conn as any).peerToDevice.set("peer-bob", "bob");
+    (conn as any).deviceToPeer.set("bob", "peer-bob");
+
+    // Fire dataChannelClose
+    sdk.handlers.get("dataChannelClose")?.[0]({ detail: { uuid: "peer-bob" } });
+
+    // rawDataPeers and peersAwaitingHello cleaned up
+    expect((conn as any).rawDataPeers.has("peer-bob")).toBe(false);
+    expect((conn as any).peersAwaitingHello.has("peer-bob")).toBe(false);
+    // Peer-to-device maps cleaned up
+    expect((conn as any).peerToDevice.has("peer-bob")).toBe(false);
+    expect((conn as any).deviceToPeer.has("bob")).toBe(false);
+    // onPeerOffline called exactly once with the device ID
+    expect(onPeerOffline).toHaveBeenCalledTimes(1);
+    expect(onPeerOffline).toHaveBeenCalledWith("bob");
+  });
+
+  it("dataChannelClose with malformed event fires onError", async () => {
+    const onError = vi.fn();
+    const conn = new GroupControlConnection({
+      groupId: GROUP_ID,
+      controlRoomId: CONTROL_ROOM,
+      groupSecret: GROUP_SECRET,
+      nodeId: "alice",
+      displayName: "Alice",
+      memberRecord: null,
+      onPeerOnline: vi.fn(),
+      onPeerOffline: vi.fn(),
+      onMessage: vi.fn(),
+      onStateChange: vi.fn(),
+      onError,
+    });
+    await conn.start();
+    await tick();
+    const sdk = createdSdks[createdSdks.length - 1]!;
+
+    // Fire with empty detail object (no uuid) — malformed event surfaces onError
+    sdk.handlers.get("dataChannelClose")?.[0]({ detail: {} });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toBe("dataChannelClose: SDK emitted event without a usable UUID");
+
+    // Fire with no detail at all — still malformed
+    sdk.handlers.get("dataChannelClose")?.[0]({});
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError.mock.calls[1][0].message).toBe("dataChannelClose: SDK emitted event without a usable UUID");
+  });
+
+  // ── signaling disconnect / reconnect ─────────────────────────────
+
+  it("disconnected sets reconnecting state but preserves peer routing and does not emit offline", async () => {
+    const onPeerOffline = vi.fn();
+    const onStateChange = vi.fn();
+    const conn = new GroupControlConnection({
+      groupId: GROUP_ID,
+      controlRoomId: CONTROL_ROOM,
+      groupSecret: GROUP_SECRET,
+      nodeId: "alice",
+      displayName: "Alice",
+      memberRecord: null,
+      onPeerOnline: vi.fn(),
+      onPeerOffline,
+      onMessage: vi.fn(),
+      onStateChange,
+      onError: vi.fn(),
+    });
+    await conn.start();
+    await tick();
+    const sdk = createdSdks[createdSdks.length - 1]!;
+
+    // Set up a mapped peer with both raw channel and authenticated mapping
+    (conn as any).rawDataPeers.add("peer-bob");
+    (conn as any).peerToDevice.set("peer-bob", "bob");
+    (conn as any).deviceToPeer.set("bob", "peer-bob");
+
+    onStateChange.mockClear();
+    onPeerOffline.mockClear();
+
+    // Fire signaling disconnected
+    sdk.handlers.get("disconnected")?.[0]({});
+
+    // State changed to reconnecting
+    expect(conn.state).toBe("reconnecting");
+    expect(onStateChange).toHaveBeenCalledWith("reconnecting");
+
+    // Peer routing and mapping are preserved
+    expect((conn as any).rawDataPeers.has("peer-bob")).toBe(true);
+    expect((conn as any).peerToDevice.has("peer-bob")).toBe(true);
+    expect((conn as any).deviceToPeer.has("bob")).toBe(true);
+
+    // onPeerOffline was NOT called
+    expect(onPeerOffline).not.toHaveBeenCalled();
+  });
+
+  it("reconnected retries hello for unmapped raw peer and requests state for mapped peer", async () => {
+    const conn = new GroupControlConnection({
+      groupId: GROUP_ID,
+      controlRoomId: CONTROL_ROOM,
+      groupSecret: GROUP_SECRET,
+      nodeId: "alice",
+      displayName: "Alice",
+      memberRecord: null,
+      onPeerOnline: vi.fn(),
+      onPeerOffline: vi.fn(),
+      onMessage: vi.fn(),
+      onStateChange: vi.fn(),
+      onError: vi.fn(),
+    });
+    await conn.start();
+    await tick();
+    const sdk = createdSdks[createdSdks.length - 1]!;
+    sdk.sendData.mockClear();
+
+    // Set up two raw peers:
+    //   - peer-bob: has data channel but no authenticated mapping (needs hello retry)
+    //   - peer-charlie: has data channel AND authenticated mapping (needs state request)
+    (conn as any).rawDataPeers.add("peer-bob");
+    (conn as any).peersAwaitingHello.add("peer-bob");
+    (conn as any).rawDataPeers.add("peer-charlie");
+    (conn as any).peerToDevice.set("peer-charlie", "charlie");
+    (conn as any).deviceToPeer.set("charlie", "peer-charlie");
+
+    // Fire reconnected
+    sdk.handlers.get("reconnected")?.[0]({});
+
+    // State should be connected
+    expect(conn.state).toBe("connected");
+
+    // peer-bob should remain in peersAwaitingHello
+    expect((conn as any).peersAwaitingHello.has("peer-bob")).toBe(true);
+
+    // Wait for the async hello to peer-bob to land in sendData
+    const helloWasSent = await waitFor(() =>
+      sdk.sendData.mock.calls.some((c) => {
+        const payload = c[0] as Record<string, unknown>;
+        return payload?.type === "group.hello" && (c[1] as Record<string, unknown>)?.uuid === "peer-bob";
+      }),
+      300,
+    );
+    expect(helloWasSent).toBe(true);
+
+    // Wait for the state request to peer-charlie
+    const stateRequestSent = await waitFor(() =>
+      sdk.sendData.mock.calls.some((c) => {
+        const payload = c[0] as Record<string, unknown>;
+        return payload?.type === "group.state.request" && (c[1] as Record<string, unknown>)?.uuid === "peer-charlie";
+      }),
+      300,
+    );
+    expect(stateRequestSent).toBe(true);
+  });
 });

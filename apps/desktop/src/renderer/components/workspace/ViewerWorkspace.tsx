@@ -7,25 +7,15 @@ import {
   useSyncExternalStore,
 } from "react";
 import {
-  Monitor,
   ArrowLeft,
   Maximize,
   RefreshCw,
-  AlertTriangle,
-  WifiOff,
   Info,
   Play,
 } from "lucide-react";
 import { motion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Progress } from "@/components/ui/progress";
-import {
-  Alert,
-  AlertTitle,
-  AlertDescription,
-} from "@/components/ui/alert";
 import {
   Tooltip,
   TooltipTrigger,
@@ -33,7 +23,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/stores/main-store";
-import type { StreamAnnouncement } from "@/stores/main-store";
+import type { StreamAnnouncement, StreamInfoCardConfig } from "@screenlink/shared";
 import { VideoControls, type ShortcutBinding } from "./viewer/VideoControls.js";
 import type { FramePerformanceSample } from "./viewer/FramePerformanceGraph.js";
 import { StreamMetricsService } from "@/services/stream-metrics-service";
@@ -41,6 +31,7 @@ import type { BandwidthSnapshot } from "@/services/bandwidth-telemetry-types";
 import { ViewerFrameTiming, type FrameTimingSample } from "@/services/viewer-frame-timing";
 import { ViewerPanelShell } from "./viewer/ViewerPanelShell.js";
 import type { ActivePanel } from "./viewer/ViewerPanelShell.js";
+import { ViewerStatusOverlay, fadeSpring, fadeInstant } from "./viewer/ViewerStatusOverlay.js";
 import { ViewerSettingsPanel, type ViewerRequestState, type MediaMode } from "./viewer/ViewerSettingsPanel.js";
 import { loadSettings } from "@/services/settings-actions";
 import { saveSettings } from "@/services/settings-actions";
@@ -51,12 +42,14 @@ import {
   getViewerQualityDispatchError,
   resolveViewerQualityFeedbackStreamId,
 } from "./viewer/viewer-quality-helpers.js";
-import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "@/services/viewer-session.js";
 import { getRuntime } from "@/services/phase3-runtime.js";
 import { uiSoundService } from "@/services/ui-sound-service.js";
 import { initializeAppRuntime } from "@/services/initialize-app-runtime.js";
-import type { ScreenLinkAPI, PersistedSettings } from "../../../preload/api-types.js";
+import type { PersistedSettings } from "@screenlink/shared";
+import type { ScreenLinkAPI } from "../../../preload/api-types.js";
 import { navigateToGroupOverview } from "@/services/group-navigation";
+import type { ViewerSession, ViewerSessionState, ViewerPauseState } from "@/services/viewer-session.js";
+import { useViewerSession } from "@/hooks/use-viewer-session";
 import { EnhancedVideoSurface } from "@/components/workspace/viewer/EnhancedVideoSurface";
 import { CompareViewerSurface, type CompareDisplayMode } from "@/components/workspace/CompareViewerSurface";
 import type { ProcessorState, ProcessorStats } from "@/services/viewer-image-processing/viewer-image-processor";
@@ -78,18 +71,9 @@ import {
 import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
 import { getNvidiaCapabilitySnapshot } from "@/services/nvidia-capability-store";
 
-// ─── Module-level viewer lifecycle serialization ────────────────────────
-// Survives component remounts so create/start/destroy operations for the
-// viewer session cannot overlap across remounts or quick retries.
-let viewerLifecycle: Promise<void> = Promise.resolve();
-
-function queueViewerLifecycle(
-  operation: () => Promise<void>,
-): Promise<void> {
-  const run = viewerLifecycle.then(operation, operation);
-  viewerLifecycle = run.catch(() => {});
-  return run;
-}
+// ─── Viewer lifecycle is now owned by ViewerSessionController (Phase 4) ──
+// The module-level lifecycle queue has been removed.
+// Use useViewerSession() hook instead.
 
 type NativeBenchmarkStatusShape = {
   benchmarkActive: boolean;
@@ -243,19 +227,6 @@ interface ViewerWorkspaceProps {
   className?: string;
 }
 
-// ─── Transitions ──────────────────────────────────────────────────────────
-
-const fadeSpring = {
-  type: "spring" as const,
-  stiffness: 300,
-  damping: 26,
-};
-
-const fadeInstant = {
-  duration: 0.15,
-  ease: "easeInOut" as const,
-};
-
 // ─── Map ViewerSession state to viewStatus string ────────────────────────
 
 function sessionStateToViewStatus(state: ViewerSessionState): string {
@@ -303,6 +274,16 @@ function sessionStateToViewStatus(state: ViewerSessionState): string {
 export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const reduced = usePrefersReducedMotion();
 
+  // ─── Viewer session controller (Phase 4) ─────────────────────────
+  const {
+    snapshot: vsSnapshot,
+    controller,
+    start: controllerStart,
+    recover: controllerRecover,
+    stop: controllerStop,
+    refreshTarget: controllerRefreshTarget,
+  } = useViewerSession();
+
   // ─── Store ───────────────────────────────────────────────────────
   const isViewing = useStore((s) => s.isViewing);
   const setIsViewing = useStore((s) => s.setIsViewing);
@@ -312,7 +293,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const groupsById = useStore((s) => s.groupsById);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
-  const watchedStreamsBySessionId = useStore((s) => s.watchedStreamsBySessionId);
   const watchingTarget = useStore((s) => s.watchingTarget);
   // Use explicit watching target — no first-entry heuristics
   const currentTarget = watchingTarget;
@@ -356,8 +336,19 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
-  const [sessionState, setSessionState] = useState<ViewerSessionState>("idle");
-  const [viewerError, setViewerError] = useState<string | null>(null);
+  // Phase 4: lifecycle phase/error derived from controller snapshot
+  const sessionPhase = vsSnapshot.phase;
+  const viewerError = vsSnapshot.error;
+
+  // For backward compatibility with the rest of the component
+  const sessionState = sessionPhase === "connecting" ? "connecting"
+    : sessionPhase === "watching" ? "watching"
+    : sessionPhase === "paused" ? "paused"
+    : sessionPhase === "reconnecting" ? "reconnecting"
+    : sessionPhase === "ended" ? "ended"
+    : sessionPhase === "error" ? "error"
+    : "idle";
+  // viewerError is now derived — no local setter needed
   const [qualityRequestPending, setQualityRequestPending] = useState(false);
   const [qualityFeedback, setQualityFeedback] = useState<string | null>(null);
   const [lastQualityAccepted, setLastQualityAccepted] = useState<boolean | undefined>(undefined);
@@ -367,8 +358,8 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const [viewerHistoryId, setViewerHistoryId] = useState<string | null>(null);
   const viewerHistoryIdRef = useRef<string | null>(null);
 
-  // ── Pause state ─────────────────────────────────────────────────────
-  const [streamPauseState, setStreamPauseState] = useState<ViewerPauseState>("playing");
+  // ── Pause state (from controller snapshot, Phase 4) ────────────────
+  const streamPauseState = vsSnapshot.pause;
   const [streamPausePoster, setStreamPausePoster] = useState<string | null>(null);
   const streamPauseTransitioning = streamPauseState === "pausing" || streamPauseState === "resuming";
 
@@ -416,13 +407,14 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ── Stream info card overlay state ──
   const [showStreamInfoCard, setShowStreamInfoCard] = useState(false);
-  const [streamInfoCardConfig, setStreamInfoCardConfig] = useState({
+  const [streamInfoCardConfig, setStreamInfoCardConfig] = useState<StreamInfoCardConfig>({
     visible: false,
     showResolution: true,
     showFps: true,
     showBitrate: true,
     showDroppedFrames: true,
     showNetworkUsage: true,
+    position: "top-right",
     fontSize: 12,
     textColor: "#ffffff",
     boxOpacity: 60,
@@ -430,6 +422,9 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   });
 
   const [maxVolumePercent, setMaxVolumePercent] = useState(200);
+
+  // ── Compare controls visibility (Phase 9, default off) ──
+  const [showCompareControls, setShowCompareControls] = useState(false);
 
   // ── Settings loader (shared between mount and page-change) ──────────────
   const applySettings = useCallback((settings: PersistedSettings) => {
@@ -441,6 +436,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
     setSyncScreenLinkDeafen(settings.discordDeafenScreenLink ?? true);
     setMaxVolumePercent(settings.viewerMaxVolumePercent ?? 200);
+    setShowCompareControls(settings.showCompareControls ?? false);
     if (settings.streamInfoCard) {
       setShowStreamInfoCard(settings.streamInfoCard.visible ?? false);
       setStreamInfoCardConfig(settings.streamInfoCard);
@@ -601,7 +597,6 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
   // ViewerSession instance ref — stable across renders
   const sessionRef = useRef<ViewerSession | null>(null);
-  const startAttemptRef = useRef(0);
 
   // ── Stream diagnostics hook (polls every 2s) ──
   const { snapshot: diagSnapshot, droppedFramesInLast5s } = useStreamDiagnostics(sessionRef.current, {
@@ -764,6 +759,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // Audio boost via Web Audio API GainNode (allows volume > 1.0)
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const lastBoostStreamRef = useRef<MediaStream | null>(null);
 
   // Auto-hide controls — stay visible while any popover panel is open
   // Track panel open state as a synthetic "always show" signal
@@ -796,34 +792,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // ── Callbacks ────────────────────────────────────────────────────
 
   const handleExit = useCallback(async () => {
-    // ── Critical ordering: destroy() MUST complete before any new
-    //    Watch attempt can begin ─────────────────────────────────
-    //
-    //    If destroy() is fire-and-forget, the old session's async
-    //    teardown (ViewerClient.shutdown → sdk.stopViewing →
-    //    sdk.disconnect) can still be in-flight when React state
-    //    transitions allow a rejoin.  Once the old teardown reaches
-    //    the video-element cleanup step it calls
-    //    videoElement.pause(); videoElement.srcObject = null;
-    //    on the shared DOM element, which blanks the new session's
-    //    stream, producing a persistent black screen.
-    //
-    //    Capturing sessionRef.current before the null-assignment
-    //    ensures we hold a reference to the exact session we mean
-    //    to destroy, even if the ref is cleared concurrently.
-    startAttemptRef.current++;
-    const session = sessionRef.current;
-    if (sessionRef.current === session) {
-      sessionRef.current = null;
-    }
+    // Phase 4: controller.stop() serializes teardown.
+    await controllerStop();
 
-    if (session) {
-      await queueViewerLifecycle(() => session.destroy());
-    }
-
-    // 2) Clear visual stale state that destroy() does not own
-    //    (React component state managed via useState).
-    // Cancel any running benchmark
+    // Clear visual stale state (React component state).
     if (nvidiaBenchmarkService.running) {
       nvidiaBenchmarkService.cancel();
     }
@@ -831,22 +803,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     setEnhancementActive(false);
     setEnhancementFallback(false);
     setEnhancementStats(null);
-    setStreamPauseState("playing");
     setStreamPausePoster(null);
-    setSessionState("idle");
-    setViewerError(null);
     setCurrentStreamId(null);
     setCurrentBandwidthBps(0);
     setTotalBytesReceived(0);
-
-    // Finalize viewer session if active
-    if (viewerHistoryIdRef.current) {
-      const id = viewerHistoryIdRef.current;
-      viewerHistoryIdRef.current = null;
-      setViewerHistoryId(null);
-      StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
-    }
     setDiagnosticsSnapshot(null);
+    setQualityFeedback(null);
+    setLastQualityAccepted(undefined);
+    setLastRequestedQuality(null);
+    setEffectiveBitrateKbps(null);
+    setConfiguredBitrateBps(null);
     resetFramePerformance();
 
     // 3) Clear watching target and store viewing state
@@ -913,158 +879,60 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   }, []);
 
   /**
-   * Create and start a new ViewerSession when the existing session ref is
-   * null (e.g. after the previous session was destroyed and the user
-   * retries).  Extracted from the useEffect so it can be called both from
-   * the isViewing effect and from the retry handler.
+   * Start a viewer session via the controller (Phase 4).
+   * Replaces the old startViewerSession that managed ViewerSession directly.
+   * Controller owns lifecycle serialization, snapshot, and stream-end detection.
    */
-  const startViewerSession = useCallback(async (
-    claimOwnedSession: (session: ViewerSession) => void,
-    shouldAbort: () => boolean = () => false,
-  ): Promise<void> => {
-    const attempt = ++startAttemptRef.current;
-
-    // Reset viewer readiness for the new watch attempt
-    viewerReadyRef.current = false;
-    effectivePresentationRef.current = "native-video";
-
-    // Reset enhancement active state for the new session so the raw video
-    // is not hidden before the new enhanced path produces its first frame.
-    setEnhancementActive(false);
-    setStreamPauseState("playing");
-    setStreamPausePoster(null);
-    setViewerError(null);
-    setSessionState("connecting");
-    setViewStatus("connecting");
-
+  const startViewerSession = useCallback(async (): Promise<void> => {
     await ensureAppRuntimeInitialized();
 
-    await queueViewerLifecycle(async () => {
-      if (shouldAbort() || attempt !== startAttemptRef.current || sessionRef.current || !useStore.getState().isViewing) {
-        return;
-      }
+    const target = watchingTarget;
+    if (!target) {
+      return;
+    }
 
-      const { selectedGroupId: gId, watchedInfo: wInfo, currentStream: cStream, sharerName: sName } = targetRef.current;
+    // Use the watchingTarget as StreamTarget
+    const streamTarget = {
+      groupId: target.groupId,
+      logicalStreamId: target.logicalStreamId,
+      mediaSessionId: target.mediaSessionId,
+      hostDeviceId: target.hostDeviceId,
+      hostName: target.hostName,
+      startedAt: target.startedAt,
+      sourceName: target.sourceName,
+      sourceKind: target.sourceKind,
+    };
 
-      const targetSessionId = wInfo?.sessionId ?? cStream?.mediaSessionId;
-      const targetHostDeviceId = wInfo?.hostDeviceId ?? cStream?.hostDeviceId;
-      const targetLogicalStreamId = cStream?.logicalStreamId ?? wInfo?.logicalStreamId;
+    // Reset enhancement and poster state
+    setEnhancementActive(false);
+    setStreamPausePoster(null);
 
-      if (!gId || !targetHostDeviceId || !targetLogicalStreamId || !targetSessionId) {
-        if (attempt !== startAttemptRef.current || shouldAbort()) return;
-        setViewerError("missing stream target");
-        setSessionState("error");
-        setViewStatus("error");
-        return;
-      }
-
-      const session = new ViewerSession();
-
-      if (shouldAbort() || attempt !== startAttemptRef.current || !useStore.getState().isViewing) {
-        await session.destroy().catch(() => {});
-        return;
-      }
-
-      claimOwnedSession(session);
-      sessionRef.current = session;
-
-      session.onStateChange = (state: ViewerSessionState) => {
-        if (sessionRef.current !== session) return;
-        setSessionState(state);
-        if (state !== "error") {
-          setViewerError(null);
-        }
-        const status = sessionStateToViewStatus(state);
-        setViewStatus(status);
-      };
-
-      session.onPauseStateChange = (pauseState: ViewerPauseState) => {
-        if (sessionRef.current !== session) return;
-        setStreamPauseState(pauseState);
-      };
-      session.onPosterFrameChange = (poster: string | null) => {
-        if (sessionRef.current !== session) return;
-        if (enhancementSettingsRef.current?.enabled && !enhancementFallbackRef.current) {
-          const canvas = document.querySelector('[data-enhanced-canvas]') as HTMLCanvasElement | null;
-          if (canvas && canvas.width > 0 && canvas.height > 0) {
-            try {
-              const enhancedPoster = canvas.toDataURL("image/jpeg", 0.85);
-              setStreamPausePoster(enhancedPoster);
-              return;
-            } catch {
-              // Fall through to use video element poster
-            }
-          }
-        }
-        setStreamPausePoster(poster);
-      };
-
-      session.onError = (error: string) => {
-        if (sessionRef.current !== session) return;
-        setViewerError(error);
-      };
-
-      await session.start({
-        groupId: gId,
-        hostDeviceId: targetHostDeviceId,
-        logicalStreamId: targetLogicalStreamId,
-        mediaSessionId: targetSessionId,
-        hostName: sName,
-        videoElement: videoRef.current,
-      }).catch((err: unknown) => {
-        if (sessionRef.current !== session) return;
-        setViewerError(err instanceof Error ? err.message : String(err));
-        setSessionState("error");
-        setViewStatus("error");
-      });
-    });
-  }, [ensureAppRuntimeInitialized, setViewStatus]);
+    // Start via controller — snapshot subscriptions will propagate state
+    await controllerStart(streamTarget, videoRef.current);
+  }, [ensureAppRuntimeInitialized, watchingTarget, controllerStart]);
 
   const handleRetry = useCallback(async () => {
     if (viewerHistoryIdRef.current) {
       StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "reconnecting");
     }
-    setViewerError(null);
-    setSessionState("connecting");
-    setViewStatus("connecting");
 
-    if (sessionRef.current) {
-      await ensureAppRuntimeInitialized();
-      void sessionRef.current.retry();
-    } else {
-      await startViewerSession(() => {});
+    await ensureAppRuntimeInitialized();
+
+    try {
+      await controllerRecover();
+    } catch (err) {
+      // Error is reflected in the controller snapshot
     }
-  }, [setViewStatus, ensureAppRuntimeInitialized, startViewerSession]);
+  }, [ensureAppRuntimeInitialized, controllerRecover]);
 
   // ── Pause/resume callbacks (media op first, marker via setSessionState) ──
   const handlePauseStream = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session || session.pauseState !== "playing") return;
-    try {
-      await session.pause();
-      if (viewerHistoryIdRef.current) {
-        StreamMetricsService.getInstance().setSessionState(viewerHistoryIdRef.current, "paused");
-      }
-    } catch (err) {
-      console.error("[ViewerWorkspace] pause failed:", err);
-    }
-  }, []);
+    await controller.pause().catch(() => {});
+  }, [controller]);
 
   const handleResumeStream = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session || session.pauseState !== "paused") return;
-    try {
-      await session.resume();
-      if (viewerHistoryIdRef.current) {
-        const svc = StreamMetricsService.getInstance();
-        svc.setSessionState(viewerHistoryIdRef.current, "playing");
-        // The peer connection stayed alive through pause — no need to
-        // replace it or re-register. The same connection is reused.
-      }
-    } catch (err) {
-      console.error("[ViewerWorkspace] resume failed:", err);
-    }
-  }, []);
+    await controller.resume().catch(() => {});
+  }, [controller]);
 
   const handleToggleStreamPause = useCallback(() => {
     if (streamPauseState === "paused") {
@@ -1527,10 +1395,19 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
    */
   const ensureAudioBoost = useCallback(async (targetVolume?: number): Promise<boolean> => {
     if (gainNodeRef.current) {
-      // Already initialised — resume if suspended
-      if ((audioCtxRef.current?.state as AudioContextState) !== "suspended") return true;
-      try { await audioCtxRef.current?.resume(); } catch {}
-      return (audioCtxRef.current?.state as AudioContextState) !== "suspended";
+      const video = videoRef.current;
+      const currentStream = video?.srcObject;
+      if (currentStream !== lastBoostStreamRef.current) {
+        audioCtxRef.current?.close().catch(() => {});
+        audioCtxRef.current = null;
+        gainNodeRef.current = null;
+        lastBoostStreamRef.current = null;
+        if (video) video.muted = isMutedRef.current;
+      } else {
+        if ((audioCtxRef.current?.state as AudioContextState) !== "suspended") return true;
+        try { await audioCtxRef.current?.resume(); } catch {}
+        return (audioCtxRef.current?.state as AudioContextState) !== "suspended";
+      }
     }
 
     const video = videoRef.current;
@@ -1559,6 +1436,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
       audioCtxRef.current = ctx;
       gainNodeRef.current = gain;
+      lastBoostStreamRef.current = stream;
 
       // Silence the native video element output.
       // createMediaStreamSource reads the raw MediaStream, not the element's
@@ -1578,6 +1456,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       // Still suspended — roll back to native path.
       audioCtxRef.current = null;
       gainNodeRef.current = null;
+      lastBoostStreamRef.current = null;
       ctx.close().catch(() => {});
       // Restore native mute state (will be re-applied by sync effect on next render)
       video.muted = isMutedRef.current;
@@ -1587,6 +1466,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
       if (gainNodeRef.current) {
         gainNodeRef.current = null;
         audioCtxRef.current = null;
+        lastBoostStreamRef.current = null;
       }
       if (video) {
         video.muted = isMutedRef.current;
@@ -1691,29 +1571,58 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
     window.addEventListener("screenlink:viewer-apply-preset", handleApplyPreset);
     window.addEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
-    window.addEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
     window.addEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
     window.addEventListener("screenlink:viewer-toggle-info", handleToggleInfo);
     window.addEventListener("screenlink:viewer-escape", handlePanelEscape);
-    window.addEventListener("screenlink:compare-toggle", handleCompareToggleEvent);
-    window.addEventListener("screenlink:compare-mode", handleCompareModeEvent);
-    window.addEventListener("screenlink:compare-exit", handleCompareExitEvent);
-    window.addEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
+    // Phase 9: compare events only registered when the setting is enabled.
+    if (showCompareControls) {
+      window.addEventListener("screenlink:compare-toggle", handleCompareToggleEvent);
+      window.addEventListener("screenlink:compare-mode", handleCompareModeEvent);
+      window.addEventListener("screenlink:compare-exit", handleCompareExitEvent);
+      window.addEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
+    }
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("screenlink:viewer-apply-preset", handleApplyPreset);
       window.removeEventListener("screenlink:viewer-toggle-mute", handleToggleMute);
-      window.removeEventListener("screenlink:viewer-toggle-pause", handleTogglePause);
       window.removeEventListener("screenlink:viewer-toggle-settings", handleToggleSettings);
       window.removeEventListener("screenlink:viewer-toggle-info", handleToggleInfo);
       window.removeEventListener("screenlink:viewer-escape", handlePanelEscape);
-      window.removeEventListener("screenlink:compare-toggle", handleCompareToggleEvent);
-      window.removeEventListener("screenlink:compare-mode", handleCompareModeEvent);
-      window.removeEventListener("screenlink:compare-exit", handleCompareExitEvent);
-      window.removeEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
+      if (showCompareControls) {
+        window.removeEventListener("screenlink:compare-toggle", handleCompareToggleEvent);
+        window.removeEventListener("screenlink:compare-mode", handleCompareModeEvent);
+        window.removeEventListener("screenlink:compare-exit", handleCompareExitEvent);
+        window.removeEventListener("screenlink:compare-open-settings-b", handleCompareOpenSettingsBEvent);
+      }
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [handleOpenCompareSettingsB, handleToggleFullscreen, handleToggleMute, isFullscreen, streamPauseState]);
+  }, [handleOpenCompareSettingsB, handleToggleFullscreen, handleToggleMute, isFullscreen, streamPauseState, showCompareControls]);
+
+  // ── Quality feedback subscription (Phase 4, typed via controller) ────
+  // Phase 6C: Confirmed feedback from the host updates qualityFeedback with
+  // concrete accepted/configured values, replacing the pending "awaiting" state.
+  useEffect(() => {
+    return controller.subscribeQuality((feedback) => {
+      if (feedback.type === "effective") {
+        const data = feedback.data as { videoBitrateKbps?: number };
+        if (typeof data.videoBitrateKbps === "number") {
+          setEffectiveBitrateKbps(data.videoBitrateKbps);
+          // Confirmed by host — mark as accepted and show effective values.
+          setQualityFeedback(`Host accepted: ${fmtKbps(data.videoBitrateKbps)}`);
+          setLastQualityAccepted(true);
+        }
+      }
+      if (feedback.type === "configured") {
+        const data = feedback.data as { configuredMaxBitrate?: number };
+        if (typeof data.configuredMaxBitrate === "number") {
+          setConfiguredBitrateBps(data.configuredMaxBitrate);
+          // Configured value reported by the sender — confirmed success.
+          setQualityFeedback(`Applied: ${fmtKbps(data.configuredMaxBitrate / 1000)}`);
+          setLastQualityAccepted(true);
+        }
+      }
+    });
+  }, [controller]);
 
   // Sync volume — routes to gain node when active, native path otherwise.
   // NOTE: This effect NEVER creates AudioContext. Boost is created by
@@ -1729,13 +1638,21 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     const actualVolume = isPausedState ? 0 : (isMuted ? 0 : volume);
 
     if (gainNodeRef.current) {
-      // Boost mode: gain node controls volume, native path stays silenced.
-      // Defensively re-silence the native path — stream reconnection can
-      // reset the element's muted/volume state, causing double audio.
-      gainNodeRef.current.gain.value = actualVolume;
-      video.volume = 0;
-      video.muted = true;
-      return;
+      const currentStream = video.srcObject;
+      if (currentStream !== lastBoostStreamRef.current) {
+        audioCtxRef.current?.close().catch(() => {});
+        audioCtxRef.current = null;
+        gainNodeRef.current = null;
+        lastBoostStreamRef.current = null;
+      } else {
+        // Boost mode: gain node controls volume, native path stays silenced.
+        // Defensively re-silence the native path — stream reconnection can
+        // reset the element's muted/volume state, causing double audio.
+        gainNodeRef.current.gain.value = actualVolume;
+        video.volume = 0;
+        video.muted = true;
+        return;
+      }
     }
 
     // Normal mode: spec-safe [0, 1] range
@@ -1750,6 +1667,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         audioCtxRef.current.close().catch(() => {});
         audioCtxRef.current = null;
         gainNodeRef.current = null;
+        lastBoostStreamRef.current = null;
       }
     };
   }, []);
@@ -1914,9 +1832,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
             streamSessionId: logicalStreamId,
           });
         }
-        setQualityFeedback("Quality request cleared — using host defaults");
-        setLastQualityAccepted(true);
+        // Phase 6C: Show neutral until confirmed via quality.effective/configured feedback.
+        setQualityFeedback("Cleared — using host defaults");
+        setLastQualityAccepted(undefined);
         setQualityRequestPending(false);
+        // Persist cleared state
+        try { localStorage.removeItem("screenlink:viewer-request"); } catch {}
         return;
       }
 
@@ -1948,9 +1869,12 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
         await conn.broadcast(payload);
       }
 
-      // Accept optimistically — real feedback comes via quality.effective messages
+      // Persist the successful request so it survives page reloads
+      try { localStorage.setItem("screenlink:viewer-request", JSON.stringify(newRequest)); } catch {}
+
+      // Phase 6C: Show pending until confirmed via quality.effective/quality.configured feedback.
       const reqByteRate = fmtKbps(newRequest.videoBitrateKbps);
-      setQualityFeedback(`Requested ${reqByteRate}, ${newRequest.maxWidth}×${newRequest.maxHeight} @ ${newRequest.maxFps}fps — awaiting host response`);
+      setQualityFeedback("Request sent — awaiting host confirmation");
       setLastQualityAccepted(undefined);
       if (viewerHistoryIdRef.current) {
         StreamMetricsService.getInstance().addMarker(
@@ -1986,215 +1910,77 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     }
   }, [sessionState, viewerRequest, handleQualityRequestChange]);
 
-  // ── Listen for incoming quality feedback (after currentStream is declared) ──
-  useEffect(() => {
-    const handleQualityEffective = (event: CustomEvent) => {
-      const detail = event.detail ?? {};
-      const streamSessionId = detail.streamSessionId;
-      const watchedLogicalStreamId = resolveViewerQualityFeedbackStreamId({
-        watchingTargetLogicalStreamId: watchingTarget?.logicalStreamId,
-        currentStreamLogicalStreamId: currentStream?.logicalStreamId,
-      });
-      if (!streamSessionId || !watchedLogicalStreamId) return;
-      if (streamSessionId !== watchedLogicalStreamId) return;
-
-      const kbps = detail.videoBitrateKbps;
-      const clampReasons: string[] = detail.clampReasons ?? [];
-
-      if (kbps) setEffectiveBitrateKbps(kbps);
-      const feedback = getViewerQualityEffectiveFeedback({
-        videoBitrateKbps: kbps,
-        clampReasons,
-      });
-      setQualityFeedback(feedback.message);
-      setLastQualityAccepted(feedback.accepted);
-    };
-
-    const handleQualityConfigured = (event: CustomEvent) => {
-      const detail = event.detail ?? {};
-      const streamSessionId = detail.streamSessionId;
-      const watchedLogicalStreamId = resolveViewerQualityFeedbackStreamId({
-        watchingTargetLogicalStreamId: watchingTarget?.logicalStreamId,
-        currentStreamLogicalStreamId: currentStream?.logicalStreamId,
-      });
-      if (!streamSessionId || !watchedLogicalStreamId) return;
-      if (streamSessionId !== watchedLogicalStreamId) return;
-
-      const kbps = detail.videoBitrateKbps;
-      const fps = detail.maxFramerate;
-      const scale = detail.scaleResolutionDownBy;
-
-      if (kbps) setConfiguredBitrateBps(kbps * 1000);
-
-      const parts: string[] = [];
-      if (kbps) parts.push(fmtKbps(kbps));
-      if (fps) parts.push(`${fps} fps`);
-      if (scale) parts.push(`scale ${scale}x`);
-      setQualityFeedback(parts.length > 0 ? `Applied: ${parts.join(", ")}` : "Applied to sender");
-      setLastQualityAccepted(true);
-    };
-
-    window.addEventListener("screenlink:quality-effective", handleQualityEffective as EventListener);
-    window.addEventListener("screenlink:quality-configured", handleQualityConfigured as EventListener);
-    return () => {
-      window.removeEventListener("screenlink:quality-effective", handleQualityEffective as EventListener);
-      window.removeEventListener("screenlink:quality-configured", handleQualityConfigured as EventListener);
-    };
-  }, [watchingTarget?.logicalStreamId, currentStream?.logicalStreamId]);
-
   // ── ViewerSession lifecycle ─────────────────────────────────────
   //
   // INTENTIONAL STALE-CLOSURE PATTERN
   // ──────────────────────────────────
-  // This effect captures watch-target values (selectedGroupId,
-  // watchedInfo, currentStream, sharerName) via refs at mount time,
-  // then reads them inside the effect via those refs.  The effect
-  // depends ONLY on `isViewing` because:
+  // This effect uses refs for the latest startViewerSession/controllerStop
+  // callbacks so it can depend ONLY on `isViewing`.  Without these refs,
+  // watchingTarget object identity changes would tear down the session.
   //
-  //   1. The viewer page mounts once per watch session; target
-  //      parameters are set by the Watch button and should not
-  //      change mid-session.
-  //   2. Adding the watch-target values to the deps array would
-  //      tear down and recreate the ViewerSession on every store
-  //      update (e.g. new stream heartbeat), which is wrong.
-  //   3. The only legitimate re-creation trigger is the user
-  //      exiting and re-watching (isViewing toggles).
-  //
-  // Re-structuring to avoid stale values would require threading
-  // the watch target through a dedicated context or route param,
-  // which is out of scope for this defect pass.
+  // The cleanup is deferred (setTimeout 0) so that React StrictMode's
+  // transient cleanup/remount cycle does not tear down a live session.
+  // On real unmount or isViewing → false the deferred stop still fires.
 
-  const targetRef = useRef({ selectedGroupId, watchedInfo, currentStream, sharerName });
-  targetRef.current = { selectedGroupId, watchedInfo, currentStream, sharerName };
+  const startViewerSessionRef = useRef(startViewerSession);
+  startViewerSessionRef.current = startViewerSession;
+  const controllerStopRef = useRef(controllerStop);
+  controllerStopRef.current = controllerStop;
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lifecycleStartedRef = useRef(false);
 
   useEffect(() => {
-    if (!isViewing || sessionRef.current) return;
-    let cancelled = false;
-    let ownedSession: ViewerSession | null = null;
+    if (!isViewing) {
+      lifecycleStartedRef.current = false;
+      return;
+    }
 
-    void startViewerSession((session) => {
-      ownedSession = session;
-    }, () => cancelled);
+    // Cancel any pending deferred stop (StrictMode probe cleanup → remount)
+    if (stopTimerRef.current !== null) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+
+    // React StrictMode re-runs this effect without changing isViewing.
+    // Keep the original serialized start rather than enqueueing a second one.
+    if (!lifecycleStartedRef.current) {
+      lifecycleStartedRef.current = true;
+      void startViewerSessionRef.current();
+    }
 
     return () => {
-      cancelled = true;
-      startAttemptRef.current++;
-      const session = ownedSession;
-      ownedSession = null;
-
-      if (sessionRef.current === session) {
-        sessionRef.current = null;
-      }
-
-      if (session) {
-        void queueViewerLifecycle(() => session.destroy());
-      }
+      // Defer cleanup so React StrictMode's transient
+      // cleanup/remount does not tear down a live session.
+      // On real unmount or isViewing change the timer still fires.
+      stopTimerRef.current = setTimeout(() => {
+        stopTimerRef.current = null;
+        lifecycleStartedRef.current = false;
+        void controllerStopRef.current();
+      }, 0);
     };
-  }, [isViewing, startViewerSession]);
+  }, [isViewing]);
 
-  // ── Detect exact watched stream stop using explicit target — do NOT eject on other streams ──
+  // ── Synchronize sessionRef for diagnostics ──────────────────────
+  // The controller owns the ViewerSession; copy its reference so
+  // downstream diagnostics (stream metrics, quality requests, etc.)
+  // can read session state without importing the controller.
   useEffect(() => {
-    if (!isViewing || !watchingTarget || !sessionRef.current) return;
+    sessionRef.current = controller.session;
+  }, [controller, controller.session]);
 
-    const exactLogicalStreamId = watchingTarget.logicalStreamId;
-    const exactMediaSessionId = watchingTarget.mediaSessionId;
-    if (!exactLogicalStreamId) return;
-
-    let endTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const unsubscribe = useStore.subscribe((state, prevState) => {
-      if (!sessionRef.current) return;
-
-      // Don't treat stream as "gone" during the initial connection flow
-      // or while the user has intentionally paused.
-      // The join flow starts before the stream is announced in activeStreamsByGroup,
-      // so the stream won't exist there until the host accepts the join and the
-      // stream.started message arrives.  Without this guard, any unrelated store
-      // update during the join window incorrectly destroys the session and cancels
-      // the pending join response.
-      // While paused, the media connection is intentionally stopped; the stream
-      // may be removed from activeStreamsByGroup by a stream.restarted event
-      // that we want to handle at resume time, not by destroying the session.
-      if (sessionRef.current.state !== "watching") return;
-      if (sessionRef.current.pauseState === "paused") return;
-
-      // 1) Check if our exact logical stream disappeared from active streams
-      if (selectedGroupId) {
-        const currStreams = state.activeStreamsByGroup[selectedGroupId] ?? [];
-        const stillExists = currStreams.some(
-          (s) => s.logicalStreamId === exactLogicalStreamId && s.mediaSessionId === exactMediaSessionId
-        );
-        if (!stillExists) {
-          const session = sessionRef.current;
-          // Our stream is gone — destroy session and show ended
-          startAttemptRef.current++;
-          if (sessionRef.current === session) {
-            sessionRef.current = null;
-          }
-          if (session) {
-            void queueViewerLifecycle(() => session.destroy());
-          }
-          setSessionState("ended");
-          setViewerError(null);
-          setViewStatus("ended");
-          setActivePanel(null);
-
-          // Finalize viewer session
-          if (viewerHistoryIdRef.current) {
-            const id = viewerHistoryIdRef.current;
-            viewerHistoryIdRef.current = null;
-            setViewerHistoryId(null);
-            StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
-          }
-
-          // Auto-navigate to overview after short delay
-          if (endTimer) clearTimeout(endTimer);
-          endTimer = setTimeout(() => {
-            useStore.getState().setIsViewing(false);
-            navigateToGroupOverview();
-          }, 4000);
-          return;
-        }
-      }
-
-      // 2) Check if watched session removed from watchedStreamsBySessionId
-      const prevWatched = prevState.watchedStreamsBySessionId;
-      const currWatched = state.watchedStreamsBySessionId;
-      if (exactMediaSessionId && prevWatched[exactMediaSessionId] && !currWatched[exactMediaSessionId]) {
-        const session = sessionRef.current;
-        startAttemptRef.current++;
-        if (sessionRef.current === session) {
-          sessionRef.current = null;
-        }
-        if (session) {
-          void queueViewerLifecycle(() => session.destroy());
-        }
-        setSessionState("ended");
-        setViewerError(null);
-        setViewStatus("ended");
-        setActivePanel(null);
-
-        // Finalize viewer session
-        if (viewerHistoryIdRef.current) {
-          const id = viewerHistoryIdRef.current;
-          viewerHistoryIdRef.current = null;
-          setViewerHistoryId(null);
-          StreamMetricsService.getInstance().finalizeSession(id).catch(() => {});
-        }
-
-          if (endTimer) clearTimeout(endTimer);
-        endTimer = setTimeout(() => {
-          useStore.getState().setIsViewing(false);
-          navigateToGroupOverview();
-        }, 4000);
-      }
-    });
-
-    return () => {
-      unsubscribe();
-      if (endTimer) clearTimeout(endTimer);
-    };
-  }, [isViewing, selectedGroupId, setViewStatus, watchingTarget?.logicalStreamId, watchingTarget?.mediaSessionId]);
+  // ── Stream-end detection is now owned by ViewerSessionController (Phase 4) ──
+  // The controller subscribes to activeStreamsByGroup and triggers ended phase
+  // when the exact (logicalStreamId, mediaSessionId) pair disappears.
+  // ViewerWorkspace reacts to the snapshot phase change instead.
+  useEffect(() => {
+    if (sessionPhase !== "ended") return;
+    setActivePanel(null);
+    const timer = setTimeout(() => {
+      useStore.getState().setIsViewing(false);
+      navigateToGroupOverview();
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [sessionPhase, navigateToGroupOverview]);
 
   // ── Derive display status from session state ─────────────────────
   const displayStatus = sessionStateToViewStatus(sessionState);
@@ -2206,47 +1992,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // Stream ended state — Animated exit with auto-navigate
   if (displayStatus === "ended") {
     return (
-      <motion.div
-        key="ended"
-        initial={{ opacity: 1 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={reduced ? fadeInstant : { duration: 0.4 }}
-        className="flex flex-col items-center justify-center h-full bg-canvas"
-      >
-        {/* Fading video element */}
-        <motion.div
-          initial={{ opacity: 1 }}
-          animate={{ opacity: 0 }}
-          transition={reduced ? { duration: 0.1 } : { duration: 0.6 }}
-          className="absolute inset-0 bg-canvas"
-        />
-
-        {/* Ended message */}
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={reduced ? fadeInstant : { delay: 0.3, duration: 0.4 }}
-          className="relative z-10 flex flex-col items-center gap-4 text-center"
-        >
-          <div className="h-12 w-12 rounded-full bg-surface-3 flex items-center justify-center">
-            <Monitor className="h-6 w-6 text-text-muted" />
-          </div>
-          <div>
-            <h2 className="text-base font-semibold text-text-primary">
-              The streamer ended the share
-            </h2>
-            <p className="text-sm text-text-secondary mt-1">
-              {sharerName}'s stream is no longer available.
-              {liveDuration && ` It was live for ${liveDuration}.`}
-            </p>
-          </div>
-          <Button variant="default" onClick={handleExit}>
-            <ArrowLeft className="h-4 w-4" />
-            Return to overview
-          </Button>
-        </motion.div>
-      </motion.div>
+      <ViewerStatusOverlay
+        displayStatus="ended"
+        sharerName={sharerName}
+        viewerError={viewerError}
+        liveDuration={liveDuration}
+        onRetry={handleRetry}
+        onExit={handleExit}
+        reduced={reduced}
+      />
     );
   }
 
@@ -2255,41 +2009,15 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   if (isFatalError) {
     return (
       <ViewerShell className={className} onExit={handleExit}>
-        <motion.div
-          key="error"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={reduced ? fadeInstant : fadeSpring}
-          className="flex flex-col items-center justify-center h-full p-8"
-        >
-          <div className="max-w-md w-full">
-            <Alert variant="destructive">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertTitle>Unable to play stream</AlertTitle>
-              <AlertDescription>
-                A fatal error occurred while trying to connect to or play
-                {sharerName}'s stream. Please try again or check your
-                connection.
-                {viewerError && (
-                  <span className="block mt-2 text-xs opacity-70">
-                    {viewerError}
-                  </span>
-                )}
-              </AlertDescription>
-            </Alert>
-            <div className="flex items-center gap-3 mt-4 justify-center">
-              <Button variant="default" onClick={handleRetry}>
-                <RefreshCw className="h-4 w-4" />
-                Retry
-              </Button>
-              <Button variant="ghost" onClick={handleExit}>
-                <ArrowLeft className="h-4 w-4" />
-                Return to overview
-              </Button>
-            </div>
-          </div>
-        </motion.div>
+        <ViewerStatusOverlay
+          displayStatus="error"
+          sharerName={sharerName}
+          viewerError={viewerError}
+          liveDuration={liveDuration}
+          onRetry={handleRetry}
+          onExit={handleExit}
+          reduced={reduced}
+        />
       </ViewerShell>
     );
   }
@@ -2339,84 +2067,41 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
 
           {/* ▸ Connecting overlay — skeleton + status text */}
           {displayStatus === "connecting" && (
-            <motion.div
-              key="connecting-overlay"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={reduced ? fadeInstant : fadeSpring}
-              className="absolute inset-0 z-10 flex items-center justify-center bg-surface-2/80"
-              role="status"
-              aria-label="Connecting to stream"
-            >
-              <div className="flex flex-col items-center gap-3">
-                <div className="relative">
-                  <Skeleton className="h-16 w-16 rounded-full" />
-                  <span className="absolute inset-0 flex items-center justify-center">
-                    <Monitor className="h-7 w-7 text-text-muted" />
-                  </span>
-                </div>
-                <div className="text-center">
-                  <p className="text-sm text-text-secondary font-medium">
-                    Connecting to {sharerName}'s stream
-                  </p>
-                  <p className="text-xs text-text-muted mt-1">
-                    Establishing secure relay connection...
-                  </p>
-                </div>
-                <Progress value={35} className="w-48 h-1" />
-              </div>
-            </motion.div>
+            <ViewerStatusOverlay
+              displayStatus="connecting"
+              sharerName={sharerName}
+              viewerError={viewerError}
+              liveDuration={liveDuration}
+              onRetry={handleRetry}
+              onExit={handleExit}
+              reduced={reduced}
+            />
           )}
 
           {/* ▸ Reconnecting overlay — amber alert + progress */}
           {displayStatus === "reconnecting" && (
-            <motion.div
-              key="reconnecting-overlay"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={reduced ? fadeInstant : fadeSpring}
-              className="absolute top-4 left-4 right-4 z-20"
-            >
-              <Alert variant="warning" className="backdrop-blur-sm bg-surface-2/90">
-                <div className="flex items-start gap-3">
-                  <WifiOff className="h-4 w-4 mt-0.5 text-warning" />
-                  <div className="flex-1">
-                    <AlertTitle>Reconnecting</AlertTitle>
-                    <AlertDescription>
-                      Attempting to restore the connection to {sharerName}'s stream.
-                    </AlertDescription>
-                    <Progress value={60} className="mt-3 h-1.5" />
-                  </div>
-                </div>
-              </Alert>
-            </motion.div>
+            <ViewerStatusOverlay
+              displayStatus="reconnecting"
+              sharerName={sharerName}
+              viewerError={viewerError}
+              liveDuration={liveDuration}
+              onRetry={handleRetry}
+              onExit={handleExit}
+              reduced={reduced}
+            />
           )}
 
           {/* ▸ Degraded overlay — amber alert */}
           {displayStatus === "degraded" && (
-            <motion.div
-              key="degraded-overlay"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={reduced ? fadeInstant : fadeSpring}
-              className="absolute top-4 left-4 right-4 z-20"
-            >
-              <Alert variant="warning" className="backdrop-blur-sm bg-surface-2/90">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle className="h-4 w-4 mt-0.5 text-warning" />
-                  <div className="flex-1">
-                    <AlertTitle>Connection degraded</AlertTitle>
-                    <AlertDescription>
-                      The stream quality may be reduced. The host's connection is
-                      experiencing issues.
-                    </AlertDescription>
-                  </div>
-                </div>
-              </Alert>
-            </motion.div>
+            <ViewerStatusOverlay
+              displayStatus="degraded"
+              sharerName={sharerName}
+              viewerError={viewerError}
+              liveDuration={liveDuration}
+              onRetry={handleRetry}
+              onExit={handleExit}
+              reduced={reduced}
+            />
           )}
 
           {/* ── Compare / Enhancement / Paused overlays ── */}
@@ -2455,36 +2140,10 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
               />
 
               {/* ── Paused overlay ── */}
-              {(streamPauseState === "paused" || streamPauseState === "resuming") && (
-                <div
-                  className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/40"
-                  aria-label={streamPauseState === "paused" ? "Stream paused" : "Resuming stream"}
-                  role="status"
-                >
-                  {streamPausePoster && (
-                    <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: `url(${streamPausePoster})` }} />
-                  )}
-                  <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
-                    {streamPauseState === "paused" ? (
-                      <>
-                        <div className="h-16 w-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
-                          <Play className="h-8 w-8 text-white" />
-                        </div>
-                        <p className="text-sm text-white/80 font-medium">
-                          Paused — Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-xs font-mono">Space</kbd> to resume
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <div className="h-12 w-12 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
-                          <RefreshCw className="h-6 w-6 text-white animate-spin" />
-                        </div>
-                        <p className="text-sm text-white/80 font-medium">Resuming stream...</p>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
+              <ViewerOverlayPaused
+                pauseState={streamPauseState}
+                posterUrl={streamPausePoster}
+              />
             </>
           )}
           </div> {/* ── End video stage ── */}
@@ -2647,7 +2306,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 onActivePanelChange={setActivePanel}
                 showStreamInfoCard={showStreamInfoCard}
                 onToggleStreamInfoCard={handleToggleStreamInfoCard}
-                onCompareToggle={handleCompareToggleWithSettingsB}
+                onCompareToggle={showCompareControls ? handleCompareToggleWithSettingsB : undefined}
               />
             </ViewerPanelShell>
           )}
@@ -2789,5 +2448,53 @@ function VideoControlsOverlay({
       showStreamInfoCard={showStreamInfoCard}
       onToggleStreamInfoCard={onToggleStreamInfoCard}
     />
+  );
+}
+
+/**
+ * Paused overlay — shown when the stream is paused or resuming.
+ * Uses a poster frame as the background image when available.
+ * Internal guard: renders nothing when pauseState is neither "paused" nor "resuming".
+ */
+function ViewerOverlayPaused({
+  pauseState,
+  posterUrl,
+}: {
+  pauseState: string;
+  posterUrl: string | null;
+}) {
+  const isPaused = pauseState === "paused";
+  const isResuming = pauseState === "resuming";
+  if (!isPaused && !isResuming) return null;
+
+  return (
+    <div
+      className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/40"
+      aria-label={isPaused ? "Stream paused" : "Resuming stream"}
+      role="status"
+    >
+      {posterUrl && (
+        <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: `url(${posterUrl})` }} />
+      )}
+      <div className="relative z-10 flex flex-col items-center gap-3 pointer-events-none">
+        {isPaused ? (
+          <>
+            <div className="h-16 w-16 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
+              <Play className="h-8 w-8 text-white" />
+            </div>
+            <p className="text-sm text-white/80 font-medium">
+              Paused — Press <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-xs font-mono">Space</kbd> to resume
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="h-12 w-12 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center">
+              <RefreshCw className="h-6 w-6 text-white animate-spin" />
+            </div>
+            <p className="text-sm text-white/80 font-medium">Resuming stream...</p>
+          </>
+        )}
+      </div>
+    </div>
   );
 }

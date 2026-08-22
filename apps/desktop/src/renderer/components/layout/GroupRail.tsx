@@ -75,7 +75,7 @@ export function GroupRail() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-10 w-10 rounded-lg text-text-secondary hover:text-text-primary flex-shrink-0"
+            className="h-10 w-10 rounded-standard text-text-secondary hover:text-text-primary flex-shrink-0"
             aria-label="Home"
             onClick={() => navigate("home")}
           >
@@ -92,7 +92,7 @@ export function GroupRail() {
             <Button
               variant="ghost"
               size="icon"
-              className="h-10 w-10 rounded-lg text-accent hover:text-accent-foreground flex-shrink-0"
+              className="h-10 w-10 rounded-standard text-accent hover:text-accent-foreground flex-shrink-0"
               aria-label="Return to stream"
               onClick={() => navigate("viewer")}
             >
@@ -129,7 +129,7 @@ export function GroupRail() {
                     {/* Live-state ring */}
                     {hasActiveStreams && (
                       <motion.div
-                        className="absolute -inset-0.5 rounded-xl border-2 border-accent/60"
+                        className="absolute -inset-0.5 rounded-dialog border-2 border-accent/60"
                         initial={{ opacity: 0.6 }}
                         animate={{ opacity: 1 }}
                         transition={{
@@ -144,7 +144,7 @@ export function GroupRail() {
                       <TooltipTrigger asChild>
                         <button
                           className={cn(
-                            "relative flex items-center justify-center w-12 h-12 rounded-xl overflow-hidden",
+                            "relative flex items-center justify-center w-12 h-12 rounded-dialog overflow-hidden",
                             "transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
                             isSelected
                               ? "bg-surface-3"
@@ -152,10 +152,11 @@ export function GroupRail() {
                           )}
                           onClick={() => handleGroupClick(groupId)}
                           aria-label={`Group: ${group.name}`}
+                          aria-current={isSelected ? "page" : undefined}
                           tabIndex={0}
                         >
-                          <Avatar className="w-12 h-12 rounded-xl">
-                            <AvatarFallback className="rounded-xl bg-inherit text-xs font-semibold">
+                          <Avatar className="w-12 h-12 rounded-dialog">
+                            <AvatarFallback className="rounded-dialog bg-inherit text-xs font-semibold">
                               {getInitials(group.name)}
                             </AvatarFallback>
                           </Avatar>
@@ -197,7 +198,7 @@ export function GroupRail() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-10 w-10 rounded-lg text-text-secondary hover:text-text-primary hover:bg-surface-hover"
+                className="h-10 w-10 rounded-standard text-text-secondary hover:text-text-primary hover:bg-surface-hover"
                 aria-label="Create or join group"
               >
                 <Plus className="h-5 w-5" />

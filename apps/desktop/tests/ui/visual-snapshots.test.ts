@@ -20,26 +20,25 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync, existsSync } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const galleryPath = path.resolve(__dirname, "../../src/renderer/routes/ComponentGallery.tsx");
 
 describe("Visual regression snapshots", () => {
   it("skipped — requires jsdom/happy-dom test environment", () => {
     // The ComponentGallery route file should exist and export a component
-    expect(true).toBe(true);
+    expect(existsSync(galleryPath)).toBe(true);
   });
 
-  it("verify ComponentGallery module loads", async () => {
-    // Verify the module path resolves (will throw if the file doesn't exist)
-    let moduleLoaded = false;
-    try {
-      // Dynamic import of the route file (won't render without DOM)
-      const mod = await import("../../src/renderer/routes/ComponentGallery.js");
-      moduleLoaded = typeof mod.ComponentGallery === "function";
-    } catch {
-      // Module may use browser APIs that fail in Node — that's expected
-      moduleLoaded = false;
-    }
-    // The import may or may not succeed depending on the dependency graph;
-    // this test documents that the file exists.
-    expect(true).toBe(true);
+  it("verify ComponentGallery source exports a component", () => {
+    // Verify the file exists and exports a ComponentGallery function
+    // (source invariant check — no dynamic import needed)
+    expect(existsSync(galleryPath)).toBe(true);
+    const source = readFileSync(galleryPath, "utf-8");
+    expect(source).toContain("export function ComponentGallery");
   });
 });

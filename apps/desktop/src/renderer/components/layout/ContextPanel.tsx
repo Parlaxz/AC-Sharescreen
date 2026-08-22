@@ -1,4 +1,4 @@
-import { Users, Radio } from "lucide-react";
+import { Users, Radio, X } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -63,7 +63,7 @@ export function ContextPanel() {
                   aria-label="Close context panel"
                   onClick={toggleContextPanel}
                 >
-                  <Radio className="h-4 w-4" />
+                  <X className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">Close panel</TooltipContent>

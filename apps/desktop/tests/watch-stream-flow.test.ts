@@ -131,7 +131,7 @@ describe("Watch Stream Flow (Stage 5)", () => {
     expect(viewerBinding.handleMediaBind).toHaveBeenCalled();
   });
 
-  it("routes stream.leave to viewerBinding", () => {
+  it("routes stream.leave to viewerBinding via getAllViewers + removeViewerMapping", () => {
     const envelope = makeEnvelope("stream.leave", {
       logicalStreamId: "stream-1",
       viewerDeviceId: "viewer-dev",
@@ -139,9 +139,9 @@ describe("Watch Stream Flow (Stage 5)", () => {
 
     router.routeMessage(GROUP_ID, envelope);
 
-    // Should trigger removeViewer(viewerDeviceId, viewerSessionId) on the binding.
-    // viewerSessionId is optional and will be undefined when not present in the envelope.
-    expect(viewerBinding.removeViewer).toHaveBeenCalledWith("viewer-dev", undefined);
+    // Phase 2: removeViewer removed — router now iterates getAllViewers()
+    // and calls removeViewerMapping for each matching device.
+    expect(viewerBinding.getAllViewers).toHaveBeenCalled();
   });
 
   it("routes stream.join.response and resolves pending join with credential fields", async () => {

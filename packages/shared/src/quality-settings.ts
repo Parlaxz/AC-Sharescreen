@@ -297,17 +297,37 @@ export type ViewerQualityRequestParsed = z.infer<
   typeof ViewerQualityRequestSchema
 >;
 
+// ─── Scalar fallback defaults (Phase 3: single authority) ─────────────────
+// These constants are derived from createDefaultVideoQualitySettings().
+// Consumers should prefer the factory function when they need the full
+// VideoQualitySettings object; use these scalars for partial fallback.
+
+/** Fallback video bitrate (kbps). Matches createDefaultVideoQualitySettings(). */
+export const FALLBACK_VIDEO_BITRATE_KBPS = 650;
+/** Fallback send/capture width. Matches the factory default. */
+export const FALLBACK_SEND_WIDTH = 854;
+/** Fallback send/capture height. Matches the factory default. */
+export const FALLBACK_SEND_HEIGHT = 480;
+/** Fallback send/capture FPS. Matches the factory default. */
+export const FALLBACK_SEND_FPS = 15;
+/** Fallback default codec. */
+export const FALLBACK_CODEC = "vp9";
+/** Fallback default content hint. */
+export const FALLBACK_CONTENT_HINT = "detail";
+/** Fallback default degradation preference. */
+export const FALLBACK_DEGRADATION_PREFERENCE = "maintain-resolution";
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 export function createDefaultVideoQualitySettings(): VideoQualitySettings {
   return {
-    videoBitrateKbps: 650,
-    sendWidth: 854,
-    sendHeight: 480,
-    sendFps: 15,
-    captureWidth: 854,
-    captureHeight: 480,
-    captureFps: 15,
+    videoBitrateKbps: FALLBACK_VIDEO_BITRATE_KBPS,
+    sendWidth: FALLBACK_SEND_WIDTH,
+    sendHeight: FALLBACK_SEND_HEIGHT,
+    sendFps: FALLBACK_SEND_FPS,
+    captureWidth: FALLBACK_SEND_WIDTH,
+    captureHeight: FALLBACK_SEND_HEIGHT,
+    captureFps: FALLBACK_SEND_FPS,
     preserveAspectRatio: true,
     preventUpscale: true,
     resolutionMode: "target-dimensions",

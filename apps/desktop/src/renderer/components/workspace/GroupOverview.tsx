@@ -31,14 +31,16 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { getInitials } from "@/lib/utils";
+import type { StreamAnnouncement } from "@screenlink/shared";
 import {
   useStore,
-  type StreamAnnouncement,
   type Page,
 } from "@/stores/main-store";
 import { toast } from "sonner";
 import { MembersList } from "./MembersList.js";
 import { copyGroupInviteFromUi } from "@/services/invite-copy";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { PageSection } from "@/components/layout/PageSection";
 import { startShare } from "@/services/share-coordinator";
 import {
   customPresetToOverride,
@@ -47,6 +49,7 @@ import {
 } from "@/services/share-quality";
 import { fetchQualityPresets } from "@/services/group-actions";
 import { getRuntime } from "@/services/phase3-runtime";
+import { startViewingStream } from "@/services/group-navigation";
 import type { CaptureSourceDTO } from "../../../preload/api-types.js";
 
 // ─── Duration formatting ─────────────────────────────────────────────────
@@ -81,7 +84,23 @@ interface ActiveShareCardProps {
 }
 
 function ActiveShareCard({ share }: ActiveShareCardProps) {
-  const duration = useMemo(() => formatLiveDuration(share.startedAt), [share.startedAt]);
+  // Live duration ticks every second; uses an interval to force re-render
+  // so the DOM text updates in real time. formatLiveDuration uses Date.now()
+  // internally, so we just need a state toggle to trigger re-computation.
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const startedAt = share.startedAt;
+    // Force an initial render in case the state hasn't changed
+    setTick((n) => n + 1);
+    const id = setInterval(() => {
+      setTick((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [share.startedAt]);
+
+  const duration = formatLiveDuration(share.startedAt);
+
   const hostDeviceId = share.hostDeviceId;
 
   // Active shares in this group — used to determine whether a
@@ -91,7 +110,6 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
   const isViewing = useStore((s) => s.isViewing);
   const setIsViewing = useStore((s) => s.setIsViewing);
   const setViewStatus = useStore((s) => s.setViewStatus);
-  const setWatchedStreams = useStore((s) => s.setWatchedStreams);
   const navigate = useStore((s) => s.navigate);
 
   const memberIsSharing = useMemo(() => {
@@ -104,30 +122,8 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
   }, [activeStreamsByGroup, groupsById, share.groupId, share.logicalStreamId, hostDeviceId]);
 
   const handleWatch = useCallback(() => {
-    // Set explicit watching target — no first-entry heuristics
-    const target = {
-      groupId: share.groupId,
-      logicalStreamId: share.logicalStreamId,
-      mediaSessionId: share.mediaSessionId,
-      hostDeviceId: share.hostDeviceId,
-      hostName: share.hostDisplayName,
-      startedAt: share.startedAt,
-      sourceName: share.sourceName,
-      sourceKind: share.sourceKind,
-    };
-    setWatchedStreams((prev) => ({
-      ...prev,
-      [share.mediaSessionId]: {
-        hostDeviceId: share.hostDeviceId,
-        hostName: share.hostDisplayName,
-        startedAt: share.startedAt,
-      },
-    }));
-    useStore.getState().setWatchingTarget(target);
-    setIsViewing(true);
-    setViewStatus("connecting");
-    navigate("viewer");
-  }, [isViewing, share, setWatchedStreams, setIsViewing, setViewStatus, navigate]);
+    startViewingStream(share);
+  }, [isViewing, share, setIsViewing, setViewStatus, navigate]);
 
   return (
     <motion.div
@@ -390,8 +386,14 @@ export function GroupOverview({
     try {
       const runtime = getRuntime();
       if (runtime) {
-        await runtime.requestGroupSync(groupId);
-        toast.success("Group state refreshed");
+        const result = await runtime.requestGroupSync(groupId);
+        if (result.status === "dispatched") {
+          toast.success("Refresh requested");
+        } else if (result.status === "no-connection") {
+          toast.error("Not connected to this group");
+        } else if (result.status === "suppressed") {
+          toast.info("Refresh already requested");
+        }
       } else {
         toast.error("Runtime not available");
       }
@@ -513,132 +515,119 @@ export function GroupOverview({
   // ── Active shares view ───────────────────────────────────────────
   return (
     <div className="mx-auto max-w-5xl p-6 space-y-8">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-text-primary">
-            {group.name}
-          </h1>
-          <p className="text-xs text-text-muted mt-0.5">
-            {memberCount} {memberCount === 1 ? "member" : "members"}
-            {" · "}
-            <span className="text-accent">
-              {activeShares.length} active{" "}
-              {activeShares.length === 1 ? "share" : "shares"}
-            </span>
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleInvite}
-                aria-label="Copy invite link"
-              >
-                <UserPlus className="h-3.5 w-3.5" />
-                Invite
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Copy invite link
-            </TooltipContent>
-          </Tooltip>
-
-          {lastShareSettings && (
+      {/* Header — using PageHeader for consistent heading structure */}
+      <PageHeader
+        title={group.name}
+        description={`${memberCount} ${memberCount === 1 ? "member" : "members"} · ${activeShares.length} active ${activeShares.length === 1 ? "share" : "shares"}`}
+        actions={
+          <div className="flex items-center gap-2">
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  variant="secondary"
+                  variant="outline"
                   size="sm"
-                  onClick={handleShareAgain}
-                  aria-label="Share again with last settings"
+                  onClick={handleInvite}
+                  aria-label="Copy invite link"
                 >
-                  <Repeat className="h-3.5 w-3.5" />
-                  Share again
+                  <UserPlus className="h-3.5 w-3.5" />
+                  Invite
                 </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">
-                Reuse last source ({lastShareSettings.sourceName})
+                Copy invite link
               </TooltipContent>
             </Tooltip>
-          )}
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefresh}
-                disabled={refreshing}
-                aria-label="Refresh group state"
-              >
-                <RefreshCw
-                  className={`h-3.5 w-3.5${refreshing ? " animate-spin" : ""}`}
-                />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Refresh group state
-            </TooltipContent>
-          </Tooltip>
+            {lastShareSettings && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleShareAgain}
+                    aria-label="Share again with last settings"
+                  >
+                    <Repeat className="h-3.5 w-3.5" />
+                    Share again
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  Reuse last source ({lastShareSettings.sourceName})
+                </TooltipContent>
+              </Tooltip>
+            )}
 
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleStartSharing}
-          >
-            <Monitor className="h-3.5 w-3.5" />
-            Start sharing
-          </Button>
-        </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRefresh}
+                  disabled={refreshing}
+                  aria-label="Refresh group state"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5${refreshing ? " animate-spin" : ""}`}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                Refresh group state
+              </TooltipContent>
+            </Tooltip>
 
-        {/* ─── Share again confirmation dialog ─────────────────── */}
-        <Dialog open={showShareAgainConfirm} onOpenChange={setShowShareAgainConfirm}>
-          <DialogContent className="max-w-sm">
-            <DialogHeader>
-              <DialogTitle>Share again?</DialogTitle>
-              <DialogDescription>
-                {lastShareSettings ? (
-                  <>
-                    Reuse your last share settings:
-                    <br />
-                    <span className="font-medium">{lastShareSettings.sourceName}</span>
-                    {" · "}
-                    <span className="capitalize">{lastShareSettings.sourceKind}</span>
-                    {lastShareSettings.audioMode !== "none" && (
-                      <> · Audio: <span className="capitalize">{lastShareSettings.audioMode}</span></>
-                    )}
-                  </>
-                ) : (
-                  "Open share setup with last used settings."
-                )}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex items-center justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={handleCancelShareAgain} disabled={shareAgainPending}>
-                <X className="h-3.5 w-3.5 mr-1" />
-                Cancel
-              </Button>
-              <Button variant="default" size="sm" onClick={handleConfirmShareAgain} disabled={shareAgainPending}>
-                {shareAgainPending ? (
-                  <><Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />Starting...</>
-                ) : (
-                  <><Check className="h-3.5 w-3.5 mr-1" />Continue</>
-                )}
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
-      </div>
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleStartSharing}
+            >
+              <Monitor className="h-3.5 w-3.5" />
+              Start sharing
+            </Button>
+          </div>
+        }
+      />
 
-      {/* ─── Active shares section (always rendered) ─────────── */}
-      <section>
-        <h2 className="text-sm font-medium text-text-primary mb-3">
-          Active shares
-        </h2>
+      {/* ─── Share again confirmation dialog ─────────────────── */}
+      <Dialog open={showShareAgainConfirm} onOpenChange={setShowShareAgainConfirm}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Share again?</DialogTitle>
+            <DialogDescription>
+              {lastShareSettings ? (
+                <>
+                  Reuse your last share settings:
+                  <br />
+                  <span className="font-medium">{lastShareSettings.sourceName}</span>
+                  {" · "}
+                  <span className="capitalize">{lastShareSettings.sourceKind}</span>
+                  {lastShareSettings.audioMode !== "none" && (
+                    <> · Audio: <span className="capitalize">{lastShareSettings.audioMode}</span></>
+                  )}
+                </>
+              ) : (
+                "Open share setup with last used settings."
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={handleCancelShareAgain} disabled={shareAgainPending}>
+              <X className="h-3.5 w-3.5 mr-1" />
+              Cancel
+            </Button>
+            <Button variant="default" size="sm" onClick={handleConfirmShareAgain} disabled={shareAgainPending}>
+              {shareAgainPending ? (
+                <><Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />Starting...</>
+              ) : (
+                <><Check className="h-3.5 w-3.5 mr-1" />Continue</>
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Active shares section ──────────────────────────────── */}
+      <PageSection title="Active shares">
         {activeShares.length === 0 ? (
           <Card>
             <CardContent className="p-6 text-center text-sm text-text-muted">
@@ -657,13 +646,12 @@ export function GroupOverview({
             </AnimatePresence>
           </div>
         )}
-      </section>
+      </PageSection>
 
-      {/* ─── Members section (always rendered) ──────────────────── */}
-      <section>
-        <h2 className="text-sm font-medium text-text-primary mb-3">Members</h2>
+      {/* ─── Members section ────────────────────────────────────── */}
+      <PageSection title="Members">
         <MembersList groupId={groupId ?? undefined} />
-      </section>
+      </PageSection>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useId } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 import {
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Tooltip,
@@ -18,98 +19,88 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { useStore } from "@/stores/main-store";
 import { cn } from "@/lib/utils";
+import type { ScreenLinkAPI, ReadRecentLogsResult } from "../../../preload/api-types.js";
 
-/**
- * DiagnosticsPage — Application diagnostics (Section 16.7).
- */
-export function DiagnosticsPage() {
-  // ── Disclosure state ─────────────────────────────────────────────
-  const [showWebrtc, setShowWebrtc] = useState(false);
-  const [showNetwork, setShowNetwork] = useState(false);
-  const [showCaptures, setShowCaptures] = useState(true);
+// ─── Types ─────────────────────────────────────────────────────────────────
 
-  // ── App info ─────────────────────────────────────────────────────
-  const [appVersion] = useState("1.0.0");
-  const [electronVersion] = useState("32.0.0");
-  const [vdoVersion] = useState("2.5.0");
-  const [osInfo] = useState("Windows 11 23H2");
-  const [buildInfo] = useState("2026-06-25T12:00:00Z");
-  const [hostname] = useState("desktop-win11");
+interface AppInfo {
+  version: string;
+  electronVersion: string;
+  chromeVersion: string;
+  nodeVersion: string;
+}
 
-  // ── Connection ───────────────────────────────────────────────────
-  const [rendezvousHealth] = useState<"healthy" | "degraded" | "down">("healthy");
-  const [shareStatus] = useState("idle");
-  const [lastHeartbeat] = useState("—");
-  const [lastReconnect] = useState("—");
-  const [webrtcStats] = useState("{\n  \"iceState\": \"connected\",\n  \"dtlsState\": \"connected\",\n  \"bytesSent\": 2456789,\n  \"packetsSent\": 12345,\n  \"nackCount\": 3\n}");
+interface HelperProvenance {
+  state: string;
+  uptimeMs: number;
+  generation: number;
+  helperBinaryPath?: string;
+  helperBinarySize?: number;
+  helperBinaryMtime?: string;
+}
 
-  // ── Captures ─────────────────────────────────────────────────────
-  const [captureLog] = useState<{ time: string; source: string; error?: string }[]>([
-    { time: "12:34:56", source: "Screen 1 (1920×1080)" },
-    { time: "12:30:22", source: "Screen 1 (1920×1080)" },
-    { time: "12:25:10", source: "Window: Chrome", error: "Permission denied" },
-    { time: "12:20:05", source: "Screen 2 (2560×1440)" },
-    { time: "12:15:00", source: "Screen 1 (1920×1080)" },
-  ]);
+interface DiagnosticsData {
+  appInfo: AppInfo | null;
+  appInfoError: string | null;
+  audioState: string | null;
+  audioStateError: string | null;
+  helperProvenance: HelperProvenance | null;
+  helperProvenanceError: string | null;
+  nvidiaCapability: { available: boolean; reason: string } | null;
+  nvidiaCapabilityError: string | null;
+  videoHelperDiag: Record<string, unknown> | null;
+  videoHelperDiagError: string | null;
+}
 
-  // ── Logs ─────────────────────────────────────────────────────────
-  const [logLines] = useState<string[]>(() =>
-    Array.from({ length: 200 }, (_, i) => {
-      const d = new Date(Date.now() - (200 - i) * 60000);
-      const ts = d.toISOString();
-      const tags = ["INFO", "WARN", "DEBUG", "INFO", "INFO", "ERROR"];
-      const tag = tags[i % tags.length];
-      const msgs = [
-        "App initialized",
-        "Helper process spawned (pid: 12345)",
-        "Rendezvous connected",
-        "Group sync completed",
-        "Stream started (session: abcdef12)",
-        "Capture stopped",
-        "WebRTC ICE state: connected",
-        "Audio pipeline started",
-        "Encoder initialized: H264",
-        "Peer connection established",
-      ];
-      const msg = msgs[i % msgs.length];
-      return `[${ts}] [${tag}] ${msg}`;
-    }),
-  );
+type LoadState = "loading" | "unavailable" | "loaded" | "error";
 
-  const handleCopyLogs = useCallback(() => {
-    navigator.clipboard.writeText(logLines.join("\n")).then(
-      () => toast("Logs copied to clipboard"),
-      () => toast("Failed to copy logs"),
-    );
-  }, [logLines]);
+// ─── Helpers ───────────────────────────────────────────────────────────────
 
-  const handleOpenLogFolder = useCallback(() => {
-    toast("Log folder opened");
-    // In production: api.openLogFolder()
-  }, []);
+function getApi(): ScreenLinkAPI | null {
+  if (typeof window === "undefined") return null;
+  return (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink ?? null;
+}
 
-  // ── Network ──────────────────────────────────────────────────────
-  const [packetLoss] = useState("0.02%");
-  const [jitter] = useState("4ms");
-  const [rtt] = useState("28ms");
+function formatUptime(ms: number | undefined | null): string {
+  if (ms == null) return "—";
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
 
-  // ── Disclosure toggle ────────────────────────────────────────────
-  const DisclosureSection = ({
-    title,
-    open,
-    onToggle,
-    children,
-  }: {
-    title: string;
-    open: boolean;
-    onToggle: () => void;
-    children: React.ReactNode;
-  }) => (
+function formatBytes(bytes: number | undefined | null): string {
+  if (bytes == null) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ─── DisclosureSection ─────────────────────────────────────────────────────
+
+function DisclosureSection({
+  title,
+  open,
+  onToggle,
+  id,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  id: string;
+  children: React.ReactNode;
+}) {
+  const contentId = `${id}-content`;
+  return (
     <div>
       <button
         onClick={onToggle}
         className="flex items-center gap-2 w-full text-left py-2 text-sm font-medium text-text-secondary hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded-compact px-1"
         aria-expanded={open}
+        aria-controls={contentId}
       >
         <motion.svg
           animate={{ rotate: open ? 90 : 0 }}
@@ -139,61 +130,396 @@ export function DiagnosticsPage() {
             transition={{ duration: 0.2, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="pt-1 pb-2">{children}</div>
+            <div id={contentId} className="pt-1 pb-2" role="region" aria-label={title}>
+              {children}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
     </div>
   );
+}
 
-  // ── Info row ─────────────────────────────────────────────────────
-  const InfoRow = ({
-    label,
-    value,
-    mono,
-    copyable,
-  }: {
-    label: string;
-    value: string;
-    mono?: boolean;
-    copyable?: boolean;
-  }) => {
-    const content = (
-      <span
-        className={cn(
-          "font-mono text-xs text-text-primary",
-          mono && "font-mono",
-        )}
-      >
-        {value}
-      </span>
-    );
+// ─── InfoRow ───────────────────────────────────────────────────────────────
 
+function InfoRow({
+  label,
+  value,
+  mono,
+  copyable,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  copyable?: boolean;
+}) {
+  const handleCopy = useCallback(() => {
+    const api = getApi();
+    if (api?.clipboardWriteText) {
+      api.clipboardWriteText(value).then((result) => {
+        if (result.success) {
+          toast("Copied: " + value);
+        } else {
+          toast("Failed to copy");
+        }
+      }).catch(() => {
+        toast("Failed to copy");
+      });
+    } else {
+      toast("Clipboard API not available");
+    }
+  }, [value]);
+
+  return (
+    <div className="flex items-center justify-between py-1 border-b border-border-subtle last:border-b-0">
+      <span className="text-xs text-text-secondary">{label}</span>
+      {copyable ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={handleCopy}
+              aria-label={`Copy ${label}`}
+              className="font-mono text-xs text-text-primary hover:text-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
+            >
+              {value || "—"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="left">Click to copy</TooltipContent>
+        </Tooltip>
+      ) : (
+        <span
+          className={cn(
+            "text-xs text-text-primary",
+            mono && "font-mono",
+          )}
+        >
+          {value || "—"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ─── SkeletonRow ───────────────────────────────────────────────────────────
+
+function SkeletonRow() {
+  return (
+    <div className="flex items-center justify-between py-1 border-b border-border-subtle last:border-b-0">
+      <Skeleton className="h-3 w-20" />
+      <Skeleton className="h-3 w-24" />
+    </div>
+  );
+}
+
+// ─── DiagnosticsPage ───────────────────────────────────────────────────────
+
+export function DiagnosticsPage() {
+  // ── Disclosure state ─────────────────────────────────────────────
+  const [showVideoHelper, setShowVideoHelper] = useState(false);
+  const [showNetwork, setShowNetwork] = useState(false);
+
+  // ── IDs for disclosure sections ──────────────────────────────────
+  const videoHelperId = useId();
+  const networkId = useId();
+
+  // ── Data ─────────────────────────────────────────────────────────
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [data, setData] = useState<DiagnosticsData>({
+    appInfo: null,
+    appInfoError: null,
+    audioState: null,
+    audioStateError: null,
+    helperProvenance: null,
+    helperProvenanceError: null,
+    nvidiaCapability: null,
+    nvidiaCapabilityError: null,
+    videoHelperDiag: null,
+    videoHelperDiagError: null,
+  });
+
+  // ── Log state ────────────────────────────────────────────────────
+  const [logResult, setLogResult] = useState<ReadRecentLogsResult | null>(null);
+  const [logLoading, setLogLoading] = useState(true);
+
+  // ── Browser info (renderer-side only) ────────────────────────────
+  const browserInfo = typeof navigator !== "undefined" ? {
+    userAgent: navigator.userAgent,
+    platform: navigator.platform,
+    language: navigator.language,
+    hardwareConcurrency: navigator.hardwareConcurrency,
+    deviceMemory: (navigator as unknown as { deviceMemory?: number }).deviceMemory,
+    maxTouchPoints: navigator.maxTouchPoints,
+  } : null;
+
+  const webrtcSupport = typeof navigator !== "undefined" ? {
+    rtcPeerConnection: typeof RTCPeerConnection !== "undefined",
+    rtcDataChannel: typeof RTCDataChannel !== "undefined",
+    getDisplayMedia: typeof navigator.mediaDevices?.getDisplayMedia !== "undefined",
+    enumerateDevices: typeof navigator.mediaDevices?.enumerateDevices !== "undefined",
+    canvasCapture: typeof HTMLCanvasElement.prototype.captureStream !== "undefined",
+    webCodecs:
+      typeof VideoEncoder !== "undefined" && typeof VideoDecoder !== "undefined",
+  } : null;
+
+  // ── Load diagnostics data ────────────────────────────────────────
+  useEffect(() => {
+    const api = getApi();
+    if (!api) {
+      setLoadState("unavailable");
+      return;
+    }
+
+    const screenlink: ScreenLinkAPI = api;
+    let cancelled = false;
+
+    async function loadAll() {
+      setLoadState("loading");
+
+      // Load app info
+      let appInfo: AppInfo | null = null;
+      let appInfoError: string | null = null;
+      try {
+        const info = await screenlink.getAppInfo();
+        if (!cancelled && info) {
+          appInfo = {
+            version: info.version,
+            electronVersion: info.electronVersion,
+            chromeVersion: info.chromeVersion,
+            nodeVersion: info.nodeVersion ?? "unknown",
+          };
+        }
+      } catch (err) {
+        appInfoError = err instanceof Error ? err.message : String(err);
+      }
+
+      // Load audio state
+      let audioState: string | null = null;
+      let audioStateError: string | null = null;
+      try {
+        const state = await screenlink.getAudioState();
+        if (!cancelled) audioState = state ?? "disabled";
+      } catch (err) {
+        audioStateError = err instanceof Error ? err.message : String(err);
+      }
+
+      // Load helper provenance from pipeline snapshot
+      let helperProvenance: HelperProvenance | null = null;
+      let helperProvenanceError: string | null = null;
+      try {
+        const snap = await screenlink.getPipelineSnapshot();
+        if (!cancelled && snap) {
+          helperProvenance = {
+            state: (snap as any).helperState ?? "unknown",
+            uptimeMs: (snap as any).helperUptimeMs ?? 0,
+            generation: (snap as any).streamGeneration ?? 0,
+            helperBinaryPath: (snap as any).helperBinaryPath,
+            helperBinarySize: (snap as any).helperBinarySize,
+            helperBinaryMtime: (snap as any).helperBinaryMtime,
+          };
+        }
+      } catch (err) {
+        helperProvenanceError = err instanceof Error ? err.message : String(err);
+      }
+
+      // Load NVIDIA capability
+      let nvidiaCapability: { available: boolean; reason: string } | null = null;
+      let nvidiaCapabilityError: string | null = null;
+      try {
+        const cap = await screenlink.probeNvidiaVsrCapability();
+        if (!cancelled) nvidiaCapability = cap ?? { available: false, reason: "unknown" };
+      } catch (err) {
+        nvidiaCapabilityError = err instanceof Error ? err.message : String(err);
+      }
+
+      // Load video helper diagnostics
+      let videoHelperDiag: Record<string, unknown> | null = null;
+      let videoHelperDiagError: string | null = null;
+      try {
+        const diag = await screenlink.videoHelperGetDiagnostics();
+        if (!cancelled) videoHelperDiag = diag;
+      } catch (err) {
+        videoHelperDiagError = err instanceof Error ? err.message : String(err);
+      }
+
+      if (cancelled) return;
+
+      setData({
+        appInfo,
+        appInfoError,
+        audioState,
+        audioStateError,
+        helperProvenance,
+        helperProvenanceError,
+        nvidiaCapability,
+        nvidiaCapabilityError,
+        videoHelperDiag,
+        videoHelperDiagError,
+      });
+
+      if (appInfoError && !appInfo) {
+        setLoadState("error");
+      } else {
+        setLoadState("loaded");
+      }
+    }
+
+    loadAll();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ── Load logs ────────────────────────────────────────────────────
+  useEffect(() => {
+    const api = getApi();
+    if (!api) return;
+
+    let cancelled = false;
+
+    api.readRecentLogs().then((result) => {
+      if (!cancelled) {
+        setLogResult(result);
+        setLogLoading(false);
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setLogResult({
+          success: false,
+          data: "",
+          byteCount: 0,
+          lineCount: 0,
+          truncated: false,
+          error: "Failed to load logs",
+        });
+        setLogLoading(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ── Copy logs handler ────────────────────────────────────────────
+  const handleCopyLogs = useCallback(() => {
+    const api = getApi();
+    if (!api?.clipboardWriteText) {
+      toast("Clipboard API not available");
+      return;
+    }
+
+    if (!logResult?.success || !logResult.data) {
+      toast("No log content to copy");
+      return;
+    }
+
+    api.clipboardWriteText(logResult.data).then((result) => {
+      if (result.success) {
+        toast("Logs copied to clipboard");
+      } else {
+        toast("Failed to copy logs");
+      }
+    }).catch(() => {
+      toast("Failed to copy logs");
+    });
+  }, [logResult]);
+
+  const handleOpenLogFolder = useCallback(() => {
+    const api = getApi();
+    if (api?.openLogFolder) {
+      api.openLogFolder().then((result) => {
+        if (result.success) {
+          toast("Log folder opened");
+        } else {
+          toast("Failed to open log folder: " + (result.error ?? "unknown"));
+        }
+      }).catch(() => {
+        toast("Failed to open log folder");
+      });
+    } else {
+      toast("Log folder API not available");
+    }
+  }, []);
+
+  // ── Render: API unavailable ──────────────────────────────────────
+  if (loadState === "unavailable") {
     return (
-      <div className="flex items-center justify-between py-1 border-b border-border-subtle last:border-b-0">
-        <span className="text-xs text-text-secondary">{label}</span>
-        {copyable ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(value);
-                  toast("Copied: " + value);
-                }}
-                className="font-mono text-xs text-text-primary hover:text-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
-              >
-                {value}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="left">Click to copy</TooltipContent>
-          </Tooltip>
-        ) : (
-          content
-        )}
+      <div className="h-full overflow-auto p-6">
+        <div role="alert" className="flex flex-col items-center justify-center h-full space-y-4">
+          <div className="text-text-muted text-4xl">⚡</div>
+          <h2 className="text-lg font-semibold text-text-primary">API not available</h2>
+          <p className="text-sm text-text-secondary text-center max-w-md">
+            The ScreenLink preload API is not available. This page requires
+            running inside the ScreenLink Electron app.
+          </p>
+          <p className="text-xs text-text-muted">
+            Running outside Electron? The diagnostics data cannot be loaded.
+          </p>
+        </div>
       </div>
     );
-  };
+  }
 
+  // ── Render: Loading ──────────────────────────────────────────────
+  if (loadState === "loading") {
+    return (
+      <div className="h-full overflow-auto p-6 space-y-6" role="status" aria-busy="true">
+        <div className="flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-text-primary">Diagnostics</h1>
+        </div>
+
+        <Card>
+          <CardHeader><CardTitle>Application</CardTitle></CardHeader>
+          <CardContent className="space-y-0">
+            <SkeletonRow />
+            <SkeletonRow />
+            <SkeletonRow />
+            <SkeletonRow />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>Audio Helper</CardTitle></CardHeader>
+          <CardContent className="space-y-0">
+            <SkeletonRow />
+            <SkeletonRow />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>Video Enhancement</CardTitle></CardHeader>
+          <CardContent className="space-y-0">
+            <SkeletonRow />
+            <SkeletonRow />
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // ── Render: Error ────────────────────────────────────────────────
+  if (loadState === "error") {
+    return (
+      <div className="h-full overflow-auto p-6">
+        <div role="alert" className="flex flex-col items-center justify-center h-full space-y-4">
+          <h2 className="text-lg font-semibold text-danger">Failed to load diagnostics</h2>
+          <p className="text-sm text-text-secondary text-center max-w-md">
+            {data.appInfoError || "An unexpected error occurred while loading diagnostics data."}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => window.location.reload()}
+          >
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Render: Loaded ───────────────────────────────────────────────
   return (
     <div className="h-full overflow-auto p-6 space-y-6">
       {/* ─── Page header ─────────────────────────────────────── */}
@@ -201,86 +527,186 @@ export function DiagnosticsPage() {
         <h1 className="text-xl font-semibold text-text-primary">Diagnostics</h1>
       </div>
 
-      {/* ─── System info ─────────────────────────────────────── */}
+      {/* ─── Application info ────────────────────────────────── */}
       <Card>
         <CardHeader>
-          <CardTitle>System info</CardTitle>
+          <CardTitle>Application</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-0">
-            <InfoRow label="App version" value={appVersion} mono copyable />
-            <InfoRow label="Electron version" value={electronVersion} mono copyable />
-            <InfoRow label="VDO SDK version" value={vdoVersion} mono copyable />
-            <InfoRow label="OS" value={osInfo} copyable />
-            <InfoRow label="Build" value={buildInfo} mono copyable />
-            <InfoRow label="Hostname" value={hostname} mono copyable />
+            <InfoRow
+              label="App version"
+              value={data.appInfo?.version ?? "—"}
+              mono
+              copyable
+            />
+            <InfoRow
+              label="Electron"
+              value={data.appInfo?.electronVersion ?? "—"}
+              mono
+              copyable
+            />
+            <InfoRow
+              label="Chromium"
+              value={data.appInfo?.chromeVersion ?? "—"}
+              mono
+              copyable
+            />
+            <InfoRow
+              label="Node.js"
+              value={data.appInfo?.nodeVersion ?? "—"}
+              mono
+              copyable
+            />
           </div>
         </CardContent>
       </Card>
 
-      {/* ─── Connection ───────────────────────────────────────── */}
+      {/* ─── Renderer Environment ────────────────────────────── */}
       <Card>
         <CardHeader>
-          <CardTitle>Connection</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center justify-between py-1">
-            <span className="text-xs text-text-secondary">Rendezvous health</span>
-            <Badge
-              variant={
-                rendezvousHealth === "healthy"
-                  ? "success"
-                  : rendezvousHealth === "degraded"
-                    ? "warning"
-                    : "destructive"
-              }
-              className="text-[10px]"
-            >
-              {rendezvousHealth}
-            </Badge>
-          </div>
-          <InfoRow label="Share status" value={shareStatus || "Idle"} />
-          <InfoRow label="Last heartbeat" value={lastHeartbeat} mono />
-          <InfoRow label="Last reconnect" value={lastReconnect} mono />
-
-          <Separator />
-          <DisclosureSection
-            title="WebRTC stats"
-            open={showWebrtc}
-            onToggle={() => setShowWebrtc(!showWebrtc)}
-          >
-            <pre className="font-mono text-[11px] text-text-secondary bg-surface-3 p-2 rounded-compact overflow-x-auto whitespace-pre-wrap">
-              {webrtcStats}
-            </pre>
-          </DisclosureSection>
-        </CardContent>
-      </Card>
-
-      {/* ─── Captures ────────────────────────────────────────── */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Captures</CardTitle>
+          <CardTitle>Renderer Environment</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-1">
-            {captureLog.map((entry, i) => (
+          <div className="space-y-0">
+            <InfoRow label="User Agent" value={browserInfo?.userAgent ?? "—"} />
+            <InfoRow label="Platform" value={browserInfo?.platform ?? "—"} />
+            <InfoRow label="Language" value={browserInfo?.language ?? "—"} />
+            <InfoRow
+              label="Logical cores"
+              value={String(browserInfo?.hardwareConcurrency ?? "—")}
+              mono
+            />
+            <InfoRow
+              label="Device memory"
+              value={browserInfo?.deviceMemory ? `${browserInfo.deviceMemory} GiB` : "unknown"}
+            />
+            <InfoRow
+              label="Max touch points"
+              value={String(browserInfo?.maxTouchPoints ?? "—")}
+              mono
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ─── WebRTC / Media Support ──────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>WebRTC &amp; Media Support</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-0">
+            {webrtcSupport && Object.entries(webrtcSupport).map(([key, supported]) => (
               <div
-                key={i}
-                className="flex items-center gap-3 py-1 text-xs border-b border-border-subtle last:border-b-0"
+                key={key}
+                className="flex items-center justify-between py-1 border-b border-border-subtle last:border-b-0"
               >
-                <span className="font-mono text-text-muted flex-shrink-0">
-                  {entry.time}
-                </span>
-                <span className="text-text-primary flex-1 truncate">
-                  {entry.source}
-                </span>
-                {entry.error && (
-                  <Badge variant="destructive" className="text-[10px] flex-shrink-0">
-                    {entry.error}
-                  </Badge>
-                )}
+                <span className="text-xs text-text-secondary">{key}</span>
+                <Badge
+                  variant={supported ? "success" : "destructive"}
+                  className="text-[10px]"
+                >
+                  {supported ? "Yes" : "No"}
+                </Badge>
               </div>
             ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ─── Audio Helper ────────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Audio Helper</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-0">
+            <InfoRow label="Audio state" value={data.audioState ?? "disabled"} />
+            {data.helperProvenance && (
+              <>
+                <InfoRow
+                  label="Helper state"
+                  value={data.helperProvenance.state}
+                  mono
+                />
+                <InfoRow
+                  label="Uptime"
+                  value={formatUptime(data.helperProvenance.uptimeMs)}
+                  mono
+                />
+                <InfoRow
+                  label="Stream generation"
+                  value={String(data.helperProvenance.generation ?? "—")}
+                  mono
+                />
+                {data.helperProvenance.helperBinaryPath && (
+                  <InfoRow
+                    label="Binary path"
+                    value={data.helperProvenance.helperBinaryPath}
+                  />
+                )}
+                {data.helperProvenance.helperBinarySize != null && (
+                  <InfoRow
+                    label="Binary size"
+                    value={formatBytes(data.helperProvenance.helperBinarySize)}
+                    mono
+                  />
+                )}
+              </>
+            )}
+            {!data.helperProvenance && !data.helperProvenanceError && (
+              <p className="text-xs text-text-muted py-1">No audio helper data available</p>
+            )}
+            {data.helperProvenanceError && (
+              <p className="text-xs text-danger py-1">
+                Helper load error: {data.helperProvenanceError}
+              </p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ─── Video Enhancement ───────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Video Enhancement</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-0">
+            {data.nvidiaCapability ? (
+              <div className="flex items-center justify-between py-1 border-b border-border-subtle">
+                <span className="text-xs text-text-secondary">NVIDIA VSR</span>
+                <Badge
+                  variant={data.nvidiaCapability.available ? "success" : "secondary"}
+                  className="text-[10px]"
+                >
+                  {data.nvidiaCapability.available ? "Available" : "Unavailable"}
+                </Badge>
+              </div>
+            ) : (
+              <p className="text-xs text-text-muted py-1">No capability data</p>
+            )}
+            {data.nvidiaCapability?.reason && (
+              <InfoRow label="Reason" value={data.nvidiaCapability.reason} mono />
+            )}
+            {data.nvidiaCapabilityError && (
+              <p className="text-xs text-danger py-1">
+                Probe error: {data.nvidiaCapabilityError}
+              </p>
+            )}
+            {data.videoHelperDiag && (
+              <DisclosureSection
+                title="Video Helper Diagnostics"
+                open={showVideoHelper}
+                onToggle={() => setShowVideoHelper(!showVideoHelper)}
+                id={videoHelperId}
+              >
+                <pre className="font-mono text-[11px] text-text-secondary bg-surface-3 p-2 rounded-compact overflow-x-auto whitespace-pre-wrap">
+                  {JSON.stringify(data.videoHelperDiag, null, 2)}
+                </pre>
+              </DisclosureSection>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -292,18 +718,54 @@ export function DiagnosticsPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={handleCopyLogs}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCopyLogs}
+              disabled={!logResult?.success || !logResult.data}
+            >
               Copy to clipboard
             </Button>
             <Button variant="outline" size="sm" onClick={handleOpenLogFolder}>
               Open log folder
             </Button>
           </div>
-          <ScrollArea className="h-64 rounded-compact border border-border-subtle">
-            <pre className="font-mono text-[11px] text-text-secondary p-3 leading-relaxed whitespace-pre-wrap select-text">
-              {logLines.join("\n")}
-            </pre>
-          </ScrollArea>
+          {logLoading ? (
+            <div className="h-32 rounded-compact border border-border-subtle p-3">
+              <Skeleton className="h-3 w-full mb-2" />
+              <Skeleton className="h-3 w-3/4 mb-2" />
+              <Skeleton className="h-3 w-1/2" />
+            </div>
+          ) : !logResult?.success ? (
+            <div className="h-32 rounded-compact border border-border-subtle p-3 flex items-center justify-center">
+              <p className="text-xs text-danger">
+                {logResult?.error || "Failed to load logs"}
+              </p>
+            </div>
+          ) : !logResult.data ? (
+            <div className="h-32 rounded-compact border border-border-subtle p-3 flex items-center justify-center">
+              <p className="text-xs text-text-muted">No log content available</p>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-text-muted">
+                  {logResult.lineCount} lines ({logResult.byteCount} bytes)
+                  {logResult.truncated && " — truncated"}
+                </span>
+              </div>
+              <ScrollArea className="h-64 rounded-compact border border-border-subtle">
+                <pre
+                  role="log"
+                  tabIndex={0}
+                  aria-label="Application log content"
+                  className="font-mono text-[11px] text-text-secondary p-3 leading-relaxed whitespace-pre-wrap select-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  {logResult.data}
+                </pre>
+              </ScrollArea>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -317,12 +779,11 @@ export function DiagnosticsPage() {
             title="Advanced network metrics"
             open={showNetwork}
             onToggle={() => setShowNetwork(!showNetwork)}
+            id={networkId}
           >
-            <div className="space-y-1">
-              <InfoRow label="Packet loss" value={packetLoss} mono />
-              <InfoRow label="Jitter" value={jitter} mono />
-              <InfoRow label="RTT" value={rtt} mono />
-            </div>
+            <p className="text-xs text-text-muted py-1">
+              Network diagnostics require an active stream session.
+            </p>
           </DisclosureSection>
         </CardContent>
       </Card>

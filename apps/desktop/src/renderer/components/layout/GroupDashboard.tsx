@@ -27,11 +27,13 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn, getInitials } from "@/lib/utils";
-import { useStore, type GroupNavPage, type Page, type StreamAnnouncement } from "@/stores/main-store";
+import type { StreamAnnouncement } from "@screenlink/shared";
+import { useStore, type GroupNavPage, type Page } from "@/stores/main-store";
 import { UserDock } from "./UserDock.js";
 import { AnimatedCountBadge } from "@/components/primitives/AnimatedCountBadge";
 import { InviteDialog } from "@/components/workspace/InviteDialog";
 import { copyGroupInviteFromUi } from "@/services/invite-copy";
+import { startViewingStream } from "@/services/group-navigation";
 
 /**
  * GroupDashboard — 240px column for the selected group (Section 6).
@@ -86,27 +88,7 @@ export function GroupDashboard() {
   const handleWatchShare = useCallback((share: StreamAnnouncement) => {
     if (useStore.getState().isViewing) return;
     const s = useStore.getState();
-    const target = {
-      groupId: share.groupId,
-      logicalStreamId: share.logicalStreamId,
-      mediaSessionId: share.mediaSessionId,
-      hostDeviceId: share.hostDeviceId,
-      hostName: share.hostDisplayName,
-      startedAt: share.startedAt,
-      sourceName: share.sourceName,
-      sourceKind: share.sourceKind,
-    };
-    s.setWatchedStreams({
-      [share.mediaSessionId]: {
-        hostDeviceId: share.hostDeviceId,
-        hostName: share.hostDisplayName,
-        startedAt: share.startedAt,
-      },
-    });
-    s.setWatchingTarget(target);
-    s.setIsViewing(true);
-    s.setViewStatus("connecting");
-    s.navigate("viewer");
+    startViewingStream(share);
   }, []);
 
   const navItems: {

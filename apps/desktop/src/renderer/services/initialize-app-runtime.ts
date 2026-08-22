@@ -94,7 +94,10 @@ export async function initializeAppRuntime(
         // Auto-request stream state from all peers so active shares
         // are discovered immediately on app open without waiting for
         // the hello-handshake snapshot push.
-        runtime.requestGroupSync(config.groupId)?.catch(() => {});
+        const syncResult = runtime.requestGroupSync(config.groupId);
+        if (syncResult && typeof (syncResult as Promise<unknown>).then === "function") {
+          (syncResult as Promise<unknown>).catch(() => {});
+        }
       }
     } catch (err) {
       console.warn(`[App] Failed to initialize group ${record.groupId}:`, err);

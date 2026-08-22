@@ -1016,7 +1016,9 @@ export function ViewerSettingsPanel({
           {requestFeedback && (
             <p className={cn(
               "col-span-2 text-xs",
-              lastRequestAccepted === false ? "text-danger" : "text-text-secondary",
+              lastRequestAccepted === false ? "text-danger"
+                : lastRequestAccepted === true ? "text-emerald-500"
+                : "text-text-secondary",
             )}>
               {requestFeedback}
             </p>

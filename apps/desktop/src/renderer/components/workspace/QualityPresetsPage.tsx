@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
-import { RefreshCw, AlertTriangle, Download, Upload } from "lucide-react";
+import { RefreshCw, AlertTriangle, Upload } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -10,6 +10,7 @@ import {
   CardFooter,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -46,6 +47,8 @@ import {
   AlertDescription,
 } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { PageSection } from "@/components/layout/PageSection";
 import { useStore } from "@/stores/main-store";
 import {
   fetchQualityPresets,
@@ -57,6 +60,7 @@ import {
   importQualityPreset,
 } from "@/services/group-actions";
 import { saveSettings } from "@/services/settings-actions";
+import type { GroupQualitySettings, QualityPreset } from "@screenlink/shared";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -68,26 +72,23 @@ import {
   qualityEditorFieldsValid,
 } from "./QualityEditorFields.js";
 
-interface PresetRecord {
-  id: string;
-  name: string;
-  settings: Record<string, unknown>;
-}
+/** Extended preset record with viewer-panel metadata */
+type PresetRecord = QualityPreset;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function presetSummary(settings: Record<string, unknown>): {
+function presetSummary(settings: GroupQualitySettings): {
   resolution: string;
   fps: number;
   bitrate: number;
   codec: string;
 } {
-  const video = (settings.video as Record<string, unknown>) ?? {};
-  const w = (video.sendWidth as number) ?? 854;
-  const h = (video.sendHeight as number) ?? 480;
-  const f = (video.sendFps as number) ?? 15;
-  const b = (video.videoBitrateKbps as number) ?? 650;
-  const c = (video.codec as string) ?? "auto";
+  const video = settings.video;
+  const w = video.sendWidth ?? 854;
+  const h = video.sendHeight ?? 480;
+  const f = video.sendFps ?? 15;
+  const b = video.videoBitrateKbps ?? 650;
+  const c = video.codec ?? "auto";
   return {
     resolution: `${w}×${h}`,
     fps: f,
@@ -193,9 +194,9 @@ export function QualityPresetsPage() {
 
   const openEditEditor = useCallback(
     (preset: PresetRecord) => {
-      const video = (preset.settings.video as Record<string, unknown>) ?? {};
-      const w = (video.sendWidth as number) ?? 1280;
-      const h = (video.sendHeight as number) ?? 720;
+      const video = preset.settings.video;
+      const w = video.sendWidth ?? 1280;
+      const h = video.sendHeight ?? 720;
       // Match the saved w×h to a known resolution option, otherwise
       // fall back to Custom with the explicit dimensions preserved.
       const matched = RESOLUTION_OPTIONS.find(
@@ -206,18 +207,16 @@ export function QualityPresetsPage() {
         resolutionValue: matched?.value ?? "custom",
         customWidth: w,
         customHeight: h,
-        fps: (video.sendFps as number) ?? 30,
-        bitrate: (video.videoBitrateKbps as number) ?? 4000,
-        codec: (video.codec as string) ?? "vp9",
-        contentHint: (video.contentHint as string) ?? "motion",
+        fps: video.sendFps ?? 30,
+        bitrate: video.videoBitrateKbps ?? 4000,
+        codec: video.codec ?? "vp9",
+        contentHint: video.contentHint ?? "motion",
         degradationPreference:
-          (video.degradationPreference as string) ?? "maintain-resolution",
+          video.degradationPreference ?? "maintain-resolution",
       });
       setEditingId(preset.id);
-      const sv = preset.showInViewerPanel as boolean | undefined;
-      const vs = preset.viewerPanelSlot as number | null | undefined;
-      setShowInViewer(sv ?? false);
-      setViewerSlot(vs ?? null);
+      setShowInViewer(preset.showInViewerPanel ?? false);
+      setViewerSlot(preset.viewerPanelSlot ?? null);
       setEditorOpen(true);
     },
     [],
@@ -226,6 +225,11 @@ export function QualityPresetsPage() {
   // ── Save (create or update) ─────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!formName.trim() || formSaving) return;
+    const nameErr = isDuplicateName(formName, editingId);
+    if (nameErr) {
+      toast.error(nameErr);
+      return;
+    }
     if (qualityEditorFieldsValid(formQuality) !== null) return;
     setFormSaving(true);
 
@@ -270,7 +274,8 @@ export function QualityPresetsPage() {
       // Validate viewer panel slot uniqueness
       if (showInViewer && viewerSlot != null) {
         const conflict = presets.find(
-          (p) => p.id !== editingId && (p as any).showInViewerPanel === true && (p as any).viewerPanelSlot === viewerSlot,
+          (p): p is PresetRecord & { showInViewerPanel: true; viewerPanelSlot: number } =>
+            p.id !== editingId && p.showInViewerPanel === true && p.viewerPanelSlot === viewerSlot,
         );
         if (conflict) {
           toast.error(`Slot ${viewerSlot} is already assigned to "${conflict.name}"`);
@@ -397,7 +402,7 @@ export function QualityPresetsPage() {
 
   // ── Set as default ──────────────────────────────────────────────
   const handleSetDefault = useCallback(
-    async (settings: Record<string, unknown>) => {
+    async (settings: GroupQualitySettings) => {
       try {
         await saveSettings({ globalQualityDefaults: settings });
         toast.success("Default preset changed");
@@ -410,53 +415,70 @@ export function QualityPresetsPage() {
     [],
   );
 
+  // ── Duplicate name check ───────────────────────────────────────
+  const isDuplicateName = useCallback(
+    (name: string, excludeId: string | null): string | null => {
+      const trimmed = name.trim();
+      if (!trimmed) return "Name is required";
+      const existing = presets.find(
+        (p) => p.id !== excludeId && p.name.toLowerCase() === trimmed.toLowerCase(),
+      );
+      if (existing) return `A preset named "${existing.name}" already exists`;
+      return null;
+    },
+    [presets],
+  );
+
   // ── Render ──────────────────────────────────────────────────────
 
   return (
     <div className="h-full overflow-auto p-6 space-y-6">
       {/* ─── Page header ─────────────────────────────────────── */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-text-primary">
-          Quality Presets
-        </h1>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setImportDialogOpen(true)}>
-            <Upload className="h-3.5 w-3.5 mr-1" />
-            Import
-          </Button>
-          <Button onClick={openNewEditor} disabled={loading}>New preset</Button>
-        </div>
-      </div>
+      <PageHeader
+        title="Quality Presets"
+        description="Create and manage stream quality presets"
+        actions={
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setImportDialogOpen(true)}>
+              <Upload className="h-3.5 w-3.5 mr-1" />
+              Import
+            </Button>
+            <Button onClick={openNewEditor} disabled={loading}>New preset</Button>
+          </div>
+        }
+      />
 
-      {/* ─── Loading state ────────────────────────────────────── */}
-      {loading && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-48 w-full rounded-standard" />
-          ))}
-        </div>
-      )}
+      {/* ─── Preset list section ─────────────────────────────── */}
+      <PageSection title="Saved presets" description="Quality presets for streaming">
+        {/* ─── Loading state ────────────────────────────────────── */}
+        {loading && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-48 w-full rounded-standard" />
+            ))}
+          </div>
+        )}
 
-      {/* ─── Error state ──────────────────────────────────────── */}
-      {!loading && error && (
-        <Alert variant="destructive">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>Failed to load presets</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-2"
-            onClick={loadPresets}
-          >
-            <RefreshCw className="h-3.5 w-3.5 mr-1" />
-            Retry
-          </Button>
-        </Alert>
-      )}
+        {/* ─── Error state ──────────────────────────────────────── */}
+        {!loading && error && (
+          <Alert variant="destructive">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Failed to load presets</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={loadPresets}
+            >
+              <RefreshCw className="h-3.5 w-3.5 mr-1" />
+              Retry
+            </Button>
+          </Alert>
+        )}
 
-      {/* ─── Preset grid ──────────────────────────────────────── */}
-      {!loading && !error && (
+        {/* ─── Preset grid ──────────────────────────────────────── */}
+        {!loading && !error && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <AnimatePresence mode="popLayout">
             {presets.map((preset) => {
@@ -474,9 +496,9 @@ export function QualityPresetsPage() {
                     <CardHeader>
                       <div className="flex items-center gap-2">
                         <CardTitle className="text-sm">{preset.name}</CardTitle>
-                        {(preset as any).showInViewerPanel && (preset as any).viewerPanelSlot != null && (
+                        {preset.showInViewerPanel && preset.viewerPanelSlot != null && (
                           <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4">
-                            {(preset as any).viewerPanelSlot}
+                            {preset.viewerPanelSlot}
                           </Badge>
                         )}
                       </div>
@@ -553,16 +575,15 @@ export function QualityPresetsPage() {
           </AnimatePresence>
         </div>
       )}
-
-      {/* ─── Empty state ──────────────────────────────────────── */}
-      {!loading && !error && presets.length === 0 && (
-        <div className="text-center py-12 text-text-muted">
-          <p className="text-sm">No presets yet.</p>
-          <p className="text-xs mt-1">
-            Create a preset to save your preferred quality settings.
-          </p>
-        </div>
-      )}
+        {!loading && !error && presets.length === 0 && (
+          <div className="text-center py-12 text-text-muted">
+            <p className="text-sm">No presets yet.</p>
+            <p className="text-xs mt-1">
+              Create a preset to save your preferred quality settings.
+            </p>
+          </div>
+        )}
+      </PageSection>
 
       {/* ─── Editor sheet ─────────────────────────────────────── */}
       <Sheet open={editorOpen} onOpenChange={setEditorOpen}>
@@ -594,37 +615,37 @@ export function QualityPresetsPage() {
 
             {/* Viewer Panel Pin */}
             <div className="space-y-3 pt-2 border-t border-border-subtle">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="show-in-viewer">Show in viewer panel</Label>
-                <input
+              <div className="flex items-center gap-2">
+                <Checkbox
                   id="show-in-viewer"
-                  type="checkbox"
                   checked={showInViewer}
-                  onChange={(e) => {
-                    setShowInViewer(e.target.checked);
-                    if (!e.target.checked) setViewerSlot(null);
+                  onCheckedChange={(checked) => {
+                    setShowInViewer(checked === true);
+                    if (checked !== true) setViewerSlot(null);
                   }}
                   disabled={formSaving}
-                  className="toggle"
                 />
+                <Label htmlFor="show-in-viewer" className="cursor-pointer">Show in viewer panel</Label>
               </div>
               {showInViewer && (
                 <div className="space-y-1.5">
                   <Label htmlFor="viewer-slot">Keyboard shortcut</Label>
-                  <select
-                    id="viewer-slot"
-                    value={viewerSlot ?? ""}
-                    onChange={(e) => setViewerSlot(e.target.value ? parseInt(e.target.value, 10) : null)}
+                  <Select
+                    value={viewerSlot != null ? String(viewerSlot) : ""}
+                    onValueChange={(value) => setViewerSlot(value ? parseInt(value, 10) : null)}
                     disabled={formSaving}
-                    className="w-full h-8 rounded-standard text-xs bg-surface-2 border border-border-subtle text-text-primary px-2"
                   >
-                    <option value="">Select slot…</option>
-                    {Array.from({ length: 9 }, (_, i) => i + 1).map((n) => (
-                      <option key={n} value={n}>
-                        {n}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger id="viewer-slot" className="w-full">
+                      <SelectValue placeholder="Select slot…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Array.from({ length: 9 }, (_, i) => i + 1).map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <p className="text-[10px] text-text-muted">
                     Press this number key on the viewer page to instantly apply this preset.
                   </p>
