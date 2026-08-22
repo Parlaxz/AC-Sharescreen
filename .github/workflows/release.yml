@@ -80,6 +80,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $release = gh release view "$tag" --json isDraft,isPrerelease 2>$null
