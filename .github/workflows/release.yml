@@ -438,13 +438,13 @@ jobs:
           # Required updater assets
           $requiredAssets = @(
             "latest.yml",
-            ${{ steps.validate-artifacts.outputs.setup_exe }},
-            ${{ steps.validate-artifacts.outputs.blockmap }}
+            "${{ steps.validate-artifacts.outputs.setup_exe }}",
+            "${{ steps.validate-artifacts.outputs.blockmap }}"
           )
 
           # Optional distribution asset
           $optionalAssets = @(
-            ${{ steps.validate-artifacts.outputs.portable_exe }}
+            "${{ steps.validate-artifacts.outputs.portable_exe }}"
           )
 
           $allAssets = $requiredAssets + $optionalAssets
@@ -479,8 +479,8 @@ jobs:
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $requiredAssets = @(
             "latest.yml",
-            ${{ steps.validate-artifacts.outputs.setup_exe }},
-            ${{ steps.validate-artifacts.outputs.blockmap }}
+            "${{ steps.validate-artifacts.outputs.setup_exe }}",
+            "${{ steps.validate-artifacts.outputs.blockmap }}"
           )
 
           $releaseInfo = gh release view "$tag" --json assets 2>$null
