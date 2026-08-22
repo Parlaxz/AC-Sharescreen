@@ -402,14 +402,14 @@ jobs:
           if (Test-Path "$releaseDir/latest.yml") {
               $ymlContent = Get-Content "$releaseDir/latest.yml" -Raw
               # Extract the 'path' field
-              $ymlPath = ($ymlContent | Select-String '(?<=^path: ).*$' -Raw | ForEach-Object { $_.Trim() })
+              $ymlPath = [regex]::Match($ymlContent, '(?m)^path:\s*(.+)$').Groups[1].Value.Trim()
               $actualSetupName = $setupExe.Name
               if ($ymlPath -ne $actualSetupName) {
                   $errors += "latest.yml path '$ymlPath' does not match actual setup filename '$actualSetupName'"
               }
 
               # Extract the 'url' field from files array
-              $ymlUrl = ($ymlContent | Select-String '(?<=^  - url: ).*$' -Raw | ForEach-Object { $_.Trim() })
+              $ymlUrl = [regex]::Match($ymlContent, '(?m)^\s*-\s*url:\s*(.+)$').Groups[1].Value.Trim()
               if ($ymlUrl -and $ymlUrl -ne $actualSetupName) {
                   $errors += "latest.yml url '$ymlUrl' does not match actual setup filename '$actualSetupName'"
               }
@@ -524,8 +524,8 @@ jobs:
           $ymlContent = Get-Content "${{ runner.temp }}/verified-latest.yml" -Raw
 
           # Parse path and sha512 using regex
-          $setupPath = ($ymlContent | Select-String '(?<=^path: ).*$' -Raw | ForEach-Object { $_.Trim() })
-          $expectedSha = ($ymlContent | Select-String '(?<=^sha512: ).*' -Raw | ForEach-Object { $_.Trim() })
+          $setupPath = [regex]::Match($ymlContent, '(?m)^path:\s*(.+)$').Groups[1].Value.Trim()
+          $expectedSha = [regex]::Match($ymlContent, '(?m)^sha512:\s*(.+)$').Groups[1].Value.Trim()
 
           if (-not $setupPath -or -not $expectedSha) {
               Write-Host "::error::Could not parse path or sha512 from latest.yml"
@@ -555,7 +555,7 @@ jobs:
         run: |
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $ymlContent = Get-Content "${{ runner.temp }}/verified-latest.yml" -Raw
-          $setupPath = ($ymlContent | Select-String '(?<=^path: ).*$' -Raw | ForEach-Object { $_.Trim() })
+          $setupPath = [regex]::Match($ymlContent, '(?m)^path:\s*(.+)$').Groups[1].Value.Trim()
 
           $baseUrl = "https://github.com/Parlaxz/AC-Sharescreen/releases/download/$tag"
 
