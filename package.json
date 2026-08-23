@@ -32,7 +32,7 @@
 		"test": "pnpm --filter @screenlink/shared test",
 		"test:all": "pnpm -r test",
 		"test:run": "pnpm test",
-		"typecheck": "pnpm build:shared && pnpm -r typecheck",
+		"typecheck": "pnpm build:shared && pnpm build:vdo-adapter && pnpm -r typecheck",
 		"clean": "pnpm -r clean",
 		"clean:dev": "powershell -NoProfile -Command \"Get-Process -Name 'electron' -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*screenlink*' } | Stop-Process -Force -ErrorAction SilentlyContinue; exit 0\"",
 		"desktop:dev": "pnpm build:shared && pnpm build:vdo-adapter && pnpm --filter @screenlink/desktop dev",
