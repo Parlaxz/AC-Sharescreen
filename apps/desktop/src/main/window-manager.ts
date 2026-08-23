@@ -16,6 +16,56 @@ export class WindowManager {
   }
 
   /**
+   * True when `window` is a live, usable BrowserWindow.
+   * Clears the stale reference when the underlying native window
+   * has already been destroyed (prevents "Object has been destroyed").
+   */
+  private getAliveWindow(): BrowserWindow | null {
+    if (!this.window) {
+      return null;
+    }
+    if (this.window.isDestroyed()) {
+      this.window = null;
+      return null;
+    }
+    return this.window;
+  }
+
+  /**
+   * True only for Electron's native-teardown race: the object passed the
+   * `isDestroyed()` check but was destroyed before the native call ran.
+   */
+  private static isDestroyedRace(err: unknown): boolean {
+    return (
+      err instanceof Error && err.message.includes("Object has been destroyed")
+    );
+  }
+
+  /**
+   * Run `fn` against a live window. Returns false when there was no usable
+   * live window (already destroyed, or destroyed between the aliveness
+   * check and the native call). Only the destroyed-object race is caught;
+   * any other error propagates.
+   */
+  private useAliveWindow(fn: (win: BrowserWindow) => void): boolean {
+    const win = this.getAliveWindow();
+    if (!win) {
+      return false;
+    }
+    try {
+      fn(win);
+      return true;
+    } catch (err) {
+      if (!WindowManager.isDestroyedRace(err)) {
+        throw err;
+      }
+      // Native teardown won the race: drop the stale reference.
+      this.window = null;
+      return false;
+    }
+  }
+
+  /**
    * Create the main BrowserWindow with secure defaults and close-to-tray behavior.
    */
   create(): BrowserWindow {
@@ -45,7 +95,7 @@ export class WindowManager {
     this.window.on("close", (event) => {
       if (!this.isQuitting) {
         event.preventDefault();
-        this.window?.hide();
+        this.getAliveWindow()?.hide();
       }
     });
 
@@ -79,37 +129,64 @@ export class WindowManager {
   }
 
   toggleDevTools(): void {
-    if (!this.window) {
-      return;
-    }
+    this.useAliveWindow((win) => {
+      const wc = win.webContents;
+      if (wc.isDestroyed()) {
+        return;
+      }
 
-    if (this.window.webContents.isDevToolsOpened()) {
-      this.window.webContents.closeDevTools();
-      return;
-    }
+      if (wc.isDevToolsOpened()) {
+        wc.closeDevTools();
+        return;
+      }
 
-    // Ctrl+Shift+I always toggles DevTools in development and packaged builds.
-    this.window.webContents.openDevTools({ mode: "bottom" });
+      // Ctrl+Shift+I always toggles DevTools in development and packaged builds.
+      wc.openDevTools({ mode: "bottom" });
+    });
   }
 
   show(): void {
-    this.window?.show();
+    if (this.useAliveWindow((win) => win.show())) {
+      return;
+    }
+    // Window was destroyed (e.g. closed to tray path raced with teardown,
+    // possibly between the aliveness check and show()): recreate and show
+    // when it is safe to do so.
+    this.recreateAndShow();
   }
 
   /** Show, restore if minimized, and focus the window. */
   showRestoreOrFocus(): void {
-    if (!this.window) return;
-    if (this.window.isMinimized()) this.window.restore();
-    this.window.show();
-    this.window.focus();
+    if (
+      this.useAliveWindow((win) => {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+      })
+    ) {
+      return;
+    }
+    this.recreateAndShow();
   }
 
   hide(): void {
-    this.window?.hide();
+    this.useAliveWindow((win) => win.hide());
   }
 
   focus(): void {
-    this.window?.focus();
+    this.useAliveWindow((win) => win.focus());
+  }
+
+  /**
+   * Recreate the BrowserWindow after it has been destroyed and show it.
+   * Only safe while the app is not quitting; a no-op otherwise.
+   */
+  private recreateAndShow(): void {
+    if (this.isQuitting || this.window) {
+      return;
+    }
+    const win = this.create();
+    win.show();
   }
 
   getWindow(): BrowserWindow | null {

@@ -22,6 +22,7 @@ function createBrowserWindowMock() {
       show: vi.fn(),
       hide: vi.fn(),
       focus: vi.fn(),
+      isDestroyed: vi.fn(() => false),
       isMinimized: vi.fn(() => false),
       restore: vi.fn(),
       isMaximized: vi.fn(() => false),
@@ -35,6 +36,7 @@ function createBrowserWindowMock() {
           }
         }),
         isDevToolsOpened: vi.fn(() => false),
+        isDestroyed: vi.fn(() => false),
         openDevTools: vi.fn(),
         closeDevTools: vi.fn(),
       },

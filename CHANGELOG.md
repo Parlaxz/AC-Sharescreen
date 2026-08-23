@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.8 — 2026-08-22
+
+### Fixed
+- Prevented Electron main-process crashes when window operations race with native window teardown.
+
 ## 0.6.0 — 2026-06-30
 
 ### New
