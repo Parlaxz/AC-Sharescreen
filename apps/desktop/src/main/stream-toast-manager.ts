@@ -80,10 +80,25 @@ export class StreamToastManager {
     toastWindow.webContents.on("did-finish-load", () => {
       console.log("[stream-toast] toast content rendered");
     });
+    toastWindow.webContents.on("did-fail-load", (_event, code, desc) => {
+      console.error("[stream-toast] did-fail-load:", code, desc);
+    });
+    toastWindow.webContents.on("render-process-gone", (_event, details) => {
+      console.error("[stream-toast] render-process-gone:", JSON.stringify(details));
+    });
     toastWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(renderToastHtml(payload))}`).catch((err: unknown) => {
       console.error("[stream-toast] failed to load toast content:", err);
     });
     toastWindow.showInactive();
+    setTimeout(() => {
+      if (toastWindow.isDestroyed()) return;
+      if (toastWindow.isVisible()) {
+        const bounds = toastWindow.getBounds();
+        console.log("[stream-toast] visibility check ok:", JSON.stringify(bounds));
+      } else {
+        console.error("[stream-toast] visibility check FAILED: window not visible after show");
+      }
+    }, 1000);
     this.dismissTimer = setTimeout(() => this.fadeAndDestroy(), TOAST_DURATION_MS);
     console.log("[stream-toast] shown for", payload.hostName, "in", payload.groupName);
     return { shown: true };

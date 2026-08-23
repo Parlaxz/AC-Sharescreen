@@ -34,6 +34,7 @@ import {
 } from "@/services/settings-actions";
 import { useIdentityStore } from "@/stores/identity-store";
 import { getRuntime } from "@/services/phase3-runtime";
+import { getApi } from "@/services/get-api";
 import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSection";
 import { StreamHistorySection } from "@/components/settings/StreamHistorySection";
 import type { PersistedSettings, ShortcutBinding, StreamInfoCardConfig } from "@screenlink/shared";
@@ -535,13 +536,46 @@ export function SettingsPage() {
 
       <PageSection title="Notifications" description="Control when ScreenLink notifies you">
         <Card>
-          <CardContent className="pt-4 space-y-1">
+          <CardContent className="pt-4 space-y-3">
             <SwitchRow
               id="notifications-enabled"
               label="General notifications enabled"
               checked={form.notificationsEnabled}
               onCheckedChange={(value) => updateField("notificationsEnabled", value)}
             />
+            <div>
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  const api = getApi();
+                  if (!api) {
+                    toast.error("ScreenLink API unavailable");
+                    return;
+                  }
+                  try {
+                    const result = await api.showStreamToast({
+                      groupId: `popup-test-${Date.now()}`,
+                      hostDeviceId: "settings-test",
+                      logicalStreamId: `test-${Date.now()}`,
+                      hostName: "ScreenLink",
+                      groupName: "Popup test",
+                    });
+                    if (result.shown) {
+                      toast.success("Test popup displayed (bottom-right corner)");
+                    } else {
+                      toast.warning(`Popup not shown: ${result.reason ?? "unknown reason"}`);
+                    }
+                  } catch (err) {
+                    toast.error(`Test popup failed: ${err instanceof Error ? err.message : String(err)}`);
+                  }
+                }}
+              >
+                Test popup
+              </Button>
+              <p className="text-xs text-muted-foreground mt-1.5">
+                Shows a sample stream toast in the bottom-right corner of your screen.
+              </p>
+            </div>
           </CardContent>
         </Card>
       </PageSection>
