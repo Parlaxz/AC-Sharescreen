@@ -68,8 +68,10 @@ async function serveRenderer(url: URL): Promise<Response> {
     return new Response("Not Found", { status: 404 });
   }
 
-  const filePath = decodedPathname === "/" ? "/index.html" : decodedPathname;
-  const resolved = path.resolve(distPath, path.normalize(filePath));
+  // Strip the leading slash: path.resolve would otherwise treat "/x" as
+  // drive-rooted on Windows ("D:\x") and escape distPath.
+  const filePath = decodedPathname === "/" ? "index.html" : decodedPathname.replace(/^\/+/, "");
+  const resolved = path.resolve(distPath, filePath);
 
   // Containment check: the resolved path must stay inside distPath
   // (equal to distPath itself is also rejected — only real files serve).
