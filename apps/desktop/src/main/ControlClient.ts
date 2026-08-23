@@ -257,7 +257,14 @@ export class ControlClient {
 
   private tryDispatchResponse(text: string): boolean {
     try {
-      const response: ControlResponse = JSON.parse(text);
+      // Tolerate helpers built with unexpanded @CMAKE@ placeholders (e.g.
+      // "gitDirty":@GIT_DIRTY@) by quoting bare placeholder tokens before
+      // parsing. Quoted values ("@TOKEN@") are left untouched.
+      const parseable = text.replace(
+        /([:{[,]\s*)@([A-Za-z_][A-Za-z0-9_]*)@/g,
+        '$1"@$2@"',
+      );
+      const response: ControlResponse = JSON.parse(parseable);
       
       // Match by exact requestId (native side now echoes the real incoming ID).
       const pending = this.pendingRequests.get(response.requestId);

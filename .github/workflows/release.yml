@@ -175,6 +175,21 @@ jobs:
         run: |
           cmake --build native/audio-helper/build --config Release
 
+      - name: Verify audio helper build info
+        shell: pwsh
+        run: |
+          $header = "native/audio-helper/build/generated/BuildInfo.h"
+          if (-not (Test-Path $header)) {
+            Write-Host "::error::BuildInfo.h was not generated"
+            exit 1
+          }
+          $content = Get-Content $header -Raw
+          if ($content -match "@GIT_COMMIT@|@GIT_DIRTY@|@GIT_BRANCH@") {
+            Write-Host "::error::BuildInfo.h contains unexpanded placeholders (git metadata unavailable at generation time)"
+            exit 1
+          }
+          Write-Host "BuildInfo.h generated correctly."
+
       - name: Run audio helper self-test
         id: audio-helper-self-test
         shell: pwsh

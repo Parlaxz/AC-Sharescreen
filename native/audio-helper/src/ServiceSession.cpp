@@ -762,7 +762,17 @@ void ServiceSession::HandleHello(const CommandContext& ctx,
     result += "\"pid\":" + std::to_string(static_cast<uint64_t>(GetCurrentProcessId())) + ",";
     result += "\"buildInfo\":{";
     result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
-    result += "\"gitDirty\":" + std::string(build::kGitDirty) + ",";
+    // kGitDirty is a bare JSON boolean when build info was generated
+    // ("true"/"false"), but an ungenerated template leaves a raw
+    // @PLACEHOLDER@ which would make the response unparseable — quote it.
+    {
+        const std::string dirty(build::kGitDirty);
+        if (dirty == "true" || dirty == "false") {
+            result += "\"gitDirty\":" + dirty + ",";
+        } else {
+            result += "\"gitDirty\":\"" + dirty + "\",";
+        }
+    }
     result += "\"gitBranch\":\"" + std::string(build::kGitBranch) + "\",";
     result += "\"buildTimestamp\":\"" + std::string(build::kBuildTimestamp) + "\",";
     result += "\"architecture\":\"" + std::string(build::kArchitecture) + "\",";
@@ -1212,7 +1222,17 @@ void ServiceSession::HandleGetDiagnostics(const CommandContext& ctx,
     result += "\"lastErrorTimestamp\":" + std::to_string(lastErrorTimestamp_) + ",";
     result += "\"buildInfo\":{";
     result += "\"gitCommit\":\"" + std::string(build::kGitCommit) + "\",";
-    result += "\"gitDirty\":" + std::string(build::kGitDirty) + ",";
+    // kGitDirty is a bare JSON boolean when build info was generated
+    // ("true"/"false"), but an ungenerated template leaves a raw
+    // @PLACEHOLDER@ which would make the response unparseable — quote it.
+    {
+        const std::string dirty(build::kGitDirty);
+        if (dirty == "true" || dirty == "false") {
+            result += "\"gitDirty\":" + dirty + ",";
+        } else {
+            result += "\"gitDirty\":\"" + dirty + "\",";
+        }
+    }
     result += "\"gitBranch\":\"" + std::string(build::kGitBranch) + "\",";
     result += "\"buildTimestamp\":\"" + std::string(build::kBuildTimestamp) + "\",";
     result += "\"architecture\":\"" + std::string(build::kArchitecture) + "\",";

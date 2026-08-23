@@ -1,4 +1,4 @@
-# GenerateBuildInfo.cmake
+﻿# GenerateBuildInfo.cmake
 # Captures git build provenance and generates BuildInfo.h.
 # Can be called from cmake configure time (include()) or build time
 # (cmake -P with AHC_SOURCE_DIR and AHC_BINARY_DIR).
@@ -119,3 +119,13 @@ string(REPLACE "@BUILD_CONFIG@" "${BUILD_CONFIG}" CONTENT "${CONTENT}")
 string(REPLACE "@COMPILER_ID@" "${COMPILER_ID}" CONTENT "${CONTENT}")
 
 file(WRITE "${AHC_BINARY_DIR}/generated/BuildInfo.h" "${CONTENT}")
+
+
+# Surface unexpanded placeholders loudly: hello responses from such a
+# helper are malformed JSON and stall stream startup on older clients.
+if(CONTENT MATCHES "@GIT_COMMIT@|@GIT_DIRTY@|@GIT_BRANCH@|@BUILD_TIMESTAMP@")
+  message(WARNING
+    "GenerateBuildInfo: BuildInfo.h contains unexpanded placeholders - "
+    "git metadata was unavailable at generation time.")
+endif()
+
