@@ -24,6 +24,7 @@ import { usePreloadEvents } from "./hooks/use-preload-events.js";
 import { useTrayStateSync } from "./hooks/use-tray-state-sync.js";
 import { initializeAppRuntime } from "./services/initialize-app-runtime.js";
 import { initGroupShortcutListener } from "./services/group-shortcut-service.js";
+import { startNotificationWatcher } from "./services/notification-watcher.js";
 import { getApi } from "./services/get-api.js";
 import { startViewingStream } from "./services/group-navigation.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
@@ -67,6 +68,12 @@ export function App() {
   // Initialize group shortcut listener (Quick Share / Quick Join via global shortcuts)
   useEffect(() => {
     const cleanup = initGroupShortcutListener();
+    return cleanup;
+  }, []);
+
+  // Watch store for stream-started transitions and fire stream toasts
+  useEffect(() => {
+    const cleanup = startNotificationWatcher();
     return cleanup;
   }, []);
 
