@@ -1,0 +1,15 @@
+{
+  "agent": "sanity-a-6632",
+  "flushedAt": "2026-08-24T06:15:17.873Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787551878732,
+      "iso": "2026-08-24T06:11:18.732Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

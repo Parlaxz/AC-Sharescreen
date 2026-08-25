@@ -1,0 +1,35 @@
+{
+  "timestamp": 1787609255112,
+  "currentPage": "overview",
+  "selectedGroupId": "44708714-435b-4f78-a9a1-25d0da1fea6f",
+  "groups": [
+    {
+      "id": "44708714-435b-4f78-a9a1-25d0da1fea6f",
+      "name": "Alpha m7-30824-72861",
+      "memberCount": 2
+    }
+  ],
+  "groupConnections": [
+    {
+      "groupId": "44708714-435b-4f78-a9a1-25d0da1fea6f",
+      "state": "connected",
+      "onlinePeers": [
+        "65ee27e4-9dac-4c84-8354-aa285e8a31f5"
+      ],
+      "error": null
+    }
+  ],
+  "activeStreams": [],
+  "activeStreamsByGroup": {},
+  "viewerSessions": [],
+  "hostShare": {
+    "sharing": false,
+    "sessionId": null,
+    "mediaSessionId": null,
+    "sourceLabel": ""
+  },
+  "helpers": {
+    "audio": "disabled",
+    "video": "disconnected"
+  }
+}

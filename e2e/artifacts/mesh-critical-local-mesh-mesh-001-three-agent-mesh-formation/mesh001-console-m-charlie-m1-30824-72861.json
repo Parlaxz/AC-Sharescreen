@@ -1,0 +1,11 @@
+{
+  "markerish": [],
+  "counts": {
+    "rendererConsole": 0,
+    "mainConsole": 0,
+    "pageErrors": 0,
+    "requestFailed": 0
+  },
+  "lastRenderer": [],
+  "lastMain": []
+}

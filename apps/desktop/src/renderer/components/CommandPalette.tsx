@@ -25,6 +25,7 @@ interface CommandActionItem {
   shortcut: string;
   disabled?: boolean;
   disabledReason?: string;
+  testId?: string;
   action: () => void;
 }
 
@@ -43,7 +44,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         { label: "Open settings", shortcut: "Ctrl+,", action: () => navigate("user-settings") },
         { label: "Open diagnostics", shortcut: "", action: () => navigate("diagnostics") },
         { label: "Open my presets", shortcut: "", action: () => navigate("quality-presets") },
-        { label: "Open about", shortcut: "", action: () => navigate("about") },
+        { label: "Open about", shortcut: "", testId: "nav-about", action: () => navigate("about") },
       ],
     },
     {
@@ -98,6 +99,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 <CommandItem
                   key={item.label}
                   disabled={isDisabled}
+                  data-testid={item.testId}
                   onSelect={() => {
                     if (isDisabled) return;
                     item.action();

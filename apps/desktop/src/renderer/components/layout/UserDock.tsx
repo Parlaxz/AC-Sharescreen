@@ -132,6 +132,7 @@ export function UserDock() {
               size="icon"
               className="h-7 w-7 flex-shrink-0"
               aria-label="Settings"
+              data-testid="nav-settings"
               onClick={() => navigate("user-settings")}
             >
               <Settings className="h-4 w-4" />
@@ -169,6 +170,7 @@ export function UserDock() {
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
+            data-testid="nav-diagnostics"
             onClick={() => {
               useStore.getState().navigate("diagnostics");
             }}

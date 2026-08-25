@@ -1,0 +1,15 @@
+{
+  "agent": "lc-quit-16528",
+  "flushedAt": "2026-08-24T05:31:51.035Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787549420357,
+      "iso": "2026-08-24T05:30:20.357Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

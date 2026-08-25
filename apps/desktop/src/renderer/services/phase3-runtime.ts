@@ -10,7 +10,7 @@ import { ViewerSenderController } from "./viewer-sender-controller.js";
 import { showNotification } from "./notifications.js";
 import { uiSoundService } from "./ui-sound-service.js";
 import type { GroupSharedState, GroupMemberRecord, HybridTimestamp, HostQualityLimits } from "@screenlink/shared";
-import { createDefaultHostQualityLimits } from "@screenlink/shared";
+import { createDefaultHostQualityLimits, isMemberActive } from "@screenlink/shared";
 import type { PublisherManager } from "./publisher-manager.js";
 import type { VdoSessionConfig } from "./stream-session-manager.js";
 
@@ -133,10 +133,35 @@ export class Phase3Runtime {
     this.connManager.setOnStatesChanged((states) => {
       if (gen !== this.initGen || this.destroyed) return;
       const stateById: Record<string, { groupId: string; state: string; onlinePeers: string[]; error: string | null }> = {};
+      const s0 = store.getState();
+      const byGroup = { ...s0.onlineDeviceIdsByGroup };
+      let onlineChanged = false;
       for (const [groupId, s] of states) {
-        stateById[groupId] = s;
+        // Store-level only: the local device is always "online" from its own
+        // view, but it never authenticates a hello with itself, so peers
+        // lists only contain remote devices.
+        let peers = s.onlinePeers;
+        if (s.state === "connected" && this._deviceId && !peers.includes(this._deviceId)) {
+          peers = [...peers, this._deviceId];
+        }
+        stateById[groupId] = { ...s, onlinePeers: peers };
+
+        // Mirror self into onlineDeviceIdsByGroup — MembersList/Groups read
+        // THIS field for member-row online dots (remote ids here are managed
+        // by the onPeerOnline/onPeerOffline callbacks below).
+        if (this._deviceId) {
+          const entry = byGroup[groupId] ?? [];
+          if (s.state === "connected" && !entry.includes(this._deviceId)) {
+            byGroup[groupId] = [...entry, this._deviceId];
+            onlineChanged = true;
+          } else if (s.state !== "connected" && entry.includes(this._deviceId)) {
+            byGroup[groupId] = entry.filter((d) => d !== this._deviceId);
+            onlineChanged = true;
+          }
+        }
       }
-      store.getState().setGroupConnectionState(stateById);
+      s0.setGroupConnectionState(stateById);
+      if (onlineChanged) s0.setOnlineDevices(byGroup);
     });
 
     this.connManager.setOnPeerOnline((groupId, deviceId, displayName) => {
@@ -188,6 +213,10 @@ export class Phase3Runtime {
           void this.connManager.flushPendingLifecycleToPeer(groupId, peerUuid).catch(() => {});
         }
       }
+
+      // Immediate membership propagation kick: exchange anti-entropy
+      // summaries right away instead of waiting up to 30s for the timer.
+      void this.syncService.requestSync(groupId).catch(() => {});
     });
 
     this.connManager.setOnPeerOffline((groupId, deviceId) => {
@@ -238,7 +267,9 @@ export class Phase3Runtime {
         id: groupId,
         name: state.name.value,
         members: Object.fromEntries(
-          Object.entries(state.members).map(([k, v]) => [k, { deviceId: v.deviceId, displayName: v.displayName }]),
+          Object.entries(state.members)
+            .filter(([, v]) => isMemberActive(v))
+            .map(([k, v]) => [k, { deviceId: v.deviceId, displayName: v.displayName }]),
         ),
       };
       if (!order.includes(groupId)) order.push(groupId);
@@ -296,6 +327,14 @@ export class Phase3Runtime {
           store.setState({ viewerCount: count });
         },
         showNotification: (n) => showNotification(n),
+        onMemberLeft: (groupId, deviceId) => {
+          const s = store.getState();
+          const byGroup = { ...s.onlineDeviceIdsByGroup };
+          if (byGroup[groupId]?.includes(deviceId)) {
+            byGroup[groupId] = byGroup[groupId].filter((d) => d !== deviceId);
+            s.setOnlineDevices(byGroup);
+          }
+        },
         onViewerStatus: (data) => {
           if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
             window.dispatchEvent(new CustomEvent("screenlink:viewer-status", { detail: data }));
@@ -339,7 +378,7 @@ export class Phase3Runtime {
    * Messages immediately after connection must not drop due to missing sync state.
    */
   async addGroup(
-    config: { groupId: string; controlRoomId: string; groupSecret: string; nodeId: string; displayName: string },
+    config: { groupId: string; controlRoomId: string; groupSecret: string; nodeId: string; displayName: string; creatorDeviceId?: string | null },
     state: GroupSharedState,
     clock: HybridTimestamp,
   ): Promise<void> {
@@ -403,6 +442,15 @@ export class Phase3Runtime {
     const onlineState = (await import("../stores/main-store.js")).useStore.getState().onlineDeviceIdsByGroup[config.groupId] ?? [];
     const onlineSet = new Set(onlineState);
     this.previouslyOnlineMembers.set(config.groupId, onlineSet);
+
+    // Defunct-group watcher: sole-survivor joiners self-dissolve groups whose
+    // creator and all other members are gone (GRP-011). Loaded lazily to
+    // avoid an import cycle (it imports Phase3Runtime as type-only).
+    const { watchGroupForDefunct } = await import("./defunct-group-watch.js");
+    watchGroupForDefunct(this, config.groupId, {
+      selfDeviceId: config.nodeId,
+      creatorDeviceId: config.creatorDeviceId ?? null,
+    });
   }
 
   async removeGroup(groupId: string): Promise<void> {
@@ -582,9 +630,19 @@ export class Phase3Runtime {
   private async doRequestGroupSync(groupId: string, options?: GroupSyncOptions): Promise<GroupSyncRequestResult> {
     if (this.destroyed) return { status: "suppressed", reason: "destroyed" };
 
-    const conn = this.connManager.getConnection(groupId);
+    let conn = this.connManager.getConnection(groupId);
     if (!conn || conn.state !== "connected") {
-      return { status: "no-connection" };
+      // Self-heal: attempt one connection recovery round before surfacing
+      // the error (covers cold-start timeouts and transient drops).
+      try {
+        await this.connManager.ensureConnected(groupId);
+      } catch {
+        return { status: "no-connection" };
+      }
+      conn = this.connManager.getConnection(groupId);
+      if (!conn || conn.state !== "connected") {
+        return { status: "no-connection" };
+      }
     }
 
     // Viewer recovery should preserve already-registered remote streams;

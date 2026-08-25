@@ -855,8 +855,36 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   const handleStreamSwitch = useCallback(
     (stream: StreamAnnouncement) => {
       setCurrentStreamId(stream.logicalStreamId);
+
+      // A switch must REBIND the viewer session to the newly selected host.
+      // Updating only the highlight id leaves the controller bound to the
+      // previous target: the old peer connection keeps playing while the
+      // phase machine never settles back to "watching", which gates the
+      // whole control bar off (displayStatus stuck on "connecting").
+      const target = {
+        groupId: stream.groupId,
+        logicalStreamId: stream.logicalStreamId,
+        mediaSessionId: stream.mediaSessionId,
+        hostDeviceId: stream.hostDeviceId,
+        hostName: stream.hostDisplayName,
+        startedAt: stream.startedAt,
+        sourceName: stream.sourceName,
+        sourceKind: stream.sourceKind,
+      };
+      useStore.getState().setWatchingTarget(target);
+
+      // Reset per-session UI state, mirroring startViewerSession
+      setEnhancementActive(false);
+      setStreamPausePoster(null);
+      // Per-session one-shots must re-arm for the new bind
+      viewerReadyRef.current = false;
+      viewerRequestAutoSentRef.current = false;
+
+      // Serialized + generation-guarded by the controller: tears down the
+      // old session and starts fresh; snapshot drives connecting → watching.
+      void controllerStart(target, videoRef.current);
     },
-    [],
+    [controllerStart],
   );
 
   /**
@@ -1965,7 +1993,16 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
   // downstream diagnostics (stream metrics, quality requests, etc.)
   // can read session state without importing the controller.
   useEffect(() => {
-    sessionRef.current = controller.session;
+    const session = controller.session;
+    sessionRef.current = session;
+    // Ref callbacks run BEFORE effects: if the <video> element remounted
+    // while the session reference was changing (e.g. an error excursion
+    // unmounted it), hand the fresh element to the now-current session.
+    const el = videoRef.current;
+    if (session && el) {
+      const owned = (session as unknown as { videoElement: HTMLVideoElement | null }).videoElement;
+      if (owned !== el) session.bindVideoElement(el);
+    }
   }, [controller, controller.session]);
 
   // ── Stream-end detection is now owned by ViewerSessionController (Phase 4) ──
@@ -2047,6 +2084,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
           <video
             ref={videoRefCallback}
             data-video-native
+            data-testid="viewer-video"
             className={cn(
               "h-full object-contain absolute inset-0",
               // In compare mode: hide raw video, CompareViewerSurface layers on top
@@ -2330,7 +2368,7 @@ function ViewerShell({
   onExit: () => void;
 }) {
   return (
-    <div className={cn("flex flex-col h-full bg-canvas", className)}>
+    <div className={cn("flex flex-col h-full bg-canvas", className)} data-testid="viewer-workspace-root">
       <div className="flex-1 overflow-hidden relative">{children}</div>
     </div>
   );

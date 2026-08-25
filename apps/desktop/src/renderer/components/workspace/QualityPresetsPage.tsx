@@ -432,7 +432,7 @@ export function QualityPresetsPage() {
   // ── Render ──────────────────────────────────────────────────────
 
   return (
-    <div className="h-full overflow-auto p-6 space-y-6">
+    <div className="h-full overflow-auto p-6 space-y-6" data-testid="presets-root">
       {/* ─── Page header ─────────────────────────────────────── */}
       <PageHeader
         title="Quality Presets"
@@ -443,7 +443,7 @@ export function QualityPresetsPage() {
               <Upload className="h-3.5 w-3.5 mr-1" />
               Import
             </Button>
-            <Button onClick={openNewEditor} disabled={loading}>New preset</Button>
+            <Button data-testid="preset-create-button" onClick={openNewEditor} disabled={loading}>New preset</Button>
           </div>
         }
       />
@@ -492,7 +492,7 @@ export function QualityPresetsPage() {
                   exit={{ opacity: 0, scale: 0.95 }}
                   transition={{ duration: 0.2 }}
                 >
-                  <Card className="h-full flex flex-col">
+                  <Card className="h-full flex flex-col" data-testid="preset-row" data-preset-name={preset.name}>
                     <CardHeader>
                       <div className="flex items-center gap-2">
                         <CardTitle className="text-sm">{preset.name}</CardTitle>
@@ -539,6 +539,7 @@ export function QualityPresetsPage() {
                         variant="ghost"
                         size="sm"
                         className="flex-1 min-w-[60px]"
+                        data-testid="preset-duplicate-button"
                         onClick={() => handleDuplicate(preset.id)}
                       >
                         Duplicate
@@ -555,6 +556,7 @@ export function QualityPresetsPage() {
                         variant="ghost"
                         size="sm"
                         className="flex-1 min-w-[60px]"
+                        data-testid="preset-delete-button"
                         onClick={() => setDeleteId(preset.id)}
                       >
                         Delete
@@ -661,6 +663,7 @@ export function QualityPresetsPage() {
               </Button>
             </SheetClose>
             <Button
+              data-testid="preset-save-button"
               onClick={handleSave}
               disabled={!formName.trim() || formSaving}
             >

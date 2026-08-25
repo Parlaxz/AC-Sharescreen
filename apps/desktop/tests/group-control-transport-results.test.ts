@@ -672,9 +672,9 @@ describe("GroupControlConnection — transport result changes", () => {
     expect(stateRequestSent).toBe(true);
   });
 
-  // ── bounded hello retry ──────────────────────────────────────────
+  // ── hello retry: fast phase then indefinite slow retry ──────────
 
-  it("retries hello up to 3 times for a peer that never responds, then gives up", async () => {
+  it("retries hello 3 times fast, then keeps slow-retrying every 10s while the route is alive", async () => {
     vi.useFakeTimers();
     try {
       const conn = new GroupControlConnection({
@@ -734,11 +734,17 @@ describe("GroupControlConnection — transport result changes", () => {
       await waitHellos(4);
       expect(countHellos()).toBe(4);
 
-      // After max retries the peer is given up on silently — no more sends.
-      await vi.advanceTimersByTimeAsync(2_000);
-      await vi.advanceTimersByTimeAsync(10_000);
+      // Fast phase exhausted (initial + 3 retries). Slow phase begins:
+      // ticks continue every 2s but a hello is only sent every 10s
+      // (every 5th tick), landing at t=16s, 26s, …
+      await vi.advanceTimersByTimeAsync(8_000); // t=8s..14s — no sends
       expect(countHellos()).toBe(4);
-      expect((conn as any).peersAwaitingHello.has("peer-bob")).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000); // t=16s — first slow retry
+      await waitHellos(5);
+      expect(countHellos()).toBe(5);
+
+      // The peer is never given up on while its raw route stays open.
+      expect((conn as any).peersAwaitingHello.has("peer-bob")).toBe(true);
 
       await conn.destroy();
       await vi.advanceTimersByTimeAsync(0);

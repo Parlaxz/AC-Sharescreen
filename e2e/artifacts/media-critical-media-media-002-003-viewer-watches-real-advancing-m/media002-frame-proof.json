@@ -1,0 +1,36 @@
+{
+  "samples": [
+    {
+      "label": "t0",
+      "present": true,
+      "readyState": 4,
+      "videoWidth": 786,
+      "videoHeight": 592,
+      "currentTime": 0.661,
+      "rvfc": 0
+    },
+    {
+      "label": "t+15s",
+      "present": true,
+      "readyState": 4,
+      "videoWidth": 786,
+      "videoHeight": 592,
+      "currentTime": 15.665,
+      "rvfc": 346
+    },
+    {
+      "label": "t+30s",
+      "present": true,
+      "readyState": 4,
+      "videoWidth": 786,
+      "videoHeight": 592,
+      "currentTime": 30.665,
+      "rvfc": 692
+    }
+  ],
+  "currentTimeStrictlyIncreasing": true,
+  "rvfcAvailable": true,
+  "rvfcIncreasing": true,
+  "renderedFpsEstimate": 23.07,
+  "note": "rvfc counts begin at the FIRST sampleViewerVideo call (installed lazily)"
+}

@@ -15,6 +15,7 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "group.member.update",
   "group.member.joined",
   "group.member.online",
+  "group.member.left",
   "group.presence",
   "stream.state.request",
   "stream.state.snapshot",
@@ -351,6 +352,20 @@ export const GroupMemberOnlinePayloadSchema = z.object({
   memberDisplayName: z.string(),
   onlineAt: z.number(),
   groupId: z.string(),
+}).strict();
+
+export const GroupMemberLeftPayloadSchema = z.object({
+  memberDeviceId: z.string(),
+  memberDisplayName: z.string(),
+  leftAt: z.number(),
+  groupId: z.string(),
+  member: z.object({
+    deviceId: z.string(),
+    displayName: z.string().min(1).max(100),
+    firstSeenAt: z.number().int().positive(),
+    profileStamp: HybridTimestampSchema,
+    leftAt: z.number().optional(),
+  }).strict(),
 }).strict();
 
 export const GroupPresencePayloadSchema = z.object({
@@ -703,6 +718,7 @@ export type GroupControlPayloadMap = {
   "group.member.update": z.infer<typeof GroupMemberUpdatePayloadSchema>;
   "group.member.joined": z.infer<typeof GroupMemberJoinedPayloadSchema>;
   "group.member.online": z.infer<typeof GroupMemberOnlinePayloadSchema>;
+  "group.member.left": z.infer<typeof GroupMemberLeftPayloadSchema>;
   "group.presence": z.infer<typeof GroupPresencePayloadSchema>;
   "stream.state.request": z.infer<typeof StreamStateRequestPayloadSchema>;
   "stream.state.snapshot": z.infer<typeof StreamStateSnapshotPayloadSchema>;
@@ -741,6 +757,7 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "group.member.update": GroupMemberUpdatePayloadSchema,
   "group.member.joined": GroupMemberJoinedPayloadSchema,
   "group.member.online": GroupMemberOnlinePayloadSchema,
+  "group.member.left": GroupMemberLeftPayloadSchema,
   "group.presence": GroupPresencePayloadSchema,
   "stream.state.request": StreamStateRequestPayloadSchema,
   "stream.state.snapshot": StreamStateSnapshotPayloadSchema,

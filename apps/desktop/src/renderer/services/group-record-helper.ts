@@ -5,12 +5,14 @@ import { getApi } from "./get-api.js";
 
 /**
  * Normalize GroupSharedState members to the store's compact shape.
+ * Tombstoned members (leftAt set) are skipped — they left the group.
  */
 function normalizeMembers(
-  members: Record<string, { deviceId: string; displayName: string }>,
+  members: Record<string, { deviceId: string; displayName: string; leftAt?: number }>,
 ): Record<string, { deviceId: string; displayName: string }> {
   const result: Record<string, { deviceId: string; displayName: string }> = {};
   for (const [k, v] of Object.entries(members)) {
+    if (v.leftAt !== undefined) continue;
     result[k] = {
       deviceId: v.deviceId ?? k,
       displayName: v.displayName ?? k,
@@ -83,6 +85,7 @@ export async function attachGroupRecordToRuntime(
       groupSecret: config.groupSecret,
       nodeId,
       displayName,
+      creatorDeviceId: record.creatorDeviceId ?? null,
     },
     record.sharedState,
     record.lastClock,

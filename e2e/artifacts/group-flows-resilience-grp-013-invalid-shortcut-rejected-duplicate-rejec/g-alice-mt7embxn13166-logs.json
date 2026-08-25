@@ -1,0 +1,33 @@
+{
+  "agent": "g-alice-mt7embxn13166",
+  "flushedAt": "2026-08-24T15:42:45.785Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787586122624,
+      "iso": "2026-08-24T15:42:02.624Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 13 sources"
+    },
+    {
+      "t": 1787586129578,
+      "iso": "2026-08-24T15:42:09.578Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 13 sources"
+    },
+    {
+      "t": 1787586154975,
+      "iso": "2026-08-24T15:42:34.975Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 13 sources"
+    },
+    {
+      "t": 1787586165088,
+      "iso": "2026-08-24T15:42:45.088Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

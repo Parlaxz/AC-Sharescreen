@@ -1,0 +1,57 @@
+{
+  "agent": "media-alice-m23-37496-48666",
+  "flushedAt": "2026-08-24T11:26:31.908Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787570759602,
+      "iso": "2026-08-24T11:25:59.602Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570764357,
+      "iso": "2026-08-24T11:26:04.357Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570769329,
+      "iso": "2026-08-24T11:26:09.329Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570774282,
+      "iso": "2026-08-24T11:26:14.282Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570779253,
+      "iso": "2026-08-24T11:26:19.253Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570784281,
+      "iso": "2026-08-24T11:26:24.281Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570789398,
+      "iso": "2026-08-24T11:26:29.398Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787570790434,
+      "iso": "2026-08-24T11:26:30.434Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

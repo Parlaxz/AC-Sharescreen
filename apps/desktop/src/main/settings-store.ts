@@ -16,6 +16,7 @@ import {
   defaultNvidiaQuality,
   defaultHourlyEstimateDurationMs,
   defaultShowCompareControls,
+  defaultUpdateChannel,
 } from "@screenlink/shared";
 
 const CURRENT_VERSION = 4;
@@ -60,6 +61,7 @@ function getDefaults(): PersistedSettings {
     hourlyEstimateDurationMs: defaultHourlyEstimateDurationMs(),
     streamInfoCard: defaultStreamInfoCard(),
     showCompareControls: defaultShowCompareControls(),
+    updateChannel: defaultUpdateChannel(),
   };
 }
 
@@ -140,6 +142,11 @@ function applyMigrations(raw: unknown): PersistedSettings {
   // Add showCompareControls if absent
   if (s.showCompareControls === undefined) {
     s.showCompareControls = defaultShowCompareControls();
+  }
+
+  // Add updateChannel if absent (defaults to stable)
+  if (s.updateChannel === undefined) {
+    s.updateChannel = defaultUpdateChannel();
   }
 
   return s as PersistedSettings;
@@ -271,6 +278,10 @@ export class SettingsStore {
     // Add showCompareControls if absent
     if (s.showCompareControls === undefined) {
       s.showCompareControls = defaultShowCompareControls();
+    }
+    // Add updateChannel if absent
+    if (s.updateChannel === undefined) {
+      s.updateChannel = defaultUpdateChannel();
     }
     // Normalise "Win" → "Super" in any stored Quick Share accelerator
     // (catches values saved before the IPC-level normalisation was added).

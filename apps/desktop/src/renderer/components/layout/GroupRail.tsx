@@ -77,6 +77,7 @@ export function GroupRail() {
             size="icon"
             className="h-10 w-10 rounded-standard text-text-secondary hover:text-text-primary flex-shrink-0"
             aria-label="Home"
+            data-testid="nav-home"
             onClick={() => navigate("home")}
           >
             <Home className="h-5 w-5" />

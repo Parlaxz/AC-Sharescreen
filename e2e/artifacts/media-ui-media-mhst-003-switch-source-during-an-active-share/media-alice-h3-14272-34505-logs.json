@@ -1,0 +1,75 @@
+{
+  "agent": "media-alice-h3-14272-34505",
+  "flushedAt": "2026-08-24T21:56:16.628Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787608442922,
+      "iso": "2026-08-24T21:54:02.922Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 18 sources"
+    },
+    {
+      "t": 1787608448830,
+      "iso": "2026-08-24T21:54:08.830Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 20 sources"
+    },
+    {
+      "t": 1787608464161,
+      "iso": "2026-08-24T21:54:24.161Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608474173,
+      "iso": "2026-08-24T21:54:34.173Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608484161,
+      "iso": "2026-08-24T21:54:44.161Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608494163,
+      "iso": "2026-08-24T21:54:54.163Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608504163,
+      "iso": "2026-08-24T21:55:04.163Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608554162,
+      "iso": "2026-08-24T21:55:54.162Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608564162,
+      "iso": "2026-08-24T21:56:04.162Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608574163,
+      "iso": "2026-08-24T21:56:14.163Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, open 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-h3-14272-34505\\stream-history.json.tmp'\n    at async open (node:internal/fs/promises:640:25)\n    at async Module.writeFile (node:internal/fs/promises:1257:14)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1033:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787608575235,
+      "iso": "2026-08-24T21:56:15.235Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

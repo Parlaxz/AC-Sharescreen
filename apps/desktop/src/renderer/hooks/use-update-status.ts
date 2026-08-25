@@ -21,6 +21,7 @@ interface ScreenLinkUpdateApi {
   downloadUpdate: () => Promise<UpdateStatusDTO>;
   restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
   checkDownloadAndInstall: () => Promise<UpdateStatusDTO>;
+  setUpdateChannel?: (channel: "stable" | "beta") => Promise<UpdateStatusDTO>;
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 
@@ -34,7 +35,7 @@ function getApi(): ScreenLinkUpdateApi | null {
   return w.screenlink ?? null;
 }
 
-export type UpdateAction = "check" | "download" | "restartAndInstall" | "fullUpdate";
+export type UpdateAction = "check" | "download" | "restartAndInstall" | "fullUpdate" | "setChannel";
 
 export interface UseUpdateStatusResult {
   status: UpdateStatusDTO | null;
@@ -47,9 +48,11 @@ export interface UseUpdateStatusResult {
   download: () => Promise<void>;
   restartAndInstall: () => Promise<void>;
   checkDownloadAndInstall: () => Promise<void>;
+  setChannel: (channel: "stable" | "beta") => Promise<void>;
 }
 
-const ACTIONS: Record<UpdateAction, keyof ScreenLinkUpdateApi> = {
+// setChannel is handled separately (it takes an argument).
+const ACTIONS: Record<Exclude<UpdateAction, "setChannel">, keyof ScreenLinkUpdateApi> = {
   check: "checkForUpdates",
   download: "downloadUpdate",
   restartAndInstall: "restartAndInstallUpdate",
@@ -124,7 +127,7 @@ export function useUpdateStatus(): UseUpdateStatusResult {
 
   // ── 4. Typed actions with duplicate-call prevention ──────────────────
   const runAction = useCallback(
-    async (action: UpdateAction): Promise<void> => {
+    async (action: Exclude<UpdateAction, "setChannel">): Promise<void> => {
       // Block re-entrancy: if a different action is in flight, ignore.
       if (inFlightRef.current !== null) return;
       // Block re-entrancy: if the same action is already in flight, ignore.
@@ -176,6 +179,40 @@ export function useUpdateStatus(): UseUpdateStatusResult {
     [runAction],
   );
 
+  // setChannel takes an argument, so it cannot go through the arg-less
+  // ACTIONS dispatch. It shares the same in-flight guard.
+  const setChannel = useCallback(
+    async (channel: "stable" | "beta"): Promise<void> => {
+      if (inFlightRef.current !== null) return;
+
+      const api = getApi();
+      if (!api || typeof api.setUpdateChannel !== "function") {
+        setError("Update API is not available in this environment.");
+        return;
+      }
+
+      inFlightRef.current = "setChannel";
+      setActionInFlight("setChannel");
+      setHasStarted(true);
+      setError(null);
+
+      try {
+        const next = await api.setUpdateChannel(channel);
+        if (unmountedRef.current) return;
+        if (next) setStatus(next);
+      } catch (err: unknown) {
+        if (unmountedRef.current) return;
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        inFlightRef.current = null;
+        if (!unmountedRef.current) {
+          setActionInFlight(null);
+        }
+      }
+    },
+    [],
+  );
+
   return {
     status,
     loading,
@@ -186,5 +223,6 @@ export function useUpdateStatus(): UseUpdateStatusResult {
     download,
     restartAndInstall,
     checkDownloadAndInstall,
+    setChannel,
   };
 }

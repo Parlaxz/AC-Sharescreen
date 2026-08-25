@@ -156,11 +156,17 @@ interface MeshStopHandle {
 /** Deadline for sdk.autoConnect() — prevents state being stuck in "starting". */
 const AUTO_CONNECT_TIMEOUT_MS = 15_000;
 
-/** Interval between hello retries for peers that never completed handshake. */
+/** Fast-phase interval between hello retries for peers that never completed handshake. */
 const HELLO_RETRY_INTERVAL_MS = 2_000;
 
-/** Maximum number of hello resends per peer before giving up silently. */
+/**
+ * Number of fast-phase hello resends per peer before falling back to the
+ * slow steady-state schedule (the peer is never given up on).
+ */
 const HELLO_MAX_RETRIES = 3;
+
+/** Steady-state interval between hello retries after the fast phase. */
+const HELLO_SLOW_RETRY_INTERVAL_MS = 10_000;
 
 export class GroupControlConnection {
   private sdk: VDONinjaSDKInstance | null = null;
@@ -182,10 +188,14 @@ export class GroupControlConnection {
   private clock: HybridTimestamp;
   /** Pending hello responses to throttle duplicates. */
   private peersAwaitingHello = new Set<string>();
-  /** Hello retry attempts per peer UUID (bounded by HELLO_MAX_RETRIES). */
+  /** Hello retry attempts per peer UUID (fast phase counted by HELLO_MAX_RETRIES). */
   private helloRetryAttempts = new Map<string, number>();
   /** Interval timer resending hellos to peers still awaiting a response. */
   private helloRetryTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timestamp of the last observed raw-peer activity (route open or authenticated traffic). */
+  private lastRawPeerActivityAt = 0;
+  /** Timestamp of the last mesh-discovery refresh attempt (cooldown gate). */
+  private lastMeshRefreshAt = 0;
 
   constructor(opts: GroupControlConnectionOptions) {
     this.opts = opts;
@@ -330,6 +340,7 @@ export class GroupControlConnection {
       console.log("[group-control] mesh ready — room:", this.opts.controlRoomId);
 
       this.setState("connected");
+      this.lastRawPeerActivityAt = Date.now();
       // Do NOT broadcastHello here. The first hello is driven by
       // dataChannelOpen so we only send hellos once a usable route exists.
     } catch (err) {
@@ -529,6 +540,56 @@ export class GroupControlConnection {
   }
 
   /**
+   * Whether the mesh needs a discovery refresh (MESH-003 self-heal).
+   *
+   * Zero raw routes for 45s while connected means room-discovery events were
+   * missed: vdo.ninja peer announcements are push-only, so once a
+   * `peerConnected`/`dataChannelOpen` event is lost nothing else can
+   * re-trigger it — hello retries cannot help because there are no routes to
+   * retry on. A room rejoin is the only recovery.
+   */
+  needsMeshRefresh(now: number = Date.now()): boolean {
+    return (
+      !this.destroyed &&
+      this._state === "connected" &&
+      this.meshStop !== null &&
+      this.sdk !== null &&
+      this.rawDataPeers.size === 0 &&
+      now - this.lastRawPeerActivityAt > 45_000
+    );
+  }
+
+  /**
+   * Rejoin the control room and re-announce to re-trigger vdo.ninja room
+   * discovery after missed peer-announcement events. Rate-limited by a
+   * 60s cooldown; generation-guarded so a concurrent start()/destroy()
+   * is never disturbed mid-refresh.
+   */
+  async refreshMeshDiscovery(): Promise<void> {
+    const gen = this.startGeneration;
+    if (gen !== this.startGeneration || this.destroyed) return;
+    if (Date.now() - this.lastMeshRefreshAt < 60_000) return;
+    this.lastMeshRefreshAt = Date.now();
+    console.warn(
+      `[group-control] no peers seen for ${Date.now() - this.lastRawPeerActivityAt}ms — refreshing mesh discovery (rejoin room)`,
+    );
+    try {
+      const sdk = this.sdk;
+      if (!sdk) return;
+      await sdk.leaveRoom();
+      if (gen !== this.startGeneration || this.destroyed) return;
+      await sdk.joinRoom({ room: this.opts.controlRoomId, password: this.opts.groupSecret });
+      if (gen !== this.startGeneration || this.destroyed) return;
+      await sdk.announce({ streamID: this.opts.nodeId });
+    } catch (err) {
+      console.warn(
+        "[group-control] mesh discovery refresh failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  /**
    * Send a `group.member.joined` message to a specific peer without including
    * a `type` field in the payload (strict-schema compatible).
    */
@@ -660,16 +721,20 @@ export class GroupControlConnection {
   }
 
   /**
-   * Start the bounded hello-retry interval (lazily, once at a time).
+   * Start the hello-retry interval (lazily, once at a time).
    *
    * Every HELLO_RETRY_INTERVAL_MS the tick resends a hello to every peer
-   * still in peersAwaitingHello, up to HELLO_MAX_RETRIES per peer. After
-   * that the peer is given up on silently — route-down or a signaling
-   * reconnect will re-trigger the handshake.
+   * still in peersAwaitingHello. The first HELLO_MAX_RETRIES attempts run
+   * at that fast interval; after that the peer enters a slow steady-state
+   * schedule (every HELLO_SLOW_RETRY_INTERVAL_MS) that retries indefinitely
+   * while its raw route stays alive — an unacked handshake is never given
+   * up on. Route-down or a signaling reconnect re-triggers a fresh fast
+   * phase via dataChannelOpen.
    */
   private ensureHelloRetryTimer(): void {
     if (this.helloRetryTimer !== null || this.destroyed) return;
     const genAtCreate = this.startGeneration;
+    const slowTicks = Math.max(1, Math.round(HELLO_SLOW_RETRY_INTERVAL_MS / HELLO_RETRY_INTERVAL_MS));
     this.helloRetryTimer = setInterval(() => {
       // Generation guard: a newer start()/destroy() owns hello state now.
       if (genAtCreate !== this.startGeneration || this.destroyed) {
@@ -682,12 +747,20 @@ export class GroupControlConnection {
       }
       for (const uuid of Array.from(this.peersAwaitingHello)) {
         const attempts = (this.helloRetryAttempts.get(uuid) ?? 0) + 1;
-        if (attempts > HELLO_MAX_RETRIES) {
-          // Give up silently for this peer — route-down/reconnect re-triggers.
-          this.removePeerAwaitingHello(uuid);
-          continue;
-        }
         this.helloRetryAttempts.set(uuid, attempts);
+        if (attempts > HELLO_MAX_RETRIES) {
+          // Slow phase: keep retrying at HELLO_SLOW_RETRY_INTERVAL_MS for as
+          // long as the raw route is alive; route-down removes the peer.
+          if (!this.rawDataPeers.has(uuid)) {
+            this.removePeerAwaitingHello(uuid);
+            continue;
+          }
+          const slowAttempt = attempts - HELLO_MAX_RETRIES;
+          if (slowAttempt === 1) {
+            console.log("[group-control] hello still unacked for peer", uuid, ", entering slow retry");
+          }
+          if (slowAttempt % slowTicks !== 0) continue;
+        }
         this.sendHelloToPeer(uuid).catch(() => {});
       }
       if (this.peersAwaitingHello.size === 0) {
@@ -843,6 +916,7 @@ export class GroupControlConnection {
         if (!this.rawDataPeers.has(uuid)) {
           console.log("[group-control] data channel opened for peer:", uuid);
           this.rawDataPeers.add(uuid);
+          this.lastRawPeerActivityAt = Date.now();
         }
 
         // Send hello directly on data channel open so the peer can
@@ -888,6 +962,8 @@ export class GroupControlConnection {
             return;
           }
           const validatedEnvelope = result.data;
+          // Any authenticated traffic proves room discovery works.
+          this.lastRawPeerActivityAt = Date.now();
 
           if (!this.checkSenderIdentity(uuid, validatedEnvelope)) {
             console.warn("[group-control] sender identity check failed for", uuid);
@@ -912,6 +988,9 @@ export class GroupControlConnection {
 
             this.rawPeerIdentity.set(uuid, deviceId);
             const mappingOutcome = this.establishDeviceMapping(uuid, deviceId);
+            // A validated hello (re)maps this peer — start any later retry
+            // cycle from a fresh fast phase.
+            this.helloRetryAttempts.delete(uuid);
 
             // Only fire onPeerOnline for genuinely new mappings,
             // not for duplicate hellos (already mapped).
@@ -968,6 +1047,9 @@ export class GroupControlConnection {
 
             this.rawPeerIdentity.set(uuid, deviceId);
             const mappingOutcome = this.establishDeviceMapping(uuid, deviceId);
+            // Handshake complete for this peer: stop retrying and reset the
+            // counter so any later remap starts a fresh fast phase.
+            this.removePeerAwaitingHello(uuid);
 
             // Only fire onPeerOnline for genuinely new mappings.
             if (mappingOutcome === "new") {

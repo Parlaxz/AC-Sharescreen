@@ -1,0 +1,18 @@
+[
+  {
+    "t": 1787609375781,
+    "marker": "app-ready"
+  },
+  {
+    "t": 1787609375781,
+    "marker": "group-connected"
+  },
+  {
+    "t": 1787609375781,
+    "marker": "share-started"
+  },
+  {
+    "t": 1787609375781,
+    "marker": "share-stopped"
+  }
+]

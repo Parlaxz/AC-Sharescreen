@@ -1,0 +1,14 @@
+{
+  "leaveCompletedMs": 4334,
+  "groupConnectedBeforeLeave": true,
+  "bobMarkers": [
+    {
+      "t": 1787609151456,
+      "marker": "app-ready"
+    },
+    {
+      "t": 1787609151456,
+      "marker": "group-connected"
+    }
+  ]
+}

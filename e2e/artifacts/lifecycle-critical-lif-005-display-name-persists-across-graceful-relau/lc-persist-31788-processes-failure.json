@@ -1,0 +1,56 @@
+{
+  "agent": "lc-persist-31788",
+  "label": "failure",
+  "at": "2026-08-24T05:53:50.781Z",
+  "selfPid": 12912,
+  "processes": [
+    {
+      "Name": "electron.exe",
+      "ProcessId": 4828,
+      "ParentProcessId": 12912,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\"  \"--inspect=0\" \"--remote-debugging-port=0\" \"--dev-profile=lc-persist-31788\" \"--multi-instance\" \"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\dist\\main\\main.js\""
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 28600,
+      "ParentProcessId": 4828,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\" --type=gpu-process --user-data-dir=\"C:\\Users\\parla\\AppData\\Roaming\\Electron\" --gpu-preferences=SAAAAAAAAADgAAAEAAAAAAAAAAAAAGAAAQAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --field-trial-handle=2056,i,14919806958683139129,13607394504749125167,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,NetworkServiceSandbox,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=2060,i,8396910436543937525,8072546805031716769,4 --trace-process-track-uuid=3190708988185955192 --mojo-platform-channel-handle=2052 /prefetch:2"
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 3084,
+      "ParentProcessId": 4828,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\" --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=none --user-data-dir=\"C:\\Users\\parla\\AppData\\Roaming\\Electron\" --standard-schemes=screenlink --secure-schemes=screenlink --fetch-schemes=screenlink --streaming-schemes=screenlink --field-trial-handle=2056,i,14919806958683139129,13607394504749125167,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,NetworkServiceSandbox,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=2060,i,8396910436543937525,8072546805031716769,4 --trace-process-track-uuid=3190708989122997041 --mojo-platform-channel-handle=2200 /prefetch:3"
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 31880,
+      "ParentProcessId": 4828,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\" --type=utility --utility-sub-type=audio.mojom.AudioService --lang=en-US --service-sandbox-type=audio --video-capture-use-gpu-memory-buffer --user-data-dir=\"C:\\Users\\parla\\AppData\\Roaming\\Electron-lc-persist-31788\" --standard-schemes=screenlink --secure-schemes=screenlink --fetch-schemes=screenlink --streaming-schemes=screenlink --field-trial-handle=2056,i,14919806958683139129,13607394504749125167,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,NetworkServiceSandbox,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=2060,i,8396910436543937525,8072546805031716769,4 --trace-process-track-uuid=3190708990997080739 --mojo-platform-channel-handle=3892 /prefetch:8"
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 6716,
+      "ParentProcessId": 9916,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\"  \"--inspect=0\" \"--remote-debugging-port=0\" \"--dev-profile=g-alice-mt6tl7i214t9\" \"--multi-instance\" \"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\dist\\main\\main.js\""
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 32500,
+      "ParentProcessId": 6716,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\" --type=gpu-process --user-data-dir=\"C:\\Users\\parla\\AppData\\Roaming\\Electron\" --gpu-preferences=SAAAAAAAAADgAAAEAAAAAAAAAAAAAGAAAQAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --field-trial-handle=1972,i,14255230117906826780,16154065665236062839,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,NetworkServiceSandbox,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1980,i,1988833032155535784,15332231882538222568,4 --trace-process-track-uuid=3190708988185955192 --mojo-platform-channel-handle=1964 /prefetch:2"
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 300,
+      "ParentProcessId": 6716,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\" --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=none --user-data-dir=\"C:\\Users\\parla\\AppData\\Roaming\\Electron\" --standard-schemes=screenlink --secure-schemes=screenlink --fetch-schemes=screenlink --streaming-schemes=screenlink --field-trial-handle=1972,i,14255230117906826780,16154065665236062839,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,NetworkServiceSandbox,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1980,i,1988833032155535784,15332231882538222568,4 --trace-process-track-uuid=3190708989122997041 --mojo-platform-channel-handle=2220 /prefetch:3"
+    },
+    {
+      "Name": "electron.exe",
+      "ProcessId": 7012,
+      "ParentProcessId": 6716,
+      "CommandLine": "\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe\" --type=utility --utility-sub-type=audio.mojom.AudioService --lang=en-US --service-sandbox-type=audio --video-capture-use-gpu-memory-buffer --user-data-dir=\"C:\\Users\\parla\\AppData\\Roaming\\Electron-g-alice-mt6tl7i214t9\" --standard-schemes=screenlink --secure-schemes=screenlink --fetch-schemes=screenlink --streaming-schemes=screenlink --field-trial-handle=1972,i,14255230117906826780,16154065665236062839,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,NetworkServiceSandbox,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1980,i,1988833032155535784,15332231882538222568,4 --trace-process-track-uuid=3190708990997080739 --mojo-platform-channel-handle=3764 /prefetch:8"
+    }
+  ]
+}

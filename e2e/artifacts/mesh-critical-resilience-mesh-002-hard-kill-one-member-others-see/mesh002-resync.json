@@ -1,0 +1,7 @@
+{
+  "resyncLatencyMs": {
+    "m-alice-m2-30824-72861": 2010,
+    "m-bob-m2-30824-72861": 2012
+  },
+  "recoveryViolations": []
+}

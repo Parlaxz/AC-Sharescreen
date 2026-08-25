@@ -115,7 +115,7 @@ function Start-ViteDevServer {
     #>
     # Check for existing live Vite
     $existingPid = Get-LivePid $VitePidFile
-    if ($existingPid) {
+    if ($existingPid -and (Wait-ForPort -Port 5173 -TimeoutSeconds 2)) {
         Write-Log "Vite dev server already running (PID: $existingPid)"
         Write-Log "Rebuilding TypeScript (main + preload)..."
         Push-Location $DesktopDir
@@ -126,6 +126,14 @@ function Start-ViteDevServer {
             if ($proc.ExitCode -ne 0) { return $false }
         } finally { Pop-Location }
         return $true
+    }
+
+    # PID alive but port dead (crashed/hung server): recycle it so a fresh
+    # Vite can bind 5173 instead of failing with "port already in use".
+    if ($existingPid) {
+        Write-Log "Vite PID $existingPid is alive but NOT serving on 5173 - recycling it"
+        try { Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue } catch {}
+        Remove-Item $VitePidFile -Force -ErrorAction SilentlyContinue
     }
 
     Write-Log "Building native helpers (C++)..."
@@ -334,6 +342,17 @@ function Start-ElectronInstance {
 
 # --- Main logic ----------------------------------------------------------------
 
+function Ensure-ViteServing {
+    <#
+        Gate for branches where Electron instances are already running: a
+        crashed/hung Vite leaves PID files looking healthy while windows
+        white-screen against a dead dev server. Restart it if not serving.
+    #>
+    if (Wait-ForPort -Port 5173 -TimeoutSeconds 2) { return $true }
+    Write-Log "Vite is NOT serving on 5173 - restarting it (reload app windows with Ctrl+R after)..."
+    return (Start-ViteDevServer)
+}
+
 Write-Log "ScreenLink Development Launcher"
 
 $aliveAlicePid = Get-LivePid $AlicePidFile
@@ -349,11 +368,13 @@ if (-not $aliveAlicePid -and -not $aliveBobPid) {
 } elseif ($aliveAlicePid -and -not $aliveBobPid) {
     # -- Second run: reuse Vite, launch Bob --
     Write-Log "Alice is running - reusing Vite, launching Bob..."
+    if (-not (Ensure-ViteServing)) { exit 1 }
     if (-not (Start-ElectronInstance -Profile "bob" -DebugPort 9223 -PidFile $BobPidFile)) { exit 1 }
     Write-Log "Bob launched. Alice (PID: $aliveAlicePid) and Bob are running."
 
 } elseif ($aliveAlicePid -and $aliveBobPid) {
     # -- Both already running --
+    if (-not (Ensure-ViteServing)) { exit 1 }
     Write-Log "Both Alice (PID: $aliveAlicePid) and Bob (PID: $aliveBobPid) are already running."
     Write-Log "Close one first, or run reset-screenlink-dev.ps1 to stop all instances."
 

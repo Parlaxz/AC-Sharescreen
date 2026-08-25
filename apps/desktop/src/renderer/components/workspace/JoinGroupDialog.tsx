@@ -82,7 +82,7 @@ export function JoinGroupDialog() {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent className="sm:max-w-sm" data-testid="join-group-dialog">
         <DialogHeader>
           <DialogTitle>Join group</DialogTitle>
           <DialogDescription>
@@ -95,6 +95,7 @@ export function JoinGroupDialog() {
             <Label htmlFor="join-invite-link">Invite link</Label>
             <Input
               id="join-invite-link"
+              data-testid="join-invite-input"
               value={inviteLink}
               onChange={(e) => setInviteLink(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -114,12 +115,13 @@ export function JoinGroupDialog() {
 
         <DialogFooter>
           <DialogClose asChild>
-            <Button variant="outline" disabled={joining}>
+            <Button variant="outline" data-testid="join-group-cancel" disabled={joining}>
               Cancel
             </Button>
           </DialogClose>
           <Button
             variant="default"
+            data-testid="join-group-submit"
             disabled={!inviteLink.trim() || joining}
             onClick={handleJoin}
           >

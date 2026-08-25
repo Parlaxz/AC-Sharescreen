@@ -1,0 +1,27 @@
+{
+  "agent": "media-alice-m6-27716-56434",
+  "flushedAt": "2026-08-24T22:15:59.297Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787609720039,
+      "iso": "2026-08-24T22:15:20.039Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 20 sources"
+    },
+    {
+      "t": 1787609741202,
+      "iso": "2026-08-24T22:15:41.202Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-m6-27716-56434\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-m6-27716-56434\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787609757274,
+      "iso": "2026-08-24T22:15:57.274Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

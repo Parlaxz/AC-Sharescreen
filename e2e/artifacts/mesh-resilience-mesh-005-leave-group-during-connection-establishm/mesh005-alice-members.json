@@ -1,0 +1,14 @@
+{
+  "firstPoll": [
+    {
+      "name": "Alice",
+      "online": "true"
+    }
+  ],
+  "secondPollAfter10s": [
+    {
+      "name": "Alice",
+      "online": "true"
+    }
+  ]
+}

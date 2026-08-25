@@ -1,0 +1,64 @@
+{
+  "mode": "fast",
+  "at": "2026-08-24T03:42:24.981Z",
+  "appPackage": "@screenlink/desktop",
+  "profileDirHeuristic": "%APPDATA%\\<appUserDataBase>-<profile> (base folder may be 'screenlink' or 'Electron'; agents append '-<name>')",
+  "allPassed": true,
+  "failedCount": 0,
+  "results": [
+    {
+      "name": "node >= 24",
+      "pass": true,
+      "detail": "node 25.2.1",
+      "durationMs": 89
+    },
+    {
+      "name": "pnpm present",
+      "pass": true,
+      "detail": "pnpm 10.0.0",
+      "durationMs": 1122
+    },
+    {
+      "name": "electron.exe exists",
+      "pass": true,
+      "detail": "C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\node_modules\\electron\\dist\\electron.exe",
+      "durationMs": 76
+    },
+    {
+      "name": "apps/desktop/dist/main/main.js exists",
+      "pass": true,
+      "detail": "C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\apps\\desktop\\dist\\main\\main.js",
+      "durationMs": 75
+    },
+    {
+      "name": "native helpers exist",
+      "pass": true,
+      "detail": "screenlink-audio-helper.exe (helperVersion=0.1.0 protocolVersion=0.2.0), screenlink-video-enhancer.exe (version=0.1.0)",
+      "durationMs": 138
+    },
+    {
+      "name": "VDO signaling reachable (wss.vdo.ninja:443)",
+      "pass": true,
+      "detail": "TLS connected to wss.vdo.ninja:443 (TLSv1.3)",
+      "durationMs": 156
+    },
+    {
+      "name": "at least one active display",
+      "pass": true,
+      "detail": "3 display(s)",
+      "durationMs": 297
+    },
+    {
+      "name": "@playwright/test installed",
+      "pass": true,
+      "detail": "@playwright/test 1.62.1 @ C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\node_modules\\.pnpm\\@playwright+test@1.62.1\\node_modules\\@playwright\\test\\package.json",
+      "durationMs": 16
+    },
+    {
+      "name": "no leftover native helpers (warn-only)",
+      "pass": true,
+      "detail": "none running",
+      "durationMs": 529
+    }
+  ]
+}

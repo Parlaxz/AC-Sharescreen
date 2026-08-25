@@ -1,0 +1,30 @@
+{
+  "endedMarkerMs": 7,
+  "endedUiVisible": true,
+  "markers": [
+    {
+      "t": 1787611661846,
+      "marker": "app-ready"
+    },
+    {
+      "t": 1787611661846,
+      "marker": "group-connected"
+    },
+    {
+      "t": 1787611661846,
+      "marker": "viewer-joined"
+    },
+    {
+      "t": 1787611662861,
+      "marker": "viewer-watching"
+    },
+    {
+      "t": 1787611676301,
+      "marker": "viewer-ended"
+    },
+    {
+      "t": 1787611676301,
+      "marker": "viewer-reconnecting"
+    }
+  ]
+}

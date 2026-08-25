@@ -1,0 +1,35 @@
+{
+  "timestamp": 1787609255196,
+  "currentPage": "overview",
+  "selectedGroupId": "c086c29f-af56-48b7-bbb3-38c212dffb78",
+  "groups": [
+    {
+      "id": "c086c29f-af56-48b7-bbb3-38c212dffb78",
+      "name": "Beta m7-30824-72861",
+      "memberCount": 2
+    }
+  ],
+  "groupConnections": [
+    {
+      "groupId": "c086c29f-af56-48b7-bbb3-38c212dffb78",
+      "state": "connected",
+      "onlinePeers": [
+        "e5a4c0c0-135b-46ba-9146-ba922c64d66c"
+      ],
+      "error": null
+    }
+  ],
+  "activeStreams": [],
+  "activeStreamsByGroup": {},
+  "viewerSessions": [],
+  "hostShare": {
+    "sharing": false,
+    "sessionId": null,
+    "mediaSessionId": null,
+    "sourceLabel": ""
+  },
+  "helpers": {
+    "audio": "disabled",
+    "video": "disconnected"
+  }
+}

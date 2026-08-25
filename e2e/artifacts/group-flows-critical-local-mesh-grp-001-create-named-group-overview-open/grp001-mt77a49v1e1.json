@@ -1,0 +1,24 @@
+{
+  "groupId": "06d81696-3c53-495f-9fc2-577bd1ca9c41",
+  "groupName": "GRP Alpha mt77a49v1e1",
+  "link": "screenlink://group?v=1&data=eyJ2ZXJzaW9uIjoxLCJncm91cElkIjoiMDZkODE2OTYtM2M1My00OTVmLTlmYzItNTc3YmQxY2E5YzQxIiwiY29udHJvbFJvb21JZCI6InVPako3cVg4aF95U3NVWFlfZlJaU1EiLCJncm91cFNlY3JldCI6IlNYQTZoOXVpQjJqaXhsLUJ0NHR3QmtaTGQzc1owNzExUFlsZUNhNVp6bmsiLCJib290c3RyYXBOYW1lIjoiR1JQIEFscGhhIG10NzdhNDl2MWUxIiwiYm9vdHN0cmFwTmFtZVN0YW1wIjp7IndhbGxUaW1lTXMiOjE3ODc1NzM3OTMyNTksImNvdW50ZXIiOjAsIm5vZGVJZCI6IjM3ODBhNWZjLTM3ZTMtNGE2YS04MzIyLTk3NTM5ZWRkY2Q4ZCJ9LCJib290c3RyYXBTZXR0aW5ncyI6eyJzY2hlbWFWZXJzaW9uIjoxLCJ2aWRlbyI6eyJ2aWRlb0JpdHJhdGVLYnBzIjo2NTAsInNlbmRXaWR0aCI6ODU0LCJzZW5kSGVpZ2h0Ijo0ODAsInNlbmRGcHMiOjE1LCJjYXB0dXJlV2lkdGgiOjg1NCwiY2FwdHVyZUhlaWdodCI6NDgwLCJjYXB0dXJlRnBzIjoxNSwicHJlc2VydmVBc3BlY3RSYXRpbyI6dHJ1ZSwicHJldmVudFVwc2NhbGUiOnRydWUsInJlc29sdXRpb25Nb2RlIjoidGFyZ2V0LWRpbWVuc2lvbnMiLCJzY2FsZVJlc29sdXRpb25Eb3duQnkiOjEsImNvZGVjIjoidnA5IiwiaDI2NFByb2ZpbGUiOiJhdXRvIiwiY29udGVudEhpbnQiOiJkZXRhaWwiLCJkZWdyYWRhdGlvblByZWZlcmVuY2UiOiJtYWludGFpbi1yZXNvbHV0aW9uIiwic2NhbGFiaWxpdHlNb2RlIjpudWxsLCJjdXJzb3JNb2RlIjoiYWx3YXlzIiwicnRwUHJpb3JpdHkiOiJtZWRpdW0ifSwiYXVkaW8iOnsiYml0cmF0ZUticHMiOjY0LCJjaGFubmVscyI6InN0ZXJlbyIsImJpdHJhdGVNb2RlIjoidmJyIiwiZHR4IjpmYWxzZSwiZmVjIjp0cnVlLCJwYWNrZXREdXJhdGlvbk1zIjoyMCwicmVkdW5kYW50QXVkaW8iOmZhbHNlfX0sImJvb3RzdHJhcFNldHRpbmdzU3RhbXAiOnsid2FsbFRpbWVNcyI6MTc4NzU3Mzc5MzI1OSwiY291bnRlciI6MCwibm9kZUlkIjoiMzc4MGE1ZmMtMzdlMy00YTZhLTgzMjItOTc1MzllZGRjZDhkIn0sImJvb3RzdHJhcENyZWF0b3IiOnsiZGV2aWNlSWQiOiIzNzgwYTVmYy0zN2UzLTRhNmEtODMyMi05NzUzOWVkZGNkOGQiLCJkaXNwbGF5TmFtZSI6Ikhvc3QiLCJmaXJzdFNlZW5BdCI6MTc4NzU3Mzc5MzI1OSwicHJvZmlsZVN0YW1wIjp7IndhbGxUaW1lTXMiOjE3ODc1NzM3OTMyNTksImNvdW50ZXIiOjAsIm5vZGVJZCI6IjM3ODBhNWZjLTM3ZTMtNGE2YS04MzIyLTk3NTM5ZWRkY2Q4ZCJ9fX0",
+  "snap": {
+    "currentPage": "overview",
+    "selectedGroupId": "06d81696-3c53-495f-9fc2-577bd1ca9c41",
+    "groups": [
+      {
+        "id": "06d81696-3c53-495f-9fc2-577bd1ca9c41",
+        "name": "GRP Alpha mt77a49v1e1",
+        "memberCount": 1
+      }
+    ],
+    "groupConnections": [
+      {
+        "groupId": "06d81696-3c53-495f-9fc2-577bd1ca9c41",
+        "state": "connected",
+        "onlinePeers": [],
+        "error": null
+      }
+    ]
+  }
+}

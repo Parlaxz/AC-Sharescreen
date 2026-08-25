@@ -1,0 +1,45 @@
+{
+  "agent": "media-charlie-vwui6-35500-74906",
+  "flushedAt": "2026-08-24T22:19:02.721Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787609917423,
+      "iso": "2026-08-24T22:18:37.423Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: Qt5QWindowIcon}"
+    },
+    {
+      "t": 1787609917423,
+      "iso": "2026-08-24T22:18:37.423Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787609922380,
+      "iso": "2026-08-24T22:18:42.380Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: Qt5QWindowIcon}"
+    },
+    {
+      "t": 1787609922381,
+      "iso": "2026-08-24T22:18:42.381Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787609923348,
+      "iso": "2026-08-24T22:18:43.348Z",
+      "source": "main-console",
+      "text": "[nvidia-capability] Using video enhancer helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe"
+    },
+    {
+      "t": 1787609942001,
+      "iso": "2026-08-24T22:19:02.001Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

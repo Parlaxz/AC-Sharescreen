@@ -1,0 +1,15 @@
+{
+  "agent": "media-charlie-vwui6-39228-82159",
+  "flushedAt": "2026-08-24T17:36:54.674Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787592993624,
+      "iso": "2026-08-24T17:36:33.624Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -1,0 +1,69 @@
+{
+  "agent": "media-bob-h2-15724-77879",
+  "flushedAt": "2026-08-24T18:58:34.656Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787597813774,
+      "iso": "2026-08-24T18:56:53.774Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: POEWindowClass}"
+    },
+    {
+      "t": 1787597813774,
+      "iso": "2026-08-24T18:56:53.774Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787597814280,
+      "iso": "2026-08-24T18:56:54.280Z",
+      "source": "main-console",
+      "text": "[nvidia-capability] Using video enhancer helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe"
+    },
+    {
+      "t": 1787597821303,
+      "iso": "2026-08-24T18:57:01.303Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-bob-h2-15724-77879\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-bob-h2-15724-77879\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787597823100,
+      "iso": "2026-08-24T18:57:03.100Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: POEWindowClass}"
+    },
+    {
+      "t": 1787597823101,
+      "iso": "2026-08-24T18:57:03.101Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787597826961,
+      "iso": "2026-08-24T18:57:06.961Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: POEWindowClass}"
+    },
+    {
+      "t": 1787597826961,
+      "iso": "2026-08-24T18:57:06.961Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787597826968,
+      "iso": "2026-08-24T18:57:06.968Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-bob-h2-15724-77879\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-bob-h2-15724-77879\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787597912778,
+      "iso": "2026-08-24T18:58:32.778Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

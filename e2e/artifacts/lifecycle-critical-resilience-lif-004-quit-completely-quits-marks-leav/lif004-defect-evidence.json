@@ -1,0 +1,36 @@
+{
+  "pid": 11700,
+  "userData": "C:\\Users\\parla\\AppData\\Roaming\\Electron-lc-quit-17644",
+  "baselineQuitComplete": 0,
+  "processAlive30sAfterQuit": true,
+  "windowStateWhileHung": {
+    "windowCount": 0,
+    "destroyed": true,
+    "visible": false,
+    "minimized": false
+  },
+  "activeHandlesWhileHung": [
+    {
+      "type": "Socket",
+      "handleType": "Pipe",
+      "fd": 1
+    },
+    {
+      "type": "Socket",
+      "handleType": "Pipe",
+      "fd": 2
+    }
+  ],
+  "markersWhileHung": [
+    {
+      "timestamp": "2026-08-24T06:52:09.865Z",
+      "e2eMarker": "app-ready",
+      "version": "42.4.1",
+      "hidden": false
+    },
+    {
+      "timestamp": "2026-08-24T06:52:10.270Z",
+      "e2eMarker": "quit-complete"
+    }
+  ]
+}

@@ -12,6 +12,14 @@ export const JOIN_REJECTION_SHARE_INACTIVE = "This share is no longer active";
 export const JOIN_REJECTION_NO_ACTIVE_SHARE = "There is no active share for this stream";
 
 /**
+ * The host explicitly removed this viewer (kick). Deliberately NOT a
+ * share-ended reason: the viewer must surface an error/kicked state, not
+ * silently retry, and the host keeps rejecting re-join attempts for a
+ * bounded window so auto-recovery cannot defeat the kick.
+ */
+export const JOIN_REJECTION_KICKED = "You were removed from this stream by the host";
+
+/**
  * Whether a join rejection reason indicates the host's share has ended.
  * Matches case-insensitively on the stable phrases so minor wording
  * changes (or older hosts) still classify correctly.

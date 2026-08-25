@@ -1,0 +1,19 @@
+{
+  "connections": [
+    {
+      "label": "viewer",
+      "pcPresent": true,
+      "inbound": [
+        {
+          "kind": "video",
+          "bytesReceived": 2578658,
+          "framesDecoded": 1661,
+          "framesPerSecond": 23,
+          "codecMimeType": "video/VP9",
+          "jitterTimestamp": 1787609556972.268
+        }
+      ],
+      "outbound": []
+    }
+  ]
+}

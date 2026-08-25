@@ -735,6 +735,22 @@ export class StreamSessionManager {
         // Non-fatal — readback will report whatever the source produces
       });
 
+      // Parity with startStream: startPublishing applies the configured
+      // contentHint to the published track BEFORE publish; a switched-in
+      // track would otherwise keep the browser default hint, changing
+      // encoder behavior mid-share. Apply the same precedence here.
+      {
+        const hint = ov?.contentHint ?? quality?.video?.contentHint ?? DEFAULT_CONTENT_HINT;
+        const track = this.currentTrack!;
+        if (hint && hint !== "auto" && typeof track.contentHint !== "undefined") {
+          try {
+            track.contentHint = hint as MediaStreamTrack["contentHint"];
+          } catch {
+            // Non-fatal — contentHint is advisory
+          }
+        }
+      }
+
       // Update local registry with new source metadata
       const registry = this.runtime.getActiveStreamRegistry();
       registry.registerLocalStream(this.buildAnnouncement());

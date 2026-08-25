@@ -1,0 +1,7 @@
+{
+  "groupId": "8a244b5d-717d-44fb-9f2f-a9786c24458b",
+  "nameLength": 223,
+  "linkLength": 1970,
+  "linkPrefix": "screenlink://group?v=1&data=eyJ2ZXJzaW9uIjoxLCJncm91cElkIjoi",
+  "note": "invite link rejected by parseGroupInviteLink (bootstrapName > 100 chars)"
+}

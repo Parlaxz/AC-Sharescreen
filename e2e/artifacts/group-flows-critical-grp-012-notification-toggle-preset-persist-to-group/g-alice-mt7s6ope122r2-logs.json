@@ -1,0 +1,21 @@
+{
+  "agent": "g-alice-mt7s6ope122r2",
+  "flushedAt": "2026-08-24T22:01:48.209Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787608906736,
+      "iso": "2026-08-24T22:01:46.736Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'update-group-clock': Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-g-alice-mt7s6ope122r2\\groups.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-g-alice-mt7s6ope122r2\\groups.json'\n    at Object.renameSync (node:fs:1013:11)\n    at GroupStore.writeAtomic (file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/group-store.js:149:12)\n    at GroupStore.persist (file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/group-store.js:152:14)\n    at GroupStore.updateClock (file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/group-store.js:278:14)\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:382:24\n    at Session.<anonymous> (node:electron/js2c/browser_init:2:114084)\n    at Session.emit (node:events:509:28)"
+    },
+    {
+      "t": 1787608907503,
+      "iso": "2026-08-24T22:01:47.503Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

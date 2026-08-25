@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, BrowserWindow, ipcMain } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
@@ -14,6 +14,7 @@ import {
   registerIpcHandlers,
   stopCurrentAudioHelper,
   stopVideoHelperForQuit,
+  forceKillHelpersForQuit,
 } from "./ipc-handlers.js";
 import { FullscreenDetector } from "./fullscreen-detector.js";
 import { StreamToastManager } from "./stream-toast-manager.js";
@@ -21,6 +22,7 @@ import { registerPermissionHandler } from "./permissions.js";
 import { SettingsStore } from "./settings-store.js";
 import { SecureStore } from "./secure-store.js";
 import { LogManager } from "./log-manager.js";
+import { markE2E } from "./test-markers.js";
 import { LoginItemManager } from "./login-item-manager.js";
 import { GroupStore } from "./group-store.js";
 import { QualityPresetStore } from "./quality-preset-store.js";
@@ -34,6 +36,7 @@ import {
   registerUpdateIpcHandlers,
   removeUpdateIpcHandlers,
 } from "./update-ipc.js";
+import { DeepLinkRouter, extractScreenLinkUrls } from "./deep-link.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -67,6 +70,31 @@ registerPrivilegedSchemes();
 const isMultiInstance = !app.isPackaged && process.argv.includes("--multi-instance");
 const devProfile = getDevProfile();
 
+/**
+ * Read `--flag=value` or `--flag value` from the process arguments.
+ * Returns null when the flag is absent or has no value.
+ */
+function getArgValue(flag: string): string | null {
+  const prefix = `${flag}=`;
+  const argv = process.argv;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg) continue;
+    if (arg.startsWith(prefix)) return arg.slice(prefix.length);
+    if (arg === flag) {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("--")) return next;
+    }
+  }
+  return null;
+}
+
+// CLI channel override (--update-channel=stable), used by the
+// revert-to-stable.bat helper shipped next to the installed exe: a broken
+// beta build can self-repair to stable without any UI interaction.
+const cliUpdateChannel = getArgValue("--update-channel");
+let forceFullUpdateOnReady = false;
+
 // ─── Module-level state (assigned in whenReady) ──────────────────────────────
 let windowManager: WindowManager;
 let trayManager: TrayManager;
@@ -80,6 +108,7 @@ let updateManager: UpdateManager | null = null;
 let quickShareShortcutManager: QuickShareShortcutManager | null = null;
 let groupShortcutManager: GroupShortcutManager | null = null;
 let streamToastManager: StreamToastManager | null = null;
+let deepLinkRouter: DeepLinkRouter | null = null;
 
 app.whenReady().then(() => {
   if (isMultiInstance && !devProfile) {
@@ -101,6 +130,19 @@ app.whenReady().then(() => {
   const preloadPath = path.join(__dirname, "../preload/index.js");
 
   settingsStore = new SettingsStore();
+
+  // Honor the CLI channel override before anything else can read settings.
+  // Only the literal value "stable" triggers the automatic repair flow.
+  if (cliUpdateChannel === "stable") {
+    try {
+      settingsStore.update({ updateChannel: "stable" });
+      forceFullUpdateOnReady = true;
+      console.log("[ScreenLink] CLI override: update channel forced to stable");
+    } catch (err) {
+      console.warn("[ScreenLink] Failed to persist CLI update-channel override:", err);
+    }
+  }
+
   windowManager = new WindowManager(preloadPath);
   secureStore = new SecureStore();
   logManager = new LogManager();
@@ -148,7 +190,31 @@ app.whenReady().then(() => {
     }
   };
 
+  // ── Deep links (screenlink://group?... invite URLs) ─────────────────────
+  deepLinkRouter = new DeepLinkRouter((channel, payload) => safeSend(channel, payload));
+  for (const url of extractScreenLinkUrls(process.argv)) {
+    deepLinkRouter.enqueue(url);
+  }
+  // Renderer hydrates + subscribes shortly after load; flush any cold-start
+  // argv links after a grace window so the push lands on an armed listener.
+  setTimeout(() => deepLinkRouter?.flush(), 3000).unref?.();
+  ipcMain.handle("deep-link:get-pending", () => deepLinkRouter?.drainPending() ?? []);
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    deepLinkRouter?.enqueue(url);
+  });
+  try {
+    if (app.isPackaged) {
+      app.setAsDefaultProtocolClient("screenlink");
+    } else if (process.argv[1]) {
+      app.setAsDefaultProtocolClient("screenlink", process.execPath, [path.resolve(process.argv[1])]);
+    }
+  } catch (err) {
+    console.warn("[ScreenLink] Failed to register screenlink:// protocol client:", err);
+  }
+
   const fullscreenDetector = new FullscreenDetector();
+
   streamToastManager = new StreamToastManager(
     mainWindow,
     fullscreenDetector,
@@ -196,7 +262,12 @@ app.whenReady().then(() => {
   }
 
   // ── Single instance ────────────────────────────────────────────────────
-  setupSingleInstance(windowManager);
+  setupSingleInstance(windowManager, (argv) => {
+    for (const url of extractScreenLinkUrls(argv)) {
+      deepLinkRouter?.enqueue(url);
+    }
+    windowManager.show();
+  });
 
   // ── Tray ───────────────────────────────────────────────────────────────
   const trayActions: TrayMenuActions = {
@@ -303,10 +374,27 @@ app.whenReady().then(() => {
       );
 
       // Register IPC handlers for updates
-      registerUpdateIpcHandlers(mainWindow, updateManager);
+      registerUpdateIpcHandlers(mainWindow, updateManager, (channel) => {
+        settingsStore.update({ updateChannel: channel });
+        updateManager?.applyChannel(channel);
+      });
 
       // Initialize (schedules first auto-check after ~15 seconds)
       updateManager.init();
+
+      // Apply the persisted channel, then run the CLI-triggered repair
+      // flow (revert to stable) without any UI interaction.
+      const storedChannel = settingsStore.get().updateChannel ?? "stable";
+      updateManager.applyChannel(storedChannel);
+
+      if (forceFullUpdateOnReady) {
+        loggerAdapter.log("info", "updater", "cli_revert_to_stable", {});
+        void updateManager.checkDownloadAndInstall().catch((err: unknown) => {
+          loggerAdapter.log("error", "updater", "cli_revert_failed", {
+            errorDetail: String(err),
+          });
+        });
+      }
     } else {
       loggerAdapter.log("error", "updater", "update_manager_not_created", {
         reason: "electron-updater failed to load",
@@ -341,6 +429,7 @@ app.whenReady().then(() => {
     electronVersion: process.versions.electron,
     hidden: process.argv.includes("--hidden"),
   });
+  markE2E("app-ready", { version: app.getVersion(), hidden: process.argv.includes("--hidden") });
 }).catch((err: unknown) => {
   // Startup failure safety net: without this, any constructor/store/tray/IPC
   // error above becomes an unhandled rejection with a half-initialized app.
@@ -422,28 +511,74 @@ app.on("before-quit", () => {
 // can never hang: whichever finishes first (allSettled or the timer) releases
 // the quit exactly once.
 let helperShutdownComplete = false;
+let helperShutdownStarted = false;
+let prepareQuitSent = false;
 
 app.on("will-quit", (event) => {
   // Pass through the re-entrant app.quit() issued after shutdown completes.
   if (helperShutdownComplete) return;
   event.preventDefault();
 
-  const finishQuit = (): void => {
-    if (helperShutdownComplete) return;
-    helperShutdownComplete = true;
-    clearTimeout(quitTimeout);
-    app.quit();
+  const beginHelperShutdown = (): void => {
+    if (helperShutdownStarted) return;
+    helperShutdownStarted = true;
+
+    const finishQuit = (): void => {
+      if (helperShutdownComplete) return;
+      helperShutdownComplete = true;
+      markE2E("quit-complete");
+      clearTimeout(quitTimeout);
+      clearTimeout(hardKillTimer);
+      app.quit();
+      // Last-resort watchdog: graceful quit has fully completed (helpers torn
+      // down, windows destroyed), but an unpinned handle such as a parent-held
+      // stdio pipe can keep the event loop alive. Force exit rather than linger.
+      const exitWatchdog = setTimeout(() => {
+        console.warn("[ScreenLink] Quit did not finalize within 1500ms - forcing exit");
+        app.exit(0);
+      }, 1500);
+      exitWatchdog.unref?.();
+    };
+    const quitTimeout = setTimeout(finishQuit, 3000);
+
+    const shutdowns: Array<Promise<unknown>> = [
+      stopCurrentAudioHelper().catch((err: unknown) => {
+        console.warn("[ScreenLink] Audio helper shutdown failed during quit:", err);
+      }),
+      stopVideoHelperForQuit().catch((err: unknown) => {
+        console.warn("[ScreenLink] Video helper shutdown failed during quit:", err);
+      }),
+    ];
+
+    // Graceful shutdowns can hang on an unresponsive helper (internal command
+    // timeouts exceed this grace period). Escalate to hard process kills so no
+    // helper outlives the app.
+    const hardKillTimer = setTimeout(() => {
+      console.warn("[ScreenLink] Helper shutdown exceeded grace period - force killing helper processes");
+      forceKillHelpersForQuit();
+      finishQuit();
+    }, 1500);
+
+    void Promise.allSettled(shutdowns).then(() => {
+      clearTimeout(hardKillTimer);
+      finishQuit();
+    });
   };
-  const quitTimeout = setTimeout(finishQuit, 3000);
 
-  const shutdowns: Array<Promise<unknown>> = [
-    stopCurrentAudioHelper().catch((err: unknown) => {
-      console.warn("[ScreenLink] Audio helper shutdown failed during quit:", err);
-    }),
-    stopVideoHelperForQuit().catch((err: unknown) => {
-      console.warn("[ScreenLink] Video helper shutdown failed during quit:", err);
-    }),
-  ];
-
-  Promise.allSettled(shutdowns).then(finishQuit, finishQuit);
+  // One-time, bounded: give the renderer a beat to release its group runtime
+  // (control connections, sync timers) before helper teardown begins. Quit
+  // must never depend on renderer responsiveness, hence the fixed window.
+  if (!prepareQuitSent) {
+    prepareQuitSent = true;
+    for (const win of BrowserWindow.getAllWindows()) {
+      try {
+        win.webContents.send("app:prepare-quit");
+      } catch {
+        // Window/webContents already gone.
+      }
+    }
+    setTimeout(beginHelperShutdown, 600);
+    return;
+  }
+  beginHelperShutdown();
 });

@@ -1,0 +1,5 @@
+{
+  "persistedNotificationsEnabled": false,
+  "uiSwitchAriaChecked": "true",
+  "defect": "UI switch does not reflect persisted notificationsEnabled"
+}

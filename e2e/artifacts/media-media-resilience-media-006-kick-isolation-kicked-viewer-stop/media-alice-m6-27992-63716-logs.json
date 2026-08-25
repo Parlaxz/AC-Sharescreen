@@ -1,0 +1,33 @@
+{
+  "agent": "media-alice-m6-27992-63716",
+  "flushedAt": "2026-08-24T09:27:49.395Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787563476928,
+      "iso": "2026-08-24T09:24:36.928Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 11 sources"
+    },
+    {
+      "t": 1787563488233,
+      "iso": "2026-08-24T09:24:48.233Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-m6-27992-63716\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-m6-27992-63716\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787563498236,
+      "iso": "2026-08-24T09:24:58.236Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-m6-27992-63716\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-m6-27992-63716\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787563647939,
+      "iso": "2026-08-24T09:27:27.939Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

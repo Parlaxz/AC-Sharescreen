@@ -1,0 +1,12 @@
+{
+  "groupId": "844858d5-c0d5-4d66-8d71-82c09d6adcc0",
+  "bobProfile": "g-bob-mt6ywalt106qj",
+  "bob2Groups": [
+    {
+      "id": "844858d5-c0d5-4d66-8d71-82c09d6adcc0",
+      "name": "GRP Pair mt6ywalt106qj",
+      "memberCount": 3
+    }
+  ],
+  "note": "stale membership survived peer leave + relaunch"
+}

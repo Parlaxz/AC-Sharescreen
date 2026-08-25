@@ -1,0 +1,27 @@
+{
+  "agent": "media-alice-vwui7-36508-16387",
+  "flushedAt": "2026-08-24T17:37:17.558Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787593028948,
+      "iso": "2026-08-24T17:37:08.948Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 14 sources"
+    },
+    {
+      "t": 1787593033647,
+      "iso": "2026-08-24T17:37:13.647Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 14 sources"
+    },
+    {
+      "t": 1787593036843,
+      "iso": "2026-08-24T17:37:16.843Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

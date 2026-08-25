@@ -1,0 +1,12 @@
+{
+  "groupId": "f6ea59dc-0886-43ff-8e11-606fbf7be39b",
+  "bobProfile": "g-bob-mt77drir102jf",
+  "bob2Groups": [
+    {
+      "id": "f6ea59dc-0886-43ff-8e11-606fbf7be39b",
+      "name": "GRP Pair mt77drir102jf",
+      "memberCount": 3
+    }
+  ],
+  "note": "stale membership survived peer leave + relaunch"
+}

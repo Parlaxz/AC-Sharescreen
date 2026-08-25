@@ -68,7 +68,15 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.determine-tag.outputs.tag }}"
-          if (-not ($tag -match '^v\d+\.\d+\.\d+$')) {
+          $releaseType = "${{ github.event.inputs.release_type }}"
+          # Stable releases must be plain vX.Y.Z. Prerelease (beta) releases
+          # additionally accept vX.Y.Z-beta.N.
+          if ($releaseType -eq "prerelease") {
+            if (-not ($tag -match '^v\d+\.\d+\.\d+$' -or $tag -match '^v\d+\.\d+\.\d+-beta\.\d+$')) {
+              Write-Host "::error::Beta release tag '$tag' must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-beta.N (e.g. v0.1.1-beta.1)"
+              exit 1
+            }
+          } elseif (-not ($tag -match '^v\d+\.\d+\.\d+$')) {
             Write-Host "::error::Release tag '$tag' must match vMAJOR.MINOR.PATCH (e.g. v0.1.1)"
             exit 1
           }
@@ -278,6 +286,8 @@ jobs:
       # ── 7. Build packages ───────────────────────────────────────────
       - name: Build desktop
         run: pnpm build:desktop
+        env:
+          SCREENLINK_RELEASE_CHANNEL: ${{ github.event.inputs.release_type == 'prerelease' && 'beta' || 'stable' }}
 
       - name: Verify desktop build output
         shell: pwsh
@@ -303,6 +313,10 @@ jobs:
         id: package
         shell: pwsh
         working-directory: apps/desktop
+        env:
+          # Switches electron-builder publish config to channel "beta" /
+          # releaseType "prerelease" for beta builds.
+          SCREENLINK_RELEASE_CHANNEL: ${{ github.event.inputs.release_type == 'prerelease' && 'beta' || 'stable' }}
         run: |
           npx electron-builder --win --x64 --config electron-builder.config.cjs --publish never
           if ($LASTEXITCODE -ne 0) {
@@ -316,26 +330,34 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.determine-version.outputs.version }}"
+          $releaseType = "${{ github.event.inputs.release_type }}"
           $releaseDir = "release"
           $errors = @()
 
-          # latest.yml
-          if (-not (Test-Path "$releaseDir/latest.yml")) {
-            $errors += "latest.yml is missing"
+          # Beta channel builds emit beta.yml updater metadata instead of latest.yml
+          if ($releaseType -eq "prerelease") {
+            $updateYmlName = "beta.yml"
+          } else {
+            $updateYmlName = "latest.yml"
           }
 
-          # latest.yml version check
-          if (Test-Path "$releaseDir/latest.yml") {
-            $yml = Get-Content "$releaseDir/latest.yml" -Raw
+          # Updater metadata yml
+          if (-not (Test-Path "$releaseDir/$updateYmlName")) {
+            $errors += "$updateYmlName is missing"
+          }
+
+          # Updater metadata version check
+          if (Test-Path "$releaseDir/$updateYmlName") {
+            $yml = Get-Content "$releaseDir/$updateYmlName" -Raw
             if ($yml -notmatch "version: $version") {
-              $errors += "latest.yml version does not match $version"
+              $errors += "$updateYmlName version does not match $version"
             }
             if ($yml -notmatch "\.exe") {
-              $errors += "latest.yml does not reference an .exe installer"
+              $errors += "$updateYmlName does not reference an .exe installer"
             }
-            # Ensure latest.yml does NOT reference the portable artifact
+            # Ensure the metadata does NOT reference the portable artifact
             if ($yml -match "portable") {
-              $errors += "latest.yml appears to reference a portable build"
+              $errors += "$updateYmlName appears to reference a portable build"
             }
           }
 
@@ -437,28 +459,29 @@ jobs:
           echo "setup_exe=$setupExeName" >> $env:GITHUB_OUTPUT
           echo "blockmap=$blockmapName" >> $env:GITHUB_OUTPUT
           echo "portable_exe=$portableExeName" >> $env:GITHUB_OUTPUT
+          echo "update_yml=$updateYmlName" >> $env:GITHUB_OUTPUT
 
           Write-Host "All artifacts validated successfully."
           Write-Host "  Setup EXE: $setupExeName ($( [math]::Round($setupExe.Length / 1MB, 1) ) MB)"
-          Write-Host "  Blockmap: $blockmapName ($( [math]::Round($blockmap.Length / 1KB, 1) ) KB)"
-          Write-Host "  Portable: $portableExeName ($( [math]::Round($portableExe.Length / 1MB, 1) ) MB)"
-          Write-Host "  latest.yml: present"
+          Write-Host "  Blockmap: $blockmap.Name ($( [math]::Round($blockmap.Length / 1KB, 1) ) KB)"
+          Write-Host "  Portable: $portableExeName ($( [math]::Round($portable.Length / 1MB, 1) ) MB)"
+          Write-Host "  Updater metadata: $updateYmlName"
           Write-Host "  app-update.yml: present (no token)"
 
-          # Verify latest.yml 'path' matches the actual setup filename
-          if (Test-Path "$releaseDir/latest.yml") {
-              $ymlContent = Get-Content "$releaseDir/latest.yml" -Raw
+          # Verify updater metadata 'path' matches the actual setup filename
+          if (Test-Path "$releaseDir/$updateYmlName") {
+              $ymlContent = Get-Content "$releaseDir/$updateYmlName" -Raw
               # Extract the 'path' field
               $ymlPath = [regex]::Match($ymlContent, '(?m)^path:\s*(.+)$').Groups[1].Value.Trim()
               $actualSetupName = $setupExe.Name
               if ($ymlPath -ne $actualSetupName) {
-                  $errors += "latest.yml path '$ymlPath' does not match actual setup filename '$actualSetupName'"
+                  $errors += "$updateYmlName path '$ymlPath' does not match actual setup filename '$actualSetupName'"
               }
 
               # Extract the 'url' field from files array
               $ymlUrl = [regex]::Match($ymlContent, '(?m)^\s*-\s*url:\s*(.+)$').Groups[1].Value.Trim()
               if ($ymlUrl -and $ymlUrl -ne $actualSetupName) {
-                  $errors += "latest.yml url '$ymlUrl' does not match actual setup filename '$actualSetupName'"
+                  $errors += "$updateYmlName url '$ymlUrl' does not match actual setup filename '$actualSetupName'"
               }
 
               # Verify blockmap path
@@ -482,9 +505,9 @@ jobs:
           $tag = "${{ steps.determine-tag.outputs.tag }}"
           $releaseDir = "release"
 
-          # Required updater assets
+          # Required updater assets (beta channel publishes beta.yml)
           $requiredAssets = @(
-            "latest.yml",
+            "${{ steps.validate-artifacts.outputs.update_yml }}",
             "${{ steps.validate-artifacts.outputs.setup_exe }}",
             "${{ steps.validate-artifacts.outputs.blockmap }}"
           )

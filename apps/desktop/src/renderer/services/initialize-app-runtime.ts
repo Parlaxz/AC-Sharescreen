@@ -1,4 +1,5 @@
 import type { GroupSharedState, HybridTimestamp } from "@screenlink/shared";
+import { isMemberActive } from "@screenlink/shared";
 import type { ScreenLinkAPI } from "../../preload/api-types.js";
 import { useStore } from "../stores/main-store.js";
 import { useIdentityStore } from "../stores/identity-store.js";
@@ -50,10 +51,12 @@ export async function initializeAppRuntime(
       id: record.groupId,
       name: record.sharedState.name.value,
       members: Object.fromEntries(
-        Object.entries(record.sharedState.members).map(([key, value]) => [
-          key,
-          { deviceId: value.deviceId, displayName: value.displayName },
-        ]),
+        Object.entries(record.sharedState.members)
+          .filter(([, value]) => isMemberActive(value))
+          .map(([key, value]) => [
+            key,
+            { deviceId: value.deviceId, displayName: value.displayName },
+          ]),
       ),
     };
     if (!groupOrder.includes(record.groupId)) {
@@ -86,6 +89,7 @@ export async function initializeAppRuntime(
             groupSecret: config.groupSecret,
             nodeId: identity.deviceId,
             displayName: identity.displayName,
+            creatorDeviceId: (record as { creatorDeviceId?: string }).creatorDeviceId ?? null,
           },
           record.sharedState,
           record.lastClock,

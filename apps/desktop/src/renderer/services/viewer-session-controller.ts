@@ -38,6 +38,7 @@ import {
 import { ViewerSession, type ViewerSessionState, type ViewerPauseState } from "./viewer-session.js";
 import { StreamMetricsService } from "./stream-metrics-service.js";
 import { getRuntime } from "./phase3-runtime.js";
+import { emitMarker } from "./test-hooks.js";
 
 export type { ViewerSessionSnapshot };
 
@@ -154,6 +155,9 @@ export class ViewerSessionController {
   /** Generation at which the health monitor was started (extra safety). */
   private _monitorGen = -1;
 
+  /** Detachers for media-transport death listeners (PC states, track ended). */
+  private _transportCleanup: Array<() => void> = [];
+
   /**
    * Cached snapshot. Replaced on every _publish() call so
    * useSyncExternalStore getSnapshot returns the same reference
@@ -243,6 +247,11 @@ export class ViewerSessionController {
     if (this._phase === p) return;
     this._phase = p;
     this._publish();
+    // E2E lifecycle markers — no-op unless SCREENLINK_E2E=1
+    if (p === "connecting") emitMarker("viewer-joined", { sessionId: this._target?.mediaSessionId ?? null });
+    if (p === "watching") emitMarker("viewer-watching", { sessionId: this._target?.mediaSessionId ?? null });
+    if (p === "reconnecting") emitMarker("viewer-reconnecting", { sessionId: this._target?.mediaSessionId ?? null });
+    if (p === "ended") emitMarker("viewer-ended", { sessionId: this._target?.mediaSessionId ?? null });
   }
 
   private _setPause(p: ViewerSessionSnapshot["pause"]): void {
@@ -297,8 +306,14 @@ export class ViewerSessionController {
     this._supervisor.cancel();
     this._recoveryInFlight = false;
 
-    await this._destroySession();
+    // Invalidate the prior session's callbacks BEFORE tearing it down:
+    // destroy() emits its terminal state change synchronously, and with the
+    // generation still current that stale "ended" would be published
+    // mid-switch - flashing the ended overlay, unmounting the persistent
+    // <video> element, and leaving the re-bind attached to a detached node.
     this._gen++;
+
+    await this._destroySession();
 
     this._target = target;
     this._error = null;
@@ -357,6 +372,11 @@ export class ViewerSessionController {
 
       // Start health monitor AFTER session is established
       this._startHealthMonitor();
+
+      // Watch the media transport itself: a host-side kick closes the
+      // publisher connection without any control-plane announcement, so
+      // registry-based stream-end detection never fires.
+      this._attachTransportDeathWatch(session);
     } catch (err) {
       if (this._gen !== gen) return;
       const msg = err instanceof Error ? err.message : String(err);
@@ -565,6 +585,142 @@ export class ViewerSessionController {
     }
   }
 
+  // ── Media transport death detection (host kick / silent PC close) ──
+
+  /**
+   * Watch the peer connection and its receiver tracks for terminal states.
+   *
+   * A kick (or any host-side teardown that skips the stream-stop
+   * announcement) kills the media transport without removing the stream
+   * from the registry, so neither the store-based end detection nor the
+   * control-plane health poll notices. Terminal signals handled here:
+   * - pc.connectionState "failed" | "closed"
+   * - pc.iceConnectionState "failed" | "closed" ("disconnected" may self-heal)
+   * - receiver track "ended" ("mute" is ambiguous — the host may pause)
+   */
+  private _attachTransportDeathWatch(session: ViewerSession): void {
+    this._detachTransportDeathWatch();
+    const gen = this._gen;
+    let pc: RTCPeerConnection | null = null;
+    try {
+      pc = session.getPeerConnection();
+    } catch {
+      pc = null;
+    }
+    // Feature-detect: SDK PCs are real RTCPeerConnections, but test doubles
+    // may expose bare objects.
+    if (!pc || typeof pc.addEventListener !== "function" || typeof pc.getReceivers !== "function") {
+      return;
+    }
+
+    const onConnectionState = (): void => {
+      if (this._gen !== gen) return;
+      const s = pc!.connectionState;
+      if (s === "failed" || s === "closed") this._handleTransportDeath(`pc-${s}`);
+    };
+    const onIceState = (): void => {
+      if (this._gen !== gen) return;
+      const s = pc!.iceConnectionState;
+      if (s === "failed" || s === "closed") this._handleTransportDeath(`ice-${s}`);
+    };
+    const onTrackEnded = (): void => {
+      if (this._gen !== gen) return;
+      this._handleTransportDeath("track-ended");
+    };
+
+    try {
+      pc.addEventListener("connectionstatechange", onConnectionState);
+      pc.addEventListener("iceconnectionstatechange", onIceState);
+    } catch {
+      return;
+    }
+    this._transportCleanup.push(() => {
+      try {
+        pc!.removeEventListener("connectionstatechange", onConnectionState);
+        pc!.removeEventListener("iceconnectionstatechange", onIceState);
+      } catch {
+        // PC already gone.
+      }
+    });
+
+    const watchTrack = (track: MediaStreamTrack | null | undefined): void => {
+      if (!track) return;
+      // A track that is already dead at attach time ends the session.
+      if (track.readyState === "ended") {
+        onTrackEnded();
+        return;
+      }
+      track.addEventListener("ended", onTrackEnded);
+      this._transportCleanup.push(() => {
+        try {
+          track.removeEventListener("ended", onTrackEnded);
+        } catch {
+          // Track already gone.
+        }
+      });
+    };
+
+    let receivers: RTCRtpReceiver[] = [];
+    try {
+      receivers = pc.getReceivers() ?? [];
+    } catch {
+      receivers = [];
+    }
+    for (const receiver of receivers) {
+      watchTrack(receiver.track);
+    }
+    const onLaterTrack = (ev: RTCTrackEvent): void => {
+      if (this._gen !== gen) return;
+      watchTrack(ev.track);
+    };
+    try {
+      pc.addEventListener("track", onLaterTrack);
+    } catch {
+      return;
+    }
+    this._transportCleanup.push(() => {
+      try {
+        pc!.removeEventListener("track", onLaterTrack);
+      } catch {
+        // PC already gone.
+      }
+    });
+  }
+
+  private _detachTransportDeathWatch(): void {
+    for (const detach of this._transportCleanup) {
+      try {
+        detach();
+      } catch {
+        // Listener/target already gone.
+      }
+    }
+    this._transportCleanup = [];
+  }
+
+  /**
+   * Route transport death through the same path as an intentional stop:
+   * a kick is deliberate host action, so auto-reconnecting into a session
+   * that will be rejected again is wrong — surface the ended state instead.
+   */
+  private _handleTransportDeath(reason: string): void {
+    if (this._phase === "ended" || this._phase === "idle") return;
+    // Kill the monitor first: this cancels any pending auto-recovery timer,
+    // which must not fire after the terminal stop below.
+    this._stopHealthMonitor();
+    this._supervisor.markIntentionalStop();
+    this._settleEnded();
+  }
+
+  /** Tear the session down and settle into the terminal "ended" phase. */
+  private _settleEnded(): void {
+    void this._enqueue(async () => {
+      await this._destroySession();
+      this._setPhase("ended");
+      this._setError(null);
+    });
+  }
+
   // ── Health monitor (Phase 5B) ─────────────────────────────────────
 
   /**
@@ -728,6 +884,15 @@ export class ViewerSessionController {
       if (this._gen !== gen) { this._recoveryInFlight = false; return; }
       this._recoveryTimer = null;
 
+      // A terminal stop (host kick / confirmed stream end) that was detected
+      // after this recovery was scheduled must win: never auto-rejoin once
+      // the supervisor is marked intentional-stop.
+      if (this._supervisor.getSnapshot().isIntentionalStop) {
+        this._recoveryInFlight = false;
+        this._settleEnded();
+        return;
+      }
+
       void this._enqueue(async () => {
         if (this._gen !== gen) { this._recoveryInFlight = false; return; }
         try {
@@ -757,6 +922,7 @@ export class ViewerSessionController {
 
   private async _destroySession(): Promise<void> {
     this._stopStreamEndDetection();
+    this._detachTransportDeathWatch();
     const session = this._session;
     if (!session) return;
 

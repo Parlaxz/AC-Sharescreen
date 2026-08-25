@@ -1,0 +1,81 @@
+{
+  "agent": "media-alice-m1-26524-60259",
+  "flushedAt": "2026-08-24T08:34:01.201Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787560368215,
+      "iso": "2026-08-24T08:32:48.215Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560373177,
+      "iso": "2026-08-24T08:32:53.177Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560378115,
+      "iso": "2026-08-24T08:32:58.115Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560383094,
+      "iso": "2026-08-24T08:33:03.094Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560388085,
+      "iso": "2026-08-24T08:33:08.085Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560393076,
+      "iso": "2026-08-24T08:33:13.076Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560401133,
+      "iso": "2026-08-24T08:33:21.133Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560403339,
+      "iso": "2026-08-24T08:33:23.339Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560408234,
+      "iso": "2026-08-24T08:33:28.234Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560413304,
+      "iso": "2026-08-24T08:33:33.304Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560418161,
+      "iso": "2026-08-24T08:33:38.161Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560420073,
+      "iso": "2026-08-24T08:33:40.073Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

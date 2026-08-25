@@ -25,6 +25,29 @@ export interface HostPublisherOptions {
   requestedCodec?: string;
 }
 
+/** Per-peer outcome of ensureVideoTrackReplaced(). */
+export interface VideoTrackReplacementPeerReport {
+  /** VDO media peer UUID of the publisher connection */
+  peerUuid: string;
+  /** true when the sender already carried newTrack after the SDK-level swap */
+  swappedBySdk: boolean;
+  /** true when a direct sender.replaceTrack repair had to be applied */
+  repaired: boolean;
+  /** true when the encoder active-toggle keyframe kick was applied */
+  encoderKicked: boolean;
+  /** track id on the video sender after the ensure pass (null if no video sender) */
+  senderTrackId: string | null;
+}
+
+/** Aggregate result of ensureVideoTrackReplaced(). */
+export interface VideoTrackReplacementReport {
+  peers: VideoTrackReplacementPeerReport[];
+  /** true when at least one publisher PC was inspected */
+  anyPublisherConnection: boolean;
+  /** true when every inspected video sender carries newTrack (or none exist) */
+  allVideoSendersCarryNewTrack: boolean;
+}
+
 export class HostPublisher {
   private sdk: VDONinjaSDK | null = null;
   private pendingHandlers = new Map<SDKEvent, Set<(...args: unknown[]) => void>>();
@@ -217,6 +240,132 @@ export class HostPublisher {
   async replaceVideoTrack(oldTrack: MediaStreamTrack, newTrack: MediaStreamTrack): Promise<void> {
     if (!this.sdk) throw new CompatibilityError("Not connected");
     await this.sdk.replaceTrack(oldTrack, newTrack);
+  }
+
+  /**
+   * Verify — and if necessary repair — that every publisher connection's
+   * video sender carries `newTrack` after an SDK-level replaceTrack call.
+   *
+   * Why this exists: SDK 1.3.18's `replaceTrack(oldTrack, newTrack)` finds
+   * each connection's sender via strict object identity
+   * (`senders.find(s => s.track === oldTrack)`) and swallows per-connection
+   * errors. If the identity match misses (or the internal replace fails),
+   * the swap is SILENTLY skipped for that peer while the SDK still stops
+   * `oldTrack` at the end — leaving the sender bound to a dead track, which
+   * freezes frame delivery for that viewer with zero host-side errors.
+   *
+   * This method:
+   *   1. Verifies each publisher PC's video sender now carries `newTrack`.
+   *   2. Repairs any sender that does not, via a direct
+   *      `sender.replaceTrack(newTrack)` (no renegotiation needed).
+   *   3. Kicks the encoder (encoding `active` false→true) on successfully
+   *      swapped senders so the viewer's decoder receives a fresh keyframe
+   *      for the new source. Senders parked at `active:false` (viewer
+   *      pause / quality hold) are left untouched.
+   *
+   * Never throws for per-peer issues — callers inspect the returned report.
+   */
+  async ensureVideoTrackReplaced(newTrack: MediaStreamTrack): Promise<VideoTrackReplacementReport> {
+    if (!this.sdk) throw new CompatibilityError("Not connected");
+
+    const peers: VideoTrackReplacementPeerReport[] = [];
+    let anyPublisherConnection = false;
+    let allVideoSendersCarryNewTrack = true;
+
+    for (const [uuid, group] of this.sdk.connections) {
+      const pc = group.publisher?.pc;
+      if (!pc) continue;
+      anyPublisherConnection = true;
+
+      const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+      if (!sender) {
+        // Peer has no video sender (e.g. data-only or audio-only viewer) —
+        // nothing to verify or repair.
+        peers.push({
+          peerUuid: uuid,
+          swappedBySdk: false,
+          repaired: false,
+          encoderKicked: false,
+          senderTrackId: null,
+        });
+        continue;
+      }
+
+      const swappedBySdk = sender.track === newTrack;
+      let repaired = false;
+      if (!swappedBySdk) {
+        try {
+          await sender.replaceTrack(newTrack);
+          repaired = sender.track === newTrack;
+          console.log(
+            `[HostPublisher] sender repair applied for peer ${uuid.slice(0, 8)}… repaired=${repaired}`,
+          );
+        } catch (err) {
+          console.warn(
+            `[HostPublisher] direct sender.replaceTrack repair failed for peer ${uuid.slice(0, 8)}…:`,
+            err,
+          );
+        }
+      }
+
+      let encoderKicked = false;
+      if (sender.track === newTrack) {
+        encoderKicked = await this.kickVideoEncoder(sender);
+      }
+
+      if (sender.track !== newTrack) {
+        allVideoSendersCarryNewTrack = false;
+      }
+
+      peers.push({
+        peerUuid: uuid,
+        swappedBySdk,
+        repaired,
+        encoderKicked,
+        senderTrackId: sender.track?.id ?? null,
+      });
+    }
+
+    return { peers, anyPublisherConnection, allVideoSendersCarryNewTrack };
+  }
+
+  /**
+   * Force the video encoder to restart for `sender` by briefly toggling the
+   * first encoding's `active` flag off→on. The restart guarantees a fresh
+   * keyframe for the newly attached source; without it some encoder stacks
+   * (notably hardware H.264/VP9 paths) keep encoding into the void and the
+   * viewer's decoder never resyncs, freezing playback on the last frame of
+   * the previous source.
+   *
+   * Returns true when the kick was applied. Senders whose encoding is
+   * already inactive (viewer-initiated pause / quality hold) are skipped so
+   * this never accidentally resumes a paused stream.
+   */
+  private async kickVideoEncoder(sender: RTCRtpSender): Promise<boolean> {
+    try {
+      const params = sender.getParameters();
+      if (!Array.isArray(params.encodings) || params.encodings.length === 0) {
+        return false;
+      }
+      const encoding = params.encodings[0];
+      if (!encoding || encoding.active === false) {
+        // Paused by viewer quality control — do not resume it here.
+        return false;
+      }
+      encoding.active = false;
+      await sender.setParameters(params);
+
+      const reenable = sender.getParameters();
+      if (!Array.isArray(reenable.encodings) || reenable.encodings.length === 0) {
+        return false;
+      }
+      reenable.encodings[0]!.active = true;
+      await sender.setParameters(reenable);
+      return true;
+    } catch {
+      // Keyframe kick is best-effort; swap verification is the authority.
+      return false;
+    }
   }
 
   async stopPublishing(): Promise<void> {

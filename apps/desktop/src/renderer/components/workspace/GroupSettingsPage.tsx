@@ -67,6 +67,7 @@ function getApi() {
         validateGroupShortcut: (s: string, g: string, a: string, e?: boolean) => Promise<ShortcutValidationDTO>;
         getSources: () => Promise<CaptureSourceDTO[]>;
         listQualityPresets: () => Promise<Array<{ id: string; name: string }>>;
+        getGroup: (id: string) => Promise<{ notificationsEnabled: boolean } | null>;
       };
     }).screenlink ?? null;
   } catch {
@@ -97,6 +98,26 @@ export function GroupSettingsPage() {
   const [notificationSaving, setNotificationSaving] = useState(false);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
+
+  // Load the persisted notification preference for the selected group so the
+  // switch reflects groups.json instead of an assumed default.
+  useEffect(() => {
+    if (!selectedGroupId) return;
+    let cancelled = false;
+    const api = getApi();
+    if (!api?.getGroup) return;
+    void api
+      .getGroup(selectedGroupId)
+      .then((record) => {
+        if (!cancelled && record) setNotificationsEnabled(record.notificationsEnabled);
+      })
+      .catch(() => {
+        // Keep current value on transient read failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedGroupId]);
 
   // ── Quick Actions state ──────────────────────────────────────────────
   const [shortcutConfig, setShortcutConfig] = useState<GroupShortcutConfigDTO | null>(null);
@@ -390,7 +411,7 @@ export function GroupSettingsPage() {
 
   // ── Render ──────────────────────────────────────────────────────
   return (
-    <div className="h-full overflow-auto p-6 space-y-6">
+    <div className="h-full overflow-auto p-6 space-y-6" data-testid="group-settings-root">
       <PageHeader
         title="Group settings"
         description={`Manage "${group.name}" group preferences`}
@@ -440,6 +461,7 @@ export function GroupSettingsPage() {
           <Button
             variant="outline"
             className="w-full justify-start"
+            data-testid="copy-invite-button"
             onClick={handleCopyInviteLink}
           >
             <Copy className="h-4 w-4 mr-2" />
@@ -471,6 +493,7 @@ export function GroupSettingsPage() {
             </div>
             <Switch
               id="group-notifications"
+              data-testid="group-notifications-switch"
               checked={notificationsEnabled}
               onCheckedChange={handleNotificationToggle}
               disabled={notificationSaving}
@@ -483,6 +506,7 @@ export function GroupSettingsPage() {
           <Button
             variant="destructive"
             className="w-full justify-start"
+            data-testid="leave-group-button"
             onClick={() => setLeaveConfirmOpen(true)}
           >
             <LogOut className="h-4 w-4 mr-2" />
@@ -519,15 +543,14 @@ export function GroupSettingsPage() {
                 <div className="space-y-1.5">
                   <Label className="text-xs text-text-muted">Shortcut</Label>
                   <div className="flex items-center gap-2">
-                    <div className="flex-1">
+                    <div className="flex-1" data-testid="quick-share-shortcut-input">
                       <KeyRecorder
                         value={shortcutConfig?.quickShareShortcut ?? ""}
                         onChange={handleQuickShareShortcutChange}
                         disabled={savingQuickShare}
                         placeholder="Click to set shortcut"
                       />
-                    </div>
-                    {shortcutConfig?.quickShareShortcut && (
+                    </div>                    {shortcutConfig?.quickShareShortcut && (
                       <Button
                         variant="ghost"
                         size="icon"
@@ -549,7 +572,7 @@ export function GroupSettingsPage() {
                     onValueChange={handleQuickShareSourceChange}
                     disabled={sourceSaving}
                   >
-                    <SelectTrigger className="w-full">
+                    <SelectTrigger className="w-full" data-testid="quick-share-source-select">
                       <SelectValue placeholder="Select a source" />
                     </SelectTrigger>
                     <SelectContent>
@@ -577,7 +600,7 @@ export function GroupSettingsPage() {
                     onValueChange={handleQuickSharePresetChange}
                     disabled={presetSaving}
                   >
-                    <SelectTrigger className="w-full">
+                    <SelectTrigger className="w-full" data-testid="default-preset-select">
                       <SelectValue placeholder="Select a preset" />
                     </SelectTrigger>
                     <SelectContent>
@@ -606,7 +629,7 @@ export function GroupSettingsPage() {
                 <div className="space-y-1.5">
                   <Label className="text-xs text-text-muted">Shortcut</Label>
                   <div className="flex items-center gap-2">
-                    <div className="flex-1">
+                    <div className="flex-1" data-testid="quick-join-shortcut-input">
                       <KeyRecorder
                         value={shortcutConfig?.quickJoinShortcut ?? ""}
                         onChange={handleQuickJoinShortcutChange}
@@ -637,7 +660,7 @@ export function GroupSettingsPage() {
 
       {/* ─── Leave group confirmation dialog ─────────────────── */}
       <Dialog open={leaveConfirmOpen} onOpenChange={setLeaveConfirmOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" data-testid="leave-confirm-dialog">
           <DialogHeader>
             <DialogTitle>Leave group</DialogTitle>
             <DialogDescription>
@@ -650,12 +673,13 @@ export function GroupSettingsPage() {
           </DialogHeader>
           <DialogFooter>
             <DialogClose asChild>
-              <Button variant="outline" disabled={leaving}>
+              <Button variant="outline" data-testid="leave-cancel-button" disabled={leaving}>
                 Cancel
               </Button>
             </DialogClose>
             <Button
               variant="destructive"
+              data-testid="leave-confirm-button"
               onClick={handleLeaveGroup}
               disabled={leaving}
             >

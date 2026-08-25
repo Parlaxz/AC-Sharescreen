@@ -1,0 +1,10 @@
+{
+  "alice": {
+    "baseline": 1,
+    "after": 1
+  },
+  "bob": {
+    "baseline": 1,
+    "after": 1
+  }
+}

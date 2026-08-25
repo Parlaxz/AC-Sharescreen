@@ -603,3 +603,42 @@ describe("parseGroupMessagePayload for viewer.pause.request/result", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+// ─── Forward compatibility — unknown future message types ─────────────────
+
+describe("Forward compatibility — unknown future message types are rejected", () => {
+  it("rejects an envelope whose type is not in GROUP_CONTROL_MESSAGE_TYPES", async () => {
+    // A message type invented by a NEWER peer. Older peers must safely drop
+    // it at the schema layer instead of crashing or misinterpreting it.
+    const futureType = "group.member.exploded";
+    expect(GROUP_CONTROL_MESSAGE_TYPES).not.toContain(futureType);
+
+    const futureEnvelope = {
+      version: GROUP_PROTOCOL_VERSION,
+      type: futureType,
+      messageId: crypto.randomUUID(),
+      sentAt: Date.now(),
+      senderDeviceId: SENDER_ID,
+      groupId: GROUP_ID,
+      logicalStamp: { wallTimeMs: Date.now(), counter: 0, nodeId: SENDER_ID },
+      payload: {},
+      mac: "0".repeat(64),
+    };
+
+    const parsed = GroupControlEnvelopeSchema.safeParse(futureEnvelope);
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((i) => i.path.includes("type"))).toBe(true);
+    }
+
+    const dedup = new DedupSet();
+    const result = await validateEnvelope(futureEnvelope, GROUP_ID, GROUP_SECRET, dedup);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("Invalid schema");
+    }
+    // Rejected before dedup registration — a retry of the same ID is still
+    // not poisoned into the set.
+    expect(dedup.has(futureEnvelope.messageId)).toBe(false);
+  });
+});

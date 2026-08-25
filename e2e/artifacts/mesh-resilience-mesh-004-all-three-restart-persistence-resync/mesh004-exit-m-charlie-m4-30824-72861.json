@@ -1,0 +1,8 @@
+{
+  "reason": "mesh004-graceful:m-charlie-m4-30824-72861",
+  "gracefulClose": true,
+  "taskkillUsed": false,
+  "pid": 24976,
+  "closedAt": "2026-08-24T22:05:36.611Z",
+  "gracefulCloseHung": false
+}

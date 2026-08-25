@@ -8,6 +8,8 @@ export interface PageHeaderProps {
   title: string;
   /** Optional subtitle or description below the title */
   description?: string;
+  /** Optional rich description node rendered like `description` (takes precedence) */
+  descriptionNode?: React.ReactNode;
   /** Optional eyebrow text displayed above the title */
   eyebrow?: string;
   /** Optional status element (badge, pill, indicator) shown in the header row */
@@ -41,6 +43,7 @@ export interface PageHeaderProps {
 export function PageHeader({
   title,
   description,
+  descriptionNode,
   eyebrow,
   status,
   actions,
@@ -59,8 +62,10 @@ export function PageHeader({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold text-text-primary">{title}</h1>
-          {description && (
-            <p className="text-sm text-text-secondary mt-1">{description}</p>
+          {(descriptionNode ?? description) && (
+            <p className="text-sm text-text-secondary mt-1">
+              {descriptionNode ?? description}
+            </p>
           )}
         </div>
 

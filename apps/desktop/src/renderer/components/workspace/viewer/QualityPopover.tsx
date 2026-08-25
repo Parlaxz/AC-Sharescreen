@@ -199,7 +199,7 @@ export function QualityPopover({ current, onSelect, children }: QualityPopoverPr
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-80 p-0">
+      <PopoverContent side="top" align="center" className="w-80 p-0" data-testid="quality-popover-content">
         {/* Tab bar */}
         <div className="flex border-b border-border-subtle">
           <button

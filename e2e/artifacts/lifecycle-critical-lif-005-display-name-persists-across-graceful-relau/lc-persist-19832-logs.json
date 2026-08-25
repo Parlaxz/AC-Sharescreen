@@ -1,0 +1,15 @@
+{
+  "agent": "lc-persist-19832",
+  "flushedAt": "2026-08-24T11:12:10.960Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787569930244,
+      "iso": "2026-08-24T11:12:10.244Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

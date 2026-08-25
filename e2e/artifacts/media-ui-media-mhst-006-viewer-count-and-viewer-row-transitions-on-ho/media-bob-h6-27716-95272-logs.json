@@ -1,0 +1,45 @@
+{
+  "agent": "media-bob-h6-27716-95272",
+  "flushedAt": "2026-08-24T22:10:19.546Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787609413632,
+      "iso": "2026-08-24T22:10:13.632Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: Qt5QWindowIcon}"
+    },
+    {
+      "t": 1787609413632,
+      "iso": "2026-08-24T22:10:13.632Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787609414196,
+      "iso": "2026-08-24T22:10:14.196Z",
+      "source": "main-console",
+      "text": "[nvidia-capability] Using video enhancer helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe"
+    },
+    {
+      "t": 1787609416228,
+      "iso": "2026-08-24T22:10:16.228Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: Qt5QWindowIcon}"
+    },
+    {
+      "t": 1787609416229,
+      "iso": "2026-08-24T22:10:16.229Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787609418836,
+      "iso": "2026-08-24T22:10:18.836Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -1,0 +1,15 @@
+{
+  "agent": "lc-tray-20840",
+  "flushedAt": "2026-08-24T06:43:31.549Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787553791418,
+      "iso": "2026-08-24T06:43:11.418Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -1,5 +1,6 @@
 import { getRuntime } from "./phase3-runtime.js";
 import { useStore } from "../stores/main-store.js";
+import { emitMarker } from "./test-hooks.js";
 import type { ShareSource, StartShareInput } from "@screenlink/shared";
 import type { SessionQualityOverride } from "./share-quality.js";
 import {
@@ -209,6 +210,8 @@ export async function startShare(input: StartShareInput): Promise<void> {
     store.setIsSharing(true);
     store.setSharingGroupId(input.groupId);
     store.setLocalShareState("sharing");
+    // E2E lifecycle marker — no-op unless SCREENLINK_E2E=1
+    emitMarker("share-started", { groupId: input.groupId, sourceId: input.source.id, sourceName: input.source.name });
   } catch (err) {
     // Clear approved source on failure if possible.
     if (api) {
@@ -260,5 +263,7 @@ export async function stopShare(): Promise<void> {
     store.setLocalShareState("idle");
     store.setIsDegraded(false);
     useStore.setState({ viewerCount: 0 });
+    // E2E lifecycle marker — no-op unless SCREENLINK_E2E=1
+    emitMarker("share-stopped");
   }
 }

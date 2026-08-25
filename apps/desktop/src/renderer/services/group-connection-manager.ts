@@ -1,9 +1,10 @@
-import {
+﻿import {
   GroupControlConnection,
   type ConnectionState,
   type BroadcastResult,
 } from "./group-control-connection.js";
 import type { GroupMemberRecord } from "@screenlink/shared";
+import { emitMarker } from "./test-hooks.js";
 
 export interface GroupConnectionState {
   groupId: string;
@@ -43,13 +44,22 @@ export class GroupConnectionManager {
   /** Callback for authenticated hello handshake with remote member record. */
   private onAuthenticatedHello: ((groupId: string, senderDeviceId: string, member: GroupMemberRecord | null) => void) | null = null;
 
-  // ── Pending-announcement queue ─────────────────────────────────────
+  // â”€â”€ Pending-announcement queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   /**
    * Group-scoped pending lifecycle messages. When group control reconnects,
    * pending messages are flushed.
    * Key: groupId. Value: Map of "logicalStreamId:type" -> PendingLifecycleMessage.
    */
   private pendingLifecycle = new Map<string, Map<string, PendingLifecycleMessage>>();
+
+  // â”€â”€â”€ Failed-connection auto-recovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  /**
+   * Failed group connections are restarted automatically with capped backoff
+   * so a slow first connect (cold start, AV scan, DNS) cannot leave the app
+   * permanently disconnected. Key: groupId.
+   */
+  private failedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private failedRetryAttempts = new Map<string, number>();
 
   setOnStatesChanged(cb: (states: Map<string, GroupConnectionState>) => void): void {
     this.onStatesChanged = cb;
@@ -134,6 +144,11 @@ export class GroupConnectionManager {
         prevState = newState;
         self.onConnectionStateChange(config.groupId, old, newState);
         self.emitStates();
+        if (newState === "failed") {
+          self.scheduleFailedRetry(config.groupId);
+        } else if (newState === "connected") {
+          self.clearFailedRetry(config.groupId);
+        }
       },
       onError() {
         self.emitStates();
@@ -153,6 +168,7 @@ export class GroupConnectionManager {
     if (!conn) return;
     this.connections.delete(groupId);
     this.clearPendingForGroup(groupId);
+    this.clearFailedRetry(groupId);
     await conn.destroy();
     this.emitStates();
   }
@@ -161,8 +177,50 @@ export class GroupConnectionManager {
     const conns = Array.from(this.connections.values());
     this.connections.clear();
     this.clearAllPending();
+    for (const timer of this.failedRetryTimers.values()) clearTimeout(timer);
+    this.failedRetryTimers.clear();
+    this.failedRetryAttempts.clear();
     await Promise.all(conns.map((c) => c.destroy().catch(() => {})));
     this.emitStates();
+  }
+
+  // â”€â”€â”€ Failed-connection auto-recovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  private static FAILED_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 15_000, 15_000];
+
+  private scheduleFailedRetry(groupId: string): void {
+    const conn = this.connections.get(groupId);
+    if (!conn) return;
+    if (this.failedRetryTimers.has(groupId)) return; // already scheduled
+
+    const attempt = (this.failedRetryAttempts.get(groupId) ?? 0) + 1;
+    this.failedRetryAttempts.set(groupId, attempt);
+    const delays = GroupConnectionManager.FAILED_RETRY_DELAYS_MS;
+    if (attempt > delays.length) {
+      console.error(
+        `[group-connections] ${groupId}: connection failed ${attempt - 1} times â€” giving up until restart`,
+      );
+      return;
+    }
+
+    const delay = delays[attempt - 1];
+    console.log(
+      `[group-connections] ${groupId}: connection failed â€” retrying in ${delay}ms (attempt ${attempt}/${delays.length})`,
+    );
+    const timer = setTimeout(() => {
+      this.failedRetryTimers.delete(groupId);
+      const current = this.connections.get(groupId);
+      if (!current) return;
+      void current.start().catch(() => {});
+    }, delay);
+    this.failedRetryTimers.set(groupId, timer);
+  }
+
+  private clearFailedRetry(groupId: string): void {
+    const timer = this.failedRetryTimers.get(groupId);
+    if (timer) clearTimeout(timer);
+    this.failedRetryTimers.delete(groupId);
+    this.failedRetryAttempts.delete(groupId);
   }
 
   async broadcast(groupId: string, payload: Record<string, unknown>): Promise<BroadcastResult> {
@@ -171,7 +229,7 @@ export class GroupConnectionManager {
     return conn.broadcast(payload);
   }
 
-  // ── Readiness API ─────────────────────────────────────────────────
+  // â”€â”€ Readiness API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Returns true only when the group connection exists and is in the
@@ -233,7 +291,7 @@ export class GroupConnectionManager {
           cleanup();
           reject(new Error(GROUP_NOT_CONNECTED));
         }
-        // "starting", "reconnecting", "stopping" → keep waiting
+        // "starting", "reconnecting", "stopping" â†’ keep waiting
       };
 
       const onDisconnected = () => {
@@ -243,7 +301,7 @@ export class GroupConnectionManager {
       };
 
       // Subscribe to state changes via the connection's onStateChange option.
-      // We need to hook into the existing pattern — the connection calls
+      // We need to hook into the existing pattern â€” the connection calls
       // opts.onStateChange which triggers emitStates. For this promise,
       // we poll the connection state instead.
       timer = setTimeout(() => {
@@ -260,16 +318,21 @@ export class GroupConnectionManager {
         if (s === "connected") {
           cleanup();
           resolve();
-        } else if (s === "failed" || s === "destroyed") {
+        } else if (s === "destroyed") {
           cleanup();
           reject(new Error(GROUP_NOT_CONNECTED));
+        } else if (s === "failed") {
+          // Manager-level auto-retry recovers failed connections; nudge it
+          // once (single-flight) and keep waiting within the budget.
+          triggerRestart();
+          setTimeout(poll, 200);
         } else if (s === "idle") {
-          // Idle — trigger one restart attempt (single-flight), then keep
+          // Idle â€” trigger one restart attempt (single-flight), then keep
           // polling until connected or the timeout fires.
           triggerRestart();
           setTimeout(poll, 200);
         } else {
-          // "starting" or "reconnecting" — keep polling
+          // "starting" or "reconnecting" â€” keep polling
           setTimeout(poll, 200);
         }
       };
@@ -284,7 +347,7 @@ export class GroupConnectionManager {
     });
   }
 
-  // ── Pending-announcement queue ─────────────────────────────────────
+  // â”€â”€ Pending-announcement queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Send a stream lifecycle message immediately, or queue it if the
@@ -311,7 +374,7 @@ export class GroupConnectionManager {
       try {
         const result = await conn.broadcast(payload);
         // Require at least 1 sent recipient to consider it "sent".
-        // Zero confirmed recipients → queue for later.
+        // Zero confirmed recipients â†’ queue for later.
         if (result.sent > 0) {
           return "sent";
         }
@@ -319,7 +382,7 @@ export class GroupConnectionManager {
           `[group-control] broadcast for ${type} had zero confirmed recipients (attempted=${result.attempted}), queuing`,
         );
       } catch (err) {
-        // Broadcast failed — queue as fallback
+        // Broadcast failed â€” queue as fallback
         console.warn(
           `[group-control] broadcast failed for ${type}, queuing:`,
           (err instanceof Error ? err.message : String(err)),
@@ -357,7 +420,7 @@ export class GroupConnectionManager {
       // in the queue. The start was announced before the connection dropped;
       // the stop must still be delivered so viewers learn the stream ended (B-12).
       // A standalone stop with no preceding start on this connection is still
-      // meaningful — the start was already flushed to peers earlier.
+      // meaningful â€” the start was already flushed to peers earlier.
       // Broadcast the pending message
       try {
         const result = await conn.broadcast(msg.payload);
@@ -481,7 +544,7 @@ export class GroupConnectionManager {
     };
     queue.set(key, msg);
 
-    // Bound queue size per group — evict oldest entries if exceeded.
+    // Bound queue size per group â€” evict oldest entries if exceeded.
     if (queue.size > MAX_PENDING_PER_GROUP) {
       const entries = Array.from(queue.entries());
       const toEvict = entries.slice(0, queue.size - MAX_PENDING_PER_GROUP);
@@ -509,15 +572,19 @@ export class GroupConnectionManager {
    * group connection transitions to "connected" from any other state.
    */
   private onConnectionStateChange(groupId: string, _oldState: ConnectionState, newState: ConnectionState): void {
+    // E2E lifecycle markers — no-op unless SCREENLINK_E2E=1
+    if (newState === "connected") emitMarker("group-connected", { groupId });
+    if (newState === "failed") emitMarker("group-disconnected", { groupId });
     if (newState === "connected") {
-      console.log("[group-control] connection reconnected — flushing pending lifecycle messages for", groupId);
+      console.log("[group-control] connection reconnected â€” flushing pending lifecycle messages for", groupId);
       this.flushPendingLifecycle(groupId).catch(() => {});
     }
   }
 
-  // ── Modified addGroup to wire state change handler ─────────────────
+  // â”€â”€ Modified addGroup to wire state change handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   private emitStates(): void {
     this.onStatesChanged?.(this.states);
   }
 }
+

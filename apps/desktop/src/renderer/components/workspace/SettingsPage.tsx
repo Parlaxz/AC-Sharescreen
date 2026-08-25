@@ -243,11 +243,14 @@ function SwitchRow({
   label,
   checked,
   onCheckedChange,
+  testId,
 }: {
   id: string;
   label: string;
   checked: boolean;
   onCheckedChange: (value: boolean) => void;
+  /** Optional data-testid applied to the Switch control */
+  testId?: string;
 }) {
   return (
     <div className="flex items-center justify-between py-1.5">
@@ -267,6 +270,7 @@ function SwitchRow({
             checked={checked}
             onCheckedChange={onCheckedChange}
             aria-label={label}
+            data-testid={testId}
           />
         </motion.div>
       </AnimatePresence>
@@ -490,7 +494,7 @@ export function SettingsPage() {
 }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col" data-testid="settings-root">
       <div className="flex-1 overflow-auto p-5 space-y-5">
         <PageHeader
           title="Settings"
@@ -504,6 +508,7 @@ export function SettingsPage() {
               <Label htmlFor="display-name">Display Name</Label>
               <Input
                 id="display-name"
+                data-testid="settings-display-name-input"
                 value={form.displayName}
                 onChange={(e) => updateField("displayName", e.target.value)}
                 placeholder="Your name shown to viewers"
@@ -520,6 +525,7 @@ export function SettingsPage() {
             <SwitchRow
               id="launch-at-login"
               label="Launch at login"
+              testId="settings-launch-at-login-switch"
               checked={form.launchAtLogin}
               onCheckedChange={(value) => updateField("launchAtLogin", value)}
             />
@@ -540,6 +546,7 @@ export function SettingsPage() {
             <SwitchRow
               id="notifications-enabled"
               label="General notifications enabled"
+              testId="settings-notifications-switch"
               checked={form.notificationsEnabled}
               onCheckedChange={(value) => updateField("notificationsEnabled", value)}
             />
@@ -710,7 +717,7 @@ export function SettingsPage() {
               value={form.defaultCodec}
               onValueChange={(value) => updateField("defaultCodec", value as SettingsForm["defaultCodec"])}
             >
-              <SelectTrigger id="default-codec">
+              <SelectTrigger id="default-codec" data-testid="settings-default-codec-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -924,6 +931,7 @@ export function SettingsPage() {
           className={`text-[0.8125rem] transition-colors duration-150 ${
             isDirty ? "text-text-secondary" : "text-text-muted"
           }`}
+          data-testid="settings-save-feedback"
         >
           {isDirty ? "Unsaved changes" : "All settings saved"}
         </span>

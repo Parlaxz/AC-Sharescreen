@@ -95,7 +95,7 @@ function ViewerRowItem({ row, onBitrateClick, onKick }: { row: ViewerRow; onBitr
   const fmtBitrate = (kbps: number | null) => formatBitrateKbps(kbps);
 
   return (
-    <div className="py-1.5 space-y-0.5">
+    <div className="py-1.5 space-y-0.5" data-testid="viewer-row" data-viewer-id={row.viewerDeviceId} data-viewer-state={row.state}>
       {/* Row 1: name + state */}
       <div className="flex items-center gap-2 text-xs">
         <span className={`h-2 w-2 rounded-full ${statusDot} shrink-0`} />
@@ -108,6 +108,7 @@ function ViewerRowItem({ row, onBitrateClick, onKick }: { row: ViewerRow; onBitr
               variant="destructive"
               size="sm"
               className="h-6 px-2 text-[10px]"
+              data-testid="kick-viewer-button"
               onClick={() => void onKick(row.viewerDeviceId)}
             >
               <UserX className="h-3 w-3" />
@@ -421,6 +422,9 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       (v) => v.viewerDeviceId === viewerDeviceId,
     );
     if (viewerEntry) {
+      // Remember the kick so re-join attempts (the viewer's auto-recovery)
+      // are rejected for a bounded window — a kick must stay terminal.
+      viewerBinding.markViewerKicked(viewerEntry.viewerDeviceId, viewerEntry.mediaSessionId);
       viewerBinding.removeViewerMapping(viewerEntry.viewerDeviceId, viewerEntry.mediaSessionId, viewerEntry.viewerSessionId);
     }
 
@@ -464,7 +468,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   }
 
   return (
-    <div className="p-6 max-w-3xl space-y-4">
+    <div className="p-6 max-w-3xl space-y-4" data-testid="host-dashboard-root">
       <PageHeader
         title={group?.name ?? "Sharing"}
         status={
@@ -473,9 +477,18 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             Live
           </Badge>
         }
-        description={`${liveDuration} · ${visibleViewerRows.length} ${visibleViewerRows.length === 1 ? "viewer" : "viewers"}`}
+        descriptionNode={
+          <>
+            <span data-testid="host-duration">{liveDuration}</span>
+            {" · "}
+            <span data-testid="host-viewer-count">
+              {visibleViewerRows.length}{" "}
+              {visibleViewerRows.length === 1 ? "viewer" : "viewers"}
+            </span>
+          </>
+        }
         actions={
-          <Button variant="destructive" size="sm" onClick={() => setStopConfirmOpen(true)}>
+          <Button variant="destructive" size="sm" data-testid="stop-sharing-button" onClick={() => setStopConfirmOpen(true)}>
             <StopCircle className="h-4 w-4" />
             Stop sharing
           </Button>
@@ -489,7 +502,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
         <CardContent className="space-y-2 text-sm text-text-secondary">
           <div className="flex items-center gap-2">
             <Monitor className="h-4 w-4 text-text-muted" />
-            <span className="text-text-primary">{sourceName || sourceKind || "Unknown source"}</span>
+            <span className="text-text-primary" data-testid="host-source-label">{sourceName || sourceKind || "Unknown source"}</span>
           </div>
         </CardContent>
       </Card>
@@ -530,6 +543,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
           <Button
             variant="outline"
             size="sm"
+            data-testid="switch-source-button"
             onClick={openSourcePicker}
             disabled={isSwitchingSource}
           >
@@ -551,6 +565,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
           <Button
             variant="outline"
             size="sm"
+            data-testid="restart-share-button"
             onClick={() => setRestartConfirmOpen(true)}
             disabled={isRestarting || isSwitchingSource}
           >
@@ -607,7 +622,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       </Card>
 
       <Dialog open={stopConfirmOpen} onOpenChange={setStopConfirmOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" data-testid="stop-confirm-dialog">
           <DialogHeader>
             <DialogTitle>Stop sharing?</DialogTitle>
             <DialogDescription>
@@ -616,9 +631,9 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
           </DialogHeader>
           <DialogFooter>
             <DialogClose asChild>
-              <Button variant="outline">Cancel</Button>
+              <Button variant="outline" data-testid="stop-cancel-button">Cancel</Button>
             </DialogClose>
-            <Button variant="destructive" onClick={handleStopSharing}>
+            <Button variant="destructive" data-testid="stop-confirm-button" onClick={handleStopSharing}>
               <StopCircle className="h-4 w-4" />
               Stop
             </Button>
@@ -628,7 +643,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
 
       {/* Restart share dialog */}
       <Dialog open={restartConfirmOpen} onOpenChange={setRestartConfirmOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" data-testid="restart-confirm-dialog">
           <DialogHeader>
             <DialogTitle>Restart share?</DialogTitle>
             <DialogDescription>
@@ -640,7 +655,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             <DialogClose asChild>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
-            <Button variant="default" onClick={handleRestartShare} disabled={isRestarting}>
+            <Button variant="default" data-testid="restart-confirm-button" onClick={handleRestartShare} disabled={isRestarting}>
               <RotateCcw className="h-4 w-4" />
               Restart
             </Button>
@@ -650,7 +665,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
 
       {/* Switch Source Dialog */}
       <Dialog open={switchSourceOpen} onOpenChange={setSwitchSourceOpen}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="sm:max-w-lg" data-testid="switch-source-dialog">
           <DialogHeader>
             <DialogTitle>Switch source</DialogTitle>
             <DialogDescription>
@@ -686,6 +701,8 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
                           <button
                             key={s.id}
                             type="button"
+                            data-testid="switch-source-item"
+                            data-source-title={s.name}
                             onClick={() => setSelectedSwitchSource(s)}
                             aria-pressed={selectedSwitchSource?.id === s.id}
                             className={cn(
@@ -730,6 +747,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             </DialogClose>
             <Button
               size="sm"
+              data-testid="switch-confirm-button"
               onClick={handleSwitchSource}
               disabled={!selectedSwitchSource || isSwitchingSource}
             >

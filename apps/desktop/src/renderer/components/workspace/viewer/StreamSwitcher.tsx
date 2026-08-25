@@ -94,8 +94,16 @@ export function StreamSwitcher({
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent side="top" align="center" className="w-64">
+      {/* Tooltip must sit OUTSIDE DropdownMenuTrigger: asChild merges props
+          only into a DOM-bound element, and a provider child swallows them
+          (aria-haspopup/onPointerDown never reached the button). */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="top">Switch stream</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent side="top" align="center" className="w-64" data-testid="stream-switcher-root">
         <DropdownMenuLabel>Switch stream</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {activeStreams.map((stream) => {
@@ -104,6 +112,8 @@ export function StreamSwitcher({
           return (
             <DropdownMenuItem
               key={stream.logicalStreamId}
+              data-testid="stream-switch-option"
+              data-stream-id={stream.logicalStreamId}
               disabled={isCurrent}
               onSelect={() => handleSelect(stream)}
               className={isCurrent ? "bg-accent-muted" : undefined}

@@ -1,0 +1,14 @@
+{
+  "outcome": "landed-ended-or-error-ui",
+  "recoveredToWatching": false,
+  "landedEndedOrError": true,
+  "timelineTail": [
+    {
+      "tSec": 0,
+      "phase": "ended",
+      "currentTime": null,
+      "endedUi": true,
+      "errorUi": false
+    }
+  ]
+}

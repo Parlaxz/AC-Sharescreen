@@ -1,0 +1,45 @@
+{
+  "agent": "g-alice-mt6ysr8673n9",
+  "flushedAt": "2026-08-24T08:19:42.856Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787559545455,
+      "iso": "2026-08-24T08:19:05.455Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'join-group': Error: Invalid group link or code\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:348:23\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787559548952,
+      "iso": "2026-08-24T08:19:08.952Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'join-group': Error: Invalid group link or code\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:348:23\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787559552473,
+      "iso": "2026-08-24T08:19:12.473Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'join-group': Error: Invalid group link or code\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:348:23\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787559555964,
+      "iso": "2026-08-24T08:19:15.964Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'join-group': Error: Invalid group link or code\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:348:23\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787559559473,
+      "iso": "2026-08-24T08:19:19.473Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'join-group': Error: Invalid group link or code\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:348:23\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787559562743,
+      "iso": "2026-08-24T08:19:22.743Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -1,0 +1,9 @@
+{
+  "groupId": "125c8821-e15c-4a9b-b2d9-5d9ad8c97b6f",
+  "staleNames": [
+    "Host",
+    "Host"
+  ],
+  "memberCount": 2,
+  "note": "bob confirmed leave; alice's member list never returned to 1"
+}

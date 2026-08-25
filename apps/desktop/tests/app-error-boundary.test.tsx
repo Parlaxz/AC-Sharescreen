@@ -128,8 +128,9 @@ describe("App.tsx error boundary integration", () => {
   it("uses a div (not main) for the inner page wrapper since AppShell owns main", () => {
     // AppShell already renders a <main> element. The inner wrapper
     // inside AppErrorBoundary should be a <div> to avoid nested mains.
+    // Tolerates additional inert attributes (e.g. data-testid="app-root").
     expect(appSrc).toMatch(
-      /<AppErrorBoundary>\s*<div className="h-full overflow-auto">/,
+      /<AppErrorBoundary>\s*<div className="h-full overflow-auto"[^>]*>/,
     );
   });
 });

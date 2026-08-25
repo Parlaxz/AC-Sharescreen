@@ -11,6 +11,11 @@
  */
 const path = require("node:path");
 
+// Beta releases set SCREENLINK_RELEASE_CHANNEL=beta so the updater
+// metadata is published to the "beta" channel as a prerelease. Stable
+// builds (default) keep the "latest" channel.
+const isBetaRelease = process.env.SCREENLINK_RELEASE_CHANNEL === "beta";
+
 /** @type {import('electron-builder').Configuration} */
 const config = {
   appId: "app.screenlink.desktop",
@@ -77,6 +82,12 @@ const config = {
       from: "../../native/video-frame-ring/build/Release/screenlink-video-frame-ring.node",
       to: "screenlink-video-frame-ring.node",
     },
+    {
+      // Revert-to-stable helper, shipped flat next to ScreenLink.exe so it
+      // can be run even when a broken beta build cannot render its UI.
+      from: "scripts/revert-to-stable.bat",
+      to: "revert-to-stable.bat",
+    },
   ],
   // Do not rebuild native modules unless specifically verified
   npmRebuild: false,
@@ -86,8 +97,8 @@ const config = {
     provider: "github",
     owner: "Parlaxz",
     repo: "AC-Sharescreen",
-    channel: "latest",
-    releaseType: "release",
+    channel: isBetaRelease ? "beta" : "latest",
+    releaseType: isBetaRelease ? "prerelease" : "release",
     vPrefixedTagName: true,
     publishAutoUpdate: true,
   },

@@ -23,6 +23,12 @@ import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts.js";
 import { usePreloadEvents } from "./hooks/use-preload-events.js";
 import { useTrayStateSync } from "./hooks/use-tray-state-sync.js";
 import { initializeAppRuntime } from "./services/initialize-app-runtime.js";
+import { releasePhase3Runtime } from "./services/phase3-runtime.js";
+import {
+  processDeepLinkJoin,
+  subscribeToDeepLinkJoins,
+} from "./services/deep-link-join.js";
+import { installTestHooks, emitMarker } from "./services/test-hooks.js";
 import { initGroupShortcutListener } from "./services/group-shortcut-service.js";
 import { startNotificationWatcher } from "./services/notification-watcher.js";
 import { getApi } from "./services/get-api.js";
@@ -30,6 +36,9 @@ import { startViewingStream } from "./services/group-navigation.js";
 import type { ScreenLinkAPI } from "../preload/api-types.js";
 
 export function App() {
+  // E2E test hooks — inert unless SCREENLINK_E2E=1 (idempotent install)
+  installTestHooks();
+
   // Fix 2: If ?gallery=1 is in the URL, render ComponentGallery ONLY (no AppShell)
   const isGalleryMode = typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("gallery") === "1";
@@ -103,6 +112,16 @@ export function App() {
     return unsub;
   }, []);
 
+  // Release the group runtime (control connections, sync timers) when main
+  // initiates quit. Bounded on the main side; fire-and-forget here.
+  useEffect(() => {
+    const api = (window as unknown as { screenlink?: ScreenLinkAPI }).screenlink;
+    if (!api?.onPrepareQuit) return;
+    return api.onPrepareQuit(() => {
+      void releasePhase3Runtime();
+    });
+  }, []);
+
   // Listen for custom Ctrl+K toggle event from the hook
   useEffect(() => {
     const handler = () => setCommandOpen((prev) => !prev);
@@ -112,6 +131,7 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let unsubscribeDeepLinks: (() => void) | null = null;
 
     // Expose store for audit harness (browser-only, dev)
     if ((window as unknown as { __SCREENLINK_AUDIT_MODE__?: boolean }).__SCREENLINK_AUDIT_MODE__) {
@@ -123,7 +143,22 @@ export function App() {
       console.warn("[App] screenlink API not available – running outside Electron?");
       return;
     }
-    void initializeAppRuntime(api, () => cancelled).catch((err: unknown) => {
+    void initializeAppRuntime(api, () => cancelled)
+      .then(() => {
+        if (cancelled) return;
+        emitMarker("app-ready");
+        unsubscribeDeepLinks = subscribeToDeepLinkJoins(api);
+        void api
+          .getPendingDeepLinks()
+          .then((urls) => {
+            if (cancelled) return;
+            for (const url of urls) void processDeepLinkJoin(url);
+          })
+          .catch((err: unknown) => {
+            console.warn("[App] Failed to fetch pending deep links:", err);
+          });
+      })
+      .catch((err: unknown) => {
       if (cancelled) {
         return;
       }
@@ -131,6 +166,7 @@ export function App() {
     });
     return () => {
       cancelled = true;
+      unsubscribeDeepLinks?.();
       // Do NOT release the phase3 runtime on React cleanup/remount.
       // The runtime is a global singleton that survives component
       // unmount — it is released only on actual app shutdown.
@@ -175,7 +211,7 @@ export function App() {
       <Toaster />
       <AppShell>
         <AppErrorBoundary>
-          <div className="h-full overflow-auto">{renderPage()}</div>
+          <div className="h-full overflow-auto" data-testid="app-root">{renderPage()}</div>
         </AppErrorBoundary>
       </AppShell>
       {/* ShareSetup dialog — rendered at root level so it can be

@@ -7,7 +7,7 @@
  */
 
 import { ipcMain, BrowserWindow } from "electron";
-import type { UpdateManager, UpdateStatus } from "./update-manager.js";
+import type { UpdateManager, UpdateChannel, UpdateStatus } from "./update-manager.js";
 
 const IPC_CHANNELS = {
   GET_STATUS: "updates:get-status",
@@ -15,14 +15,18 @@ const IPC_CHANNELS = {
   DOWNLOAD: "updates:download",
   INSTALL: "updates:install",
   FULL_UPDATE: "updates:full-update",
+  SET_CHANNEL: "updates:set-channel",
   STATUS_CHANGED: "updates:status-changed",
 } as const;
 
 export { IPC_CHANNELS };
 
+const VALID_CHANNELS: readonly string[] = ["stable", "beta"];
+
 export function registerUpdateIpcHandlers(
   _window: BrowserWindow,
   updateManager: UpdateManager,
+  setUpdateChannel: (channel: UpdateChannel) => void,
 ): void {
   // ── Get current status ──────────────────────────────────────────────
   ipcMain.handle(IPC_CHANNELS.GET_STATUS, () => {
@@ -50,6 +54,15 @@ export function registerUpdateIpcHandlers(
   // ── Check, download, and install in one shot ────────────────────────
   ipcMain.handle(IPC_CHANNELS.FULL_UPDATE, async () => {
     return await updateManager.checkDownloadAndInstall();
+  });
+
+  // ── Switch the update channel (persists via the injected callback) ──
+  ipcMain.handle(IPC_CHANNELS.SET_CHANNEL, (_event, channel: string) => {
+    if (!VALID_CHANNELS.includes(channel)) {
+      throw new Error(`Invalid update channel: ${String(channel)}`);
+    }
+    setUpdateChannel(channel as UpdateChannel);
+    return updateManager.getStatus();
   });
 
   // ── Broadcast status changes to the renderer ────────────────────────

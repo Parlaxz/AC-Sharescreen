@@ -194,6 +194,29 @@ export async function stopVideoHelperForQuit(): Promise<void> {
   }
 }
 
+/**
+ * Hard-kill helper processes immediately. Called from the will-quit
+ * escalation when graceful shutdown exceeds its grace period.
+ */
+export function forceKillHelpersForQuit(): void {
+  if (currentAudioHelper) {
+    try {
+      currentAudioHelper.forceKill();
+    } catch (err) {
+      console.error("[ipc] Audio helper force-kill failed:", err);
+    }
+    setCurrentAudioHelper(null);
+    setCurrentAudioState("disabled");
+  }
+  if (videoHelperManager) {
+    try {
+      videoHelperManager.forceKill();
+    } catch (err) {
+      console.error("[ipc] Video helper force-kill failed:", err);
+    }
+  }
+}
+
 export function registerIpcHandlers(
   window: BrowserWindow,
   settings: SettingsStore,

@@ -1,0 +1,47 @@
+{
+  "freezeWindow": {
+    "before": {
+      "present": false
+    },
+    "after8s": {
+      "present": false
+    },
+    "delta": 0,
+    "frozen": true
+  },
+  "sawEndedSurface": true,
+  "sawReconnectingMarker": false,
+  "resumedAdvancing": false,
+  "markers": [
+    {
+      "t": 1787611611129,
+      "marker": "app-ready"
+    },
+    {
+      "t": 1787611611129,
+      "marker": "group-connected"
+    },
+    {
+      "t": 1787611611129,
+      "marker": "viewer-joined"
+    },
+    {
+      "t": 1787611611129,
+      "marker": "viewer-watching"
+    },
+    {
+      "t": 1787611611129,
+      "marker": "viewer-ended"
+    }
+  ],
+  "timeline": [
+    {
+      "tSec": 26,
+      "phase": null,
+      "currentTime": null,
+      "endedUi": false,
+      "errorUi": false
+    }
+  ],
+  "kickedAt": "2026-08-24T22:46:25.101Z"
+}

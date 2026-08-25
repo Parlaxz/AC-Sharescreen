@@ -2,6 +2,8 @@
 import type { ScreenLinkAPI } from "./api-types.js";
 
 const api: ScreenLinkAPI = {
+  // E2E test flag (inert unless SCREENLINK_E2E=1 is set for the app process)
+  __e2eEnabled: process.env.SCREENLINK_E2E === "1",
   showStreamToast: (payload) => ipcRenderer.invoke("stream-toast:show", payload),
   onStreamToastAction: (callback) => {
     const handler = (_event: Electron.IpcRendererEvent, action: Parameters<ScreenLinkAPI["onStreamToastAction"]>[0] extends (value: infer T) => void ? T : never) => callback(action);
@@ -67,6 +69,20 @@ const api: ScreenLinkAPI = {
     return () => { ipcRenderer.removeListener("fullscreen-state-changed", handler); };
   },
 
+  onPrepareQuit: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on("app:prepare-quit", handler);
+    return () => { ipcRenderer.removeListener("app:prepare-quit", handler); };
+  },
+
+  // ── Deep links ───────────────────────────────────────────────────────────
+  getPendingDeepLinks: () => ipcRenderer.invoke("deep-link:get-pending"),
+  onDeepLinkJoin: (callback) => {
+    const handler = (_event: Electron.IpcRendererEvent, url: string) => callback(url);
+    ipcRenderer.on("deep-link:join", handler);
+    return () => { ipcRenderer.removeListener("deep-link:join", handler); };
+  },
+
   traySetSharing: (sharing) => ipcRenderer.send("tray-set-sharing", sharing),
   traySetViewing: (viewing) => ipcRenderer.send("tray-set-viewing", viewing),
   traySetViewerCount: (count) => ipcRenderer.send("tray-set-viewer-count", count),
@@ -108,6 +124,7 @@ const api: ScreenLinkAPI = {
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),
   restartAndInstallUpdate: () => ipcRenderer.invoke("updates:install"),
   checkDownloadAndInstall: () => ipcRenderer.invoke("updates:full-update"),
+  setUpdateChannel: (channel: "stable" | "beta") => ipcRenderer.invoke("updates:set-channel", channel),
 
   // ── Quick Share ──────────────────────────────────────────────────────────
   getQuickShareConfig: () => ipcRenderer.invoke("get-quick-share-config"),

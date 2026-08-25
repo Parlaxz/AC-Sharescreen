@@ -300,6 +300,7 @@ export function VideoControls({
       animate={{ opacity: barLocked || visible ? 1 : 0, y: barLocked || visible ? 0 : 20 }}
       exit={{ opacity: 0, y: 20 }}
       transition={{ duration: 0.2, ease: "easeInOut" }}
+      data-testid="video-controls-root"
       className={cn(
         "absolute bottom-0 left-0 right-0 z-30",
         "bg-gradient-to-t from-black/80 via-black/50 to-transparent",
@@ -330,6 +331,7 @@ export function VideoControls({
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 text-white hover:bg-white/10"
+                    data-testid="play-pause-button"
                     onClick={onToggleStreamPause}
                     disabled={isStreamPauseTransitioning}
                     aria-label={isStreamPaused ? "Resume stream" : "Pause stream"}
@@ -352,6 +354,7 @@ export function VideoControls({
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 text-white hover:bg-white/10"
+                    data-testid="play-pause-button"
                     onClick={onTogglePlay}
                     aria-label={isPaused ? "Play" : "Pause"}
                   >
@@ -376,6 +379,7 @@ export function VideoControls({
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
+                      data-testid="mute-button"
                       onClick={onToggleMute}
                       aria-label={isMuted ? "Unmute" : "Mute"}
                     >
@@ -398,6 +402,7 @@ export function VideoControls({
                     max={maxVolumePercent}
                     step={1}
                     aria-label="Volume"
+                    data-testid="volume-slider"
                     className="[&>div]:h-1"
                     thumbTooltip={volumeTooltip}
                   />
@@ -416,6 +421,7 @@ export function VideoControls({
                         "h-7 w-7 hover:bg-white/10",
                         discordMuted ? "text-white" : "text-white/50",
                       )}
+                      data-testid="discord-mute-button"
                       onClick={handleDiscordMute}
                       aria-label="Toggle Discord mute"
                     >
@@ -440,6 +446,7 @@ export function VideoControls({
                         "h-7 w-7 hover:bg-white/10",
                         discordDeafened ? "text-white" : "text-white/50",
                       )}
+                      data-testid="discord-deafen-button"
                       onClick={handleDiscordDeafen}
                       aria-label="Toggle Discord deafen"
                     >
@@ -461,6 +468,7 @@ export function VideoControls({
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-white/50 hover:bg-white/10"
+                      data-testid="alttab-button"
                       onClick={handleAltTab}
                       aria-label="Switch window (Alt+Tab)"
                     >
@@ -498,6 +506,7 @@ export function VideoControls({
                     "h-7 w-7 hover:bg-white/10",
                     showStreamInfoCard ? "text-white" : "text-white/50",
                   )}
+                  data-testid="stream-info-toggle"
                   onClick={onToggleStreamInfoCard}
                   aria-label="Toggle stream info overlay"
                 >
@@ -511,31 +520,26 @@ export function VideoControls({
  
           {/* ── Right group: Stream switcher | Connection dot | Settings | Fullscreen ── */}
           <div className="flex items-center gap-1">
-            {/* Stream switcher */}
+            {/* Stream switcher — tooltip owned by StreamSwitcher so the
+                dropdown trigger can bind this button directly. */}
             <StreamSwitcher
               currentStreamId={currentStreamId}
               onSwitch={onStreamSwitch}
             >
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
-                    aria-label="Switch stream"
-                  >
-                    <MonitorUp className="h-3.5 w-3.5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  Switch stream
-                </TooltipContent>
-              </Tooltip>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
+                aria-label="Switch stream"
+              >
+                <MonitorUp className="h-3.5 w-3.5" />
+              </Button>
             </StreamSwitcher>
 
             {/* Connection state dot — click to open diagnostics */}
             <button
               className="flex items-center gap-1.5 px-1.5 cursor-pointer hover:opacity-80 transition-opacity"
+              data-testid="open-diagnostics-button"
               onClick={() => onActivePanelChange(activePanel === "diagnostics" ? null : "diagnostics")}
               aria-label={`Connection: ${STATE_LABELS[connectionState]} — click for diagnostics`}
               title={`${STATE_LABELS[connectionState]} — click for diagnostics`}
@@ -578,6 +582,7 @@ export function VideoControls({
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
+                  data-testid="open-settings-button"
                   onClick={() => onActivePanelChange(activePanel === "settings" ? null : "settings")}
                   aria-label="Viewer settings"
                 >
@@ -596,6 +601,7 @@ export function VideoControls({
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-white/80 hover:text-white hover:bg-white/10"
+                  data-testid="fullscreen-button"
                   onClick={onToggleFullscreen}
                   aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
                 >

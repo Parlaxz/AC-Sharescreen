@@ -34,8 +34,10 @@ export function registerAppProtocol(): void {
       return serveRenderer(url);
     }
     if (url.hostname === "group") {
-      // Phase 3: deep linking for group invites. The renderer reads the
-      // link from process.argv at startup; we do not log the URL.
+      // Group invite deep links are NOT delivered through protocol.handle —
+      // they arrive via cold-start argv, "second-instance" argv, or macOS
+      // open-url and are forwarded to the renderer by DeepLinkRouter
+      // (main/deep-link.ts). This stub only acknowledges navigation attempts.
       return new Response("ScreenLink group link received", { status: 200 });
     }
     return new Response("Not Found", { status: 404 });

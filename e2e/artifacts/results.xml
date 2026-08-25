@@ -1,0 +1,6 @@
+<testsuites id="" name="" tests="1" failures="0" skipped="0" errors="0" time="5.276355">
+<testsuite name="lifecycle.spec.ts" timestamp="2026-08-25T15:35:58.736Z" hostname="all" tests="1" failures="0" skipped="0" time="3.813" errors="0">
+<testcase name="@critical @smoke LIF-001: clean-profile launch health" classname="lifecycle.spec.ts" time="3.813">
+</testcase>
+</testsuite>
+</testsuites>

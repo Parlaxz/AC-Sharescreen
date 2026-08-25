@@ -243,6 +243,7 @@ export function HomePage() {
             <Button
               variant="outline"
               size="sm"
+              data-testid="nav-quality-presets"
               onClick={() => navigate("quality-presets")}
             >
               <SlidersHorizontal className="h-3.5 w-3.5 mr-1" />

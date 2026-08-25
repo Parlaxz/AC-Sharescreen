@@ -1,7 +1,8 @@
 /**
  * UpdatesSettingsSection — User Settings panel for the real updater.
  *
- * This is a thin consumer of `useUpdateStatus()`. It must display exactly:
+ * This is a thin consumer of `useUpdateStatus()`. It displays exactly:
+ *  - Update channel selector (stable | beta)
  *  - Current version
  *  - Updater support state
  *  - Last checked time when available
@@ -11,8 +12,10 @@
  *  - Restart and install when downloaded
  *  - Safe error and retry state
  *
- * It must NOT add update channels, prerelease toggles, automatic-install
- * settings, fake release notes, or a fake latest version.
+ * Channel contract: selecting a channel persists it via IPC and then
+ * immediately runs the full update flow so the channel's version is
+ * delivered right away (beta→stable performs a downgrade; stable→beta
+ * installs the beta). No automatic checks or install timers live here.
  */
 import { useEffect, useState } from "react";
 import { Download, RefreshCw, RotateCw, AlertTriangle, CheckCircle2 } from "lucide-react";
@@ -20,6 +23,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { useUpdateStatus } from "@/hooks/use-update-status";
+
+type UpdateChannel = "stable" | "beta";
 
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0 B";
@@ -48,7 +53,11 @@ export function UpdatesSettingsSection() {
     download,
     restartAndInstall,
     checkDownloadAndInstall,
+    setChannel,
   } = useUpdateStatus();
+
+  // Transient state while a channel switch + immediate full update runs.
+  const [channelSwitching, setChannelSwitching] = useState(false);
 
   // Mounted guard to keep UI stable across React strict-mode double-render.
   const [, setMounted] = useState(false);
@@ -62,6 +71,23 @@ export function UpdatesSettingsSection() {
     );
   }
 
+  const activeChannel: UpdateChannel = status.channel ?? "stable";
+  const channelBusy =
+    channelSwitching || actionInFlight === "setChannel" || actionInFlight === "fullUpdate";
+
+  const handleChannelSwitch = async (channel: UpdateChannel): Promise<void> => {
+    if (channelBusy || channel === activeChannel) return;
+    setChannelSwitching(true);
+    try {
+      await setChannel(channel);
+      // Deliver the channel's version immediately. For beta→stable this
+      // performs the downgrade; for stable→beta it installs the beta.
+      await checkDownloadAndInstall();
+    } finally {
+      setChannelSwitching(false);
+    }
+  };
+
   const percent =
     typeof status.downloadPercent === "number"
       ? Math.max(0, Math.min(100, status.downloadPercent))
@@ -71,6 +97,44 @@ export function UpdatesSettingsSection() {
 
   return (
     <div className="space-y-3" data-testid="updates-settings-section">
+      <div className="flex flex-col gap-1">
+        <span className="text-sm text-text-primary">Update channel</span>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant={activeChannel === "stable" ? "default" : "outline"}
+            aria-pressed={activeChannel === "stable"}
+            disabled={channelBusy}
+            onClick={() => void handleChannelSwitch("stable")}
+            data-testid="updates-channel-stable"
+          >
+            Stable
+          </Button>
+          <Button
+            size="sm"
+            variant={activeChannel === "beta" ? "default" : "outline"}
+            aria-pressed={activeChannel === "beta"}
+            disabled={channelBusy}
+            onClick={() => void handleChannelSwitch("beta")}
+            data-testid="updates-channel-beta"
+          >
+            Beta
+          </Button>
+          <span className="text-xs text-text-muted" data-testid="updates-channel-active">
+            Active: {activeChannel}
+          </span>
+        </div>
+        <span className="text-xs text-text-muted">
+          Stable = tested releases only. Beta = try new features before release; may be unstable.
+        </span>
+        {channelSwitching && (
+          <span className="text-xs text-text-muted flex items-center gap-1">
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            Switching channel — checking for updates…
+          </span>
+        )}
+      </div>
+
       <div className="flex flex-col gap-1">
         <span className="text-sm text-text-primary">Current version</span>
         <span className="text-xs text-text-muted">{status.currentVersion}</span>

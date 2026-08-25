@@ -981,6 +981,7 @@ export function ViewerSettingsPanel({
                 <Input
                   type="number"
                   value={bitrateText}
+                  data-testid="quality-request-bitrate-input"
                   onChange={(e) => handleBitrateTextChange(e.target.value)}
                   onBlur={handleBitrateTextBlur}
                   min={100}
@@ -1034,6 +1035,7 @@ export function ViewerSettingsPanel({
             <span className="text-[10px] text-text-muted uppercase tracking-wide">GPU Image Enhancements</span>
             <Switch
               checked={enhancementSettings.enabled}
+              data-testid="gpu-enhancement-toggle"
               onCheckedChange={(checked) =>
                 onEnhancementChange({ ...enhancementSettings, enabled: checked })
               }
@@ -1539,13 +1541,13 @@ export function ViewerSettingsPanel({
     const containerClass = variant === "B"
       ? "w-[750px] p-4 max-h-[80vh] overflow-y-auto border-l-2 border-accent/30 bg-accent/[0.02]"
       : "w-[750px] p-4 max-h-[80vh] overflow-y-auto";
-    return <div className={containerClass}>{content}</div>;
+    return <div className={containerClass} data-testid="viewer-settings-panel">{content}</div>;
   }
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-[750px] p-4 max-h-[80vh] overflow-y-auto">
+      <PopoverContent side="top" align="center" className="w-[750px] p-4 max-h-[80vh] overflow-y-auto" data-testid="viewer-settings-panel">
         {content}
       </PopoverContent>
     </Popover>

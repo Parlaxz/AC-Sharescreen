@@ -1,0 +1,21 @@
+{
+  "agent": "g-alice-mt774cpj13f5",
+  "flushedAt": "2026-08-24T12:12:36.569Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787573532511,
+      "iso": "2026-08-24T12:12:12.511Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 8 sources"
+    },
+    {
+      "t": 1787573555565,
+      "iso": "2026-08-24T12:12:35.565Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

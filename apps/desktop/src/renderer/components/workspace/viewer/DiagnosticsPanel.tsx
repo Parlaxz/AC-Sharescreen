@@ -178,13 +178,15 @@ function DetailRow({
 
 function DetailSection({
   title,
+  testId,
   children,
 }: {
   title: string;
+  testId?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div data-testid={testId}>
       <p className="text-[10px] font-medium text-text-secondary uppercase tracking-wide mb-1.5">
         {title}
       </p>
@@ -281,6 +283,7 @@ function NvidiaDiagnosticsSection() {
         variant="outline"
         size="sm"
         className="w-full text-[10px] h-7 mt-2"
+        data-testid="diagnostics-open-folder-button"
         onClick={handleOpenFolder}
       >
         <FolderOpen className="h-3 w-3 mr-1.5" />
@@ -517,7 +520,7 @@ export function DiagnosticsPanel({
           <h2 className="text-xs font-semibold text-text-primary uppercase tracking-wide">
             ScreenLink Viewer Diagnostics
           </h2>
-          <Button variant="ghost" size="sm" className="h-7 text-[10px] gap-1" onClick={handleCopy}>
+          <Button variant="ghost" size="sm" className="h-7 text-[10px] gap-1" data-testid="diagnostics-copy-summary-button" onClick={handleCopy}>
             {copied ? (
               <><Check className="h-3 w-3" />Copied</>
             ) : (
@@ -587,7 +590,7 @@ export function DiagnosticsPanel({
           <CollapsibleContent className="space-y-3 pt-2">
             {/* ── 2-column grid: Detailed video | Detailed audio ── */}
             <div className="grid grid-cols-2 gap-4">
-              <DetailSection title="Detailed video">
+              <DetailSection title="Detailed video" testId="diagnostics-section-video">
                 <DetailRow label="Active codec" value={formatCodecDisplay(activeCodec)} />
                 <DetailRow label="Packet loss" value={fmtPct(packetLoss)} />
                 <DetailRow label="Jitter" value={fmtMs(jitterMs)} />
@@ -595,7 +598,7 @@ export function DiagnosticsPanel({
                 <DetailRow label="Packets" value={receivedStatus?.packetsReceived != null ? `${receivedStatus.packetsReceived} recv` : NA} />
                 <DetailRow label="Decode time" value={fmtMs(latestFrameSample?.decodeTimeMs ?? null)} />
               </DetailSection>
-              <DetailSection title="Detailed audio">
+              <DetailSection title="Detailed audio" testId="diagnostics-section-audio">
                 <DetailRow label="Codec" value={formatCodecDisplay(primaryAudioStream?.codecMimeType ?? latestSample?.codec ?? null)} />
                 <DetailRow label="Bitrate" value={fmtBps(audioBps)} mono />
                 <DetailRow label="Jitter" value={fmtMs(primaryAudioStream?.jitterMs ?? jitterMs)} />
@@ -607,7 +610,7 @@ export function DiagnosticsPanel({
 
             {/* ── 2-column grid: Connection | Codec ── */}
             <div className="grid grid-cols-2 gap-4">
-              <DetailSection title="Connection">
+              <DetailSection title="Connection" testId="diagnostics-section-connection">
                 <DetailRow label="State" value={
                   <span className={`capitalize ${agg?.state === "playing" ? "text-emerald-500" : agg?.state === "paused" ? "text-amber-500" : "text-rose-500"}`}>
                     {agg?.state ?? NA}
@@ -619,7 +622,7 @@ export function DiagnosticsPanel({
                 <DetailRow label="Sample age" value={fmtSampleAge(latestSample?.timestampMs ?? null)} />
                 <DetailRow label="Duration" value={agg ? `${(agg.durationMs / 1000).toFixed(0)}s` : NA} />
               </DetailSection>
-              <DetailSection title="Codec">
+              <DetailSection title="Codec" testId="diagnostics-section-codec">
                 <DetailRow label="Requested" value={reqCodecDisplay ?? NA} />
                 <DetailRow label="Active receive" value={activeCodecDisplay ?? NA} />
                 <DetailRow label="Match" value={
@@ -632,7 +635,7 @@ export function DiagnosticsPanel({
 
             {/* ── Quality section — requested / effective / configured / observed ── */}
             <div className="grid grid-cols-2 gap-4">
-              <DetailSection title="Quality">
+              <DetailSection title="Quality" testId="diagnostics-section-quality">
                 <DetailRow label="Requested" value={reqBitrateKbps != null ? formatBitrateBps(reqBitrateKbps * 1000) : "\u2014"} mono />
                 <DetailRow label="Effective (host)" value={fmtBps(effBitrateBps)} mono />
                 <DetailRow label="Configured (sender)" value={fmtBps(confBitrateBps)} mono />
@@ -652,13 +655,13 @@ export function DiagnosticsPanel({
   );
 
   if (contentOnly) {
-    return <div className="w-[820px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto">{content}</div>;
+    return <div className="w-[820px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto" data-testid="diagnostics-panel-root">{content}</div>;
   }
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      <PopoverContent side="top" align="center" className="w-[820px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto">
+      <PopoverContent side="top" align="center" className="w-[820px] max-w-[calc(100vw-32px)] p-4 max-h-[80vh] overflow-y-auto" data-testid="diagnostics-panel-root">
         {content}
       </PopoverContent>
     </Popover>

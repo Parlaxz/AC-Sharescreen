@@ -1,0 +1,41 @@
+{
+  "agent": "media-bob-m1-33648-23958",
+  "flushedAt": "2026-08-24T08:52:39.260Z",
+  "rendererConsole": [
+    {
+      "t": 1787561535641,
+      "iso": "2026-08-24T08:52:15.641Z",
+      "source": "renderer-console",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+      "url": "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Cstyle%3E%0A*%7Bbox-sizing%3Aborder-box%7Dhtml%2Cbody%7Bmargin%3A0%3Bwidth%3A100%25%3Bheight%3A100%25%3Boverflow%3Ahidden%3Bbackground%3Atransparent%3Bfont-family%3ASegoe%20UI%2Csystem-ui%2Csans-serif%3Bcolor%3A%23f5f7fb%7Dbody%7Bpadding%3A8px%3Banimation%3Aslide%20.22s%20ease-out%7D.card%7Bheight%3A104px%3Bpadding%3A14px%2014px%2012px%3Bbackground%3A%2317181c%3Bborder%3A1px%20solid%20%23343740%3Bborder-radius%3A12px%3Bbox-shadow%3A0%2010px%2028px%20%230009%3Bposition%3Arelative%7D.close%7Bposition%3Aabsolute%3Bright%3A9px%3Btop%3A7px%3Bborder%3A0%3Bbackground%3Atransparent%3Bcolor%3A%238f96a3%3Bfont-size%3A18px%3Bline-height%3A18px%3Bcursor%3Apointer%7D.title%7Bfont-size%3A15px%3Bfont-weight%3A700%3Bpadding-right%3A22px%7D.group%7Bfont-size%3A12px%3Bcolor%3A%239da3b0%3Bmargin-top%3A3px%3Bwhite-space%3Anowrap%3Boverflow%3Ahidden%3Btext-overflow%3Aellipsis%7D.actions%7Bdisplay%3Aflex%3Bgap%3A8px%3Bmargin-top%3A10px%7D.button%7Bborder-radius%3A6px%3Bpadding%3A5px%2014px%3Bfont-size%3A12px%3Bfont-weight%3A600%3Bcursor%3Apointer%7D.join%7Bborder%3A1px%20solid%20%235b8cff%3Bbackground%3A%233e6fe8%3Bcolor%3Awhite%7D.dismiss%7Bborder%3A1px%20solid%20%23414650%3Bbackground%3Atransparent%3Bcolor%3A%23c0c5cf%7D.leaving%7Banimation%3Afade%20.25s%20ease-in%20forwards%7D%40keyframes%20slide%7Bfrom%7Bopacity%3A0%3Btransform%3AtranslateX(24px)%7Dto%7Bopacity%3A1%3Btransform%3AtranslateX(0)%7D%7D%40keyframes%20fade%7Bto%7Bopacity%3A0%3Btransform%3AtranslateX(24px)%7D%7D%0A%3C%2Fstyle%3E%3C%2Fhead%3E%3Cbody%3E%3Cdiv%20class%3D%22card%22%20data-testid%3D%22toast-root%22%3E%3Cbutton%20class%3D%22close%22%20aria-label%3D%22Dismiss%22%20onclick%3D%22dismiss()%22%3E%C3%97%3C%2Fbutton%3E%3Cdiv%20class%3D%22title%22%20data-testid%3D%22toast-host-name%22%3EAlice%20is%20streaming%3C%2Fdiv%3E%3Cdiv%20class%3D%22group%22%20data-testid%3D%22toast-group-name%22%3EMedia%20m1-33648-23958%3C%2Fdiv%3E%3Cdiv%20class%3D%22actions%22%3E%3Cbutton%20class%3D%22button%20join%22%20data-testid%3D%22toast-join-action%22%20onclick%3D%22join()%22%3EJoin%3C%2Fbutton%3E%3Cbutton%20class%3D%22button%20dismiss%22%20data-testid%3D%22toast-dismiss%22%20onclick%3D%22dismiss()%22%3EDismiss%3C%2Fbutton%3E%3C%2Fdiv%3E%3C%2Fdiv%3E%3Cscript%3Econst%20payload%3D%7B%22groupId%22%3A%227199eadc-c6a6-4748-9ef6-342e5b81deef%22%2C%22hostDeviceId%22%3A%2219e16891-038b-44b3-9574-d881c0ad7e02%22%2C%22logicalStreamId%22%3A%223df09042-01a3-481f-9b87-ed01911c2012%22%2C%22hostName%22%3A%22Alice%22%2C%22groupName%22%3A%22Media%20m1-33648-23958%22%7D%3Bfunction%20join()%7Bwindow.toastAction('join'%2Cpayload)%7Dfunction%20dismiss()%7Bwindow.toastAction('dismiss'%2Cpayload)%7D%3C%2Fscript%3E%3C%2Fbody%3E%3C%2Fhtml%3E"
+    }
+  ],
+  "mainConsole": [
+    {
+      "t": 1787561535572,
+      "iso": "2026-08-24T08:52:15.572Z",
+      "source": "main-console",
+      "text": "[stream-toast] shown for Alice in Media m1-33648-23958"
+    },
+    {
+      "t": 1787561535640,
+      "iso": "2026-08-24T08:52:15.640Z",
+      "source": "main-console",
+      "text": "[stream-toast] toast content rendered"
+    },
+    {
+      "t": 1787561536571,
+      "iso": "2026-08-24T08:52:16.571Z",
+      "source": "main-console",
+      "text": "[stream-toast] visibility check ok: {\"x\":1544,\"y\":904,\"width\":360,\"height\":120}"
+    },
+    {
+      "t": 1787561539157,
+      "iso": "2026-08-24T08:52:19.157Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

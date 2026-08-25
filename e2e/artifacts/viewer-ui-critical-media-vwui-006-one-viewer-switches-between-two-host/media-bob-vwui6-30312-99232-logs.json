@@ -1,0 +1,33 @@
+{
+  "agent": "media-bob-vwui6-30312-99232",
+  "flushedAt": "2026-08-24T18:54:23.916Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787597620294,
+      "iso": "2026-08-24T18:53:40.294Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: POEWindowClass}"
+    },
+    {
+      "t": 1787597620294,
+      "iso": "2026-08-24T18:53:40.294Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787597623164,
+      "iso": "2026-08-24T18:53:43.164Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1787597660381,
+      "iso": "2026-08-24T18:54:20.381Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

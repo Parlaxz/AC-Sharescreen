@@ -213,6 +213,7 @@ export function QualityEditorFields({
               <Input
                 id="quality-width"
                 type="number"
+                data-testid="custom-width-input"
                 value={value.customWidth}
                 min={WIDTH_MIN}
                 max={WIDTH_MAX}
@@ -242,6 +243,7 @@ export function QualityEditorFields({
               <Input
                 id="quality-height"
                 type="number"
+                data-testid="custom-height-input"
                 value={value.customHeight}
                 min={HEIGHT_MIN}
                 max={HEIGHT_MAX}
@@ -276,6 +278,7 @@ export function QualityEditorFields({
             <Input
               id="quality-fps"
               type="number"
+              data-testid="custom-fps-input"
               value={value.fps}
               min={FPS_MIN}
               max={FPS_MAX}
@@ -307,6 +310,7 @@ export function QualityEditorFields({
             <Input
               id="quality-bitrate"
               type="number"
+              data-testid="custom-bitrate-input"
               value={value.bitrate}
               min={BITRATE_MIN}
               max={BITRATE_MAX}
@@ -331,7 +335,7 @@ export function QualityEditorFields({
               onValueChange={(v) => update({ codec: v })}
               disabled={disabled}
             >
-              <SelectTrigger id="quality-codec">
+              <SelectTrigger id="quality-codec" data-testid="codec-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -355,7 +359,7 @@ export function QualityEditorFields({
                 onValueChange={(v) => update({ contentHint: v })}
                 disabled={disabled}
               >
-                <SelectTrigger id="quality-content-hint">
+                <SelectTrigger id="quality-content-hint" data-testid="content-hint-select">
                   <SelectValue />
                 </SelectTrigger>
               <SelectContent>
@@ -378,7 +382,7 @@ export function QualityEditorFields({
               onValueChange={(v) => update({ degradationPreference: v })}
               disabled={disabled}
             >
-              <SelectTrigger id="quality-degradation">
+              <SelectTrigger id="quality-degradation" data-testid="degradation-preference-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

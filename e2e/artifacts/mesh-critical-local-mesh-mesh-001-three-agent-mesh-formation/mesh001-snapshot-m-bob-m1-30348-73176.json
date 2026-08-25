@@ -1,0 +1,35 @@
+{
+  "timestamp": 1787591581151,
+  "currentPage": "overview",
+  "selectedGroupId": "12e8fca5-cc5c-4a97-849d-d9a9aea3db46",
+  "groups": [
+    {
+      "id": "12e8fca5-cc5c-4a97-849d-d9a9aea3db46",
+      "name": "Mesh m1-30348-73176",
+      "memberCount": 3
+    }
+  ],
+  "groupConnections": [
+    {
+      "groupId": "12e8fca5-cc5c-4a97-849d-d9a9aea3db46",
+      "state": "connected",
+      "onlinePeers": [
+        "bc090930-68d8-4899-a468-9faf6166c640",
+        "3d7e105d-85f1-468c-8f96-84846c8a2eb1"
+      ],
+      "error": null
+    }
+  ],
+  "activeStreams": [],
+  "viewerSessions": [],
+  "hostShare": {
+    "sharing": false,
+    "sessionId": null,
+    "mediaSessionId": null,
+    "sourceLabel": ""
+  },
+  "helpers": {
+    "audio": "disabled",
+    "video": "disconnected"
+  }
+}

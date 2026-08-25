@@ -1,0 +1,8 @@
+{
+  "reason": "mesh003-graceful",
+  "gracefulClose": true,
+  "taskkillUsed": false,
+  "pid": 36000,
+  "closedAt": "2026-08-24T22:05:20.283Z",
+  "gracefulCloseHung": false
+}

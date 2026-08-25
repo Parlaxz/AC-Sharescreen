@@ -3,7 +3,7 @@ import { createDefaultGroupQualitySettings } from "@screenlink/shared";
 import type { Phase3Runtime } from "./phase3-runtime.js";
 import type { StreamAnnouncement } from "@screenlink/shared";
 import { ViewerSenderController, type SenderOperationResult, type ViewerBindingId } from "./viewer-sender-controller.js";
-import { JOIN_REJECTION_NO_ACTIVE_SHARE, JOIN_REJECTION_SHARE_INACTIVE } from "./join-rejection.js";
+import { JOIN_REJECTION_KICKED, JOIN_REJECTION_NO_ACTIVE_SHARE, JOIN_REJECTION_SHARE_INACTIVE } from "./join-rejection.js";
 
 /**
  * Binding token created by the host for a viewer's stream.join.request.
@@ -157,6 +157,16 @@ export class ViewerMediaBinding {
   private destroyed = false;
   private readonly TOKEN_TTL_MS = 60_000; // 60 seconds
   private readonly CLEANUP_INTERVAL_MS = 30_000; // every 30s
+  /**
+   * Host-executed kick memory: compositeKey(viewerDeviceId, mediaSessionId)
+   * → kickedAt (ms). A kick is terminal for the kicked viewer, so join
+   * requests for the same media session are rejected for a bounded window —
+   * otherwise the viewer's silent-crash auto-recovery would rejoin and
+   * defeat the kick. Window expiry lets the viewer back in when the host
+   * re-invites or restarts the share (new media session ID never matches).
+   */
+  private kickedViewers = new Map<string, number>();
+  private readonly KICK_REJECT_WINDOW_MS = 5 * 60_000;
 
   /**
    * Locally-owned fallback controller used when the runtime does not
@@ -202,6 +212,40 @@ export class ViewerMediaBinding {
   }
 
   /**
+   * Record a host-executed kick. The kicked viewer's join requests for the
+   * same media session are rejected for {@link KICK_REJECT_WINDOW_MS}.
+   */
+  markViewerKicked(viewerDeviceId: string, mediaSessionId: string): void {
+    if (!viewerDeviceId || !mediaSessionId) return;
+    this.kickedViewers.set(
+      ViewerMediaBinding.compositeKey(viewerDeviceId, mediaSessionId),
+      Date.now(),
+    );
+  }
+
+  /**
+   * Return the kick timestamp for this viewer/media-session pair if it is
+   * still inside the rejection window (pruning expired entries), else null.
+   * An undefined mediaSessionId matches any kicked session of the viewer.
+   */
+  private getRecentKickAt(viewerDeviceId: string, mediaSessionId: string | undefined): number | null {
+    const now = Date.now();
+    let hit: number | null = null;
+    for (const [key, kickedAt] of this.kickedViewers) {
+      if (now - kickedAt > this.KICK_REJECT_WINDOW_MS) {
+        this.kickedViewers.delete(key);
+        continue;
+      }
+      const sepIdx = key.lastIndexOf(COMPOSITE_KEY_SEP);
+      if (sepIdx === -1) continue;
+      if (key.slice(0, sepIdx) !== viewerDeviceId) continue;
+      if (mediaSessionId !== undefined && key.slice(sepIdx + COMPOSITE_KEY_SEP.length) !== mediaSessionId) continue;
+      hit = kickedAt;
+    }
+    return hit;
+  }
+
+  /**
    * Called by host when stream.join.request arrives via group control.
    * Validates the sender has a valid group with an active stream,
    * generates a one-time token, stores it, and sends a response back
@@ -237,6 +281,14 @@ export class ViewerMediaBinding {
         requestId,
         !viewerDeviceId ? "Invalid viewer identity" : "Missing stream identifier",
       );
+      return null;
+    }
+
+    // A host-executed kick is terminal: reject re-join attempts (the
+    // viewer's auto-recovery path) for a bounded window so a kick cannot
+    // be defeated by silent reconnection.
+    if (this.getRecentKickAt(viewerDeviceId, requestedMediaSessionId) !== null) {
+      this.sendJoinRejection(envelope, requestId, JOIN_REJECTION_KICKED);
       return null;
     }
 

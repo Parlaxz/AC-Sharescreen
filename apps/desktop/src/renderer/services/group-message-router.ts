@@ -81,6 +81,8 @@ export interface GroupMessageRouterCallbacks {
   onViewerCue?: (name: "user-join" | "user-leave", presence: ViewerPresence) => void;
   /** Called instead of showNotification() for member joined/online events */
   showNotification?: (notification: { title: string; body: string }) => void;
+  /** Fired when a remote member announces its departure via group.member.left */
+  onMemberLeft?: (groupId: string, deviceId: string) => void;
   /** Called with parsed viewer.status payload instead of window.dispatchEvent */
   onViewerStatus?: (data: unknown) => void;
 }
@@ -275,6 +277,24 @@ export class GroupMessageRouter {
         title: "ScreenLink",
         body: `${data.memberDisplayName} is online in ${groupName}`,
       });
+      return;
+    }
+
+    // ── group.member.left → sync service (tombstone merge) + notification ──
+    if (type === "group.member.left") {
+      const parsed = parseGroupMessagePayload("group.member.left", envelope.payload);
+      if (!parsed.ok) return;
+      const data = parsed.data;
+
+      void this.syncService.handleGroupMessage(groupId, envelope);
+
+      const syncState = this.syncService.getSyncState(groupId);
+      const groupName = syncState?.state.name.value ?? groupId;
+      this.callbacks?.showNotification?.({
+        title: "ScreenLink",
+        body: `${data.memberDisplayName} left ${groupName}`,
+      });
+      this.callbacks?.onMemberLeft?.(groupId, data.memberDeviceId);
       return;
     }
 

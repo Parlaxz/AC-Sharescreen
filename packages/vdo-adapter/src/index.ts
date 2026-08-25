@@ -9,7 +9,11 @@ export type {
   SDKEvent,
 } from "./sdk-types.js";
 
-export type { HostPublisherOptions } from "./host-publisher.js";
+export type {
+  HostPublisherOptions,
+  VideoTrackReplacementPeerReport,
+  VideoTrackReplacementReport,
+} from "./host-publisher.js";
 
 export type {
   DegradationPreference,

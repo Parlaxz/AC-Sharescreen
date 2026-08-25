@@ -1,0 +1,15 @@
+{
+  "agent": "g-alice-mt7s4ek843xt",
+  "flushedAt": "2026-08-24T21:59:59.553Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787608798862,
+      "iso": "2026-08-24T21:59:58.862Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

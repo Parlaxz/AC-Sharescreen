@@ -1,0 +1,75 @@
+{
+  "agent": "media-alice-m1-4748-23797",
+  "flushedAt": "2026-08-24T08:30:02.245Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787560131572,
+      "iso": "2026-08-24T08:28:51.572Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560136488,
+      "iso": "2026-08-24T08:28:56.488Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560141430,
+      "iso": "2026-08-24T08:29:01.430Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560146456,
+      "iso": "2026-08-24T08:29:06.456Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560151460,
+      "iso": "2026-08-24T08:29:11.460Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560156455,
+      "iso": "2026-08-24T08:29:16.455Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560161419,
+      "iso": "2026-08-24T08:29:21.419Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 10 sources"
+    },
+    {
+      "t": 1787560166511,
+      "iso": "2026-08-24T08:29:26.511Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560171430,
+      "iso": "2026-08-24T08:29:31.430Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560176438,
+      "iso": "2026-08-24T08:29:36.438Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 9 sources"
+    },
+    {
+      "t": 1787560181048,
+      "iso": "2026-08-24T08:29:41.048Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

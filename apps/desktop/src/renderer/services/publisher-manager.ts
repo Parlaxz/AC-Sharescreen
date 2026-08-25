@@ -605,6 +605,35 @@ export class PublisherManager {
       throw new Error("replaceVideoTrack: publisher was stopped during replacement");
     }
 
+    // Verify the swap actually landed on every publisher connection.
+    // SDK 1.3.18 matches senders by strict object identity and swallows
+    // per-connection errors — a silent miss leaves the OLD (now stopped)
+    // track attached, which freezes viewer frame delivery with no error.
+    // ensureVideoTrackReplaced repairs misses via direct sender.replaceTrack
+    // and kicks the encoder so viewers get a fresh keyframe for the new source.
+    // Guarded: mocks / older adapter builds may not expose it.
+    const ensure = (this.publisher as HostPublisher | null)?.ensureVideoTrackReplaced?.bind(
+      this.publisher,
+    );
+    if (typeof ensure === "function") {
+      const report = await ensure(newTrack);
+      console.log("[PublisherManager] replaceVideoTrack verification", {
+        peers: report.peers.map((p) => ({
+          peer: p.peerUuid.slice(0, 8) + "…",
+          swappedBySdk: p.swappedBySdk,
+          repaired: p.repaired,
+          encoderKicked: p.encoderKicked,
+        })),
+        allSwapped: report.allVideoSendersCarryNewTrack,
+      });
+      if (report.anyPublisherConnection && !report.allVideoSendersCarryNewTrack) {
+        newTrack.stop();
+        throw new Error(
+          "replaceVideoTrack: video sender verification failed — one or more viewer connections still carry the old track",
+        );
+      }
+    }
+
     // Update combined stream reference so self-view and track tracking
     // reflect the new source.
     if (this.combinedStream) {

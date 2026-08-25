@@ -1,0 +1,21 @@
+{
+  "agent": "g-bob-mt7s5vhk1058n",
+  "flushedAt": "2026-08-24T22:01:13.906Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787608871429,
+      "iso": "2026-08-24T22:01:11.429Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 18 sources"
+    },
+    {
+      "t": 1787608873178,
+      "iso": "2026-08-24T22:01:13.178Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

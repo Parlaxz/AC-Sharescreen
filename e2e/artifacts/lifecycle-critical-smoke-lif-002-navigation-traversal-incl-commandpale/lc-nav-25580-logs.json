@@ -1,0 +1,21 @@
+{
+  "agent": "lc-nav-25580",
+  "flushedAt": "2026-08-24T11:11:51.224Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787569909895,
+      "iso": "2026-08-24T11:11:49.895Z",
+      "source": "main-console",
+      "text": "[nvidia-capability] Using video enhancer helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe"
+    },
+    {
+      "t": 1787569910512,
+      "iso": "2026-08-24T11:11:50.512Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

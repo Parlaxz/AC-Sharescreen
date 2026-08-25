@@ -9,6 +9,7 @@ import { createAppliedNvidiaConfig } from "@screenlink/shared";
 import type { AppliedNvidiaConfig } from "@screenlink/shared";
 import { getVideoEnhancerHelperPath } from "./helper-path.js";
 import { SharedMemoryFrameRing, SlotState } from "./SharedMemoryFrameRing.js";
+import { markE2E } from "./test-markers.js";
 
 // --- Types ──────────────────────────────────────────────────────────
 
@@ -1193,6 +1194,31 @@ export class VideoHelperManager {
     this.callbacks.onStateChange?.("disconnected");
   }
 
+  /**
+   * Hard-kill the helper process immediately, bypassing graceful control
+   * commands. Used on app quit when graceful shutdown exceeds its grace
+   * period (an unresponsive helper would otherwise be orphaned).
+   */
+  forceKill(): void {
+    this.lifecycleGeneration += 1;
+    this.startPromise = null;
+    this.shuttingDown_ = true;
+    this.clearDiagnosticsInterval();
+    this.clearRestartTimer();
+    this.cancelIdleShutdown();
+
+    try {
+      // On Windows, kill() terminates the process immediately.
+      this.helper?.kill("SIGKILL");
+    } catch { /* already dead */ }
+    this.helper = null;
+    this.controlSocket?.destroy();
+    this.controlSocket = null;
+    this.appliedConfig = null;
+    this.state = "disconnected";
+    this.callbacks.onStateChange?.("disconnected");
+  }
+
   async reconfigure(config: VideoEnhancerConfig): Promise<VideoEnhancerConfigureResult> {
     if (this.state !== "ready" && this.state !== "processing") {
       return { success: false, error: "Helper not in ready/processing state" };
@@ -1632,6 +1658,7 @@ export class VideoHelperManager {
       this.appliedConfig = this.buildAppliedConfig(config, configReply, true);
 
       this.state = "ready";
+      markE2E("helper-video-started");
       this.restartAttempts = 0;
       this.callbacks.onStateChange?.("ready");
       helperLifecycleLog("helperReady", {

@@ -77,6 +77,7 @@ export function ViewerStatusOverlay({
       return (
         <motion.div
           key="ended"
+          data-testid="viewer-ended-state"
           initial={{ opacity: 1 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -110,7 +111,7 @@ export function ViewerStatusOverlay({
                 {liveDuration && ` It was live for ${liveDuration}.`}
               </p>
             </div>
-            <Button variant="default" onClick={onExit}>
+            <Button variant="default" data-testid="viewer-exit-button" onClick={onExit}>
               <ArrowLeft className="h-4 w-4" />
               Return to overview
             </Button>
@@ -122,6 +123,7 @@ export function ViewerStatusOverlay({
       return (
         <motion.div
           key="error"
+          data-testid="viewer-error-state"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -137,18 +139,18 @@ export function ViewerStatusOverlay({
                 {sharerName}'s stream. Please try again or check your
                 connection.
                 {viewerError && (
-                  <span className="block mt-2 text-xs opacity-70">
+                  <span className="block mt-2 text-xs opacity-70" data-testid="viewer-error-message">
                     {viewerError}
                   </span>
                 )}
               </AlertDescription>
             </Alert>
             <div className="flex items-center gap-3 mt-4 justify-center">
-              <Button variant="default" onClick={onRetry}>
+              <Button variant="default" data-testid="viewer-retry-button" onClick={onRetry}>
                 <RefreshCw className="h-4 w-4" />
                 Retry
               </Button>
-              <Button variant="ghost" onClick={onExit}>
+              <Button variant="ghost" data-testid="viewer-exit-button" onClick={onExit}>
                 <ArrowLeft className="h-4 w-4" />
                 Return to overview
               </Button>
@@ -181,6 +183,7 @@ function ConnectingOverlay({ sharerName, reduced }: { sharerName: string; reduce
   return (
     <motion.div
       key="connecting-overlay"
+      data-testid="viewer-status-overlay"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -197,7 +200,7 @@ function ConnectingOverlay({ sharerName, reduced }: { sharerName: string; reduce
           </span>
         </div>
         <div className="text-center">
-          <p className="text-sm text-text-secondary font-medium">
+          <p className="text-sm text-text-secondary font-medium" data-testid="viewer-status-text">
             Connecting to {sharerName}'s stream
           </p>
           <p className="text-xs text-text-muted mt-1">
@@ -217,6 +220,7 @@ function ReconnectingOverlay({ sharerName, reduced }: { sharerName: string; redu
   return (
     <motion.div
       key="reconnecting-overlay"
+      data-testid="viewer-status-overlay"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
@@ -246,6 +250,7 @@ function DegradedOverlay({ sharerName, reduced }: { sharerName: string; reduced:
   return (
     <motion.div
       key="degraded-overlay"
+      data-testid="viewer-status-overlay"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}

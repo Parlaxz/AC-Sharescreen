@@ -1,0 +1,15 @@
+{
+  "agent": "m-charlie-m2-30824-72861",
+  "flushedAt": "2026-08-24T22:05:10.071Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787609109377,
+      "iso": "2026-08-24T22:05:09.377Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

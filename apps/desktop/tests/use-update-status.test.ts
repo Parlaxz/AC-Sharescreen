@@ -17,6 +17,7 @@ const DEFAULT_STATUS: UpdateStatusDTO = {
   isPackaged: true,
   isPortable: false,
   updaterSupported: true,
+  channel: "stable",
 };
 
 type StatusHandler = (status: UpdateStatusDTO) => void;

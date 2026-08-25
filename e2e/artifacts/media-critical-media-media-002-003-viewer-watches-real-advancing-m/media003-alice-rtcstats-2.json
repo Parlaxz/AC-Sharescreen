@@ -1,0 +1,17 @@
+{
+  "connections": [
+    {
+      "label": "publisher",
+      "pcPresent": true,
+      "inbound": [],
+      "outbound": [
+        {
+          "kind": "video",
+          "bytesSent": 2579934,
+          "framesEncoded": 1662,
+          "codecMimeType": "video/VP9"
+        }
+      ]
+    }
+  ]
+}

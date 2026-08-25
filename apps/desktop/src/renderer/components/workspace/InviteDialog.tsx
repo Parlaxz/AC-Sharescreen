@@ -85,7 +85,7 @@ export function InviteDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md" data-testid="invite-dialog">
         <DialogHeader>
           <DialogTitle>Invite members</DialogTitle>
           <DialogDescription>
@@ -97,6 +97,7 @@ export function InviteDialog({
         <div className="flex items-center gap-2 pt-2">
           <Input
             readOnly
+            data-testid="invite-link-input"
             value={
               inviteLink ??
               (resolved
@@ -111,6 +112,7 @@ export function InviteDialog({
           <Button
             variant="default"
             size="icon"
+            data-testid="invite-copy-button"
             onClick={handleCopy}
             disabled={!inviteLink}
             aria-label={copied ? "Copied" : "Copy invite link"}
@@ -126,7 +128,7 @@ export function InviteDialog({
 
         <div className="flex justify-end pt-2">
           <DialogClose asChild>
-            <Button variant="outline" aria-label="Close">
+            <Button variant="outline" aria-label="Close" data-testid="invite-close-button">
               Close
             </Button>
           </DialogClose>

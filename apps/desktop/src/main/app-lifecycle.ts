@@ -7,9 +7,15 @@ import type { WindowManager } from "./window-manager.js";
  *
  * Pass --multi-instance to allow multiple instances (for testing).
  *
+ * @param onSecondInstance optional callback invoked with the second
+ *   instance's argv BEFORE the window is shown/focused (used for deep links).
+ *
  * @returns false if this is not the primary instance (caller should quit)
  */
-export function setupSingleInstance(windowManager: WindowManager): boolean {
+export function setupSingleInstance(
+  windowManager: WindowManager,
+  onSecondInstance?: (argv: string[]) => void,
+): boolean {
   // Allow multiple instances for testing (dev builds only; packaged builds
   // always enforce single-instance).
   if (!app.isPackaged && process.argv.includes("--multi-instance")) {
@@ -30,7 +36,8 @@ export function setupSingleInstance(windowManager: WindowManager): boolean {
     return false;
   }
 
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
+    onSecondInstance?.(argv);
     windowManager.show();
     windowManager.focus();
   });

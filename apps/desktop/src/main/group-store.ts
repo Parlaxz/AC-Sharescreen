@@ -412,7 +412,7 @@ export class GroupStore {
         groupId: record.groupId,
         controlRoomId: record.controlRoomId,
         groupSecret,
-        bootstrapName: record.sharedState.name.value,
+        bootstrapName: record.sharedState.name.value.trim().slice(0, 100),
         bootstrapNameStamp: record.sharedState.name.stamp,
         bootstrapSettings: record.sharedState.defaultQuality.value,
         bootstrapSettingsStamp: record.sharedState.defaultQuality.stamp,

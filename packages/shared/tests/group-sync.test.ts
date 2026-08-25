@@ -206,4 +206,36 @@ describe("GroupSync", () => {
     expect(mergedAB.state.members["device-b"]!.displayName).toBe("Bob");
     expect(mergedAB.changed).toBe(true);
   });
+
+  it("tombstone merge: newer-stamp leftAt record beats older alive record; stale announcement does not resurrect", () => {
+    // device-b is alive locally with an older stamp
+    const local = makeState("g1", "Name", ts(100, 0, "a"), defaultSettings, ts(100, 0, "a"), {
+      "device-a": makeMember("device-a", "Alice", ts(100, 0, "a")),
+      "device-b": makeMember("device-b", "Bob", ts(100, 0, "b")),
+    });
+
+    // Bob leaves — tombstone carries a strictly newer profileStamp
+    const tombstonedBob: GroupMemberRecord = {
+      ...makeMember("device-b", "Bob", ts(100, 0, "b")),
+      leftAt: 300,
+      profileStamp: ts(300, 0, "b"),
+    };
+    const remote = makeState("g1", "Name", ts(100, 0, "a"), defaultSettings, ts(100, 0, "a"), {
+      "device-a": makeMember("device-a", "Alice", ts(100, 0, "a")),
+      "device-b": tombstonedBob,
+    });
+
+    const merged = mergeGroupSharedState(local, remote);
+    expect(merged.state.members["device-b"]!.leftAt).toBe(300);
+    expect(merged.changed).toBe(true);
+
+    // A stale (older-stamp) alive announcement must NOT resurrect the tombstone
+    const staleAlive = makeState("g1", "Name", ts(100, 0, "a"), defaultSettings, ts(100, 0, "a"), {
+      "device-a": makeMember("device-a", "Alice", ts(100, 0, "a")),
+      "device-b": makeMember("device-b", "Bob", ts(150, 0, "b")),
+    });
+    const resurrectAttempt = mergeGroupSharedState(merged.state, staleAlive);
+    expect(resurrectAttempt.state.members["device-b"]!.leftAt).toBe(300);
+    expect(resurrectAttempt.changed).toBe(false);
+  });
 });

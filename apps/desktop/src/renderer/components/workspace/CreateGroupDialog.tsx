@@ -82,7 +82,7 @@ export function CreateGroupDialog() {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-sm">
+      <DialogContent className="sm:max-w-sm" data-testid="create-group-dialog">
         <DialogHeader>
           <DialogTitle>Create group</DialogTitle>
           <DialogDescription>
@@ -96,6 +96,7 @@ export function CreateGroupDialog() {
             <Label htmlFor="create-group-name">Group name</Label>
             <Input
               id="create-group-name"
+              data-testid="create-group-name-input"
               value={groupName}
               onChange={(e) => setGroupName(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -115,12 +116,13 @@ export function CreateGroupDialog() {
 
         <DialogFooter>
           <DialogClose asChild>
-            <Button variant="outline" disabled={creating}>
+            <Button variant="outline" data-testid="create-group-cancel" disabled={creating}>
               Cancel
             </Button>
           </DialogClose>
           <Button
             variant="default"
+            data-testid="create-group-submit"
             disabled={!groupName.trim() || creating}
             onClick={handleCreate}
           >

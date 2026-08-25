@@ -2,7 +2,18 @@ import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { cn } from "@/lib/utils";
 
-const DropdownMenu = DropdownMenuPrimitive.Root;
+// Non-modal by default: Radix's modal menus apply aria-hidden to ALL content
+// outside the open menu (aria-hidden pkg `hideOthers`) and disable outside
+// pointer events. That hid the whole viewer workspace (control bar included)
+// from assistive tech and role-based queries whenever the stream switcher
+// dropdown was open. Callers can still opt back in via <DropdownMenu modal>.
+const DropdownMenu = ({
+  modal = false,
+  ...props
+}: React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Root>) => (
+  <DropdownMenuPrimitive.Root modal={modal} {...props} />
+);
+DropdownMenu.displayName = "DropdownMenu";
 const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 const DropdownMenuGroup = DropdownMenuPrimitive.Group;
 const DropdownMenuPortal = DropdownMenuPrimitive.Portal;

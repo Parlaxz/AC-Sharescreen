@@ -2,6 +2,9 @@ import type { AudioMode } from "./audio-capabilities.js";
 import type { ShortcutBinding } from "./shortcuts.js";
 import { createDefaultHostQualityLimits, createDefaultGroupQualitySettings } from "./quality-settings.js";
 
+/** Update channel preference. Beta opts into prerelease builds. */
+export type UpdateChannel = "stable" | "beta";
+
 /**
  * Persisted settings schema for the ScreenLink desktop application.
  * Stored locally (e.g., electron-store). This is the canonical shared
@@ -121,6 +124,8 @@ export interface PersistedSettings {
   streamInfoCard: StreamInfoCardConfig;
   /** Show compare controls in the viewer */
   showCompareControls: boolean;
+  /** Update channel preference ("stable" | "beta"); absent = stable */
+  updateChannel?: UpdateChannel;
 }
 
 /**
@@ -212,4 +217,9 @@ export function defaultHourlyEstimateDurationMs(): number {
 /** Default showCompareControls value. */
 export function defaultShowCompareControls(): boolean {
   return false;
+}
+
+/** Default update channel. */
+export function defaultUpdateChannel(): UpdateChannel {
+  return "stable";
 }

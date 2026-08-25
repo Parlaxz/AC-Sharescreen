@@ -24,6 +24,8 @@ export type UpdatePhase =
   | "installing"
   | "error";
 
+export type UpdateChannel = "stable" | "beta";
+
 export interface UpdateStatus {
   phase: UpdatePhase;
   currentVersion: string;
@@ -41,6 +43,7 @@ export interface UpdateStatus {
   isPackaged: boolean;
   isPortable: boolean;
   updaterSupported: boolean;
+  channel: UpdateChannel;
 }
 
 export type ErrorCode =
@@ -146,6 +149,8 @@ export class UpdateManager {
   private isInstalling = false;
   /** Indicates whether a check is currently in flight (prevents duplicate clicks). */
   private checkInFlight = false;
+  /** Active update channel. Defaults to stable; applied externally via applyChannel(). */
+  private activeChannel: UpdateChannel = "stable";
 
   constructor(
     private updater: UpdaterAdapter,
@@ -163,6 +168,38 @@ export class UpdateManager {
 
   getStatus(): UpdateStatus {
     return { ...this.state };
+  }
+
+  /**
+   * Apply an update channel to the underlying updater.
+   *
+   * - "beta": allow prereleases and read the beta feed.
+   * - "stable": allow only releases and read the latest feed. When the
+   *   currently installed version is itself a prerelease, downgrades are
+   *   enabled so the lower stable version can install (beta → stable revert).
+   *
+   * Called externally after construction (keeps the constructor DI-pure).
+   */
+  applyChannel(channel: UpdateChannel): UpdateStatus {
+    this.activeChannel = channel;
+
+    this.updater.allowPrerelease = channel === "beta";
+    this.updater.channel = channel === "beta" ? "beta" : "latest";
+
+    const currentIsPrerelease =
+      typeof this.state.currentVersion === "string" &&
+      this.state.currentVersion.includes("-");
+    this.updater.allowDowngrade = channel === "stable" && currentIsPrerelease;
+
+    this.logger.log("info", "updater", "channel_applied", {
+      channel,
+      allowPrerelease: this.updater.allowPrerelease,
+      allowDowngrade: this.updater.allowDowngrade,
+      updaterChannel: this.updater.channel,
+    });
+
+    this.setState({ channel });
+    return this.getStatus();
   }
 
   /**
@@ -405,6 +442,7 @@ export class UpdateManager {
         isPackaged,
         isPortable,
         updaterSupported: false,
+        channel: this.activeChannel,
       };
     }
 
@@ -415,6 +453,7 @@ export class UpdateManager {
       isPackaged: true,
       isPortable: false,
       updaterSupported: true,
+      channel: this.activeChannel,
     };
   }
 
@@ -441,7 +480,16 @@ export class UpdateManager {
         reason: comparison.reason,
       });
 
-      if (!comparison.isNewer) {
+      // An intentional downgrade (beta → stable revert) must not be
+      // suppressed: when allowDowngrade is set, a well-formed version that
+      // is lower than the installed prerelease is advertised as the update.
+      // Malformed metadata (null) and equal versions stay suppressed.
+      const isIntentionalDowngrade =
+        this.updater.allowDowngrade === true &&
+        comparison.normalizedAvailable !== null &&
+        comparison.normalizedAvailable !== comparison.normalizedCurrent;
+
+      if (!comparison.isNewer && !isIntentionalDowngrade) {
         // Stale, equal, lower, malformed, or missing versions are never
         // advertised as updates. We log the reason and fall through to
         // an up-to-date (or error) state so the renderer never displays

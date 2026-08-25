@@ -19,6 +19,8 @@ export interface GroupMemberRecord {
   displayName: string;
   firstSeenAt: number;
   profileStamp: HybridTimestamp;
+  /** Wall-ms of departure. Presence means the member is tombstoned (left). */
+  leftAt?: number;
 }
 
 export interface GroupSharedState {
@@ -44,7 +46,17 @@ export const GroupMemberRecordSchema = z.object({
   displayName: z.string().min(1).max(100),
   firstSeenAt: z.number().int().positive(),
   profileStamp: HybridTimestampSchema,
+  leftAt: z.number().int().positive().optional(),
 });
+
+/**
+ * A tombstoned member is just a member record with a newer profileStamp and
+ * leftAt set — existing LWW merge logic propagates it and protects it from
+ * stale older announcements.
+ */
+export function isMemberActive(m: GroupMemberRecord): boolean {
+  return m.leftAt === undefined;
+}
 
 export const GroupSharedStateSchema: z.ZodType<GroupSharedState> = z.object({
   schemaVersion: z.literal(1),

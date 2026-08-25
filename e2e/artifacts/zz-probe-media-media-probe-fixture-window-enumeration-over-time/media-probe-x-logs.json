@@ -1,0 +1,15 @@
+{
+  "agent": "media-probe-x",
+  "flushedAt": "2026-08-24T08:49:25.033Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787561344906,
+      "iso": "2026-08-24T08:49:04.906Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -590,7 +590,7 @@ export function CompareViewerSurface({
             </Tooltip>
 
             {/* ── Mode toggle ────────────────────────────────────── */}
-            <div className="flex items-center gap-0.5 mx-auto">
+            <div className="flex items-center gap-0.5 mx-auto" data-testid="compare-mode-toggle">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button

@@ -1,0 +1,20 @@
+{
+  "before": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 30.539,
+    "rvfc": 702
+  },
+  "after10s": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 40.614,
+    "rvfc": 935
+  },
+  "charlieDelta": 10.074999999999996,
+  "charlieRowIntact": true
+}

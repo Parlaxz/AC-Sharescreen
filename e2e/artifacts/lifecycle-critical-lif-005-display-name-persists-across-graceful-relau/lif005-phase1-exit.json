@@ -1,0 +1,7 @@
+{
+  "reason": "lif005-phase1-graceful",
+  "gracefulClose": true,
+  "taskkillUsed": false,
+  "pid": 5156,
+  "closedAt": "2026-08-24T12:21:30.860Z"
+}

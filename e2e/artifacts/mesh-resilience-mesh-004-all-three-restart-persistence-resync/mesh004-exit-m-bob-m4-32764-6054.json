@@ -1,0 +1,8 @@
+{
+  "reason": "mesh004-graceful:m-bob-m4-32764-6054",
+  "gracefulClose": true,
+  "taskkillUsed": false,
+  "pid": 25912,
+  "closedAt": "2026-08-24T12:14:39.589Z",
+  "gracefulCloseHung": false
+}

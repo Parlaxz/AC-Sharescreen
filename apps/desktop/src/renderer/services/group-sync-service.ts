@@ -214,6 +214,103 @@ export class GroupSyncService {
     await this.runAntiEntropy(groupId);
   }
 
+  /**
+   * Tombstone the local member in the group state and broadcast the
+   * departure. The tombstone is a member record with a newer profileStamp
+   * and leftAt set, so existing LWW merge logic propagates it transitively
+   * and stale older announcements cannot resurrect the membership.
+   *
+   * Returns true when a tombstone was created and announced.
+   */
+  async announceLocalLeave(groupId: string): Promise<boolean> {
+    const sync = this.syncStates.get(groupId);
+    if (!sync) return false;
+
+    const selfId = sync.clock.nodeId;
+    const existing = sync.state.members[selfId];
+    if (!existing || existing.leftAt !== undefined) return false;
+
+    const now = Date.now();
+    const stamp = tickLocal(sync.clock, now);
+    const tombstoned: GroupMemberRecord = {
+      ...existing,
+      displayName: existing.displayName,
+      leftAt: now,
+      profileStamp: stamp,
+    };
+
+    const newState = applyGroupStateDelta(sync.state, {
+      members: { [selfId]: tombstoned },
+    });
+
+    if (this.persistence) {
+      await this.persistence.persistState(groupId, newState);
+      await this.persistence.persistClock(groupId, sync.clock);
+    }
+
+    sync.state = newState;
+    sync.lastSyncAt = now;
+    this.onStateUpdated?.(groupId, newState);
+
+    // ── Peer delivery (best-effort — local tombstone is already applied) ──
+    try {
+      const conn = this.connManager.getConnection(groupId);
+
+      // MESH-005: a peer that joins and leaves within seconds can race its
+      // own hello handshake — raw data channels exist but zero authenticated
+      // mappings do, so a broadcast would be silently dropped. Give the
+      // handshake a short bounded window so the tombstone reaches survivors.
+      // When rawDataPeers is also empty the room is genuinely empty — skip.
+      if (
+        conn &&
+        conn.state === "connected" &&
+        conn.connectedPeers.length === 0 &&
+        conn.rawDataPeerUuids.length > 0
+      ) {
+        const deadline = Date.now() + 2500;
+        while (
+          Date.now() < deadline &&
+          conn.state === "connected" &&
+          conn.connectedPeers.length === 0
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
+      }
+
+      if (!conn) return true;
+
+      // Send both messages directly so delivery is observable via
+      // BroadcastResult; confirmation signal = member.left sent > 0.
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        let leftSent = 0;
+        try {
+          await conn.broadcast({
+            type: "group.state.update",
+            state: { members: { [selfId]: tombstoned } },
+            stamp,
+          });
+          const leftResult = await conn.broadcast({
+            type: "group.member.left",
+            member: tombstoned,
+            memberDeviceId: selfId,
+            memberDisplayName: tombstoned.displayName,
+            leftAt: tombstoned.leftAt!,
+            groupId,
+          });
+          leftSent = leftResult.sent;
+        } catch {
+          // Broadcast failure — treated as undelivered below.
+        }
+        if (leftSent > 0) break;
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    } catch {
+      // Any unexpected failure degrades to "tombstone applied locally".
+    }
+
+    return true;
+  }
+
   removeGroup(groupId: string): void {
     this.syncStates.delete(groupId);
     this.stopAntiEntropy(groupId);
@@ -454,6 +551,25 @@ export class GroupSyncService {
           await conn.sendToPeer(peerUuid, { type: "group.state.request" });
         }
       }
+
+      // Reverse-direction push (self-heal): if WE hold members the sender's
+      // summary lacks, or newer versions of them, push our full state so a
+      // peer holding extra/newer members converges even when it never
+      // requests. Without this, tombstones held only by us would never reach
+      // a peer whose own state looks "complete" from its side.
+      if (!needsFullSync && summary.memberVersions) {
+        const weHaveNewer = Object.entries(sync.state.members).some(([deviceId, localMember]) => {
+          const remoteVer = summary.memberVersions![deviceId];
+          if (!remoteVer) return true;
+          return this.compareLogicalTimeOnly(localMember.profileStamp, remoteVer.profileStamp) > 0;
+        });
+        if (weHaveNewer) {
+          const peerUuid = conn.peerForDevice(envelope.senderDeviceId);
+          if (peerUuid && peerUuid.length > 0) {
+            await conn.sendToPeer(peerUuid, { type: "group.state.update", state: sync.state });
+          }
+        }
+      }
     }
 
     if (type === "group.state.request") {
@@ -468,6 +584,27 @@ export class GroupSyncService {
           });
         }
       }
+    }
+
+    if (type === "group.member.left") {
+      // ── Schema validation (typed via GroupControlPayloadMap) ──────
+      const parsed = parseGroupMessagePayload("group.member.left", envelope.payload);
+      if (!parsed.ok) return;
+
+      // ── Sender authenticity: only the leaver itself can announce its
+      // own departure. Both the flat field and the embedded record must
+      // agree with the signed envelope sender.
+      if (
+        envelope.senderDeviceId !== parsed.data.member.deviceId ||
+        envelope.senderDeviceId !== parsed.data.memberDeviceId
+      ) {
+        return;
+      }
+
+      // Existing LWW logic accepts the newer tombstone stamp and
+      // rebroadcasts the delta — transitive spread to other peers.
+      await this.mergeRemoteMember(groupId, parsed.data.member, envelope.senderDeviceId);
+      return;
     }
 
     if (type === "group.member.update") {
@@ -633,6 +770,15 @@ export class GroupSyncService {
         type: "group.state.summary",
         summary,
       });
+
+      // Self-heal: if we are connected but have seen NO peer routes for a long
+      // time while other members exist, rejoin the room once to re-trigger
+      // discovery (covers missed vdo.ninja peer announcements — the last-joiner
+      // stall). Solo groups never refresh.
+      const hasOtherMembers = Object.keys(sync.state.members).some((id) => id !== sync.clock.nodeId);
+      if (hasOtherMembers && conn.needsMeshRefresh()) {
+        void conn.refreshMeshDiscovery().catch(() => {});
+      }
     }
   }
 }

@@ -521,7 +521,7 @@ export function DiagnosticsPage() {
 
   // ── Render: Loaded ───────────────────────────────────────────────
   return (
-    <div className="h-full overflow-auto p-6 space-y-6">
+    <div className="h-full overflow-auto p-6 space-y-6" data-testid="diagnostics-page-root">
       {/* ─── Page header ─────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-text-primary">Diagnostics</h1>

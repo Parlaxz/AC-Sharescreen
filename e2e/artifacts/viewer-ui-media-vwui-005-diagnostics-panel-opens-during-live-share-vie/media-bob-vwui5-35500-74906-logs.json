@@ -1,0 +1,33 @@
+{
+  "agent": "media-bob-vwui5-35500-74906",
+  "flushedAt": "2026-08-24T22:18:22.572Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787609889670,
+      "iso": "2026-08-24T22:18:09.670Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: Qt5QWindowIcon}"
+    },
+    {
+      "t": 1787609889671,
+      "iso": "2026-08-24T22:18:09.671Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787609890121,
+      "iso": "2026-08-24T22:18:10.121Z",
+      "source": "main-console",
+      "text": "[nvidia-capability] Using video enhancer helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe"
+    },
+    {
+      "t": 1787609901835,
+      "iso": "2026-08-24T22:18:21.835Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

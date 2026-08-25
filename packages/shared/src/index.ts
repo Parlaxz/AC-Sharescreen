@@ -102,6 +102,7 @@ export {
   GroupMemberUpdatePayloadSchema,
   GroupMemberJoinedPayloadSchema,
   GroupMemberOnlinePayloadSchema,
+  GroupMemberLeftPayloadSchema,
   GroupPresencePayloadSchema,
   StreamStateRequestPayloadSchema,
   StreamStateSnapshotPayloadSchema,

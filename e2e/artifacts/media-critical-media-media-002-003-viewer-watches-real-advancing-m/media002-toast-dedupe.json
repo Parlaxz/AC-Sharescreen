@@ -1,0 +1,16 @@
+{
+  "firstPoll": [
+    {
+      "timestamp": "2026-08-24T22:11:24.337Z",
+      "e2eMarker": "toast-shown",
+      "groupId": "124018d9-9964-476a-8cbd-5be047d26bee"
+    }
+  ],
+  "secondPollAfter30s": [
+    {
+      "timestamp": "2026-08-24T22:11:24.337Z",
+      "e2eMarker": "toast-shown",
+      "groupId": "124018d9-9964-476a-8cbd-5be047d26bee"
+    }
+  ]
+}

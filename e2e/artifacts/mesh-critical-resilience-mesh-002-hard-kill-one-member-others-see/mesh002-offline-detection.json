@@ -1,0 +1,44 @@
+{
+  "offlineDetectionLatencyMs": {
+    "m-alice-m2-30824-72861": 8211,
+    "m-bob-m2-30824-72861": 8213
+  },
+  "countSamples": [
+    {
+      "t": 168,
+      "perAgent": [
+        3,
+        3
+      ]
+    },
+    {
+      "t": 2187,
+      "perAgent": [
+        3,
+        3
+      ]
+    },
+    {
+      "t": 4203,
+      "perAgent": [
+        3,
+        3
+      ]
+    },
+    {
+      "t": 6209,
+      "perAgent": [
+        3,
+        3
+      ]
+    },
+    {
+      "t": 8213,
+      "perAgent": [
+        3,
+        3
+      ]
+    }
+  ],
+  "violations": []
+}

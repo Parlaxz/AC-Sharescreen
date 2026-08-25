@@ -1,0 +1,12 @@
+{
+  "groupId": "6787f050-45fd-422d-a5a5-fc20d064cb14",
+  "bobProfile": "g-bob-mt774cpj13f5",
+  "bob2Groups": [
+    {
+      "id": "6787f050-45fd-422d-a5a5-fc20d064cb14",
+      "name": "GRP Pair mt774cpj13f5",
+      "memberCount": 3
+    }
+  ],
+  "note": "stale membership survived peer leave + relaunch"
+}

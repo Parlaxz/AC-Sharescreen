@@ -474,7 +474,7 @@ export function ShareSetup() {
 
   return (
     <Dialog open={openShareSetup} onOpenChange={setOpenShareSetup}>
-      <DialogContent className="max-w-2xl max-h-[85vh] p-0 gap-0">
+      <DialogContent className="max-w-2xl max-h-[85vh] p-0 gap-0" data-testid="share-setup-root">
         <DialogHeader className="px-6 pt-6 pb-2">
           <DialogTitle>Start sharing</DialogTitle>
           <DialogDescription>
@@ -506,6 +506,7 @@ export function ShareSetup() {
               <TooltipTrigger asChild>
                 <Button
                   variant="default"
+                  data-testid="start-sharing-button"
                   disabled={!canStart || startingShare}
                   onClick={handleStartSharing}
                   className={cn(
@@ -560,12 +561,12 @@ export function ShareSetup() {
                 value={activeTab}
                 onValueChange={(v) => setActiveTab(v as SourceTab)}
               >
-                <TabsList className="w-full">
-                  <TabsTrigger value="screen" className="flex-1 gap-1.5">
+                <TabsList className="w-full" data-testid="source-tabs">
+                  <TabsTrigger value="screen" className="flex-1 gap-1.5" data-testid="source-tab-screen">
                     <Monitor className="h-3.5 w-3.5" />
                     Screen
                   </TabsTrigger>
-                  <TabsTrigger value="window" className="flex-1 gap-1.5">
+                  <TabsTrigger value="window" className="flex-1 gap-1.5" data-testid="source-tab-window">
                     <Monitor className="h-3.5 w-3.5" />
                     Window
                   </TabsTrigger>
@@ -595,7 +596,7 @@ export function ShareSetup() {
                   </motion.div>
                 ) : sourceError && filteredSources.length === 0 ? (
                   <motion.div key="error" {...transitionProps}>
-                    <Alert variant="destructive">
+                    <Alert variant="destructive" data-testid="share-setup-error">
                       <AlertTriangle className="h-4 w-4" />
                       <AlertTitle>Source error</AlertTitle>
                       <AlertDescription>{sourceError}</AlertDescription>
@@ -660,6 +661,9 @@ export function ShareSetup() {
                               isSelected &&
                                 "ring-2 ring-accent bg-accent-muted/30",
                             )}
+                            data-testid="source-card"
+                            data-source-title={src.name}
+                            data-source-id={src.id}
                             onClick={() => setSelectedSourceId(src.id)}
                             role="radio"
                             aria-checked={isSelected}
@@ -732,6 +736,7 @@ export function ShareSetup() {
                 value={audioMode}
                 onValueChange={(v) => setAudioMode(v as AudioModeValue)}
                 className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+                data-testid="audio-mode-select"
               >
                 {audioModeOptions.map((mode) => {
                   const isSelected = audioMode === mode.value;
@@ -784,7 +789,7 @@ export function ShareSetup() {
                     setSelectedPersonalPresetId(v);
                   }}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger data-testid="quality-preset-select">
                     <SelectValue placeholder="Custom (no preset)" />
                   </SelectTrigger>
                   <SelectContent>

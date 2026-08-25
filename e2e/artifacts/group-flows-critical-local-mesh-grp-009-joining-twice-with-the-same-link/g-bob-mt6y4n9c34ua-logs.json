@@ -1,0 +1,15 @@
+{
+  "agent": "g-bob-mt6y4n9c34ua",
+  "flushedAt": "2026-08-24T08:01:00.746Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787558440508,
+      "iso": "2026-08-24T08:00:40.508Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -1,0 +1,15 @@
+{
+  "agent": "lc-nav-32504",
+  "flushedAt": "2026-08-24T06:26:27.264Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787552671554,
+      "iso": "2026-08-24T06:24:31.554Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

@@ -39,6 +39,9 @@ export function MembersList({
   const selectedGroupId = useStore((s) => s.selectedGroupId);
   const groupsById = useStore((s) => s.groupsById);
   const activeStreamsByGroup = useStore((s) => s.activeStreamsByGroup);
+  const onlineDeviceIdsByGroup = useStore((s) => s.onlineDeviceIdsByGroup) as
+    | Record<string, string[]>
+    | undefined;
 
   const groupId = overrideGroupId ?? selectedGroupId;
   const group = groupId ? groupsById[groupId] : null;
@@ -112,10 +115,13 @@ export function MembersList({
 
   return (
     <ScrollArea className="max-h-[400px]">
-      <div className="space-y-1 pr-2">
+      <div className="space-y-1 pr-2" data-testid="members-list">
         <AnimatePresence mode="popLayout">
           {members.map(([deviceId, member]) => {
             const isSharing = activeHostDeviceIds.has(deviceId);
+            const isOnline = groupId
+              ? (onlineDeviceIdsByGroup?.[groupId] ?? []).includes(deviceId)
+              : false;
             return (
               <motion.div
                 key={deviceId}
@@ -125,6 +131,9 @@ export function MembersList({
                 exit={{ opacity: 0, y: -8 }}
                 transition={{ duration: 0.18 }}
                 className="flex items-center gap-2.5 px-3 py-2 rounded-standard hover:bg-surface-hover transition-colors"
+                data-testid="member-row"
+                data-member-name={member.displayName}
+                data-online={isOnline ? "true" : "false"}
               >
                 <Avatar className="h-8 w-8 flex-shrink-0">
                   <AvatarFallback className="text-[11px] bg-surface-3">
@@ -142,6 +151,7 @@ export function MembersList({
                   <Badge
                     variant="success"
                     className="text-[10px] px-1.5 py-0"
+                    data-testid="member-sharing-badge"
                     aria-label={`${member.displayName} is sharing`}
                   >
                     Sharing

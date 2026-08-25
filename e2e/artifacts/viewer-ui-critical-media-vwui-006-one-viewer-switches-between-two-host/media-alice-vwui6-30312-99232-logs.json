@@ -1,0 +1,39 @@
+{
+  "agent": "media-alice-vwui6-30312-99232",
+  "flushedAt": "2026-08-24T18:54:24.379Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787597616914,
+      "iso": "2026-08-24T18:53:36.914Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 15 sources"
+    },
+    {
+      "t": 1787597626410,
+      "iso": "2026-08-24T18:53:46.410Z",
+      "source": "main-console",
+      "text": "[fullscreen-detector] fullscreen application detected: {notificationState: 2, windowClassName: POEWindowClass}"
+    },
+    {
+      "t": 1787597626410,
+      "iso": "2026-08-24T18:53:46.410Z",
+      "source": "main-console",
+      "text": "[stream-toast] suppressed (a fullscreen application is active)"
+    },
+    {
+      "t": 1787597648298,
+      "iso": "2026-08-24T18:54:08.298Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-vwui6-30312-99232\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-vwui6-30312-99232\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787597661152,
+      "iso": "2026-08-24T18:54:21.152Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

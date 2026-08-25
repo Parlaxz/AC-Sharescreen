@@ -1,0 +1,8 @@
+{
+  "reason": "mesh004-graceful:m-alice-m4-30348-73176",
+  "gracefulClose": true,
+  "taskkillUsed": false,
+  "pid": 17632,
+  "closedAt": "2026-08-24T17:13:59.207Z",
+  "gracefulCloseHung": false
+}

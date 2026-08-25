@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
 import { BinaryPcmParser, ParsedPcmPacket } from './BinaryPcmParser.js';
+import { markE2E } from './test-markers.js';
 import { PcmBridge, PcmBridgeDiagnostics } from './PcmBridge.js';
 import {
   ControlClient,
@@ -336,6 +337,7 @@ export class AudioHelperManager {
 
       // 5. Start diagnostics polling — full handshake + PCM + diagnostics = 'running'
       this.state = 'ready';
+      markE2E('helper-audio-started');
       this.helperOwnership = 'running';
       this.startDiagnostics();
     } catch (err) {
@@ -623,6 +625,38 @@ export class AudioHelperManager {
       this.state = 'disconnected';
     }
     // Keep shuttingDown_ = true permanently to prevent unintended restarts
+  }
+
+  /**
+   * Hard-kill the helper process immediately, bypassing graceful pipe
+   * commands. Used on app quit when graceful shutdown exceeds its grace
+   * period (an unresponsive helper would otherwise be orphaned).
+   */
+  forceKill(): void {
+    this.shuttingDown_ = true; // Prevent restart during shutdown
+    this.pendingCleanup = 'permanent-shutdown'; // Prevent any restart/reconnect
+
+    if (this.restartTimer !== null) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    if (this.connectionRetryTimer !== null) {
+      clearTimeout(this.connectionRetryTimer);
+      this.connectionRetryTimer = null;
+    }
+    if (this.diagnosticsInterval !== null) {
+      clearInterval(this.diagnosticsInterval);
+      this.diagnosticsInterval = null;
+    }
+    this.lifecycleGen++;
+
+    try {
+      // On Windows, kill() terminates the process immediately.
+      this.helper?.kill();
+    } catch { /* already dead */ }
+    this.helper = null;
+    this.control = null;
+    this.state = 'disconnected';
   }
 
   // ── Queries ──

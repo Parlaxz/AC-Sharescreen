@@ -1,0 +1,40 @@
+{
+  "outcome": "landed-ended-or-error-ui",
+  "recoveredToWatching": false,
+  "landedEndedOrError": true,
+  "timelineTail": [
+    {
+      "t": 6,
+      "phase": "ended",
+      "currentTime": null,
+      "endedUi": true,
+      "errorUi": false
+    }
+  ],
+  "bobMarkers": [
+    {
+      "t": 1787609599810,
+      "marker": "app-ready"
+    },
+    {
+      "t": 1787609599810,
+      "marker": "group-connected"
+    },
+    {
+      "t": 1787609599810,
+      "marker": "viewer-joined"
+    },
+    {
+      "t": 1787609600826,
+      "marker": "viewer-watching"
+    },
+    {
+      "t": 1787609604274,
+      "marker": "viewer-ended"
+    },
+    {
+      "t": 1787609604274,
+      "marker": "viewer-reconnecting"
+    }
+  ]
+}

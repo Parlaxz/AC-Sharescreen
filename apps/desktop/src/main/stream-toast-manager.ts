@@ -1,5 +1,6 @@
 import { BrowserWindow, screen, type WebContents } from "electron";
 import type { FullscreenDetector } from "./fullscreen-detector.js";
+import { markE2E } from "./test-markers.js";
 
 export interface StreamToastPayload {
   groupId: string;
@@ -101,6 +102,7 @@ export class StreamToastManager {
     }, 1000);
     this.dismissTimer = setTimeout(() => this.fadeAndDestroy(), TOAST_DURATION_MS);
     console.log("[stream-toast] shown for", payload.hostName, "in", payload.groupName);
+    markE2E("toast-shown", { groupId: payload.groupId });
     return { shown: true };
   }
 
@@ -123,7 +125,11 @@ export class StreamToastManager {
 
   private fadeAndDestroy(): void {
     if (!this.window || this.window.isDestroyed()) return;
-    this.window.webContents.executeJavaScript("document.body.classList.add('leaving')").catch(() => {});
+    try {
+      void this.window.webContents
+        .executeJavaScript("document.body.classList.add('leaving')")
+        .catch(() => {});
+    } catch { /* webContents may be gone mid-teardown */ }
     this.dismissTimer = setTimeout(() => this.destroyToast(), 250);
   }
 
@@ -154,5 +160,5 @@ function renderToastHtml(payload: StreamToastPayload): string {
   const safePayload = JSON.stringify(payload).replace(/</g, "\\u003c");
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;font-family:Segoe UI,system-ui,sans-serif;color:#f5f7fb}body{padding:8px;animation:slide .22s ease-out}.card{height:104px;padding:14px 14px 12px;background:#17181c;border:1px solid #343740;border-radius:12px;box-shadow:0 10px 28px #0009;position:relative}.close{position:absolute;right:9px;top:7px;border:0;background:transparent;color:#8f96a3;font-size:18px;line-height:18px;cursor:pointer}.title{font-size:15px;font-weight:700;padding-right:22px}.group{font-size:12px;color:#9da3b0;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.actions{display:flex;gap:8px;margin-top:10px}.button{border-radius:6px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer}.join{border:1px solid #5b8cff;background:#3e6fe8;color:white}.dismiss{border:1px solid #414650;background:transparent;color:#c0c5cf}.leaving{animation:fade .25s ease-in forwards}@keyframes slide{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}@keyframes fade{to{opacity:0;transform:translateX(24px)}}
-</style></head><body><div class="card"><button class="close" aria-label="Dismiss" onclick="dismiss()">×</button><div class="title">${escapeHtml(payload.hostName)} is streaming</div><div class="group">${escapeHtml(payload.groupName)}</div><div class="actions"><button class="button join" onclick="join()">Join</button><button class="button dismiss" onclick="dismiss()">Dismiss</button></div></div><script>const payload=${safePayload};function join(){window.toastAction('join',payload)}function dismiss(){window.toastAction('dismiss',payload)}</script></body></html>`;
+</style></head><body><div class="card" data-testid="toast-root"><button class="close" aria-label="Dismiss" onclick="dismiss()">×</button><div class="title" data-testid="toast-host-name">${escapeHtml(payload.hostName)} is streaming</div><div class="group" data-testid="toast-group-name">${escapeHtml(payload.groupName)}</div><div class="actions"><button class="button join" data-testid="toast-join-action" onclick="join()">Join</button><button class="button dismiss" data-testid="toast-dismiss" onclick="dismiss()">Dismiss</button></div></div><script>const payload=${safePayload};function join(){window.toastAction('join',payload)}function dismiss(){window.toastAction('dismiss',payload)}</script></body></html>`;
 }

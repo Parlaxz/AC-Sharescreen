@@ -1,0 +1,20 @@
+{
+  "timestamp": 1787609151464,
+  "currentPage": "home",
+  "selectedGroupId": null,
+  "groups": [],
+  "groupConnections": [],
+  "activeStreams": [],
+  "activeStreamsByGroup": {},
+  "viewerSessions": [],
+  "hostShare": {
+    "sharing": false,
+    "sessionId": null,
+    "mediaSessionId": null,
+    "sourceLabel": ""
+  },
+  "helpers": {
+    "audio": "disabled",
+    "video": "disconnected"
+  }
+}

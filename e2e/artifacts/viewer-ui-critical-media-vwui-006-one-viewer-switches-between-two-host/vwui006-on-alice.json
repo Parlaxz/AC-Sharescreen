@@ -1,0 +1,21 @@
+{
+  "from": "Bob",
+  "targetHost": "Alice",
+  "a": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 0,
+    "rvfc": 150
+  },
+  "b": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 4.189,
+    "rvfc": 153
+  },
+  "delta": 4.189
+}

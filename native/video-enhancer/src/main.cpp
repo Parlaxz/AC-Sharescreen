@@ -546,6 +546,16 @@ static int RunServe(const std::vector<std::string>& args) {
     printf("  Session: %s\n", sessionId.c_str());
     if (parentPid) {
         printf("  Parent PID: %u\n", parentPid);
+        // Exit when the parent Electron process dies so the helper can never
+        // outlive the app (covers crashes and missed shutdown commands).
+        HANDLE parentHandle = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+        if (parentHandle) {
+            std::thread([parentHandle]() {
+                if (WaitForSingleObject(parentHandle, INFINITE) == WAIT_OBJECT_0) {
+                    ExitProcess(0);
+                }
+            }).detach();
+        }
     }
 
     sv::FrameTransport transport;

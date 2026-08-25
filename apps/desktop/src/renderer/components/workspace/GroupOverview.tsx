@@ -133,7 +133,7 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
       exit={{ opacity: 0, y: -10 }}
       transition={{ type: "spring", stiffness: 350, damping: 28 }}
     >
-      <Card className="group">
+      <Card className="group" data-testid="active-share-card">
         <CardContent className="p-4">
           {/* Top row: avatar + name + source + duration */}
           <div className="flex items-start gap-3">
@@ -186,6 +186,7 @@ function ActiveShareCard({ share }: ActiveShareCardProps) {
               variant="default"
               size="sm"
               className="h-7 text-xs px-3"
+              data-testid="watch-stream-button"
               onClick={handleWatch}
               aria-label={`${isViewing ? "View" : "Watch"} ${share.hostDisplayName}'s stream`}
             >
@@ -514,7 +515,7 @@ export function GroupOverview({
 
   // ── Active shares view ───────────────────────────────────────────
   return (
-    <div className="mx-auto max-w-5xl p-6 space-y-8">
+    <div className="mx-auto max-w-5xl p-6 space-y-8" data-testid="group-overview-root">
       {/* Header — using PageHeader for consistent heading structure */}
       <PageHeader
         title={group.name}
@@ -526,6 +527,7 @@ export function GroupOverview({
                 <Button
                   variant="outline"
                   size="sm"
+                  data-testid="invite-button"
                   onClick={handleInvite}
                   aria-label="Copy invite link"
                 >
@@ -544,6 +546,7 @@ export function GroupOverview({
                   <Button
                     variant="secondary"
                     size="sm"
+                    data-testid="share-again-button"
                     onClick={handleShareAgain}
                     aria-label="Share again with last settings"
                   >
@@ -562,6 +565,7 @@ export function GroupOverview({
                 <Button
                   variant="outline"
                   size="sm"
+                  data-testid="refresh-group-button"
                   onClick={handleRefresh}
                   disabled={refreshing}
                   aria-label="Refresh group state"
@@ -579,6 +583,7 @@ export function GroupOverview({
             <Button
               variant="default"
               size="sm"
+              data-testid="start-share-button"
               onClick={handleStartSharing}
             >
               <Monitor className="h-3.5 w-3.5" />

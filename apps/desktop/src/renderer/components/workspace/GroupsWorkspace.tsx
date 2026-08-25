@@ -200,11 +200,11 @@ export function GroupsWorkspace() {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-text-primary">Groups</h1>
         <div className="flex items-center gap-2">
-          <Button onClick={() => setCreateOpen(true)}>
+          <Button data-testid="groups-create-button" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4" />
             Create group
           </Button>
-          <Button variant="outline" onClick={() => setJoinOpen(true)}>
+          <Button variant="outline" data-testid="groups-join-button" onClick={() => setJoinOpen(true)}>
             <UserPlus className="h-4 w-4" />
             Join group
           </Button>
@@ -233,7 +233,7 @@ export function GroupsWorkspace() {
                 Create your first group to start sharing with others.
               </p>
             </div>
-            <Button onClick={() => setCreateOpen(true)}>
+            <Button data-testid="groups-empty-create-button" onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" />
               Create your first group
             </Button>
@@ -254,7 +254,7 @@ export function GroupsWorkspace() {
                   exit={{ opacity: 0, scale: 0.95 }}
                   transition={{ duration: 0.2 }}
                 >
-                  <Card className="h-full flex flex-col">
+                  <Card className="h-full flex flex-col" data-testid="group-card" data-group-id={g.id}>
                     <CardContent className="p-5 flex-1">
                       <div className="flex items-start gap-3">
                         <Avatar className="h-10 w-10 rounded-lg flex-shrink-0">
@@ -264,7 +264,10 @@ export function GroupsWorkspace() {
                         </Avatar>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium text-text-primary truncate">
+                            <span
+                              className="text-sm font-medium text-text-primary truncate"
+                              data-testid="group-card-name"
+                            >
                               {g.name || "(unnamed)"}
                             </span>
                             {activeShares > 0 && (
@@ -335,7 +338,7 @@ export function GroupsWorkspace() {
 
       {/* ─── Create dialog ──────────────────────────────────────── */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" data-testid="create-group-dialog">
           <DialogHeader>
             <DialogTitle>Create group</DialogTitle>
             <DialogDescription>
@@ -347,6 +350,7 @@ export function GroupsWorkspace() {
               <Label htmlFor="new-group-name">Group name</Label>
               <Input
                 id="new-group-name"
+                data-testid="create-group-name-input"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 placeholder="My group"
@@ -356,9 +360,9 @@ export function GroupsWorkspace() {
           </div>
           <DialogFooter>
             <DialogClose asChild>
-              <Button variant="outline">Cancel</Button>
+              <Button variant="outline" data-testid="create-group-cancel">Cancel</Button>
             </DialogClose>
-            <Button onClick={handleCreate} disabled={!newName.trim()}>
+            <Button data-testid="create-group-submit" onClick={handleCreate} disabled={!newName.trim()}>
               Create
             </Button>
           </DialogFooter>
@@ -367,7 +371,7 @@ export function GroupsWorkspace() {
 
       {/* ─── Join dialog ────────────────────────────────────────── */}
       <Dialog open={joinOpen} onOpenChange={setJoinOpen}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm" data-testid="join-group-dialog">
           <DialogHeader>
             <DialogTitle>Join group</DialogTitle>
             <DialogDescription>
@@ -379,6 +383,7 @@ export function GroupsWorkspace() {
               <Label htmlFor="join-link">Invite link or code</Label>
               <Input
                 id="join-link"
+                data-testid="join-invite-input"
                 value={joinLink}
                 onChange={(e) => setJoinLink(e.target.value)}
                 placeholder="Paste invite link or code"
@@ -387,9 +392,9 @@ export function GroupsWorkspace() {
           </div>
           <DialogFooter>
             <DialogClose asChild>
-              <Button variant="outline">Cancel</Button>
+              <Button variant="outline" data-testid="join-group-cancel">Cancel</Button>
             </DialogClose>
-            <Button onClick={handleJoin} disabled={!joinLink.trim()}>
+            <Button data-testid="join-group-submit" onClick={handleJoin} disabled={!joinLink.trim()}>
               Join
             </Button>
           </DialogFooter>

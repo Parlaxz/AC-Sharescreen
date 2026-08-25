@@ -1,6 +1,7 @@
 import { useStore } from "../stores/main-store.js";
 import { detachGroupFromRuntime } from "./group-record-helper.js";
 import { getApi } from "./get-api.js";
+import { getRuntime } from "./phase3-runtime.js";
 
 /**
  * Result of leaving a group.
@@ -43,6 +44,21 @@ export async function leaveGroupAction(
   }
 
   try {
+    // 0) Best-effort leave announcement to peers before the local record is
+    // deleted — after the IPC the connection may already be torn down.
+    // The 4500ms cap covers the bounded mapping-wait + retry window added
+    // to announceLocalLeave.
+    const runtime = getRuntime();
+    if (runtime && !runtime.isDestroyed()) {
+      const conn = runtime.getConnectionManager().getConnection(groupId);
+      if (conn && conn.state === "connected") {
+        await Promise.race([
+          runtime.getSyncService().announceLocalLeave(groupId),
+          new Promise((r) => setTimeout(r, 4500)),
+        ]).catch(() => {});
+      }
+    }
+
     // 1) Call persisted leaveGroup IPC
     await api.leaveGroup(groupId);
   } catch (err) {

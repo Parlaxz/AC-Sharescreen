@@ -1,0 +1,56 @@
+{
+  "timestamp": 1787608449938,
+  "currentPage": "host",
+  "selectedGroupId": "e0aeeb36-c304-4984-a91c-69cd9ba720f8",
+  "groups": [
+    {
+      "id": "e0aeeb36-c304-4984-a91c-69cd9ba720f8",
+      "name": "Media h3-14272-34505",
+      "memberCount": 2
+    }
+  ],
+  "groupConnections": [
+    {
+      "groupId": "e0aeeb36-c304-4984-a91c-69cd9ba720f8",
+      "state": "connected",
+      "onlinePeers": [
+        "da28da80-a0ce-445d-8c68-59eb8bc51ac7"
+      ],
+      "error": null
+    }
+  ],
+  "activeStreams": [
+    {
+      "logicalStreamId": "0ac519be-5618-4231-8ccb-9e0a5aec4b46",
+      "mediaSessionId": "68971235-7477-4bd9-bdbf-f21a7a421706",
+      "groupId": "e0aeeb36-c304-4984-a91c-69cd9ba720f8",
+      "hostDeviceId": "6866190d-b23e-4b63-a122-b828b34a5752",
+      "hostDisplayName": "Alice",
+      "sourceKind": "screen",
+      "sourceName": "Screen 1",
+      "startedAt": 1787608444156,
+      "appliedSettingsRevision": 0,
+      "heartbeatSequence": 0,
+      "streamRevision": 1,
+      "mediaJoinMetadata": "",
+      "replacesSessionId": null,
+      "isAudioDegraded": false
+    }
+  ],
+  "activeStreamsByGroup": {
+    "e0aeeb36-c304-4984-a91c-69cd9ba720f8": [
+      "6866190d-b23e-4b63-a122-b828b34a5752"
+    ]
+  },
+  "viewerSessions": [],
+  "hostShare": {
+    "sharing": true,
+    "sessionId": "0ac519be-5618-4231-8ccb-9e0a5aec4b46",
+    "mediaSessionId": "68971235-7477-4bd9-bdbf-f21a7a421706",
+    "sourceLabel": "Screen 1"
+  },
+  "helpers": {
+    "audio": "disabled",
+    "video": "disconnected"
+  }
+}

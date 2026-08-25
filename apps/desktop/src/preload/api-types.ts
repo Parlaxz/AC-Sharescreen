@@ -1,6 +1,8 @@
 ﻿import type { GroupSharedState, HybridTimestamp, NativePresenterDiagnostics, ShortcutBinding, PersistedSettings } from "@screenlink/shared";
 
 export interface ScreenLinkAPI {
+  /** E2E test flag — true only when the app runs with SCREENLINK_E2E=1. */
+  readonly __e2eEnabled?: boolean;
   showStreamToast: (payload: StreamToastPayload) => Promise<{ shown: boolean; reason?: string }>;
   onStreamToastAction: (callback: (action: StreamToastActionEvent) => void) => () => void;
   // Sources
@@ -64,6 +66,13 @@ export interface ScreenLinkAPI {
   // Fullscreen (native Electron)
   toggleFullscreen: () => Promise<boolean>;
   onFullscreenChanged: (callback: (isFullscreen: boolean) => void) => () => void;
+
+  // Quit lifecycle: main asks the renderer to release runtime state before teardown
+  onPrepareQuit: (callback: () => void) => () => void;
+
+  // Deep links (screenlink://group?... invite URLs routed via main)
+  getPendingDeepLinks: () => Promise<string[]>;
+  onDeepLinkJoin: (callback: (url: string) => void) => () => void;
 
   // App info
   getAppInfo: () => Promise<{
@@ -217,6 +226,7 @@ export interface ScreenLinkAPI {
   downloadUpdate: () => Promise<UpdateStatusDTO>;
   restartAndInstallUpdate: () => Promise<UpdateStatusDTO>;
   checkDownloadAndInstall: () => Promise<UpdateStatusDTO>;
+  setUpdateChannel: (channel: "stable" | "beta") => Promise<UpdateStatusDTO>;
   onUpdateStatusChanged: (callback: (status: UpdateStatusDTO) => void) => () => void;
 }
 
@@ -431,6 +441,8 @@ export interface UpdateStatusDTO {
   isPackaged: boolean;
   isPortable: boolean;
   updaterSupported: boolean;
+  /** Active update channel. Optional so older main processes stay compatible. */
+  channel?: "stable" | "beta";
 }
 
 // ─── Existing types ────────────────────────────────────────────────────────

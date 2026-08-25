@@ -1,0 +1,27 @@
+{
+  "agent": "g-alice-mt6xku9e24lt",
+  "flushedAt": "2026-08-24T07:45:30.429Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787557498142,
+      "iso": "2026-08-24T07:44:58.142Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 12 sources"
+    },
+    {
+      "t": 1787557500274,
+      "iso": "2026-08-24T07:45:00.274Z",
+      "source": "main-console",
+      "text": "Error occurred in handler for 'update-group-shortcut-config': Error: Failed to register \"Alt+Ctrl+M\"\n    at file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:411:27\n    at Session.<anonymous> (node:electron/js2c/browser_init:2:114084)\n    at Session.emit (node:events:509:28)"
+    },
+    {
+      "t": 1787557510290,
+      "iso": "2026-08-24T07:45:10.290Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}
