@@ -1,15 +1,19 @@
 @echo off
-rem Reverts ScreenLink to the STABLE update channel and immediately
-rem installs the latest stable version (downgrade from beta).
-rem Safe to run even when the beta app cannot render its UI.
+rem ============================================================================
+rem revert-to-stable.bat - HEADLESS rollback to the latest STABLE ScreenLink.
+rem
+rem Safe to run when the installed beta cannot render or launch: this script
+rem never executes the installed app. It flips the persisted update channel
+rem back to stable, closes running instances, downloads the latest stable
+rem installer from GitHub, and silently installs it over the existing copy.
+rem
+rem Options (forwarded to revert-to-stable.ps1):
+rem   -NoLaunch   do not relaunch ScreenLink after installing
+rem   -DryRun     print what would happen without changing anything
+rem   -NoPause    do not wait for Enter at the end (for automation)
+rem ============================================================================
 setlocal
-set "APP_EXE=%~dp0ScreenLink.exe"
-if not exist "%APP_EXE%" (
-    echo [ScreenLink] ScreenLink.exe not found next to this script: %APP_EXE%
-    pause
-    exit /b 1
-)
-echo [ScreenLink] Switching to the STABLE channel and installing the latest stable version...
-start "" "%APP_EXE%" --update-channel=stable
-echo [ScreenLink] The app will download and install the stable version automatically, then restart.
-exit /b 0
+set "SCRIPT_DIR=%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%revert-to-stable.ps1" %*
+set "EXITCODE=%errorlevel%"
+endlocal & exit /b %EXITCODE%

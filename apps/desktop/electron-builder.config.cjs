@@ -40,6 +40,9 @@ const config = {
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
+    // Rollback support: silent beta -> stable installs run an OLDER setup
+    // over a newer installation. Without this, NSIS refuses the downgrade.
+    allowDowngrade: true,
     // Stable artifact name that includes the version
     artifactName: "ScreenLink-Setup-${version}.${ext}",
   },
@@ -83,10 +86,15 @@ const config = {
       to: "screenlink-video-frame-ring.node",
     },
     {
-      // Revert-to-stable helper, shipped flat next to ScreenLink.exe so it
-      // can be run even when a broken beta build cannot render its UI.
+      // Headless beta -> stable rollback helpers, shipped flat next to
+      // ScreenLink.exe so they stay runnable even when a broken beta build
+      // cannot render its UI.
       from: "scripts/revert-to-stable.bat",
       to: "revert-to-stable.bat",
+    },
+    {
+      from: "scripts/revert-to-stable.ps1",
+      to: "revert-to-stable.ps1",
     },
   ],
   // Do not rebuild native modules unless specifically verified
