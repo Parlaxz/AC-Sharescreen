@@ -1,6 +1,6 @@
-﻿# revert-to-stable.ps1 - Headless rollback from a beta build to the latest
-# STABLE ScreenLink release. Does NOT execute the installed (possibly
-# broken) app at any point:
+﻿# revert-to-stable.ps1 - OFFLINE FALLBACK: manual rollback to the latest
+# stable ScreenLink release by downloading the FULL stable installer and
+# silent-installing it. Use ONLY if the primary differential rollback (revert-to-stable.bat) fails.
 #
 #   1. Flips the persisted update channel back to "stable" (settings.json).
 #   2. Queries GitHub for the latest non-prerelease release.
@@ -161,4 +161,5 @@ try {
 } catch {
     Finish 1 "Rollback FAILED: $_"
 }
+
 
