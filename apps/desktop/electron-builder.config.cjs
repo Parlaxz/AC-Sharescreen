@@ -40,9 +40,6 @@ const config = {
     oneClick: false,
     perMachine: false,
     allowToChangeInstallationDirectory: true,
-    // Rollback support: silent beta -> stable installs run an OLDER setup
-    // over a newer installation. Without this, NSIS refuses the downgrade.
-    allowDowngrade: true,
     // Stable artifact name that includes the version
     artifactName: "ScreenLink-Setup-${version}.${ext}",
   },
