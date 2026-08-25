@@ -67,8 +67,12 @@ export class WindowManager {
 
   /**
    * Create the main BrowserWindow with secure defaults and close-to-tray behavior.
+   *
+   * `loadRenderer` = false runs the main process only (headless update mode,
+   * e.g. --revert-to-stable): the window stays hidden and empty so a broken
+   * renderer build can never interfere with updater operations.
    */
-  create(): BrowserWindow {
+  create(loadRenderer = true): BrowserWindow {
     this.window = new BrowserWindow({
       width: 960,
       height: 700,
@@ -100,11 +104,13 @@ export class WindowManager {
     });
 
     // Load the renderer
-    const devServerUrl = process.env.VITE_DEV_SERVER_URL;
-    if (process.env.NODE_ENV === "development" || devServerUrl) {
-      this.window.loadURL(devServerUrl ?? "http://localhost:5173");
-    } else {
-      this.window.loadURL("screenlink://app/index.html");
+    if (loadRenderer) {
+      const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+      if (process.env.NODE_ENV === "development" || devServerUrl) {
+        this.window.loadURL(devServerUrl ?? "http://localhost:5173");
+      } else {
+        this.window.loadURL("screenlink://app/index.html");
+      }
     }
 
     this.window.webContents.on("before-input-event", (event, input) => {

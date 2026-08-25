@@ -95,6 +95,12 @@ function getArgValue(flag: string): string | null {
 const cliUpdateChannel = getArgValue("--update-channel");
 let forceFullUpdateOnReady = false;
 
+// Full headless rollback (--revert-to-stable), used by revert-to-stable.bat:
+// the updater runs in the main process only - no renderer is loaded and no
+// window is shown - applying a differential downgrade to the latest stable
+// release using the cached installer as the diff base.
+const revertToStableMode = process.argv.includes("--revert-to-stable");
+
 // ─── Module-level state (assigned in whenReady) ──────────────────────────────
 let windowManager: WindowManager;
 let trayManager: TrayManager;
@@ -175,7 +181,9 @@ app.whenReady().then(() => {
   }
 
   // ── Window ─────────────────────────────────────────────────────────────
-  const mainWindow = windowManager.create();
+  // Headless revert mode skips the renderer entirely: the updater runs from
+  // the main process and a broken beta build cannot interfere.
+  const mainWindow = windowManager.create(!revertToStableMode);
 
   // Safe renderer send for tray/menu paths: the window may be destroyed when
   // these callbacks race quit/reload ("Object has been destroyed").
@@ -418,7 +426,7 @@ app.whenReady().then(() => {
   );
 
   // ── Startup visibility ─────────────────────────────────────────────────
-  if (process.argv.includes("--hidden")) {
+  if (process.argv.includes("--hidden") || revertToStableMode) {
     mainWindow.hide();
   } else {
     mainWindow.show();
