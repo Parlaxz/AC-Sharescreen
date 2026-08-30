@@ -1,0 +1,27 @@
+{
+  "agent": "media-alice-remote-input-24492-3110",
+  "flushedAt": "2026-08-30T20:05:28.221Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1788120316190,
+      "iso": "2026-08-30T20:05:16.190Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1788120320888,
+      "iso": "2026-08-30T20:05:20.888Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 17 sources"
+    },
+    {
+      "t": 1788120327339,
+      "iso": "2026-08-30T20:05:27.339Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

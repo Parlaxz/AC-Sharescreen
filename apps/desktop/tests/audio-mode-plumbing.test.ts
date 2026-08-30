@@ -121,6 +121,46 @@ describe("Coordinator audio mode plumbing", () => {
     });
   });
 
+  it("passes remote input permissions to SSM.startStream", async () => {
+    const { startShare } = await import(
+      "../src/renderer/services/share-coordinator.js"
+    );
+
+    const inputPermissions = {
+      arrowLeft: true,
+      arrowRight: false,
+      space: true,
+      d: false,
+      s: true,
+    };
+
+    await startShare({
+      groupId: "group-1",
+      source: {
+        id: "src-remote-input",
+        name: "Screen",
+        kind: "screen",
+        displayId: null,
+        fingerprint: null,
+        audioMode: "none",
+      },
+      inputPermissions,
+    });
+
+    expect(_mockSsm.startStream).toHaveBeenLastCalledWith({
+      groupId: "group-1",
+      source: {
+        id: "src-remote-input",
+        name: "Screen",
+        kind: "screen",
+        displayId: null,
+        fingerprint: null,
+      },
+      audioMode: "none",
+      inputPermissions,
+    });
+  });
+
   it("persists last screen audio mode in store after starting", async () => {
     const { startShare } = await import(
       "../src/renderer/services/share-coordinator.js"

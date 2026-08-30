@@ -4,6 +4,7 @@ import type { Phase3Runtime } from "./phase3-runtime.js";
 import { extractTrackEvent } from "./sdk-event-normalizer.js";
 import { StreamMetricsService } from "./stream-metrics-service.js";
 import { isShareEndedRejection } from "./join-rejection.js";
+import { REMOTE_INPUT_SHORTCUTS, type RemoteInputKey } from "@screenlink/shared";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -99,6 +100,13 @@ const JOIN_RETRANSMIT_MAX = 2;
 
 /** Max time (ms) for any single awaited teardown step before proceeding. */
 const TEARDOWN_STEP_BUDGET_MS = 3_000;
+
+/** Max time (ms) to wait for the host's viewer.pause.result acknowledgement. */
+const PAUSE_ACK_TIMEOUT_MS = 5_000;
+/** Max acknowledged send attempts per pause/resume transaction. */
+const PAUSE_SEND_MAX_ATTEMPTS = 2;
+/** Delay (ms) before re-sending a retryable pause/resume request. */
+const PAUSE_RETRY_DELAY_MS = 400;
 
 /**
  * Race a promise against a bounded timeout. If the promise does not settle
@@ -371,10 +379,8 @@ export class ViewerSession {
         return;
       }
 
-      // 5) Send acknowledged pause request to host with operationId
-      const operationId = crypto.randomUUID();
-      this._pendingPauseOperationId = operationId;
-      await this.sendViewerPauseRequest(true, operationId);
+      // 5) Send acknowledged pause request (waiter registered before send)
+      await this.requestViewerPauseAck(true);
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) {
@@ -382,21 +388,7 @@ export class ViewerSession {
         return;
       }
 
-      // 6) Wait for host acknowledgement (5s timeout)
-      const runtime = getRuntime();
-      if (runtime && !runtime.isDestroyed()) {
-        try {
-          const result = await runtime.waitForViewerPauseResult(operationId, 5_000);
-          this.assertPauseResult(result, operationId, true);
-        } finally {
-          this._pendingPauseOperationId = null;
-        }
-      }
-
-      // GENERATION CHECK
-      if (!this.isPauseGenerationCurrent()) return;
-
-      // 7) Host confirmed — transition to paused
+      // 6) Host confirmed — transition to paused
       this.setPauseState("paused");
     } catch (err) {
       // Pause failed or timed out — revert to playing
@@ -452,10 +444,8 @@ export class ViewerSession {
         return;
       }
 
-      // 3) Send acknowledged resume request to host with operationId
-      const operationId = crypto.randomUUID();
-      this._pendingPauseOperationId = operationId;
-      await this.sendViewerPauseRequest(false, operationId);
+      // 3) Send acknowledged resume request (waiter registered before send)
+      await this.requestViewerPauseAck(false);
 
       // GENERATION CHECK
       if (!this.isPauseGenerationCurrent()) {
@@ -463,21 +453,7 @@ export class ViewerSession {
         return;
       }
 
-      // 4) Wait for host acknowledgement (5s timeout)
-      const runtime = getRuntime();
-      if (runtime && !runtime.isDestroyed()) {
-        try {
-          const result = await runtime.waitForViewerPauseResult(operationId, 5_000);
-          this.assertPauseResult(result, operationId, false);
-        } finally {
-          this._pendingPauseOperationId = null;
-        }
-      }
-
-      // GENERATION CHECK
-      if (!this.isPauseGenerationCurrent()) return;
-
-      // 5) Host confirmed — transition to playing.
+      // 4) Host confirmed — transition to playing.
       //    Do NOT clear poster here — keep it visible until the video element
       //    actually starts rendering fresh frames (playing event).
       //    Resume the video element playback so the live stream shows through.
@@ -511,32 +487,123 @@ export class ViewerSession {
    * the paused flag. The host responds with viewer.paused.result carrying
    * the same operationId for correlation.
    *
-   * Fire-and-forget — errors are caught internally.
+   * Reports delivery acceptance via boolean: GroupControlConnection
+   * .sendToPeer() never throws — it resolves false when no SDK or
+   * data-channel route exists — and a missing runtime/destroyed runtime/
+   * session identity also yields false. The caller must check the result.
    *
    * @param paused true to pause, false to resume
    * @param operationId unique operation identifier for result correlation
+   * @returns true when the message was accepted for delivery
    */
-  private async sendViewerPauseRequest(paused: boolean, operationId: string): Promise<void> {
+  private async sendViewerPauseRequest(paused: boolean, operationId: string): Promise<boolean> {
     const runtime = getRuntime();
-    if (!runtime || runtime.isDestroyed()) return;
-    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return;
+    if (!runtime || runtime.isDestroyed()) return false;
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return false;
 
     const conn = runtime.getConnectionManager().getConnection(this.groupId);
-    if (!conn) return;
+    if (!conn) return false;
 
     const peerUuid = conn.peerForDevice(this.hostDeviceId);
-    if (!peerUuid) return;
+    if (!peerUuid) return false;
 
-    await conn.sendToPeer(peerUuid, {
-      type: "viewer.pause.request",
-      groupId: this.groupId,
-      logicalStreamId: this.logicalStreamId,
-      mediaSessionId: this.mediaSessionId,
-      viewerSessionId: this._viewerSessionId ?? "",
-      viewerDeviceId: runtime.deviceId ?? "viewer",
-      operationId,
-      paused,
-    });
+    try {
+      return await conn.sendToPeer(peerUuid, {
+        type: "viewer.pause.request",
+        groupId: this.groupId,
+        logicalStreamId: this.logicalStreamId,
+        mediaSessionId: this.mediaSessionId,
+        viewerSessionId: this._viewerSessionId ?? "",
+        viewerDeviceId: runtime.deviceId ?? "viewer",
+        operationId,
+        paused,
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Run ONE acknowledged pause/resume transaction with bounded retry.
+   *
+   * The result waiter is registered BEFORE the request is sent — mirroring
+   * the join-flow race fix: if viewer.pause.result arrives in the gap
+   * between send and a late waiter registration, GroupMessageRouter drops
+   * it (no resolver yet) and the operation burns its full timeout before
+   * reverting. Registering first makes that window impossible.
+   *
+   * sendToPeer resolves false rather than throwing whenever no control
+   * route exists, so delivery acceptance must be checked via the boolean;
+   * an unrouted send fails fast instead of waiting out the ack timeout.
+   *
+   * Transient host failures ("sender not ready", "mapping missing") self-
+   * heal within milliseconds and are retried once after a short delay.
+   * Ack timeouts are NOT retried: an unreachable host should revert
+   * promptly rather than double the user-visible delay.
+   */
+  private async requestViewerPauseAck(paused: boolean): Promise<void> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= PAUSE_SEND_MAX_ATTEMPTS; attempt++) {
+      const operationId = crypto.randomUUID();
+      this._pendingPauseOperationId = operationId;
+
+      const runtime = getRuntime();
+      if (!runtime || runtime.isDestroyed()) {
+        throw new Error("runtime unavailable for pause request");
+      }
+
+      // Register the waiter BEFORE sending so an early viewer.pause.result
+      // cannot race past an unregistered resolver.
+      const resultPromise = runtime.waitForViewerPauseResult(
+        operationId,
+        PAUSE_ACK_TIMEOUT_MS,
+      );
+
+      const sent = await this.sendViewerPauseRequest(paused, operationId);
+
+      // Superseded by a newer pause/resume — abandon silently.
+      if (!this.isPauseGenerationCurrent()) {
+        this._pendingPauseOperationId = null;
+        resultPromise.catch(() => {});
+        return;
+      }
+
+      if (!sent) {
+        lastError = new Error("pause request could not be sent (no control route)");
+      } else {
+        try {
+          const result = await resultPromise;
+          this.assertPauseResult(result, operationId, paused);
+          this._pendingPauseOperationId = null;
+          return;
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+        }
+      }
+
+      // Abandon the waiter so it cannot hang until its own timeout.
+      runtime.cancelViewerPauseResult(operationId);
+      this._pendingPauseOperationId = null;
+
+      const message = lastError.message;
+      const retryable =
+        message.includes("could not be sent") ||
+        message.includes("sender not ready") ||
+        message.includes("mapping missing");
+
+      if (
+        !retryable ||
+        attempt >= PAUSE_SEND_MAX_ATTEMPTS ||
+        !this.isPauseGenerationCurrent()
+      ) {
+        throw lastError;
+      }
+
+      await this.delay(PAUSE_RETRY_DELAY_MS);
+    }
+
+    throw lastError ?? new Error("pause request failed");
   }
 
   private assertPauseResult(
@@ -875,6 +942,47 @@ export class ViewerSession {
       audioEnabled,
       videoEnabled,
     }).catch(() => {});
+  }
+
+  /**
+   * Send one remote input request to the current host. Permission gating is
+   * intentionally host-owned; this method only transports the requested key.
+   */
+  async sendViewerInput(key: RemoteInputKey): Promise<boolean> {
+    if (this._destructed || !this.isCurrent()) return false;
+    const runtime = getRuntime();
+    if (!runtime || runtime.isDestroyed()) return false;
+    if (!this.groupId || !this.hostDeviceId || !this.logicalStreamId) return false;
+
+    if (this.hostDeviceId === runtime.deviceId) {
+      const api = typeof window !== "undefined"
+        ? (window as unknown as { screenlink?: { sendShortcut: (binding: { modifiers: Array<"alt" | "ctrl" | "shift" | "win">; key: string }) => Promise<{ success: boolean }> } }).screenlink
+        : null;
+      if (!api?.sendShortcut) return false;
+      try {
+        const result = await api.sendShortcut({ modifiers: [], key: REMOTE_INPUT_SHORTCUTS[key] });
+        return result.success;
+      } catch {
+        return false;
+      }
+    }
+
+    const conn = runtime.getConnectionManager().getConnection(this.groupId);
+    if (!conn) return false;
+    const peerUuid = conn.peerForDevice(this.hostDeviceId);
+    if (!peerUuid) return false;
+
+    try {
+      return await conn.sendToPeer(peerUuid, {
+        type: "viewer.input.request",
+        groupId: this.groupId,
+        logicalStreamId: this.logicalStreamId,
+        viewerDeviceId: runtime.deviceId ?? "viewer",
+        key,
+      });
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1427,8 +1535,11 @@ export class ViewerSession {
       // to interpret that as the host ending the share.
       const handleRemoteTrackEnded = (): void => {
         if (!this.isCurrent()) return;
-        // Do not trigger auto-stop while the user has intentionally paused
-        if (this._pauseState === "paused" || this._pauseState === "pausing") return;
+        // Do not trigger auto-stop unless actively playing: while paused or
+        // pausing the pause itself stops media (firing track-ended), and a
+        // late track-ended event fired while resuming must not tear down
+        // the session either.
+        if (this._pauseState !== "playing") return;
 
         if (this._remoteTrackEndedTimer) clearTimeout(this._remoteTrackEndedTimer);
         this._remoteTrackEndedTimer = setTimeout(() => {

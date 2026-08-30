@@ -71,6 +71,25 @@ import {
 import type { ProcessorAPI } from "@/services/viewer-image-processing/processor-api";
 import { getNvidiaCapabilitySnapshot } from "@/services/nvidia-capability-store";
 
+import type { RemoteInputKey, RemoteInputPermissions } from "@screenlink/shared";
+const REMOTE_INPUT_KEYS: RemoteInputKey[] = ["ArrowLeft", "ArrowRight", "Space", "d", "s"];
+
+function remoteKeyFromEvent(key: string): RemoteInputKey | null {
+  if (key === "ArrowLeft" || key === "ArrowRight") return key;
+  if (key === "p" || key === "P") return "Space";
+  if (key === "d" || key === "D") return "d";
+  if (key === "s" || key === "S") return "s";
+  return null;
+}
+
+function hasRemotePermission(permissions: RemoteInputPermissions | undefined, key: RemoteInputKey): boolean {
+  if (!permissions) return false;
+  const permissionKey: Record<RemoteInputKey, keyof RemoteInputPermissions> = {
+    ArrowLeft: "arrowLeft", ArrowRight: "arrowRight", Space: "space", d: "d", s: "s",
+  };
+  return permissions[permissionKey[key]] === true;
+}
+
 // ─── Viewer lifecycle is now owned by ViewerSessionController (Phase 4) ──
 // The module-level lifecycle queue has been removed.
 // Use useViewerSession() hook instead.
@@ -1759,6 +1778,31 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     return streams.find((s) => s.logicalStreamId === currentStreamId) ?? null;
   }, [selectedGroupId, activeStreamsByGroup, currentStreamId, watchingTarget]);
 
+  const remoteInputPermissions = (currentStream as (StreamAnnouncement & { inputPermissions?: RemoteInputPermissions }) | null)?.inputPermissions;
+  const enabledRemoteKeys = REMOTE_INPUT_KEYS.filter((key) => hasRemotePermission(remoteInputPermissions, key));
+
+  // Capture before the global shortcut listener. A permitted P/S belongs to the
+  // host; a non-permitted key continues through to the normal app shortcut.
+  useEffect(() => {
+    if (!isViewing) return;
+    const send = (event: KeyboardEvent) => {
+      const key = remoteKeyFromEvent(event.key);
+      if (!key || !hasRemotePermission(remoteInputPermissions, key)) return;
+      if (event.repeat) return;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT" || target?.isContentEditable) return;
+      event.preventDefault();
+      const session = sessionRef.current as (ViewerSession & { sendViewerInput?: (key: RemoteInputKey) => Promise<boolean> | boolean }) | null;
+      void Promise.resolve(session?.sendViewerInput?.(key)).catch(() => {});
+    };
+    const onKeyDown = (event: KeyboardEvent) => send(event);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [isViewing, remoteInputPermissions]);
+
   // Set initial stream ID
   useEffect(() => {
     if (currentStream && !currentStreamId) {
@@ -2311,6 +2355,7 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
                 isStreamPaused={streamPauseState === "paused"}
                 isStreamPauseTransitioning={streamPauseTransitioning}
                 onToggleStreamPause={handleToggleStreamPause}
+                remoteInputKeys={enabledRemoteKeys}
                 volume={volume}
                 isMuted={isMuted}
                 onVolumeChange={handleVolumeChange}
@@ -2388,6 +2433,7 @@ function VideoControlsOverlay({
   isStreamPaused,
   isStreamPauseTransitioning,
   onToggleStreamPause,
+  remoteInputKeys,
   volume,
   isMuted,
   onVolumeChange,
@@ -2422,6 +2468,7 @@ function VideoControlsOverlay({
   isStreamPaused?: boolean;
   isStreamPauseTransitioning?: boolean;
   onToggleStreamPause?: () => void;
+  remoteInputKeys?: string[];
   volume: number;
   isMuted: boolean;
   onVolumeChange: (v: number) => void;
@@ -2458,6 +2505,7 @@ function VideoControlsOverlay({
       isStreamPaused={isStreamPaused}
       isStreamPauseTransitioning={isStreamPauseTransitioning}
       onToggleStreamPause={onToggleStreamPause}
+      remoteInputKeys={remoteInputKeys}
       volume={volume}
       isMuted={isMuted}
       onVolumeChange={onVolumeChange}

@@ -1,0 +1,19 @@
+{
+  "a": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 19.491,
+    "rvfc": 60
+  },
+  "b": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 24.497,
+    "rvfc": 177
+  },
+  "delta": 5.006
+}

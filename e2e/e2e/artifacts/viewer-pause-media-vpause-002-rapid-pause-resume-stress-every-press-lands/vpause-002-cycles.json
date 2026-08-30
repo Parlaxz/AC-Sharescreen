@@ -1,0 +1,39 @@
+{
+  "cycles": [
+    {
+      "cycle": 1,
+      "action": "pause",
+      "ms": 2170
+    },
+    {
+      "cycle": 2,
+      "action": "resume",
+      "ms": 55
+    },
+    {
+      "cycle": 3,
+      "action": "pause",
+      "ms": 2357
+    },
+    {
+      "cycle": 4,
+      "action": "resume",
+      "ms": 180
+    },
+    {
+      "cycle": 5,
+      "action": "pause",
+      "ms": 2494
+    },
+    {
+      "cycle": 6,
+      "action": "resume",
+      "ms": 66
+    },
+    {
+      "cycle": 7,
+      "action": "pause",
+      "ms": 2063
+    }
+  ]
+}

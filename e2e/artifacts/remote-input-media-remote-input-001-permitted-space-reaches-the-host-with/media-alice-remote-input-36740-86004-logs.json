@@ -1,0 +1,81 @@
+{
+  "agent": "media-alice-remote-input-36740-86004",
+  "flushedAt": "2026-08-30T19:53:32.390Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1788119596951,
+      "iso": "2026-08-30T19:53:16.951Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1788119607148,
+      "iso": "2026-08-30T19:53:27.148Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Spawning helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\audio-helper\\build\\Release\\screenlink-audio-helper.exe"
+    },
+    {
+      "t": 1788119607149,
+      "iso": "2026-08-30T19:53:27.149Z",
+      "source": "main-console",
+      "text": "[AudioHelper] helper-binary path=\"C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\audio-helper\\build\\Release\\screenlink-audio-helper.exe\" size=977920 mtime=2026-08-25T14:37:56.159Z"
+    },
+    {
+      "t": 1788119608153,
+      "iso": "2026-08-30T19:53:28.153Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Helper spawned, PID: 28388"
+    },
+    {
+      "t": 1788119608153,
+      "iso": "2026-08-30T19:53:28.153Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Connecting to control pipe: \\\\.\\pipe\\screenlink-d663f025f9f43e07f424e9fb3e301cf4-ctrl"
+    },
+    {
+      "t": 1788119608157,
+      "iso": "2026-08-30T19:53:28.157Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Control pipe connected"
+    },
+    {
+      "t": 1788119608157,
+      "iso": "2026-08-30T19:53:28.157Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Sending hello..."
+    },
+    {
+      "t": 1788119608160,
+      "iso": "2026-08-30T19:53:28.160Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Hello handshake complete, helper version: 0.1.0"
+    },
+    {
+      "t": 1788119608160,
+      "iso": "2026-08-30T19:53:28.160Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Connecting PCM pipe..."
+    },
+    {
+      "t": 1788119608162,
+      "iso": "2026-08-30T19:53:28.162Z",
+      "source": "main-console",
+      "text": "[AudioHelper] PCM pipe connected"
+    },
+    {
+      "t": 1788119610798,
+      "iso": "2026-08-30T19:53:30.798Z",
+      "source": "main-console",
+      "text": "[AudioHelper] Helper exited: code=1 signal=null (GENERIC_FAILURE)"
+    },
+    {
+      "t": 1788119611645,
+      "iso": "2026-08-30T19:53:31.645Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

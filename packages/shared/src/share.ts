@@ -1,3 +1,5 @@
+import type { RemoteInputPermissions } from "./streaming.js";
+
 /**
  * Screen-sharing source types and start-share input contracts
  * shared between renderer services and the IPC boundary.
@@ -24,6 +26,8 @@ export interface ShareSource {
 export interface StartShareInput {
   groupId: string;
   source: ShareSource;
+  /** Per-share remote keyboard permissions; omitted means all denied. */
+  inputPermissions?: RemoteInputPermissions;
   qualityOverride?: {
     videoBitrateKbps?: number;
     sendWidth?: number;

@@ -1,0 +1,33 @@
+{
+  "agent": "media-alice-vpause1-33948-32801",
+  "flushedAt": "2026-08-26T02:21:24.666Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1787710848379,
+      "iso": "2026-08-26T02:20:48.379Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1787710852823,
+      "iso": "2026-08-26T02:20:52.823Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1787710869813,
+      "iso": "2026-08-26T02:21:09.813Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-vpause1-33948-32801\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-vpause1-33948-32801\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1787710883933,
+      "iso": "2026-08-26T02:21:23.933Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

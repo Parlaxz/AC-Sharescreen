@@ -16,6 +16,9 @@ import { SecureStore } from "./secure-store.js";
 } from "@screenlink/shared";
 import { z } from "zod";
 
+const RENAME_RETRY_WINDOW_MS = 250;
+const RENAME_RETRY_DELAY_MS = 10;
+
 const QuickShareSourceSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -68,6 +71,7 @@ export interface GroupConnectionConfig {
 export class GroupStore {
   private filePath: string;
   private backupPath: string;
+  private tempPath: string;
   private records: Map<string, LocalGroupRecord>;
   private secureStore: SecureStore;
 
@@ -76,6 +80,7 @@ export class GroupStore {
     const userData = basePath ?? app.getPath("userData");
     this.filePath = path.join(userData, "groups.json");
     this.backupPath = path.join(userData, "groups.json.bak");
+    this.tempPath = this.filePath + ".tmp";
     this.records = this.load();
   }
 
@@ -108,7 +113,7 @@ export class GroupStore {
 
   private load(): Map<string, LocalGroupRecord> {
     const map = new Map<string, LocalGroupRecord>();
-    const tryRead = (filePath: string): LocalGroupRecord[] | null => {
+    const tryRead = (filePath: string): { records: LocalGroupRecord[]; needsPersist: boolean } | null => {
       if (!fs.existsSync(filePath)) return null;
       try {
         const raw = fs.readFileSync(filePath, "utf-8");
@@ -137,50 +142,93 @@ export class GroupStore {
             validated.push(result.data as LocalGroupRecord);
           }
         }
-        if (needsPersist && validated.length > 0) {
-          // Persist migrated data silently
-          try {
-            this.writeAtomic(validated);
-          } catch {
-            // best-effort
-          }
-        }
-        return validated;
+        return { records: validated, needsPersist: needsPersist && validated.length > 0 };
       } catch {
         return null;
       }
     };
 
-    let records = tryRead(this.filePath);
-    if (!records) {
-      records = tryRead(this.backupPath);
-      if (records) {
+    const primary = tryRead(this.filePath);
+    const temp = tryRead(this.tempPath);
+    let loaded = temp ?? primary;
+    if (temp) {
+      // A valid temp file is a complete pending snapshot from an interrupted
+      // write, so prefer it over the possibly stale primary. Re-promote it
+      // through the normal atomic path, but keep the in-memory snapshot if
+      // promotion is still blocked by the filesystem.
+      try {
+        this.writeAtomic(temp.records, true);
+      } catch {
+        // best-effort recovery; the valid temp snapshot is still loaded below
+      }
+    } else if (primary) {
+      if (primary.needsPersist) {
         try {
-          this.writeAtomic(records);
+          this.writeAtomic(primary.records);
+        } catch {
+          // best-effort migration
+        }
+      }
+    } else {
+      loaded = tryRead(this.backupPath);
+      if (loaded) {
+        try {
+          this.writeAtomic(loaded.records);
         } catch {
           // best-effort recovery
         }
       }
     }
-    if (!records) records = [];
-    for (const r of records) {
+    for (const r of loaded?.records ?? []) {
       map.set(r.groupId, r);
     }
     return map;
   }
 
-  private writeAtomic(records: LocalGroupRecord[]): void {
-    const tmpPath = this.filePath + ".tmp";
+  private writeAtomic(records: LocalGroupRecord[], preserveTempOnFailure = false): void {
+    const tmpPath = this.tempPath;
     const json = JSON.stringify(records, null, 2);
     fs.writeFileSync(tmpPath, json, "utf-8");
     if (fs.existsSync(this.filePath)) {
       fs.copyFileSync(this.filePath, this.backupPath);
     }
-    fs.renameSync(tmpPath, this.filePath);
+    const deadline = Date.now() + RENAME_RETRY_WINDOW_MS;
+    let delayMs = RENAME_RETRY_DELAY_MS;
+    try {
+      while (true) {
+        try {
+          fs.renameSync(tmpPath, this.filePath);
+          return;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          if ((code !== "EPERM" && code !== "EBUSY") || Date.now() >= deadline) {
+            throw error;
+          }
+
+          const remaining = deadline - Date.now();
+          const delay = Math.min(delayMs, remaining);
+          if (delay <= 0) throw error;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+          delayMs = Math.min(delayMs * 2, RENAME_RETRY_DELAY_MS * 4);
+        }
+      }
+    } catch (error) {
+      if (!preserveTempOnFailure) {
+        // Do not remove the temp file while retries may still succeed. Once
+        // the bounded retry window is exhausted, remove it when possible so a
+        // stale temp file cannot be mistaken for a pending write.
+        try {
+          if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+        } catch {
+          // Best effort: the original rename error is the useful failure.
+        }
+      }
+      throw error;
+    }
   }
 
-  private persist(): void {
-    this.writeAtomic(Array.from(this.records.values()));
+  private persist(records: Map<string, LocalGroupRecord> = this.records): void {
+    this.writeAtomic(Array.from(records.values()));
   }
 
   list(): LocalGroupRecord[] {
@@ -242,8 +290,10 @@ export class GroupStore {
       notificationsEnabled: true,
       creatorDeviceId: input.nodeId,
     };
-    this.records.set(input.groupId, record);
-    this.persist();
+    const nextRecords = new Map(this.records);
+    nextRecords.set(input.groupId, record);
+    this.persist(nextRecords);
+    this.records = nextRecords;
     return record;
   }
 
@@ -312,16 +362,21 @@ export class GroupStore {
       joinedAt,
       notificationsEnabled: true,
     };
-    this.records.set(input.invite.groupId, record);
-    this.persist();
+    const nextRecords = new Map(this.records);
+    nextRecords.set(input.invite.groupId, record);
+    this.persist(nextRecords);
+    this.records = nextRecords;
     return record;
   }
 
   updateSharedState(groupId: string, state: GroupSharedState): void {
     const record = this.records.get(groupId);
     if (!record) return;
-    record.sharedState = state;
-    this.persist();
+    const updatedRecord = { ...record, sharedState: state };
+    const nextRecords = new Map(this.records);
+    nextRecords.set(groupId, updatedRecord);
+    this.persist(nextRecords);
+    Object.assign(record, updatedRecord);
   }
 
   updateClock(groupId: string, stamp: HybridTimestamp): void {
@@ -340,15 +395,21 @@ export class GroupStore {
     ) {
       incoming.counter = stamp.counter + 1;
     }
-    record.lastClock = incoming;
-    this.persist();
+    const updatedRecord = { ...record, lastClock: incoming };
+    const nextRecords = new Map(this.records);
+    nextRecords.set(groupId, updatedRecord);
+    this.persist(nextRecords);
+    Object.assign(record, updatedRecord);
   }
 
   setNotificationsEnabled(groupId: string, enabled: boolean): void {
     const record = this.records.get(groupId);
     if (!record) return;
-    record.notificationsEnabled = enabled;
-    this.persist();
+    const updatedRecord = { ...record, notificationsEnabled: enabled };
+    const nextRecords = new Map(this.records);
+    nextRecords.set(groupId, updatedRecord);
+    this.persist(nextRecords);
+    Object.assign(record, updatedRecord);
   }
 
   getConnectionConfig(groupId: string, nodeId: string): GroupConnectionConfig | null {
@@ -426,8 +487,10 @@ export class GroupStore {
 
   leave(groupId: string): void {
     if (!this.records.has(groupId)) return;
-    this.records.delete(groupId);
-    this.persist();
+    const nextRecords = new Map(this.records);
+    nextRecords.delete(groupId);
+    this.persist(nextRecords);
+    this.records = nextRecords;
   }
 
   // ── Per-group quick action shortcut settings ───────────────────────────
@@ -477,10 +540,14 @@ export class GroupStore {
   ): void {
     const record = this.records.get(groupId);
     if (!record) return;
-    if ("quickShareShortcut" in config) record.quickShareShortcut = config.quickShareShortcut ?? null;
-    if ("quickJoinShortcut" in config) record.quickJoinShortcut = config.quickJoinShortcut ?? null;
-    if ("quickShareSource" in config) record.quickShareSource = config.quickShareSource ?? null;
-    if ("quickShareDefaultPresetId" in config) record.quickShareDefaultPresetId = config.quickShareDefaultPresetId ?? null;
-    this.persist();
+    const updatedRecord = { ...record };
+    if ("quickShareShortcut" in config) updatedRecord.quickShareShortcut = config.quickShareShortcut ?? null;
+    if ("quickJoinShortcut" in config) updatedRecord.quickJoinShortcut = config.quickJoinShortcut ?? null;
+    if ("quickShareSource" in config) updatedRecord.quickShareSource = config.quickShareSource ?? null;
+    if ("quickShareDefaultPresetId" in config) updatedRecord.quickShareDefaultPresetId = config.quickShareDefaultPresetId ?? null;
+    const nextRecords = new Map(this.records);
+    nextRecords.set(groupId, updatedRecord);
+    this.persist(nextRecords);
+    Object.assign(record, updatedRecord);
   }
 }

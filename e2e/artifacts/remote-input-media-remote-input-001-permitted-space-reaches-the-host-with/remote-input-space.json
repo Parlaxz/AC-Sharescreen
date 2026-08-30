@@ -1,0 +1,37 @@
+{
+  "before": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 2.698,
+    "rvfc": 4
+  },
+  "after": {
+    "present": true,
+    "readyState": 4,
+    "videoWidth": 786,
+    "videoHeight": 592,
+    "currentTime": 2.698,
+    "rvfc": 4
+  },
+  "viewerMarkers": [
+    {
+      "t": 1788119628642,
+      "marker": "app-ready"
+    },
+    {
+      "t": 1788119628642,
+      "marker": "group-connected"
+    },
+    {
+      "t": 1788119628642,
+      "marker": "viewer-joined"
+    },
+    {
+      "t": 1788119629666,
+      "marker": "viewer-watching"
+    }
+  ],
+  "hostViewerState": "paused"
+}

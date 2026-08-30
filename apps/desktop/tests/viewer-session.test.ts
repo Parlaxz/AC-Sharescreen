@@ -58,7 +58,10 @@ import { getRuntime } from "../src/renderer/services/phase3-runtime.js";
 import { ViewerSession } from "../src/renderer/services/viewer-session.js";
 
 function makeMockRuntime() {
-  const sendToPeer = vi.fn().mockResolvedValue(undefined);
+  // sendToPeer reports delivery acceptance via boolean (true = route accepted
+  // the message); ViewerSession.sendViewerPauseRequest treats falsy as "no
+  // control route".
+  const sendToPeer = vi.fn().mockResolvedValue(true);
   const conn = {
     sendToPeer,
     peerForDevice: vi.fn().mockReturnValue("peer-uuid-host"),
@@ -2163,7 +2166,9 @@ describe("ViewerSession — pause/resume video element", () => {
   // When conn.sendToPeer rejects for the viewer.pause.request message (not the
   // host ack timeout), the session MUST recover promptly — it must NOT block
   // waiting for the full host timeout (5s). It should restore video playback
-  // and ViewerClient local intent, ending in "playing" state.
+  // and ViewerClient local intent, ending in "playing" state. The result
+  // waiter is registered BEFORE the send (race fix), so it must be cancelled
+  // when the send fails.
   it("sendToPeer failure for pause request recovers promptly without blocking on host timeout", async () => {
     const videoEl = mockVideoEl();
     setupNonSelfViewSession(videoEl);
@@ -2174,17 +2179,15 @@ describe("ViewerSession — pause/resume video element", () => {
         if (payload.type === "viewer.pause.request") {
           throw new Error("sendToPeer failed");
         }
+        return true;
       },
     );
 
-    // Spy on waitForViewerPauseResult — should NOT be called after send failure
-    const pauseResultSpy = vi.fn();
-    mockRuntimeMethods.waitForViewerPauseResult.mockImplementation(pauseResultSpy);
+    await expect(session.pause()).rejects.toThrow(/could not be sent/);
 
-    await expect(session.pause()).rejects.toThrow();
-
-    // Must NOT call waitForViewerPauseResult (recovered before host timeout)
-    expect(pauseResultSpy).not.toHaveBeenCalled();
+    // Waiter was registered before the send (race fix) and cancelled on failure
+    expect(mockRuntimeMethods.waitForViewerPauseResult).toHaveBeenCalled();
+    expect(mockRuntimeMethods.cancelViewerPauseResult).toHaveBeenCalled();
     // Must restore video playback
     expect(videoEl.play).toHaveBeenCalled();
     // Must restore ViewerClient local intent

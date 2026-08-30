@@ -1,5 +1,5 @@
 ﻿import { useCallback, useMemo, useState, useEffect } from "react";
-import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, RotateCcw, ArrowRight, UserX } from "lucide-react";
+import { Monitor, StopCircle, Radio, Eye, Clock, AlertTriangle, RefreshCw, RotateCcw, ArrowRight, UserX, Keyboard } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -39,6 +39,17 @@ import { BandwidthGraphModal } from "./BandwidthGraphModal.js";
 import { formatBitrateKbps } from "@/lib/utils";
 import { toast } from "sonner";
 import { shouldAutoKickViewer, shouldShowViewerAfterKick } from "@/lib/viewer-kick-policy";
+import { Switch } from "@/components/ui/switch";
+import type { RemoteInputPermissions } from "@screenlink/shared";
+
+type RemoteInputKey = "arrowLeft" | "arrowRight" | "space" | "d" | "s";
+const REMOTE_INPUT_OPTIONS: Array<{ key: RemoteInputKey; label: string; glyph: string }> = [
+  { key: "arrowLeft", label: "Left arrow", glyph: "←" },
+  { key: "arrowRight", label: "Right arrow", glyph: "→" },
+  { key: "space", label: "Space", glyph: "␠" },
+  { key: "d", label: "D", glyph: "D" },
+  { key: "s", label: "S", glyph: "S" },
+];
 
 function formatLiveDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
@@ -217,6 +228,11 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
   const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const runtime = getRuntime();
+  const sessionManager = runtime?.getStreamSessionManager();
+  const [inputPermissions, setInputPermissions] = useState<RemoteInputPermissions>(() =>
+    ((sessionManager as unknown as { getInputPermissions?: () => RemoteInputPermissions })?.getInputPermissions?.() ??
+      { arrowLeft: false, arrowRight: false, space: false, d: false, s: false }) as RemoteInputPermissions,
+  );
   const sdk = runtime
     ?.getStreamSessionManager()
     ?.getPublisherManager()
@@ -350,6 +366,19 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
       setIsRestarting(false);
     }
   }, []);
+
+  const handleInputPermissionChange = useCallback((key: RemoteInputKey, enabled: boolean) => {
+    const next = { ...inputPermissions, [key]: enabled };
+    setInputPermissions(next);
+    const manager = getRuntime()?.getStreamSessionManager() as unknown as {
+      setInputPermissions?: (permissions: RemoteInputPermissions) => void | Promise<void>;
+    } | undefined;
+    if (manager?.setInputPermissions) {
+      void Promise.resolve(manager.setInputPermissions(next)).catch(() => {
+        toast.error("Could not update viewer key controls");
+      });
+    }
+  }, [inputPermissions]);
 
   const handlePreview = useCallback(() => {
     const s = useStore.getState();
@@ -582,6 +611,32 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
               Degraded
             </Badge>
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="viewer-key-controls-card">
+        <CardHeader className="pb-3">
+          <div className="flex items-center gap-2">
+            <Keyboard className="h-4 w-4 text-accent" aria-hidden="true" />
+            <CardTitle className="text-sm font-medium text-text-primary">Viewer key controls</CardTitle>
+            <Badge variant="secondary" className="ml-auto text-[10px]">
+              {Object.values(inputPermissions).filter(Boolean).length}/5 enabled
+            </Badge>
+          </div>
+          <p className="text-xs text-text-secondary">Choose which keys viewers may send to this computer. Changes apply immediately.</p>
+        </CardHeader>
+        <CardContent className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          {REMOTE_INPUT_OPTIONS.map((option) => (
+            <label key={option.key} className="flex items-center gap-2 rounded-standard border border-border-subtle bg-surface-2 px-2.5 py-2 cursor-pointer hover:bg-surface-hover">
+              <Switch
+                checked={inputPermissions[option.key]}
+                onCheckedChange={(checked) => handleInputPermissionChange(option.key, checked)}
+                aria-label={`Allow viewer ${option.label}`}
+                data-testid={`host-viewer-key-${option.key.toLowerCase()}`}
+              />
+              <span className="text-xs text-text-primary"><kbd className="font-mono text-text-secondary">{option.glyph}</kbd> {option.label}</span>
+            </label>
+          ))}
         </CardContent>
       </Card>
 

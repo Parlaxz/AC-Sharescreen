@@ -2,13 +2,12 @@
   "config": {
     "argv": [
       "C:\\Program Files\\nodejs\\node.exe",
-      "C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\node_modules\\@playwright\\test\\cli.js",
+      "C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\node_modules\\playwright\\cli.js",
       "test",
-      "--config",
-      "e2e/playwright.config.ts",
-      "--project=all",
+      "viewer-pause.spec.ts",
+      "--project=media",
       "-g",
-      "LIF-001"
+      "VPAUSE-001"
     ],
     "configFile": "C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\e2e\\playwright.config.ts",
     "rootDir": "C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/e2e/tests",
@@ -188,36 +187,58 @@
   },
   "suites": [
     {
-      "title": "lifecycle.spec.ts",
-      "file": "lifecycle.spec.ts",
+      "title": "viewer-pause.spec.ts",
+      "file": "viewer-pause.spec.ts",
       "column": 0,
       "line": 0,
       "specs": [
         {
-          "title": "@critical @smoke LIF-001: clean-profile launch health",
+          "title": "@critical @media VPAUSE-001: pause freezes frames AND stops network bytes; resume restores both",
           "ok": true,
           "tags": [
             "critical",
-            "smoke"
+            "media"
           ],
           "tests": [
             {
-              "timeout": 180000,
+              "timeout": 600000,
               "annotations": [],
               "expectedStatus": "passed",
-              "projectId": "all",
-              "projectName": "all",
+              "projectId": "media",
+              "projectName": "media",
               "results": [
                 {
                   "workerIndex": 0,
                   "parallelIndex": 0,
                   "status": "passed",
-                  "duration": 3813,
+                  "duration": 64434,
                   "errors": [],
-                  "stdout": [],
+                  "stdout": [
+                    {
+                      "text": "[helpers-media] media-alice-vpause1-41768-18135: audio-mode radio values: [{\"value\":\"none\",\"checked\":\"true\"},{\"value\":\"application\",\"checked\":\"false\"}]\n"
+                    },
+                    {
+                      "text": "[VPAUSE-001] video live: 786×592\n"
+                    },
+                    {
+                      "text": "[VPAUSE-001] baseline bytes: 6862 → 53645 (delta=46783)\n"
+                    },
+                    {
+                      "text": "[VPAUSE-001] frozen: currentTime 4.903 → 4.903 (delta=0.00, rvfc 25 → 25)\n"
+                    },
+                    {
+                      "text": "[VPAUSE-001] paused bytes: 61925 → 61925 (delta=0)\n"
+                    },
+                    {
+                      "text": "[VPAUSE-001] resumed: currentTime 19.491 → 24.497 (delta=5.01)\n"
+                    },
+                    {
+                      "text": "[VPAUSE-001] resumed bytes: 301918 → 459825 (delta=157907)\n"
+                    }
+                  ],
                   "stderr": [],
                   "retry": 0,
-                  "startTime": "2026-08-25T15:35:59.188Z",
+                  "startTime": "2026-08-26T02:26:58.219Z",
                   "annotations": [],
                   "attachments": []
                 }
@@ -225,9 +246,9 @@
               "status": "expected"
             }
           ],
-          "id": "1f1785dee40219527314-13202d25a1dfc8955234",
-          "file": "lifecycle.spec.ts",
-          "line": 42,
+          "id": "9d09caf25e095d55b9bf-77341c6d0885d0dfc069",
+          "file": "viewer-pause.spec.ts",
+          "line": 206,
           "column": 1
         }
       ]
@@ -235,8 +256,8 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2026-08-25T15:35:57.772Z",
-    "duration": 5276.355,
+    "startTime": "2026-08-26T02:26:55.429Z",
+    "duration": 67324.573,
     "expected": 1,
     "skipped": 0,
     "unexpected": 0,

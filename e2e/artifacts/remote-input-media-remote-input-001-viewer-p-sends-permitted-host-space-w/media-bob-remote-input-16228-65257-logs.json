@@ -1,0 +1,53 @@
+{
+  "agent": "media-bob-remote-input-16228-65257",
+  "flushedAt": "2026-08-30T20:03:13.070Z",
+  "rendererConsole": [
+    {
+      "t": 1788120186683,
+      "iso": "2026-08-30T20:03:06.683Z",
+      "source": "renderer-console",
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+      "url": "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Cstyle%3E%0A*%7Bbox-sizing%3Aborder-box%7Dhtml%2Cbody%7Bmargin%3A0%3Bwidth%3A100%25%3Bheight%3A100%25%3Boverflow%3Ahidden%3Bbackground%3Atransparent%3Bfont-family%3ASegoe%20UI%2Csystem-ui%2Csans-serif%3Bcolor%3A%23f5f7fb%7Dbody%7Bpadding%3A8px%3Banimation%3Aslide%20.22s%20ease-out%7D.card%7Bheight%3A104px%3Bpadding%3A14px%2014px%2012px%3Bbackground%3A%2317181c%3Bborder%3A1px%20solid%20%23343740%3Bborder-radius%3A12px%3Bbox-shadow%3A0%2010px%2028px%20%230009%3Bposition%3Arelative%7D.close%7Bposition%3Aabsolute%3Bright%3A9px%3Btop%3A7px%3Bborder%3A0%3Bbackground%3Atransparent%3Bcolor%3A%238f96a3%3Bfont-size%3A18px%3Bline-height%3A18px%3Bcursor%3Apointer%7D.title%7Bfont-size%3A15px%3Bfont-weight%3A700%3Bpadding-right%3A22px%7D.group%7Bfont-size%3A12px%3Bcolor%3A%239da3b0%3Bmargin-top%3A3px%3Bwhite-space%3Anowrap%3Boverflow%3Ahidden%3Btext-overflow%3Aellipsis%7D.actions%7Bdisplay%3Aflex%3Bgap%3A8px%3Bmargin-top%3A10px%7D.button%7Bborder-radius%3A6px%3Bpadding%3A5px%2014px%3Bfont-size%3A12px%3Bfont-weight%3A600%3Bcursor%3Apointer%7D.join%7Bborder%3A1px%20solid%20%235b8cff%3Bbackground%3A%233e6fe8%3Bcolor%3Awhite%7D.dismiss%7Bborder%3A1px%20solid%20%23414650%3Bbackground%3Atransparent%3Bcolor%3A%23c0c5cf%7D.leaving%7Banimation%3Afade%20.25s%20ease-in%20forwards%7D%40keyframes%20slide%7Bfrom%7Bopacity%3A0%3Btransform%3AtranslateX(24px)%7Dto%7Bopacity%3A1%3Btransform%3AtranslateX(0)%7D%7D%40keyframes%20fade%7Bto%7Bopacity%3A0%3Btransform%3AtranslateX(24px)%7D%7D%0A%3C%2Fstyle%3E%3C%2Fhead%3E%3Cbody%3E%3Cdiv%20class%3D%22card%22%20data-testid%3D%22toast-root%22%3E%3Cbutton%20class%3D%22close%22%20aria-label%3D%22Dismiss%22%20onclick%3D%22dismiss()%22%3E%C3%97%3C%2Fbutton%3E%3Cdiv%20class%3D%22title%22%20data-testid%3D%22toast-host-name%22%3EAlice%20is%20streaming%3C%2Fdiv%3E%3Cdiv%20class%3D%22group%22%20data-testid%3D%22toast-group-name%22%3EMedia%20remote-input-16228-65257%3C%2Fdiv%3E%3Cdiv%20class%3D%22actions%22%3E%3Cbutton%20class%3D%22button%20join%22%20data-testid%3D%22toast-join-action%22%20onclick%3D%22join()%22%3EJoin%3C%2Fbutton%3E%3Cbutton%20class%3D%22button%20dismiss%22%20data-testid%3D%22toast-dismiss%22%20onclick%3D%22dismiss()%22%3EDismiss%3C%2Fbutton%3E%3C%2Fdiv%3E%3C%2Fdiv%3E%3Cscript%3Econst%20payload%3D%7B%22groupId%22%3A%22f1cc346c-67c8-47d1-93fe-9f79b9fe5b24%22%2C%22hostDeviceId%22%3A%2246d6d1d0-62f2-493e-babf-cf29189433a4%22%2C%22logicalStreamId%22%3A%22c2e8d9ac-fe2e-4729-9138-8d984bdd7781%22%2C%22hostName%22%3A%22Alice%22%2C%22groupName%22%3A%22Media%20remote-input-16228-65257%22%7D%3Bfunction%20join()%7Bwindow.toastAction('join'%2Cpayload)%7Dfunction%20dismiss()%7Bwindow.toastAction('dismiss'%2Cpayload)%7D%3C%2Fscript%3E%3C%2Fbody%3E%3C%2Fhtml%3E"
+    }
+  ],
+  "mainConsole": [
+    {
+      "t": 1788120186542,
+      "iso": "2026-08-30T20:03:06.542Z",
+      "source": "main-console",
+      "text": "[stream-toast] shown for Alice in Media remote-input-16228-65257"
+    },
+    {
+      "t": 1788120186678,
+      "iso": "2026-08-30T20:03:06.678Z",
+      "source": "main-console",
+      "text": "[stream-toast] toast content rendered"
+    },
+    {
+      "t": 1788120187009,
+      "iso": "2026-08-30T20:03:07.009Z",
+      "source": "main-console",
+      "text": "[nvidia-capability] Using video enhancer helper: C:\\Users\\parla\\OneDrive\\Desktop\\Development\\AC-Sharescreen\\native\\video-enhancer\\build\\Release\\screenlink-video-enhancer.exe"
+    },
+    {
+      "t": 1788120187543,
+      "iso": "2026-08-30T20:03:07.543Z",
+      "source": "main-console",
+      "text": "[stream-toast] visibility check ok: {\"x\":1544,\"y\":904,\"width\":360,\"height\":120}"
+    },
+    {
+      "t": 1788120191258,
+      "iso": "2026-08-30T20:03:11.258Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: ENOENT: no such file or directory, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-bob-remote-input-16228-65257\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-bob-remote-input-16228-65257\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1788120191465,
+      "iso": "2026-08-30T20:03:11.465Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

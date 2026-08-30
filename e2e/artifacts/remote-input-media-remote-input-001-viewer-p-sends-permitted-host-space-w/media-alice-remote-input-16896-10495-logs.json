@@ -1,0 +1,33 @@
+{
+  "agent": "media-alice-remote-input-16896-10495",
+  "flushedAt": "2026-08-30T20:14:10.267Z",
+  "rendererConsole": [],
+  "mainConsole": [
+    {
+      "t": 1788120823246,
+      "iso": "2026-08-30T20:13:43.246Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1788120827645,
+      "iso": "2026-08-30T20:13:47.645Z",
+      "source": "main-console",
+      "text": "[IPC] get-sources: found 16 sources"
+    },
+    {
+      "t": 1788120844548,
+      "iso": "2026-08-30T20:14:04.548Z",
+      "source": "main-console",
+      "text": "Failed to upsert stream history: Error: EPERM: operation not permitted, rename 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-remote-input-16896-10495\\stream-history.json.tmp' -> 'C:\\Users\\parla\\AppData\\Roaming\\Electron-media-alice-remote-input-16896-10495\\stream-history.json'\n    at async Module.rename (node:internal/fs/promises:785:10)\n    at async file:///C:/Users/parla/OneDrive/Desktop/Development/AC-Sharescreen/apps/desktop/dist/main/ipc-handlers.js:1038:13\n    at async Session.<anonymous> (node:electron/js2c/browser_init:2:114068)"
+    },
+    {
+      "t": 1788120848123,
+      "iso": "2026-08-30T20:14:08.123Z",
+      "source": "main-console",
+      "text": "[updater] updater_destroyed {}"
+    }
+  ],
+  "pageErrors": [],
+  "requestFailed": []
+}

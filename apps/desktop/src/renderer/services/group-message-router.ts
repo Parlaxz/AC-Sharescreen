@@ -1,7 +1,8 @@
-import type { GroupControlEnvelope, GroupControlMessageType, HostQualityLimits } from "@screenlink/shared";
+import type { GroupControlEnvelope, GroupControlMessageType, HostQualityLimits, RemoteInputKey } from "@screenlink/shared";
 import {
   parseGroupMessagePayload,
   createDefaultGroupQualitySettings,
+  REMOTE_INPUT_SHORTCUTS,
 } from "@screenlink/shared";
 import { StreamViewerReadyPayloadSchema } from "../../../../../packages/shared/src/group-control-messages.js";
 import type { GroupSyncService } from "./group-sync-service.js";
@@ -90,6 +91,8 @@ export interface GroupMessageRouterCallbacks {
 export class GroupMessageRouter {
   private pingTimestamps = new Map<string, number>();
   private pongTimestamps = new Map<string, number>();
+  private viewerInputTimestamps = new Map<string, number>();
+  private static readonly VIEWER_INPUT_THROTTLE_MS = 60;
 
   /**
    * Per-group ring buffer of recent member events (joined/online).
@@ -418,6 +421,20 @@ export class GroupMessageRouter {
       return;
     }
 
+    // stream.inputPermissionsChanged → update the matching announcement.
+    if (type === "stream.inputPermissionsChanged") {
+      const parsed = parseGroupMessagePayload(type, envelope.payload);
+      if (!parsed.ok) return;
+      if (envelope.groupId !== groupId) return;
+      if (!this.validatePayloadGroup(groupId, parsed.data.groupId, type)) return;
+      this.streamRegistry.updateInputPermissions(
+        parsed.data.groupId,
+        parsed.data.logicalStreamId,
+        parsed.data.permissions,
+      );
+      return;
+    }
+
     // media.bind → ViewerMediaBinding (token consumption via actual media peer UUID)
     if (type === "media.bind") {
       if (this.viewerBinding) {
@@ -532,6 +549,14 @@ export class GroupMessageRouter {
           }
         }
       }
+      return;
+    }
+
+    // viewer.input.request → authorize against the host's current policy and
+    // invoke the existing preload shortcut IPC. The request carries no policy;
+    // permissions are always read from the local StreamSessionManager.
+    if (type === "viewer.input.request") {
+      void this.handleViewerInputRequest(groupId, envelope);
       return;
     }
 
@@ -833,6 +858,48 @@ export class GroupMessageRouter {
     return allViewers.find(
       (mapping) => mapping.viewerDeviceId === viewerDeviceId && mapping.logicalStreamId === logicalStreamId,
     ) ?? null;
+  }
+
+  private async handleViewerInputRequest(
+    groupId: string,
+    envelope: GroupControlEnvelope,
+  ): Promise<void> {
+    if (!this.runtime) return;
+    const parsed = parseGroupMessagePayload("viewer.input.request", envelope.payload);
+    if (!parsed.ok) return;
+    const data = parsed.data;
+    if (envelope.groupId !== groupId) return;
+    if (!this.validatePayloadGroup(groupId, data.groupId, "viewer.input.request")) return;
+    if (envelope.senderDeviceId !== data.viewerDeviceId) return;
+
+    const session = this.runtime.getStreamSessionManager();
+    if (
+      session.state !== "active" ||
+      session.currentGroupId !== groupId ||
+      session.currentLogicalStreamId !== data.logicalStreamId
+    ) return;
+
+    const permissions = session.getInputPermissions();
+    const permissionKey: Record<RemoteInputKey, keyof typeof permissions> = {
+      ArrowLeft: "arrowLeft",
+      ArrowRight: "arrowRight",
+      Space: "space",
+      d: "d",
+      s: "s",
+    };
+    if (!permissions[permissionKey[data.key]]) return;
+
+    const throttleKey = `${groupId}:${data.viewerDeviceId}`;
+    const now = Date.now();
+    const previous = this.viewerInputTimestamps.get(throttleKey);
+    if (previous !== undefined && now - previous < GroupMessageRouter.VIEWER_INPUT_THROTTLE_MS) return;
+    this.viewerInputTimestamps.set(throttleKey, now);
+
+    const api = typeof window !== "undefined"
+      ? (window as unknown as { screenlink?: { sendShortcut: (binding: { modifiers: never[]; key: string }) => Promise<{ success: boolean }> } }).screenlink
+      : null;
+    if (!api?.sendShortcut) return;
+    await api.sendShortcut({ modifiers: [], key: REMOTE_INPUT_SHORTCUTS[data.key] }).catch(() => {});
   }
 
   private async respondToReconcileResult(

@@ -1,4 +1,8 @@
-import type { StreamAnnouncement } from "@screenlink/shared";
+import {
+  normalizeRemoteInputPermissions,
+  type RemoteInputPermissions,
+  type StreamAnnouncement,
+} from "@screenlink/shared";
 
 interface InternalStream {
   announcement: StreamAnnouncement;
@@ -53,6 +57,7 @@ export class ActiveStreamRegistry {
   }
 
   handleStarted(data: StreamAnnouncement): void {
+    data = this.withInputPermissions(data);
     const k = this.key(data.groupId, data.hostDeviceId, data.logicalStreamId);
 
     // Composite-key tombstone check — reject if recently stopped
@@ -170,7 +175,7 @@ export class ActiveStreamRegistry {
     const result: StreamAnnouncement[] = [];
     for (const [k, s] of this.streams) {
       if (!s.stopped && !this.isTombstoned(k) && s.announcement.groupId === groupId) {
-        result.push({ ...s.announcement });
+        result.push(this.withInputPermissions(s.announcement));
       }
     }
     return result;
@@ -179,7 +184,7 @@ export class ActiveStreamRegistry {
   getAllStreams(): StreamAnnouncement[] {
     const result: StreamAnnouncement[] = [];
     for (const [k, s] of this.streams) {
-      if (!s.stopped && !this.isTombstoned(k)) result.push({ ...s.announcement });
+      if (!s.stopped && !this.isTombstoned(k)) result.push(this.withInputPermissions(s.announcement));
     }
     return result;
   }
@@ -189,7 +194,7 @@ export class ActiveStreamRegistry {
     if (this.isTombstoned(k)) return null;
     const existing = this.streams.get(k);
     if (existing && !existing.stopped) {
-      return { ...existing.announcement };
+      return this.withInputPermissions(existing.announcement);
     }
     return null;
   }
@@ -235,6 +240,7 @@ export class ActiveStreamRegistry {
    * - Does NOT check tombstones (the local session manager controls lifecycle).
    */
   registerLocalStream(announcement: StreamAnnouncement): void {
+    announcement = this.withInputPermissions(announcement);
     const k = this.key(announcement.groupId, announcement.hostDeviceId, announcement.logicalStreamId);
 
     this.stopTombstones.delete(k);
@@ -245,7 +251,7 @@ export class ActiveStreamRegistry {
       existing.announcement = { ...announcement };
       existing.lastHeartbeatAt = Date.now();
       this.heartbeatSequences.set(k, announcement.heartbeatSequence);
-      this.emit({ type: "updated", stream: { ...announcement } });
+      this.emit({ type: "updated", stream: this.withInputPermissions(announcement) });
       return;
     }
 
@@ -255,13 +261,40 @@ export class ActiveStreamRegistry {
       stopped: false,
     });
     this.heartbeatSequences.set(k, announcement.heartbeatSequence);
-    this.emit({ type: "new", stream: { ...announcement } });
+    this.emit({ type: "new", stream: this.withInputPermissions(announcement) });
+  }
+
+  /** Update permissions without changing heartbeat ordering or timestamps. */
+  updateInputPermissions(
+    groupId: string,
+    logicalStreamId: string,
+    permissions: RemoteInputPermissions,
+  ): boolean {
+    const copied = normalizeRemoteInputPermissions(permissions);
+    let updated = false;
+    for (const [k, entry] of this.streams) {
+      if (
+        entry.stopped ||
+        this.isTombstoned(k) ||
+        entry.announcement.groupId !== groupId ||
+        entry.announcement.logicalStreamId !== logicalStreamId
+      ) continue;
+
+      entry.announcement = {
+        ...entry.announcement,
+        inputPermissions: { ...copied },
+      };
+      updated = true;
+      this.emit({ type: "updated", stream: this.withInputPermissions(entry.announcement) });
+    }
+    return updated;
   }
 
   // Snapshot recovery after reconnect
   handleSnapshot(streams: StreamAnnouncement[]): void {
     const now = Date.now();
-    for (const stream of streams) {
+    for (const rawStream of streams) {
+      const stream = this.withInputPermissions(rawStream);
       const k = this.key(stream.groupId, stream.hostDeviceId, stream.logicalStreamId);
 
       // 1. Reject tombstoned streams — do not resurrect explicit stops
@@ -291,15 +324,24 @@ export class ActiveStreamRegistry {
         if (stream.streamRevision < existing.announcement.streamRevision) {
           continue;
         }
-        // 4. Reject lower heartbeatSequence (same revision but stale heartbeat)
-        if (stream.heartbeatSequence <= existing.announcement.heartbeatSequence) {
+        // 4. Reject lower heartbeatSequence. A permission-only snapshot may
+        // legitimately reuse the current heartbeat sequence.
+        const permissionsChanged = !this.sameInputPermissions(
+          stream.inputPermissions,
+          existing.announcement.inputPermissions,
+        );
+        if (
+          stream.heartbeatSequence < existing.announcement.heartbeatSequence ||
+          (stream.heartbeatSequence === existing.announcement.heartbeatSequence && !permissionsChanged)
+        ) {
           continue;
         }
         // 5. Avoid duplicate events for unchanged state
         if (
           stream.streamRevision === existing.announcement.streamRevision &&
           stream.heartbeatSequence === existing.announcement.heartbeatSequence &&
-          stream.mediaSessionId === existing.announcement.mediaSessionId
+          stream.mediaSessionId === existing.announcement.mediaSessionId &&
+          !permissionsChanged
         ) {
           continue;
         }
@@ -329,6 +371,28 @@ export class ActiveStreamRegistry {
     this.stopTombstones.clear();
     this.heartbeatSequences.clear();
     this.stopHeartbeatCheck();
+  }
+
+  private withInputPermissions(announcement: StreamAnnouncement): StreamAnnouncement {
+    return {
+      ...announcement,
+      inputPermissions: normalizeRemoteInputPermissions(announcement.inputPermissions),
+    };
+  }
+
+  private sameInputPermissions(
+    left: RemoteInputPermissions | undefined,
+    right: RemoteInputPermissions | undefined,
+  ): boolean {
+    const a = normalizeRemoteInputPermissions(left);
+    const b = normalizeRemoteInputPermissions(right);
+    return (
+      a.arrowLeft === b.arrowLeft &&
+      a.arrowRight === b.arrowRight &&
+      a.space === b.space &&
+      a.d === b.d &&
+      a.s === b.s
+    );
   }
 
   private startHeartbeatCheck(): void {

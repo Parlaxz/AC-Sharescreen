@@ -31,6 +31,7 @@ vi.mock("lucide-react", () => ({
   RotateCcw: () => <svg />,
   ArrowRight: () => <svg />,
   UserX: () => <svg />,
+  Keyboard: () => <svg />,
 }));
 
 vi.mock("motion/react", () => ({

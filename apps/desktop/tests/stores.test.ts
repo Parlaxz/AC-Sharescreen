@@ -1,12 +1,19 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { GroupStore } from "../src/main/group-store.js";
 import { QualityPresetStore } from "../src/main/quality-preset-store.js";
 import type { SecureStore } from "../src/main/secure-store.js";
 import type { GroupQualitySettings } from "@screenlink/shared";
+import * as fs from "fs";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  const renameSync = vi.fn(actual.renameSync);
+  return { ...actual, renameSync, default: { ...actual, renameSync } };
+});
 
 class MockSecureStore implements SecureStore {
   private store = new Map<string, string>();
@@ -104,6 +111,92 @@ describe("GroupStore", () => {
     expect(fetched!.sharedState.name.value).toBe("Renamed");
   });
 
+  it("reloads all groups with their state and secrets", async () => {
+    await store.create({
+      groupId: "00000000-0000-4000-8000-000000000006",
+      controlRoomId: "control-room-6",
+      groupSecret: "secret-6",
+      nodeId: "node-6",
+      groupName: "Group 6",
+    });
+    await store.create({
+      groupId: "00000000-0000-4000-8000-000000000007",
+      controlRoomId: "control-room-7",
+      groupSecret: "secret-7",
+      nodeId: "node-7",
+      groupName: "Group 7",
+    });
+
+    const reloaded = new GroupStore(secure as unknown as SecureStore, dir);
+
+    expect(reloaded.list().map((record) => record.groupId)).toEqual([
+      "00000000-0000-4000-8000-000000000006",
+      "00000000-0000-4000-8000-000000000007",
+    ]);
+    expect(reloaded.get("00000000-0000-4000-8000-000000000006")!.sharedState.name.value).toBe("Group 6");
+    expect(reloaded.get("00000000-0000-4000-8000-000000000007")!.sharedState.name.value).toBe("Group 7");
+    expect(reloaded.getConnectionConfig("00000000-0000-4000-8000-000000000006", "node-6")!.groupSecret).toBe("secret-6");
+    expect(reloaded.getConnectionConfig("00000000-0000-4000-8000-000000000007", "node-7")!.groupSecret).toBe("secret-7");
+  });
+
+  it("retries a transient rename failure and persists the update", async () => {
+    vi.clearAllMocks();
+    const renameMock = vi.mocked(fs.renameSync);
+    renameMock.mockImplementationOnce(() => {
+      const error = new Error("simulated transient rename failure") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    });
+
+    await store.create({
+      groupId: "00000000-0000-4000-8000-000000000008",
+      controlRoomId: "control-room-8",
+      groupSecret: "secret-8",
+      nodeId: "node-8",
+      groupName: "Group 8",
+    });
+
+    expect(renameMock).toHaveBeenCalledTimes(2);
+    const reloaded = new GroupStore(secure as unknown as SecureStore, dir);
+    expect(reloaded.get("00000000-0000-4000-8000-000000000008")!.sharedState.name.value).toBe("Group 8");
+    expect(reloaded.getConnectionConfig("00000000-0000-4000-8000-000000000008", "node-8")!.groupSecret).toBe("secret-8");
+  });
+
+  it("recovers a valid pending snapshot without trusting malformed temp data", async () => {
+    const primaryRecord = await store.create({
+      groupId: "00000000-0000-4000-8000-000000000010",
+      controlRoomId: "control-room-10",
+      groupSecret: "secret-10",
+      nodeId: "node-10",
+      groupName: "Group 10",
+    });
+    const tempOnlyRecord = await store.create({
+      groupId: "00000000-0000-4000-8000-000000000011",
+      controlRoomId: "control-room-11",
+      groupSecret: "secret-11",
+      nodeId: "node-11",
+      groupName: "Group 11",
+    });
+
+    fs.writeFileSync(path.join(dir, "groups.json"), JSON.stringify([primaryRecord]), "utf-8");
+    fs.writeFileSync(
+      path.join(dir, "groups.json.tmp"),
+      JSON.stringify([primaryRecord, tempOnlyRecord]),
+      "utf-8",
+    );
+
+    const recovered = new GroupStore(secure as unknown as SecureStore, dir);
+    expect(recovered.list().map((record) => record.groupId)).toEqual([
+      primaryRecord.groupId,
+      tempOnlyRecord.groupId,
+    ]);
+
+    fs.writeFileSync(path.join(dir, "groups.json"), JSON.stringify([primaryRecord]), "utf-8");
+    fs.writeFileSync(path.join(dir, "groups.json.tmp"), "not valid json", "utf-8");
+    const withMalformedTemp = new GroupStore(secure as unknown as SecureStore, dir);
+    expect(withMalformedTemp.list().map((record) => record.groupId)).toEqual([primaryRecord.groupId]);
+  });
+
   it("leave removes a group", async () => {
     const record = await store.create({
       groupId: "00000000-0000-4000-8000-000000000005",
@@ -114,6 +207,30 @@ describe("GroupStore", () => {
     });
     store.leave(record.groupId);
     expect(store.get(record.groupId)).toBeNull();
+  });
+
+  it("does not retain a create that cannot be persisted", async () => {
+    const renameMock = vi.mocked(fs.renameSync);
+    const renameError = () => {
+      const error = new Error("simulated persistent rename failure") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    };
+
+    await renameMock.withImplementation(renameError, async () => {
+      const groupId = "00000000-0000-4000-8000-000000000009";
+      await expect(store.create({
+        groupId,
+        controlRoomId: "control-room-9",
+        groupSecret: "secret-9",
+        nodeId: "node-9",
+        groupName: "Group 9",
+      })).rejects.toThrow("simulated persistent rename failure");
+
+      expect(store.get(groupId)).toBeNull();
+      const reloaded = new GroupStore(secure as unknown as SecureStore, dir);
+      expect(reloaded.get(groupId)).toBeNull();
+    });
   });
 
   afterEach(() => {

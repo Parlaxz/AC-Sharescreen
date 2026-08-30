@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   Info,
   Check,
+  Keyboard,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -57,6 +58,19 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import type { RemoteInputPermissions } from "@screenlink/shared";
+
+type RemoteInputKey = "arrowLeft" | "arrowRight" | "space" | "d" | "s";
+const DEFAULT_REMOTE_INPUT_PERMISSIONS: RemoteInputPermissions = {
+  arrowLeft: false, arrowRight: false, space: false, d: false, s: false,
+};
+const REMOTE_INPUT_OPTIONS: Array<{ key: RemoteInputKey; label: string; glyph: string }> = [
+  { key: "arrowLeft", label: "Left arrow", glyph: "←" },
+  { key: "arrowRight", label: "Right arrow", glyph: "→" },
+  { key: "space", label: "Space", glyph: "␠" },
+  { key: "d", label: "D", glyph: "D" },
+  { key: "s", label: "S", glyph: "S" },
+];
 import {
   useStore,
   type Page,
@@ -195,6 +209,7 @@ export function ShareSetup() {
     degradationPreference: "maintain-resolution",
   });
   const [startingShare, setStartingShare] = useState(false);
+  const [inputPermissions, setInputPermissions] = useState<RemoteInputPermissions>({ ...DEFAULT_REMOTE_INPUT_PERMISSIONS });
   // Personal presets loaded from the persistent quality-preset API.
   const [personalPresets, setPersonalPresets] = useState<
     Array<{ id: string; name: string; settings: unknown }>
@@ -287,6 +302,7 @@ export function ShareSetup() {
       setSelectedPersonalPresetId(null);
       setSourceError(null);
       setStartingShare(false);
+      setInputPermissions({ ...DEFAULT_REMOTE_INPUT_PERMISSIONS });
       setCustomQuality({
         resolutionValue: "1280x720",
         customWidth: 1280,
@@ -413,6 +429,7 @@ export function ShareSetup() {
           audioMode: audioMode === "none" ? "none" : audioMode,
         },
         qualityOverride: qualityOverride ?? undefined,
+        inputPermissions,
       });
 
       // Persist source selection and full share settings (to preload settings API)
@@ -465,6 +482,7 @@ export function ShareSetup() {
     setOpenShareSetup,
     navigate,
     audioMode,
+    inputPermissions,
   ]);
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -766,6 +784,32 @@ export function ShareSetup() {
                   );
                 })}
               </RadioGroup>
+            </section>
+
+            <section data-testid="viewer-key-controls-section">
+              <div className="flex items-center gap-2 mb-1">
+                <Keyboard className="h-4 w-4 text-accent" aria-hidden="true" />
+                <h3 className="text-sm font-medium text-text-primary">Viewer key controls</h3>
+                <Badge variant="secondary" className="ml-auto text-[10px]">
+                  {Object.values(inputPermissions).filter(Boolean).length}/5 enabled
+                </Badge>
+              </div>
+              <p className="text-xs text-text-secondary mb-3">
+                Allow viewers to send these keys to your host computer. All controls start off.
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {REMOTE_INPUT_OPTIONS.map((option) => (
+                  <label key={option.key} className="flex items-center gap-2 rounded-standard border border-border-subtle bg-surface-2 px-2.5 py-2 cursor-pointer hover:bg-surface-hover">
+                    <Switch
+                      checked={inputPermissions[option.key]}
+                      onCheckedChange={(checked) => setInputPermissions((current) => ({ ...current, [option.key]: checked }))}
+                      aria-label={`Allow viewer ${option.label}`}
+                      data-testid={`viewer-key-${option.key.toLowerCase()}`}
+                    />
+                    <span className="text-xs text-text-primary"><kbd className="font-mono text-text-secondary">{option.glyph}</kbd> {option.label}</span>
+                  </label>
+                ))}
+              </div>
             </section>
 
             {/* ─── Section 4: Quality preset ─────────────────────────── */}

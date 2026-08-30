@@ -350,6 +350,8 @@ describe("ViewerSession — rapid pause/resume race", () => {
         if (payload.type === "viewer.pause.request") {
           realOperationId = payload.operationId;
         }
+        // sendToPeer reports delivery acceptance via boolean
+        return true;
       },
     );
 
@@ -404,6 +406,8 @@ describe("ViewerSession — rapid pause/resume race", () => {
           if (payload.type === "viewer.pause.request") {
             resolve(payload.operationId!);
           }
+          // sendToPeer reports delivery acceptance via boolean
+          return true;
         },
       );
     });

@@ -1,5 +1,9 @@
 ﻿import type { Phase3Runtime } from "./phase3-runtime.js";
-import type { StreamAnnouncement } from "@screenlink/shared";
+import {
+  normalizeRemoteInputPermissions,
+  type RemoteInputPermissions,
+  type StreamAnnouncement,
+} from "@screenlink/shared";
 import { PublisherManager } from "./publisher-manager.js";
 import { extractPeerUuid } from "./sdk-event-normalizer.js";
 import {
@@ -65,6 +69,8 @@ export interface StartStreamInput {
    * the session and reused on restart.
    */
   qualityOverride?: SessionQualityOverride;
+  /** Per-share remote keyboard permissions; omitted means all denied. */
+  inputPermissions?: RemoteInputPermissions;
 }
 
 export interface VdoSessionConfig {
@@ -112,6 +118,7 @@ export class StreamSessionManager {
    * Reused by restart so the same captured values are applied again.
    */
   private _sessionQualityOverride: SessionQualityOverride | null = null;
+  private _inputPermissions: RemoteInputPermissions = normalizeRemoteInputPermissions(undefined);
   /** Guard against concurrent source switches. Set during switchSource. */
   private isSwitchingSource = false;
   /**
@@ -183,6 +190,37 @@ export class StreamSessionManager {
 
   get isAudioDegraded(): boolean {
     return this._isAudioDegraded;
+  }
+
+  get inputPermissions(): RemoteInputPermissions {
+    return { ...this._inputPermissions };
+  }
+
+  getInputPermissions(): RemoteInputPermissions {
+    return this.inputPermissions;
+  }
+
+  /** Update per-share remote input permissions and announce the new policy. */
+  setInputPermissions(input: RemoteInputPermissions): void {
+    const permissions = normalizeRemoteInputPermissions(input);
+    this._inputPermissions = permissions;
+
+    if (!this.groupId || !this.logicalStreamId) return;
+    if (this._state === "active" || this._state === "starting" || this._state === "restarting") {
+      this.runtime.getActiveStreamRegistry().updateInputPermissions(
+        this.groupId,
+        this.logicalStreamId,
+        permissions,
+      );
+    }
+    if (this._state === "active") {
+      void this.runtime.getConnectionManager().broadcast(this.groupId, {
+        type: "stream.inputPermissionsChanged",
+        groupId: this.groupId,
+        logicalStreamId: this.logicalStreamId,
+        permissions: { ...permissions },
+      }).catch(() => {});
+    }
   }
 
   /**
@@ -347,6 +385,7 @@ export class StreamSessionManager {
       mediaJoinMetadata: "",
       replacesSessionId: null,
       isAudioDegraded: this._isAudioDegraded,
+      inputPermissions: this.getInputPermissions(),
     };
   }
 
@@ -371,6 +410,8 @@ export class StreamSessionManager {
       throw new Error(`Cannot start stream in state: ${this._state}`);
     }
 
+    const inputPermissions = normalizeRemoteInputPermissions(input.inputPermissions);
+
     if (input.qualityOverride) {
       const err = validateSessionQualityOverride(input.qualityOverride);
       if (err) {
@@ -391,6 +432,7 @@ export class StreamSessionManager {
     this._explicitAudioMode = input.audioMode ?? null;
     this._isAudioDegraded = false;
     this._sessionQualityOverride = input.qualityOverride ?? null;
+    this._inputPermissions = inputPermissions;
 
     // ── Phase A: Critical media startup (any failure is fatal) ────────
     try {
@@ -584,6 +626,7 @@ export class StreamSessionManager {
         streamRevision: this.streamRevision,
         mediaJoinMetadata: "",
         replacesSessionId: null,
+        inputPermissions: this.getInputPermissions(),
       };
 
       const result = await connManager.sendOrQueueStreamLifecycle(
@@ -1141,6 +1184,7 @@ export class StreamSessionManager {
         mediaJoinMetadata: "",
         replacesSessionId: oldMediaSessionId,
         isAudioDegraded: this._isAudioDegraded,
+        inputPermissions: this.getInputPermissions(),
       };
 
       const result = await connManager.sendOrQueueStreamLifecycle(
@@ -1524,6 +1568,7 @@ export class StreamSessionManager {
     this._sourceName = "";
     this._explicitAudioMode = null;
     this._sessionQualityOverride = null;
+    this._inputPermissions = normalizeRemoteInputPermissions(undefined);
     this.actualCaptureWidth = 0;
     this.actualCaptureHeight = 0;
     this.actualCaptureFps = 0;

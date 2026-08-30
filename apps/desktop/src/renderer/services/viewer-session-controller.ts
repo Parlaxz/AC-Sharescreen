@@ -477,15 +477,25 @@ export class ViewerSessionController {
 
   /**
    * Toggle pause state. Convenience for keyboard shortcuts.
+   *
+   * The play/pause decision is made INSIDE the serialized queue against
+   * fresh session state — deciding outside the queue (then re-guarding in
+   * pause()/resume()) let a state change between decision and execution
+   * turn the press into a dead no-op. While pausing/resuming the previous
+   * operation is still settling, so the press is dropped.
    */
   async togglePause(): Promise<void> {
-    const s = this._session;
-    if (!s) return;
-    if (s.pauseState === "playing" || s.pauseState === "resuming") {
-      await this.pause();
-    } else if (s.pauseState === "paused" || s.pauseState === "pausing") {
-      await this.resume();
-    }
+    return this._enqueue(async () => {
+      const s = this._session;
+      if (!s) return;
+      try {
+        if (s.pauseState === "playing") await s.pause();
+        else if (s.pauseState === "paused") await s.resume();
+        // pausing/resuming: previous op still settling — drop the press
+      } catch {
+        /* reflected via session callbacks */
+      }
+    });
   }
 
   /**

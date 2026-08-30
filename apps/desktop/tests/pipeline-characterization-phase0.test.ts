@@ -92,7 +92,8 @@ vi.mock("@screenlink/vdo-adapter", () => ({
 
 /** Make a fake runtime object matching Phase3Runtime shape. */
 function makeFakeRuntime(overrides: Record<string, unknown> = {}) {
-  const sendToPeer = vi.fn().mockResolvedValue(undefined);
+  // sendToPeer reports delivery acceptance via boolean (true = route accepted).
+  const sendToPeer = vi.fn().mockResolvedValue(true);
   const conn = {
     state: "connected",
     sendToPeer,

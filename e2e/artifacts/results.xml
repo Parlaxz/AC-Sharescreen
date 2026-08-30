@@ -1,6 +1,16 @@
-<testsuites id="" name="" tests="1" failures="0" skipped="0" errors="0" time="5.276355">
-<testsuite name="lifecycle.spec.ts" timestamp="2026-08-25T15:35:58.736Z" hostname="all" tests="1" failures="0" skipped="0" time="3.813" errors="0">
-<testcase name="@critical @smoke LIF-001: clean-profile launch health" classname="lifecycle.spec.ts" time="3.813">
+<testsuites id="" name="" tests="1" failures="0" skipped="0" errors="0" time="67.324573">
+<testsuite name="viewer-pause.spec.ts" timestamp="2026-08-26T02:26:56.250Z" hostname="media" tests="1" failures="0" skipped="0" time="64.434" errors="0">
+<testcase name="@critical @media VPAUSE-001: pause freezes frames AND stops network bytes; resume restores both" classname="viewer-pause.spec.ts" time="64.434">
+<system-out>
+<![CDATA[[helpers-media] media-alice-vpause1-41768-18135: audio-mode radio values: [{"value":"none","checked":"true"},{"value":"application","checked":"false"}]
+[VPAUSE-001] video live: 786×592
+[VPAUSE-001] baseline bytes: 6862 → 53645 (delta=46783)
+[VPAUSE-001] frozen: currentTime 4.903 → 4.903 (delta=0.00, rvfc 25 → 25)
+[VPAUSE-001] paused bytes: 61925 → 61925 (delta=0)
+[VPAUSE-001] resumed: currentTime 19.491 → 24.497 (delta=5.01)
+[VPAUSE-001] resumed bytes: 301918 → 459825 (delta=157907)
+]]>
+</system-out>
 </testcase>
 </testsuite>
 </testsuites>

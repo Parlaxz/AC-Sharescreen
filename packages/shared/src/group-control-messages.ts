@@ -26,6 +26,7 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "stream.restarted",
   "stream.restart.result",
   "stream.sourceChanged",
+  "stream.inputPermissionsChanged",
   "stream.join.request",
   "stream.join.response",
   "stream.bind.ack",
@@ -33,6 +34,7 @@ export const GROUP_CONTROL_MESSAGE_TYPES = [
   "viewer.pause.request",
   "viewer.pause.result",
   "viewer.media.request",
+  "viewer.input.request",
   "viewer.status",
   "media.bind",
   "quality.viewer.request",
@@ -112,6 +114,14 @@ export const GroupControlEnvelopeSchema = z.object({
   payload: z.record(z.unknown()),
   mac: z.string(),
 });
+
+export const RemoteInputPermissionsSchema = z.object({
+  arrowLeft: z.boolean(),
+  arrowRight: z.boolean(),
+  space: z.boolean(),
+  d: z.boolean(),
+  s: z.boolean(),
+}).strict();
 
 // ─── HMAC helpers ──────────────────────────────────────────────────────────
 
@@ -407,6 +417,7 @@ export const StreamStartedPayloadSchema = z.object({
   /** Wall-time the host asserts the lease is still valid through. */
   leaseValidUntil: z.number().optional(),
   isAudioDegraded: z.boolean().optional(),
+  inputPermissions: RemoteInputPermissionsSchema.optional(),
 });
 
 export const StreamHeartbeatPayloadSchema = z.object({
@@ -467,7 +478,14 @@ export const StreamRestartedPayloadSchema = z.object({
   /** HLC stamp the restart applied to. */
   appliedSettingsStamp: z.string().optional(),
   isAudioDegraded: z.boolean().optional(),
+  inputPermissions: RemoteInputPermissionsSchema.optional(),
 });
+
+export const StreamInputPermissionsChangedPayloadSchema = z.object({
+  groupId: z.string(),
+  logicalStreamId: z.string(),
+  permissions: RemoteInputPermissionsSchema,
+}).strict();
 
 export const StreamRestartResultPayloadSchema = z.object({
   commandId: z.string(),
@@ -601,6 +619,13 @@ export const ViewerMediaRequestPayloadSchema = z.object({
   videoEnabled: z.boolean(),
 }).strict();
 
+export const ViewerInputRequestPayloadSchema = z.object({
+  groupId: z.string(),
+  logicalStreamId: z.string(),
+  viewerDeviceId: z.string(),
+  key: z.enum(["ArrowLeft", "ArrowRight", "Space", "d", "s"]),
+}).strict();
+
 // ─── Viewer status payload schema ────────────────────────────────────────────
 
 export const ViewerStatusPayloadSchema = z.object({
@@ -729,6 +754,7 @@ export type GroupControlPayloadMap = {
   "stream.restarted": z.infer<typeof StreamRestartedPayloadSchema>;
   "stream.restart.result": z.infer<typeof StreamRestartResultPayloadSchema>;
   "stream.sourceChanged": z.infer<typeof StreamSourceChangedPayloadSchema>;
+  "stream.inputPermissionsChanged": z.infer<typeof StreamInputPermissionsChangedPayloadSchema>;
   "stream.join.request": z.infer<typeof StreamJoinRequestPayloadSchema>;
   "stream.join.response": z.infer<typeof StreamJoinResponsePayloadSchema>;
   "stream.bind.ack": z.infer<typeof StreamBindAckPayloadSchema>;
@@ -737,6 +763,7 @@ export type GroupControlPayloadMap = {
   "viewer.pause.request": z.infer<typeof ViewerPauseRequestPayloadSchema>;
   "viewer.pause.result": z.infer<typeof ViewerPauseResultPayloadSchema>;
   "viewer.media.request": z.infer<typeof ViewerMediaRequestPayloadSchema>;
+  "viewer.input.request": z.infer<typeof ViewerInputRequestPayloadSchema>;
   "viewer.status": z.infer<typeof ViewerStatusPayloadSchema>;
   "quality.viewer.request": z.infer<typeof QualityViewerRequestPayloadSchema>;
   "quality.viewer.clear": z.infer<typeof QualityViewerClearPayloadSchema>;
@@ -768,6 +795,7 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "stream.restarted": StreamRestartedPayloadSchema,
   "stream.restart.result": StreamRestartResultPayloadSchema,
   "stream.sourceChanged": StreamSourceChangedPayloadSchema,
+  "stream.inputPermissionsChanged": StreamInputPermissionsChangedPayloadSchema,
   "stream.join.request": StreamJoinRequestPayloadSchema,
   "stream.join.response": StreamJoinResponsePayloadSchema,
   "stream.bind.ack": StreamBindAckPayloadSchema,
@@ -776,6 +804,7 @@ const payloadSchemaMap: Record<string, z.ZodTypeAny> = {
   "viewer.pause.request": ViewerPauseRequestPayloadSchema,
   "viewer.pause.result": ViewerPauseResultPayloadSchema,
   "viewer.media.request": ViewerMediaRequestPayloadSchema,
+  "viewer.input.request": ViewerInputRequestPayloadSchema,
   "viewer.status": ViewerStatusPayloadSchema,
   "quality.viewer.request": QualityViewerRequestPayloadSchema,
   "quality.viewer.clear": QualityViewerClearPayloadSchema,

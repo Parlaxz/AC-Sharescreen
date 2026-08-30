@@ -59,6 +59,8 @@ const STATE_LABELS: Record<ConnectionState, string> = {
 // ─── Props ────────────────────────────────────────────────────────────────
 
 interface VideoControlsProps {
+  /** Keys the host currently allows this viewer to send. */
+  remoteInputKeys?: string[];
   /** Whether playback is paused (only meaningful for recordings/VOD) */
   isPaused: boolean;
   /** Toggle play/pause */
@@ -166,6 +168,7 @@ function friendlyShortcutError(rawError: string | undefined, label: string): str
  * popover/panel is open or a control is focused.
  */
 export function VideoControls({
+  remoteInputKeys = [],
   isPaused,
   onTogglePlay,
   isStreamPaused = false,
@@ -306,6 +309,11 @@ export function VideoControls({
         "bg-gradient-to-t from-black/80 via-black/50 to-transparent",
       )}
     >
+      {remoteInputKeys.length > 0 && (
+        <div className="mx-auto mb-1 w-fit rounded-full border border-white/10 bg-black/65 px-3 py-1 text-[10px] text-white/75 backdrop-blur-sm" data-testid="viewer-remote-input-notice" role="status">
+          Viewer keys: {remoteInputKeys.map((key) => key === "ArrowLeft" ? "←" : key === "ArrowRight" ? "→" : key === "Space" ? "P → Space" : key).join(" · ")}
+        </div>
+      )}
       {/* Control bar */}
       <div
         className={cn(

@@ -2,6 +2,71 @@
 // These types are shared across main, preload, and renderer.
 // No SDK, DOM, or service instance types are permitted here.
 
+/** Keys that a host may allow a remote viewer to send to the local desktop. */
+export type RemoteInputKey = "ArrowLeft" | "ArrowRight" | "Space" | "d" | "s";
+
+/** Per-share permissions for the supported remote input keys. */
+export interface RemoteInputPermissions {
+  arrowLeft: boolean;
+  arrowRight: boolean;
+  space: boolean;
+  d: boolean;
+  s: boolean;
+}
+
+/** Immutable template for the safest (all denied) input policy. */
+export const DEFAULT_REMOTE_INPUT_PERMISSIONS: Readonly<RemoteInputPermissions> = Object.freeze({
+  arrowLeft: false,
+  arrowRight: false,
+  space: false,
+  d: false,
+  s: false,
+});
+
+/** Return a fresh all-denied policy. */
+export function createDefaultRemoteInputPermissions(): RemoteInputPermissions {
+  return { ...DEFAULT_REMOTE_INPUT_PERMISSIONS };
+}
+
+/**
+ * Validate and copy a permissions object. Omitted permissions are deliberately
+ * treated as all denied for compatibility with older stream announcements.
+ */
+export function normalizeRemoteInputPermissions(
+  input: unknown,
+): RemoteInputPermissions {
+  if (input === undefined) return createDefaultRemoteInputPermissions();
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new Error("Invalid remote input permissions");
+  }
+
+  const value = input as Record<string, unknown>;
+  const keys = ["arrowLeft", "arrowRight", "space", "d", "s"] as const;
+  if (
+    Object.keys(value).length !== keys.length ||
+    keys.some((key) => typeof value[key] !== "boolean")
+  ) {
+    throw new Error("Invalid remote input permissions");
+  }
+
+  return {
+    arrowLeft: value.arrowLeft as boolean,
+    arrowRight: value.arrowRight as boolean,
+    space: value.space as boolean,
+    d: value.d as boolean,
+    s: value.s as boolean,
+  };
+}
+
+/** Native shortcut key corresponding to each remotely controllable key. */
+export const REMOTE_INPUT_SHORTCUTS: Readonly<Record<RemoteInputKey, string>> = {
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  Space: "SPACE",
+  d: "D",
+  s: "S",
+};
+
 /**
  * Stream announcement — published by a host and consumed by viewers
  * to discover active streams. This is the canonical shared type,
@@ -33,6 +98,8 @@ export interface StreamAnnouncement {
   appliedLiveSettingsRevision?: string;
   /** HLC stamp of the last restart-applied settings. */
   appliedRestartSettingsRevision?: string;
+  /** Per-share remote input permissions; omitted means all keys are denied. */
+  inputPermissions?: RemoteInputPermissions;
 }
 
 /**

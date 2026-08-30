@@ -1,7 +1,7 @@
 import { getRuntime } from "./phase3-runtime.js";
 import { useStore } from "../stores/main-store.js";
 import { emitMarker } from "./test-hooks.js";
-import type { ShareSource, StartShareInput } from "@screenlink/shared";
+import type { RemoteInputPermissions, ShareSource, StartShareInput } from "@screenlink/shared";
 import type { SessionQualityOverride } from "./share-quality.js";
 import {
   validateSessionQualityOverride,
@@ -143,6 +143,7 @@ export async function startShare(input: StartShareInput): Promise<void> {
         fingerprint: string | null;
       };
       audioMode?: "none" | "monitor" | "application";
+      inputPermissions?: RemoteInputPermissions;
       qualityOverride?: SessionQualityOverride;
     } = {
       groupId: input.groupId,
@@ -156,6 +157,9 @@ export async function startShare(input: StartShareInput): Promise<void> {
     };
     if (input.source.audioMode !== undefined) {
       streamInput.audioMode = input.source.audioMode;
+    }
+    if (input.inputPermissions !== undefined) {
+      streamInput.inputPermissions = input.inputPermissions;
     }
     if (input.qualityOverride) {
       streamInput.qualityOverride = {

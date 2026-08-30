@@ -58,6 +58,8 @@ function createMockRuntime() {
       password: "vdo-password",
     }),
     cancelJoinResponse: vi.fn(),
+    waitForViewerPauseResult: vi.fn(),
+    cancelViewerPauseResult: vi.fn(),
     requestGroupSync: vi.fn().mockResolvedValue({ status: "dispatched" }),
     getActiveStreamRegistry: vi.fn().mockReturnValue({
       getStreamsByGroup: vi.fn().mockReturnValue([]),
@@ -410,5 +412,134 @@ describe("ViewerSession", () => {
       (c) => c[1].type === "stream.join.request",
     );
     expect(joinSendsAfter).toHaveLength(3);
+  });
+
+  // ─── Pause ack reliability ──────────────────────────────────────────────
+
+  describe("ViewerSession — pause ack reliability", () => {
+    /** Drive the session through start() + a video track event to "watching". */
+    async function startWatching(): Promise<void> {
+      session = new ViewerSession();
+      await session.start(defaultOptions);
+      fireTrackEvent(createMockVideoTrack());
+      expect(session.state).toBe("watching");
+    }
+
+    /** Build a viewer.pause.result payload whose identity matches the session. */
+    function successResult(operationId: string, paused: boolean) {
+      return {
+        groupId: "group-1",
+        logicalStreamId: "stream-1",
+        mediaSessionId: "media-session-1",
+        viewerSessionId: session.viewerSessionId ?? "",
+        viewerDeviceId: "test-device",
+        operationId,
+        paused,
+        success: true,
+      };
+    }
+
+    function getConn() {
+      return mockRuntime.getConnectionManager().getConnection("group-1");
+    }
+
+    it("registers the pause-result waiter BEFORE sending the request", async () => {
+      const order: string[] = [];
+      const deferreds: Array<{ opId: string; resolve: (v: unknown) => void }> = [];
+      mockRuntime.waitForViewerPauseResult.mockImplementation((opId: string) => {
+        order.push("waiter");
+        return new Promise((resolve) => deferreds.push({ opId, resolve }));
+      });
+      const sendToPeer = getConn().sendToPeer as ReturnType<typeof vi.fn>;
+      sendToPeer.mockImplementation(
+        (_peer: string, payload: Record<string, unknown>) => {
+          if (payload.type === "viewer.pause.request") order.push("send");
+          return Promise.resolve(true);
+        },
+      );
+
+      await startWatching();
+
+      const pausePromise = session.pause();
+      // Flush microtasks/timers so the send has happened while the waiter
+      // promise is still pending.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(order).toContain("waiter");
+      expect(order.indexOf("send")).toBeGreaterThan(order.indexOf("waiter"));
+
+      // Deliver the host ack for the registered operation.
+      const d = deferreds[deferreds.length - 1];
+      d.resolve(successResult(d.opId, true));
+      await pausePromise;
+
+      expect(session.pauseState).toBe("paused");
+    });
+
+    it("fails fast when there is no control route", async () => {
+      // Never-resolving waiter: only cancelViewerPauseResult may settle it.
+      mockRuntime.waitForViewerPauseResult.mockImplementation(
+        () => new Promise(() => {}),
+      );
+
+      await startWatching();
+
+      // Remove the route AFTER the join flow (the join flow itself needs it).
+      const conn = getConn();
+      (conn.peerForDevice as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+      await expect(session.pause()).rejects.toThrow(/could not be sent|route/i);
+
+      expect(session.pauseState).toBe("playing");
+
+      // Every registered waiter was cancelled — none left pending-hanging.
+      const waiterOpIds = mockRuntime.waitForViewerPauseResult.mock.calls.map(
+        (c) => c[0],
+      );
+      expect(waiterOpIds.length).toBeGreaterThan(0);
+      for (const opId of waiterOpIds) {
+        expect(mockRuntime.cancelViewerPauseResult).toHaveBeenCalledWith(opId);
+      }
+    });
+
+    it("retries once on 'sender not ready' then succeeds", async () => {
+      let waiterCall = 0;
+      mockRuntime.waitForViewerPauseResult.mockImplementation((opId: string) => {
+        waiterCall++;
+        if (waiterCall === 1) {
+          return Promise.reject(new Error("pause request rejected: sender not ready"));
+        }
+        return Promise.resolve(successResult(opId, true));
+      });
+      const sendToPeer = getConn().sendToPeer as ReturnType<typeof vi.fn>;
+      sendToPeer.mockResolvedValue(true);
+
+      await startWatching();
+
+      await session.pause();
+
+      expect(session.pauseState).toBe("paused");
+      const pauseSends = (
+        sendToPeer.mock.calls as Array<[string, Record<string, unknown>]>
+      ).filter((c) => c[1].type === "viewer.pause.request");
+      expect(pauseSends).toHaveLength(2);
+    });
+
+    it("does NOT retry on ack timeout", async () => {
+      mockRuntime.waitForViewerPauseResult.mockRejectedValue(
+        new Error("Viewer pause result timeout after 5000ms"),
+      );
+      const sendToPeer = getConn().sendToPeer as ReturnType<typeof vi.fn>;
+      sendToPeer.mockResolvedValue(true);
+
+      await startWatching();
+
+      await expect(session.pause()).rejects.toThrow(/timeout/i);
+
+      expect(mockRuntime.waitForViewerPauseResult).toHaveBeenCalledTimes(1);
+      expect(mockRuntime.cancelViewerPauseResult).toHaveBeenCalledTimes(1);
+      expect(session.pauseState).toBe("playing");
+    });
   });
 });
