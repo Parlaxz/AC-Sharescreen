@@ -65,6 +65,11 @@ function formatLiveDuration(seconds: number): string {
   return `${remainingMinutes}m`;
 }
 
+function formatHudFps(fps: number | null | undefined): string {
+  if (fps == null || !Number.isFinite(fps)) return "?";
+  return `${Math.floor(fps).toString().padStart(2, "0")} FPS`;
+}
+
 function getConnectionLabel(isSharing: boolean, isDegraded: boolean, localShareState: string): string {
   if (!isSharing || localShareState === "idle" || localShareState === "stopping") {
     return "Disconnected";
@@ -146,9 +151,9 @@ function ViewerRowItem({ row, onBitrateClick, onKick }: { row: ViewerRow; onBitr
           <div className="text-[11px] text-text-secondary pl-4">
             {(row.sent.width || row.sent.height || row.sent.fps) ? (
               <>
-                Sent {row.sent.width}×{row.sent.height ?? "?"} {row.sent.fps ?? "?"} FPS
+                Sent {row.sent.width}×{row.sent.height ?? "?"} {formatHudFps(row.sent.fps)}
                 {(row.received.width || row.received.height || row.received.fps) ? (
-                  <> → Received {row.received.width}×{row.received.height ?? "?"} {row.received.fps ?? "?"} FPS</>
+                  <> → Received {row.received.width}×{row.received.height ?? "?"} {formatHudFps(row.received.fps)}</>
                 ) : null}
               </>
             ) : (
@@ -173,7 +178,7 @@ function ViewerRowItem({ row, onBitrateClick, onKick }: { row: ViewerRow; onBitr
 
           {row.requested.bitrateKbps !== null && (
             <div className="text-[10px] text-text-muted pl-4">
-              Requested: {row.requested.width}×{row.requested.height ?? "?"} · {row.requested.fps} FPS · {fmtBitrate(row.requested.bitrateKbps)}
+              Requested: {row.requested.width}×{row.requested.height ?? "?"} · {formatHudFps(row.requested.fps)} · {fmtBitrate(row.requested.bitrateKbps)}
               {row.requested.presetName ? ` · ${row.requested.presetName}` : null}
             </div>
           )}
@@ -244,16 +249,19 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
 
   // Duration timer
   useEffect(() => {
-    if (!mediaSessionId) return;
-    const interval = setInterval(() => {
+    if (!mediaSessionId) {
+      return;
+    }
+
+    const updateDuration = () => {
       const svc = StreamMetricsService.getInstance();
       const historyId = svc.findHistoryIdByMediaSessionId(mediaSessionId);
-      const startedAt = historyId ? svc.getSnapshot(historyId).aggregate.rawSamples[0]?.timestampMs ?? null : null;
-      if (startedAt) {
-        const seconds = Math.floor((Date.now() - startedAt) / 1000);
-        useStore.getState().setSessionDuration(seconds);
-      }
-    }, 1000);
+      const elapsedMs = historyId ? svc.getSessionDurationMs(historyId) : null;
+      useStore.getState().setSessionDuration(elapsedMs == null ? 0 : Math.floor(elapsedMs / 1000));
+    };
+
+    updateDuration();
+    const interval = setInterval(updateDuration, 1000);
     return () => clearInterval(interval);
   }, [mediaSessionId]);
 
@@ -550,7 +558,7 @@ export function HostDashboard({ loading = false }: HostDashboardProps) {
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Frame rate</span>
-              <span className="font-mono tabular-nums text-text-primary">{captureFps > 0 ? `${captureFps} fps` : "—"}</span>
+              <span className="font-mono tabular-nums text-text-primary">{captureFps > 0 ? formatHudFps(captureFps) : "—"}</span>
             </div>
             <div>
               <span className="block text-[11px] uppercase tracking-wider text-text-muted mb-1 font-medium">Bitrate</span>

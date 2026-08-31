@@ -189,6 +189,24 @@ describe("StreamMetricsService", () => {
     });
   });
 
+  describe("session duration", () => {
+    it("uses the session clock without samples and excludes paused time", async () => {
+      const historyId = svc.startViewerSession("ms-duration", "ls-duration", "g1", "G1");
+
+      await advanceTime(2000);
+      expect(svc.getSessionDurationMs(historyId)).toBeGreaterThanOrEqual(2000);
+      const activeBeforePause = svc.getSessionActiveDurationMs(historyId)!;
+
+      svc.setSessionState(historyId, "paused");
+      await advanceTime(2000);
+      expect(svc.getSessionActiveDurationMs(historyId)!).toBeLessThan(activeBeforePause + 500);
+
+      svc.setSessionState(historyId, "playing");
+      await advanceTime(1000);
+      expect(svc.getSessionActiveDurationMs(historyId)!).toBeGreaterThan(activeBeforePause + 500);
+    });
+  });
+
   describe("finalizeSession", () => {
     it("idempotent: repeated calls finalize once", async () => {
       const historyId = svc.startHostSession("ms1", "ls1", "g1", "G1");

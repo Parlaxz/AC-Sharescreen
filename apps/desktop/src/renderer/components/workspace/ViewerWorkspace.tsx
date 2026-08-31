@@ -759,6 +759,32 @@ export function ViewerWorkspace({ className }: ViewerWorkspaceProps) {
     };
   }, [sessionState, watchingTarget, selectedGroupId, groupsById]);
 
+  useEffect(() => {
+    if (!viewerHistoryId) {
+      setActiveDurationMs(0);
+      return;
+    }
+
+    const updateDuration = () => {
+      const duration = StreamMetricsService.getInstance().getSessionActiveDurationMs(viewerHistoryId);
+      setActiveDurationMs(duration ?? 0);
+    };
+
+    updateDuration();
+    const interval = setInterval(updateDuration, 1000);
+    return () => clearInterval(interval);
+  }, [viewerHistoryId]);
+
+  useEffect(() => {
+    if (!viewerHistoryId) return;
+    const svc = StreamMetricsService.getInstance();
+    if (streamPauseState === "paused" || streamPauseState === "pausing") {
+      svc.setSessionState(viewerHistoryId, "paused");
+    } else if (streamPauseState === "playing" || streamPauseState === "resuming") {
+      svc.setSessionState(viewerHistoryId, "playing");
+    }
+  }, [streamPauseState, viewerHistoryId]);
+
   // Video element ref — shared with ViewerSession
   const videoRef = useRef<HTMLVideoElement>(null);
   /**

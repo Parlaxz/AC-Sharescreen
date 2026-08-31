@@ -194,6 +194,8 @@ interface SessionState {
   effectiveBitsPerSecond: number | null;
   state: TelemetryState;
   sessionPeakBps: number; // permanent running max (audit item 12)
+  pausedAtMonotonic: number | null;
+  totalPausedMs: number;
 
   // Snapshot cache
   lastSnapshot: BandwidthSnapshot | null;
@@ -284,6 +286,8 @@ export class StreamMetricsService {
       state: "playing",
       lastSnapshot: null,
       sessionPeakBps: 0,
+      pausedAtMonotonic: null,
+      totalPausedMs: 0,
     };
     this.sessions.set(historyId, state);
     this.emptySnapshotCache.delete(historyId);
@@ -316,6 +320,8 @@ export class StreamMetricsService {
       state: "playing",
       lastSnapshot: null,
       sessionPeakBps: 0,
+      pausedAtMonotonic: null,
+      totalPausedMs: 0,
     };
     this.sessions.set(historyId, state);
     this.emptySnapshotCache.delete(historyId);
@@ -437,6 +443,13 @@ export class StreamMetricsService {
     if (oldState === newState) return;
 
     state.state = newState;
+
+    if (newState === "paused" && state.pausedAtMonotonic === null) {
+      state.pausedAtMonotonic = performance.now();
+    } else if (newState !== "paused" && state.pausedAtMonotonic !== null) {
+      state.totalPausedMs += performance.now() - state.pausedAtMonotonic;
+      state.pausedAtMonotonic = null;
+    }
 
     // Update all connections
     for (const conn of state.connections.values()) {
@@ -585,6 +598,16 @@ export class StreamMetricsService {
       }
     }
     return null;
+  }
+
+  getSessionDurationMs(historyId: string): number | null {
+    const state = this.sessions.get(historyId);
+    return state ? Math.max(0, performance.now() - state.startedAtMonotonic) : null;
+  }
+
+  getSessionActiveDurationMs(historyId: string): number | null {
+    const state = this.sessions.get(historyId);
+    return state ? this.computeSessionActiveDuration(state) : null;
   }
 
   getViewerRates(historyId: string): ViewerRateEntry[] {
@@ -1654,15 +1677,11 @@ export class StreamMetricsService {
 
   private computeSessionActiveDuration(state: SessionState): number {
     const total = performance.now() - state.startedAtMonotonic;
-    let maxPause = 0;
-    for (const conn of state.connections.values()) {
-      let pause = conn.totalPausedMs;
-      if (conn.pausedAtMonotonic !== null) {
-        pause += performance.now() - conn.pausedAtMonotonic;
-      }
-      if (pause > maxPause) maxPause = pause;
+    let pause = state.totalPausedMs;
+    if (state.pausedAtMonotonic !== null) {
+      pause += performance.now() - state.pausedAtMonotonic;
     }
-    return Math.max(0, total - maxPause);
+    return Math.max(0, total - pause);
   }
 
   // ─── Checkpoint ───────────────────────────────────────────────────────

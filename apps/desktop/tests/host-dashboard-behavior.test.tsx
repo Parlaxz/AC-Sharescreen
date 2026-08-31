@@ -166,10 +166,10 @@ describe("HostDashboard viewer display", () => {
 // ─── Technical metrics ───────────────────────────────────────────────────────
 
 describe("HostDashboard technical metrics", () => {
-  it("shows resolution value (1920×1080) and frame rate (30 fps) as readable stats", () => {
+  it("shows resolution value (1920×1080) and floored frame rate as readable stats", () => {
     render(<HostDashboard />);
     expect(screen.getByText("1920×1080")).toBeInTheDocument();
-    expect(screen.getByText("30 fps")).toBeInTheDocument();
+    expect(screen.getByText("30 FPS")).toBeInTheDocument();
   });
 
   it("shows metric labels (Resolution, Frame rate, Bitrate, Connection)", () => {

@@ -131,7 +131,7 @@ describe("DiagnosticsPanel — At a glance", () => {
       { timestamp: 1000, displayedFps: 59.5, decodedFps: 60, frameIntervalMs: 16.8, decodeTimeMs: 5, state: "playing" as const },
     ];
     render(<DiagnosticsPanel contentOnly snapshot={snapshot} frameSamples={frameSamples} />);
-    expect(screen.getByText(/59\.5/)).toBeTruthy();
+    expect(screen.getByText("59 FPS")).toBeTruthy();
   });
 
   it("shows decoded FPS sublabel when displayed FPS available", () => {

@@ -57,6 +57,18 @@ interface StreamInfoCardProps {
   viewerHistoryId?: string | null;
 }
 
+export function formatHudFps(fps: number): string {
+  return `${Math.floor(fps).toString().padStart(2, "0")} FPS`;
+}
+
+export function formatViewingDuration(activeDurationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(activeDurationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 function StreamInfoCardInner({
@@ -72,6 +84,8 @@ function StreamInfoCardInner({
 
   const lines: string[] = [];
 
+  lines.push(`Viewing ${formatViewingDuration(activeDurationMs)}`);
+
   // 1. Resolution
   if (config.showResolution && snapshot.videoWidth != null && snapshot.videoHeight != null) {
     lines.push(`${snapshot.videoWidth}x${snapshot.videoHeight}`);
@@ -79,7 +93,7 @@ function StreamInfoCardInner({
 
   // 2. FPS
   if (config.showFps && snapshot.videoFrameRate != null) {
-    lines.push(`${Math.round(snapshot.videoFrameRate)} fps`);
+    lines.push(formatHudFps(snapshot.videoFrameRate));
   }
 
   // 3. Bitrate

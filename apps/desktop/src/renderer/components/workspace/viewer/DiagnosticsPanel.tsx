@@ -59,7 +59,7 @@ function fmtMs(ms: number | null | undefined): string {
 
 function fmtFps(fps: number | null | undefined): string {
   if (fps == null) return NA;
-  return `${fps.toFixed(1)} FPS`;
+  return `${Math.floor(fps).toString().padStart(2, "0")} FPS`;
 }
 
 function fmtResolution(
@@ -370,7 +370,7 @@ function sanitizeSnapshot(d: BandwidthSnapshot | null): string {
     `  Video bitrate: ${sample?.videoBitsPerSecond != null ? fmtBitRate(sample.videoBitsPerSecond) : "unknown"}`,
     `  Audio bitrate: ${sample?.audioBitsPerSecond != null ? fmtBitRate(sample.audioBitsPerSecond) : "unknown"}`,
     `  Resolution: ${sample?.width && sample?.height ? `${sample.width}\u00d7${sample.height}` : "unknown"}`,
-    `  FPS: ${sample?.framesPerSecond != null ? `${sample.framesPerSecond} fps` : "unknown"}`,
+    `  FPS: ${sample?.framesPerSecond != null ? fmtFps(sample.framesPerSecond) : "unknown"}`,
     `  Codec: ${sample?.codec ?? status?.codec ?? "unknown"}`,
     "",
     "Quality:",
@@ -537,11 +537,11 @@ export function DiagnosticsPanel({
           <GlanceValue
             label="FPS"
             sub={[
-              reqFps != null ? `requested: ${reqFps}` : null,
-              decodedFps != null ? `decoded: ${decodedFps.toFixed(1)}` : null,
+              reqFps != null ? `requested: ${fmtFps(reqFps)}` : null,
+              decodedFps != null ? `decoded: ${fmtFps(decodedFps)}` : null,
             ].filter(Boolean).join(" \u00B7 ") || undefined}
           >
-            {primaryFps != null ? `${primaryFps.toFixed(1)}` : "Collecting\u2026"}
+            {primaryFps != null ? fmtFps(primaryFps) : "Collecting\u2026"}
           </GlanceValue>
           <GlanceValue label="Requested">
             {reqBitrateKbps != null ? formatBitrateBps(reqBitrateKbps * 1000) : "\u2014"}

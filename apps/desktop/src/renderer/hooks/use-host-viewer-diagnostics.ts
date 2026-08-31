@@ -17,6 +17,7 @@ interface ViewerStatusEvent {
   receivedHeight: number | null;
   displayedFps: number | null;
   sampledAt: number;
+  receivedAt: number;
 }
 
 type HostObservedViewerStats = {
@@ -89,11 +90,12 @@ function toSentStats(stats: HostObservedViewerStats | null): ViewerRow["sent"] {
 }
 
 function isViewerStatusEvent(value: unknown): value is ViewerStatusEvent {
+  const record = value as Record<string, unknown>;
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as Record<string, unknown>).viewerDeviceId === "string" &&
-    typeof (value as Record<string, unknown>).state === "string"
+    typeof record.viewerDeviceId === "string" &&
+    (record.state === "playing" || record.state === "paused" || record.state === "reconnecting")
   );
 }
 
@@ -134,12 +136,23 @@ export function useHostViewerDiagnostics(
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (isViewerStatusEvent(detail)) {
-        statusMapRef.current.set(detail.viewerDeviceId, detail);
+        const receivedAt = Date.now();
+        const sampledAt = typeof detail.sampledAt === "number" && Number.isFinite(detail.sampledAt)
+          ? detail.sampledAt
+          : receivedAt;
+        const previous = statusMapRef.current.get(detail.viewerDeviceId);
+        if (previous && sampledAt < previous.sampledAt) return;
+        statusMapRef.current.set(detail.viewerDeviceId, { ...detail, sampledAt, receivedAt });
       }
     };
     window.addEventListener("screenlink:viewer-status", handler);
     return () => window.removeEventListener("screenlink:viewer-status", handler);
   }, []);
+
+  useEffect(() => {
+    statusMapRef.current.clear();
+    setRows([]);
+  }, [logicalStreamId]);
 
   // ─── Return cleanup on unmount ─────────────────────────────────────
 
@@ -262,9 +275,10 @@ export function useHostViewerDiagnostics(
       for (const [viewerDeviceId, status] of statusMapRef.current) {
         if (seen.has(viewerDeviceId)) continue;
         if (!boundViewers.has(viewerDeviceId)) continue;
+        if (status.streamId !== logicalStreamId) continue;
         seen.add(viewerDeviceId);
 
-        const isStale = (now - status.sampledAt) > STALE_STATUS_MS;
+        const isStale = (now - status.receivedAt) > STALE_STATUS_MS;
         const state: ViewerRow["state"] = isStale ? "unknown" : status.state;
         const displayName = status.viewerDisplayName ?? viewerDeviceId.slice(0, 8);
 
@@ -289,7 +303,7 @@ export function useHostViewerDiagnostics(
         newRows.push({
           viewerDeviceId,
           displayName,
-          connectedAt: status.sampledAt,
+          connectedAt: status.receivedAt,
           state,
           received: !isStale && state !== "paused"
             ? {
@@ -301,7 +315,7 @@ export function useHostViewerDiagnostics(
             : EMPTY_RECEIVED,
           sent: toSentStats(hostStat),
           requested,
-          lastStatusAt: status.sampledAt,
+          lastStatusAt: status.receivedAt,
         });
       }
 
